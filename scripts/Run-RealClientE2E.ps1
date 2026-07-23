@@ -2482,6 +2482,14 @@ try {
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
     $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
+    $candidateCatalogDeadlineMilliseconds = [Math]::Min(
+        $candidateStartupBudgetMilliseconds,
+        [int]$candidateStartupStopwatch.ElapsedMilliseconds + 2000
+    )
+    while (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf) -and
+        $candidateStartupStopwatch.ElapsedMilliseconds -lt $candidateCatalogDeadlineMilliseconds) {
+        Start-Sleep -Milliseconds 25
+    }
     if (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf)) {
         $candidateStartupStopwatch.Stop()
         Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_failed_context_budget' -DurationMilliseconds ([int]$candidateStartupStopwatch.ElapsedMilliseconds) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
