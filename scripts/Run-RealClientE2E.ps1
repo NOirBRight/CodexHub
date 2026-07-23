@@ -197,6 +197,7 @@ $script:MinimumVersions = [ordered]@{
     pi = '0.80.6'
     omp = '17.0.3'
 }
+$script:ObservedVersions = [ordered]@{}
 $script:MaximumCapturedCharacters = 65536
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:ProcessJobHandle = [IntPtr]::Zero
@@ -311,6 +312,19 @@ function Write-JsonFile {
     [System.IO.File]::WriteAllText($Path, $json + "`n", $script:Utf8NoBom)
 }
 
+function Get-ReportedClientVersions {
+    $reported = [ordered]@{}
+    foreach ($name in $script:MinimumVersions.Keys) {
+        $reported[$name] = if ($script:ObservedVersions.Contains($name)) {
+            [string]$script:ObservedVersions[$name]
+        }
+        else {
+            [string]$script:MinimumVersions[$name]
+        }
+    }
+    return $reported
+}
+
 function Get-FailureSummaryValue {
     param([string]$FailureClassification, [string[]]$Artifacts = @())
     return [ordered]@{
@@ -319,7 +333,7 @@ function Get-FailureSummaryValue {
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-fA-F]{40}$') { $ManagedClientConfigSha.ToLowerInvariant() } else { $null }
         outcome = 'failed'
         failure_classification = $FailureClassification
-        pinned_versions = $script:MinimumVersions
+        pinned_versions = Get-ReportedClientVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
         counts = [ordered]@{
             case_count = 0
@@ -1078,7 +1092,7 @@ function Invoke-CandidateOfficialBootstrap {
 function Get-ClientArguments {
     param([string]$Client, [string]$Model, [string]$WorkRoot, [string]$Prompt)
     switch ($Client) {
-        'codex-cli' { return @('exec', '--ephemeral', '--json', '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', '-a', 'never', $Prompt) }
+        'codex-cli' { return @('exec', '--ephemeral', '--json', '--skip-git-repo-check', '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', $Prompt) }
         'opencode' { return @('run', '--format', 'json', '--model', $Model, $Prompt) }
         'pi' { return @('--print', '--mode', 'json', '--model', $Model, '--no-session', $Prompt) }
         'omp' { return @('--print', '--mode', 'json', '--model', $Model, $Prompt) }
@@ -2427,6 +2441,7 @@ foreach ($versionTarget in @(
     [pscustomobject]@{ client = 'omp'; key = 'omp' }
 )) {
     $actualVersions[$versionTarget.key] = Get-NativeClientVersion -Client $versionTarget.client -Executable $executables[$versionTarget.client] -Minimum $script:MinimumVersions[$versionTarget.key] -ProbeRoot (Join-Path $workRoot "version-$($versionTarget.client)")
+    $script:ObservedVersions[$versionTarget.key] = $actualVersions[$versionTarget.key]
 }
 [void](New-Item -ItemType Directory -Path $artifactRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
@@ -2641,7 +2656,7 @@ catch {
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-f]{40}$') { $ManagedClientConfigSha } else { $null }
         outcome = 'failed'
         failure_classification = $failureClassification
-        pinned_versions = $script:MinimumVersions
+        pinned_versions = Get-ReportedClientVersions
         canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
         counts = [ordered]@{
             case_count = 0

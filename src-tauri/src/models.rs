@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
+const CODEX_APP_SERVER_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
@@ -359,8 +360,22 @@ fn refresh_official_models_direct_with_runner(
 fn read_codex_app_server_model_list() -> Result<Value, String> {
     let codex = find_codex_executable()?;
     let mut command = Command::new(&codex);
+    command.args(["app-server", "--stdio"]);
+    let cache_path = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
+    read_codex_app_server_model_list_with_command(
+        command,
+        &cache_path,
+        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
+    )
+}
+
+fn read_codex_app_server_model_list_with_command(
+    mut command: Command,
+    cache_path: &Path,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
     command
-        .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -413,20 +428,62 @@ fn read_codex_app_server_model_list() -> Result<Value, String> {
         &mut child,
         stdout,
         json!(2),
-        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
+        deadline.saturating_duration_since(Instant::now()),
     )?;
-    kill_child(&mut child);
     if let Some(error) = message.get("error") {
         let message = error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("request failed");
+        kill_child(&mut child);
         return Err(format!("codex app-server model list failed: {message}"));
     }
-    message
+    let result = message
         .get("result")
         .cloned()
-        .ok_or_else(|| "codex app-server model list response did not include a result".to_string())
+        .ok_or_else(|| "codex app-server model list response did not include a result".to_string());
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            kill_child(&mut child);
+            return Err(error);
+        }
+    };
+    if !wait_for_native_model_cache_publication(cache_path, deadline) {
+        kill_child(&mut child);
+        return Err(
+            "codex app-server model list did not publish a readable native models cache before the refresh deadline"
+                .to_string(),
+        );
+    }
+    kill_child(&mut child);
+    Ok(result)
+}
+
+fn wait_for_native_model_cache_publication(cache_path: &Path, deadline: Instant) -> bool {
+    let mut previous = None;
+    loop {
+        let current = readable_native_model_cache(cache_path);
+        if current.is_some() && current == previous {
+            return true;
+        }
+        previous = current;
+
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(
+            CODEX_APP_SERVER_CACHE_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+        );
+    }
+}
+
+fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(cache_path).ok()?;
+    let payload: Value = serde_json::from_slice(&bytes).ok()?;
+    payload.get("models")?.as_array()?;
+    Some(bytes)
 }
 
 fn read_codex_app_server_value_response(
@@ -2411,7 +2468,7 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Mutex;
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2430,6 +2487,100 @@ mod tests {
         assert_eq!(
             desktop_codex_exe_from_local_appdata(&root),
             Some(executable)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_waits_for_delayed_atomic_native_cache_publication() {
+        let root = temp_root("app-server-delayed-cache");
+        let script = root.join("fake-codex-app-server.py");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &script,
+            r#"import json
+import os
+from pathlib import Path
+import sys
+import time
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") != 2:
+        continue
+    print(json.dumps({"id": 2, "result": {"data": []}}), flush=True)
+    time.sleep(0.15)
+    cache_path = Path(os.environ["FAKE_MODELS_CACHE"])
+    temporary_path = cache_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps({"fetched_at": "2026-07-23T00:00:00Z", "models": []}),
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, cache_path)
+    time.sleep(10)
+"#,
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(super::find_python());
+        command
+            .arg(&script)
+            .env("FAKE_MODELS_CACHE", &cache_path);
+
+        let result = super::read_codex_app_server_model_list_with_command(
+            command,
+            &cache_path,
+            Duration::from_secs(2),
+        )
+        .expect("model list response");
+
+        assert_eq!(result, json!({"data": []}));
+        assert!(
+            cache_path.is_file(),
+            "the app-server must remain alive until its atomic native cache publication is visible"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_fails_closed_when_native_cache_is_never_published() {
+        let root = temp_root("app-server-missing-cache");
+        let script = root.join("fake-codex-app-server.py");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &script,
+            r#"import json
+import sys
+import time
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") != 2:
+        continue
+    print(json.dumps({"id": 2, "result": {"data": []}}), flush=True)
+    time.sleep(10)
+"#,
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(super::find_python());
+        command.arg(&script);
+        let started = Instant::now();
+
+        let error = super::read_codex_app_server_model_list_with_command(
+            command,
+            &cache_path,
+            Duration::from_millis(500),
+        )
+        .expect_err("missing native cache publication must fail closed");
+
+        assert_eq!(
+            error,
+            "codex app-server model list did not publish a readable native models cache before the refresh deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "missing cache handling must remain bounded"
         );
         let _ = fs::remove_dir_all(root);
     }
