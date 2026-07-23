@@ -653,6 +653,8 @@ TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
 TOOL_SEARCH_EMPTY_MISS_BOUND = 2
 TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION = "identical_exact_query"
 TOOL_SEARCH_UNAVAILABLE_STATUS = "unavailable"
+EXCESSIVE_TOOL_LOOP_BOUND = 3
+EXCESSIVE_TOOL_LOOP_ERROR_CODE = "excessive_tool_loop"
 BROWSER_CONTEXT_MARKERS = (
     "# in app browser",
     "# browser comments",
@@ -6730,6 +6732,106 @@ def _compatible_internal_message(item: Mapping[str, Any]) -> dict[str, str] | No
     return _compatible_tool_message(item)
 
 
+def _is_standard_responses_function_call(item: Mapping[str, Any]) -> bool:
+    return (
+        item.get("type") == "function_call"
+        and isinstance(item.get("call_id"), str)
+        and bool(item["call_id"])
+        and isinstance(item.get("name"), str)
+        and bool(item["name"])
+        and "arguments" in item
+        and not item.get("namespace")
+        and WORKER_REQUESTED_BINDING_FIELD not in item
+        and _multi_agent_function_call_name(item) is None
+        and _node_repl_function_call_name(item) is None
+        and not _is_mcp_or_codex_app_function_call(item)
+    )
+
+
+def _excessive_transparent_responses_tool_loop_count(payload: Mapping[str, Any]) -> int | None:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return None
+
+    pending_calls: dict[str, tuple[str, str]] = {}
+    previous_pair: tuple[str, str, str] | None = None
+    repeated_count = 0
+    for item in input_items:
+        if not isinstance(item, Mapping):
+            previous_pair = None
+            repeated_count = 0
+            continue
+        if _is_standard_responses_function_call(item):
+            if item.get("status") == "completed":
+                pending_calls[item["call_id"]] = (
+                    item["name"],
+                    json.dumps(item["arguments"], ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                )
+            else:
+                previous_pair = None
+                repeated_count = 0
+            continue
+        if item.get("type") == "function_call_output" and isinstance(item.get("call_id"), str):
+            call = pending_calls.pop(item["call_id"], None)
+            if call is not None and "output" in item:
+                pair = call + (json.dumps(item["output"], ensure_ascii=True, separators=(",", ":"), sort_keys=True),)
+                repeated_count = repeated_count + 1 if pair == previous_pair else 1
+                previous_pair = pair
+                if repeated_count >= EXCESSIVE_TOOL_LOOP_BOUND:
+                    return repeated_count
+                continue
+        previous_pair = None
+        repeated_count = 0
+    return None
+
+
+def _excessive_transparent_chat_tool_loop_count(payload: Mapping[str, Any]) -> int | None:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    previous_pair: tuple[str, str, str] | None = None
+    repeated_count = 0
+    index = 0
+    while index < len(messages) - 1:
+        message = messages[index]
+        result = messages[index + 1]
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        if (
+            not isinstance(tool_calls, list)
+            or len(tool_calls) != 1
+            or not isinstance(result, Mapping)
+            or message.get("role") != "assistant"
+            or result.get("role") != "tool"
+        ):
+            previous_pair = None
+            repeated_count = 0
+            index += 1
+            continue
+        call = tool_calls[0]
+        function = call.get("function") if isinstance(call, Mapping) else None
+        if (
+            not isinstance(function, Mapping)
+            or call.get("type") != "function"
+            or not isinstance(call.get("id"), str)
+            or call["id"] != result.get("tool_call_id")
+            or not isinstance(function.get("name"), str)
+            or not isinstance(function.get("arguments"), str)
+            or not isinstance(result.get("content"), str)
+        ):
+            previous_pair = None
+            repeated_count = 0
+            index += 1
+            continue
+        pair = (function["name"], function["arguments"], result["content"])
+        repeated_count = repeated_count + 1 if pair == previous_pair else 1
+        previous_pair = pair
+        if repeated_count >= EXCESSIVE_TOOL_LOOP_BOUND:
+            return repeated_count
+        index += 2
+    return None
+
+
 def _multi_agent_discovery_output_item(item: Mapping[str, Any]) -> dict[str, Any]:
     rewritten = dict(item)
     rewritten["tools"] = MULTI_AGENT_DISCOVERY_TOOLS
@@ -6742,6 +6844,7 @@ def _rewrite_internal_input_items(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None = None,
     upstream_name: str | None = None,
+    preserve_standard_function_history: bool = False,
 ) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -6753,10 +6856,19 @@ def _rewrite_internal_input_items(
     multi_agent_search_call_ids: set[str] = set()
     multi_agent_calls_by_call_id: dict[str, tuple[str, dict[str, Any] | None]] = {}
     node_repl_call_ids: set[str] = set()
+    preserved_standard_call_ids: set[str] = set()
     for item in input_items:
         item_type = item.get("type") if isinstance(item, dict) else None
+        call_id = item.get("call_id") if isinstance(item, dict) else None
+        if preserve_standard_function_history and isinstance(item, dict):
+            if _is_standard_responses_function_call(item):
+                preserved_standard_call_ids.add(item["call_id"])
+                rewritten_items.append(item)
+                continue
+            if item_type == "function_call_output" and call_id in preserved_standard_call_ids:
+                rewritten_items.append(item)
+                continue
         if isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
-            call_id = item.get("call_id")
             if item_type == "function_call" and isinstance(call_id, str):
                 if _node_repl_function_call_name(item) is not None:
                     node_repl_call_ids.add(call_id)
@@ -8333,7 +8445,10 @@ def transparent_request_body(
                 changed = True
             if official_responses_backend and _sanitize_unsupported_compaction_input_items(next_payload):
                 changed = True
-            if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
+            if upstream_is_third_party and _rewrite_internal_input_items(
+                next_payload,
+                preserve_standard_function_history=True,
+            ):
                 changed = True
             if official_responses_backend and "max_output_tokens" in next_payload:
                 del next_payload["max_output_tokens"]
@@ -8376,7 +8491,10 @@ def transparent_request_body(
         changed = True
     if _normalize_responses_message_input_items(next_payload):
         changed = True
-    if upstream_is_third_party and _rewrite_internal_input_items(next_payload):
+    if upstream_is_third_party and _rewrite_internal_input_items(
+        next_payload,
+        preserve_standard_function_history=True,
+    ):
         changed = True
     if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
         changed = True
@@ -12898,6 +13016,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         schemas_rewritten=tool_schema_rewrites,
                         **proxy_request_context,
                     )
+                if upstream_name != "official" and is_transparent_same_format:
+                    transparent_payload = _safe_json_mapping(body) or {}
+                    repeated_count = (
+                        _excessive_transparent_responses_tool_loop_count(transparent_payload)
+                        if inbound_format == "responses"
+                        else _excessive_transparent_chat_tool_loop_count(transparent_payload)
+                        if inbound_format == "chat_completions"
+                        else None
+                    )
+                    if repeated_count is not None:
+                        raise UpstreamProtocolTranslationError(
+                            UnsupportedProtocolTranslationError(
+                                EXCESSIVE_TOOL_LOOP_ERROR_CODE,
+                                f"Repeated successful function calls exceeded the bound of {EXCESSIVE_TOOL_LOOP_BOUND}.",
+                            )
+                        )
             else:
                 compatibility_upstream = upstream
                 if upstream_format == "auto":
