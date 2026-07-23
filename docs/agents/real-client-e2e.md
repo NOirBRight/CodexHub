@@ -154,15 +154,19 @@ The runner first invokes the candidate's production `refresh-models` command
 with the isolated `CODEXHUB_RUNTIME_HOME`, isolated
 `CODEXHUB_CODEX_TARGET_HOME`, dedicated auth input, and the exact
 version-verified Codex CLI path. This publishes the candidate-managed Official
-catalog and resolved context budget without discovering or copying a host
-catalog, session, or configuration. Operators must not seed this state by hand
-or hard-code a context limit.
+catalog at `CODEXHUB_RUNTIME_HOME/model-catalogs/codexhub-model-catalog.json`
+and resolved context budget without discovering or copying a host catalog,
+session, or configuration. The runner never reads
+`CODEXHUB_RUNTIME_HOME/proxy/model-catalogs` or discovers a host catalog.
+Operators must not seed this state by hand or hard-code a context limit.
 
 After `refresh-models` succeeds, the runner contract-probes the actual passed
 `-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
 Official and Volc selections. Each probe performs `preview`/`apply`/`readback`
-in the final case-local root, passing the candidate-published Official catalog
-via `--catalog-path` for any `openai/gpt-5.6-luna` selection. The verified roots
+in the final case-local root, passing the explicit candidate runtime catalog
+via `--catalog-path` for every Official `gpt-5.6-luna` preview, apply, and
+readback probe. Volc continues to use the production provider configuration
+and its Chat Completions route without a catalog-path override. The verified roots
 are then reused for the corresponding client launch. Thus the probe detects
 candidate #194 CLI schema drift and verifies that the candidate-managed catalog
 drives Official model resolution without a second materialization or host-state

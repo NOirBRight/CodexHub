@@ -499,9 +499,22 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
             "apply",
             "readback",
         }
+    official_models = {
+        ("codex", "gpt-5.6-luna"),
+        ("opencode", "openai/gpt-5.6-luna"),
+        ("zcode", "openai/gpt-5.6-luna"),
+        ("pi", "openai/gpt-5.6-luna"),
+        ("omp", "openai/gpt-5.6-luna"),
+    }
     assert all(
         "--catalog-path" in item["flags"]
         for item in invocations
+        if (item["client"], item["model"]) in official_models
+    )
+    assert all(
+        "--catalog-path" not in item["flags"]
+        for item in invocations
+        if (item["client"], item["model"]) not in official_models
     )
     assert all(
         item["root_role"]
@@ -536,6 +549,81 @@ def test_all_managed_client_route_contracts_are_probed_before_candidate_launch(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_candidate_publishes_catalog_at_production_runtime_root(tmp_path):
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    candidate_runtime = (
+        tmp_path / "output" / "isolated" / "work" / "candidate" / "runtime"
+    )
+    assert (
+        candidate_runtime / "model-catalogs" / "codexhub-model-catalog.json"
+    ).is_file()
+    assert not (
+        candidate_runtime / "proxy" / "model-catalogs" / "codexhub-model-catalog.json"
+    ).exists()
+
+
+def test_obsolete_proxy_subdir_catalog_fails_closed_before_clients_or_requests(
+    tmp_path,
+):
+    def replace_debug_build_with_obsolete_publisher(output, isolation, debug_build):
+        # Use a special debug-build fixture that writes the catalog to the
+        # obsolete proxy/model-catalogs location instead of the production
+        # runtime root. The runner must reject the missing production path.
+        shutil.copyfile(
+            FIXTURES / "fake-debug-build-official-bootstrap-obsolete.cmd",
+            debug_build,
+        )
+
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=replace_debug_build_with_obsolete_publisher,
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    _assert_exact_summary_schema(summary)
+    assert (
+        summary["failure_classification"]
+        == "candidate_gateway_bootstrap_failed_context_budget"
+    )
+    assert summary["counts"]["case_count"] == 0
+    assert not list((tmp_path / "output" / "isolated" / "work").rglob("gui-*.launched"))
+
+
+def test_official_managed_client_probes_receive_explicit_runtime_catalog_path(
+    tmp_path,
+):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    invocations = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "output"
+            / "isolated"
+            / "work"
+            / "managed-client-config-invocations.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    for item in invocations:
+        if "--catalog-path" in item["flags"]:
+            catalog = item["catalog_path"]
+            assert catalog.endswith(
+                "runtime\\model-catalogs\\codexhub-model-catalog.json"
+            )
+            assert "proxy\\model-catalogs" not in catalog
 
 
 def test_codex_apply_accepts_production_omitted_optional_history_fields(tmp_path):
@@ -918,6 +1006,27 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all(set(event) == production_fields for event in completes)
     assert all("terminal_count" not in event for event in completes)
     assert all("sse_terminal_event_seen" not in event for event in completes)
+
+
+def test_volc_managed_client_probes_do_not_receive_catalog_path(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    invocations = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "output"
+            / "isolated"
+            / "work"
+            / "managed-client-config-invocations.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert all(
+        "--catalog-path" not in item["flags"]
+        for item in invocations
+        if item["model"] == "volc/glm-5.2"
+    )
 
 
 def test_codex_cli_read_tool_requires_explicit_completed_zero_exit(tmp_path):

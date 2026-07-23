@@ -241,6 +241,7 @@ def main() -> None:
                         "model": model,
                         "root_role": root.name,
                         "flags": sorted(args),
+                        "catalog_path": catalog_path,
                     }
                 )
                 + "\n"
