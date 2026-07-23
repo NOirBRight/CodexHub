@@ -169,6 +169,13 @@ impl ConfigPaths {
         self.runtime_providers_path()
     }
 
+    /// CLI accessor for the isolated generated catalog path. The caller may
+    /// import an explicitly supplied candidate catalog here only after the
+    /// fresh isolated root has been validated.
+    pub(crate) fn generated_catalog_path_for_cli(&self) -> PathBuf {
+        self.generated_catalog_path()
+    }
+
     pub(crate) fn settings_path(&self) -> PathBuf {
         self.proxy_dir().join("settings.json")
     }
