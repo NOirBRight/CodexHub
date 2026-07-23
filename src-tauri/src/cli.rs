@@ -763,6 +763,10 @@ gateway_exported = true
       "input_modalities": ["text", "image"],
       "supported_reasoning_levels": ["medium"],
       "default_reasoning_level": "medium",
+      "upgrade": {
+        "model": "gpt-cli-catalog-next",
+        "migration_markdown": "Switch to the next CLI catalog model."
+      },
       "enabled": true,
       "gateway_exported": true,
       "codex_proxy_metadata": {
@@ -1020,7 +1024,7 @@ gateway_exported = true
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             let catalog_path = write_candidate_official_catalog(&root);
 
-            for client_id in ["opencode", "zcode", "pi", "omp"] {
+            for client_id in ["codex", "opencode", "zcode", "pi", "omp"] {
                 let preview_root = root.join(format!("{client_id}-preview"));
                 let apply_root = root.join(format!("{client_id}-apply"));
                 for (verb, isolated) in [
@@ -1051,6 +1055,23 @@ gateway_exported = true
                     );
                 }
             }
+
+            let codex_staged_catalog = root
+                .join("codex-apply")
+                .join("runtime")
+                .join("model-catalogs")
+                .join("codexhub-model-catalog.json");
+            let staged: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(codex_staged_catalog).expect("staged Codex catalog"),
+            )
+            .expect("staged Codex catalog JSON");
+            assert_eq!(
+                staged["models"][0]["upgrade"],
+                serde_json::json!({
+                    "model": "gpt-cli-catalog-next",
+                    "migration_markdown": "Switch to the next CLI catalog model."
+                })
+            );
         }
 
         #[test]

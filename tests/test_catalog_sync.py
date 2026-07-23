@@ -265,7 +265,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertIn("gpt-5.6-current", known)
         self.assertNotIn("gpt-5.6-stale", known)
 
-    def test_official_catalog_preserves_app_cli_metadata_without_generic_defaults(self):
+    def test_official_catalog_preserves_app_metadata_and_projects_cli_upgrade_schema(self):
         official = [
             {
                 "slug": "gpt-5.6-sol",
@@ -287,7 +287,12 @@ class CatalogSyncTests(unittest.TestCase):
                 "use_responses_lite": True,
                 "availability": {"plan": "plus"},
                 "upgrade": "gpt-5.7-sol",
-                "upgrade_info": {"message": "Upgrade available"},
+                "upgradeInfo": {
+                    "model": "gpt-5.7-sol",
+                    "upgradeCopy": None,
+                    "modelLink": None,
+                    "migrationMarkdown": "Switch to GPT-5.7 Sol.\n",
+                },
                 "comp_hash": "3000",
             }
         ]
@@ -311,8 +316,15 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["slug"], "gpt-5.6-sol")
         self.assertEqual(model["display_name"], "5.6 Sol")
         for key, value in official[0].items():
-            if key not in {"slug", "display_name"}:
+            if key not in {"slug", "display_name", "upgrade"}:
                 self.assertEqual(model[key], value, key)
+        self.assertEqual(
+            model["upgrade"],
+            {
+                "model": "gpt-5.7-sol",
+                "migration_markdown": "Switch to GPT-5.7 Sol.\n",
+            },
+        )
         self.assertEqual(model["shell_type"], "shell_command")
         self.assertEqual(model["supports_parallel_tool_calls"], True)
         self.assertEqual(model["default_reasoning_level"], "medium")
@@ -325,6 +337,26 @@ class CatalogSyncTests(unittest.TestCase):
             model["codex_proxy_metadata"]["official_context_budget"]["source"],
             "current_direct_official",
         )
+
+    def test_official_catalog_preserves_native_cli_upgrade_schema(self):
+        native_upgrade = {
+            "model": "gpt-5.7-sol",
+            "migration_markdown": "Switch to GPT-5.7 Sol.\n",
+        }
+        catalog = build_codex_catalog(
+            [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "upgrade": native_upgrade,
+                }
+            ],
+            [],
+            self.policy,
+            "0.145.0",
+        )
+
+        self.assertEqual(catalog["models"][0]["upgrade"], native_upgrade)
 
     def test_official_catalog_backfills_pinned_planner_metadata_per_model(self):
         official = [
