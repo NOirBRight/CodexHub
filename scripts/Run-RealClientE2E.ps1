@@ -1070,23 +1070,42 @@ function Invoke-CandidateOfficialBootstrap {
         [hashtable]$Environment,
         [int]$TimeoutSeconds
     )
-    $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('refresh-models') -CaseRoot $CandidateRoot -Environment $Environment -StandardInput '' -ProcessTimeoutSeconds ([Math]::Min($TimeoutSeconds, 30))
-    if ($result.timed_out) {
-        Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_timeout' -DurationMilliseconds $result.duration_ms -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
-        throw 'candidate_gateway_bootstrap_timeout'
-    }
-    if ($result.exit_code -ne 0) {
+    $budgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
+    $bootstrapStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $remainingMilliseconds = $budgetMilliseconds - [int]$bootstrapStopwatch.ElapsedMilliseconds
+        if ($remainingMilliseconds -le 0) {
+            $bootstrapStopwatch.Stop()
+            Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_timeout' -DurationMilliseconds $budgetMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+            throw 'candidate_gateway_bootstrap_timeout'
+        }
+        $processTimeoutSeconds = [Math]::Max(1, [Math]::Floor($remainingMilliseconds / 1000))
+        $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('refresh-models') -CaseRoot $CandidateRoot -Environment $Environment -StandardInput '' -ProcessTimeoutSeconds $processTimeoutSeconds
+        if ($result.timed_out) {
+            $bootstrapStopwatch.Stop()
+            Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_timeout' -DurationMilliseconds ([Math]::Min($budgetMilliseconds, [int]$bootstrapStopwatch.ElapsedMilliseconds)) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+            throw 'candidate_gateway_bootstrap_timeout'
+        }
+        if ($result.exit_code -eq 0) {
+            $bootstrapStopwatch.Stop()
+            return $result
+        }
         $boundedOutput = [string]$result.stdout + "`n" + [string]$result.stderr
+        $transientNativeCacheTimeout = $boundedOutput -match '(?i)codex app-server model list did not publish a readable native models cache before the refresh deadline'
+        $remainingAfterAttempt = $budgetMilliseconds - [int]$bootstrapStopwatch.ElapsedMilliseconds
+        if ($attempt -eq 1 -and $transientNativeCacheTimeout -and $remainingAfterAttempt -gt 1000) {
+            continue
+        }
         $failure = if ($boundedOutput -match '(?i)published Official catalog contains no safe resolved context budget|current Official context snapshot is unavailable') {
             'candidate_gateway_bootstrap_failed_context_budget'
         }
         else {
             'candidate_gateway_bootstrap_failed'
         }
-        Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds $result.duration_ms -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
+        $bootstrapStopwatch.Stop()
+        Write-CandidateStartupDiagnostic -FailureClassification $failure -DurationMilliseconds ([Math]::Min($budgetMilliseconds, [int]$bootstrapStopwatch.ElapsedMilliseconds)) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
         throw $failure
     }
-    return $result
 }
 
 function Get-ClientArguments {
@@ -1786,10 +1805,31 @@ function Get-DesktopInstallationMetadata {
         throw 'preflight_desktop_executable_unbound'
     }
     $package = $bound[0]
+    $manifest = Get-AppxPackageManifest -Package $package -ErrorAction Stop
+    $applications = @($manifest.Package.Applications.Application | Where-Object {
+        [string]$_.EntryPoint -ceq 'Windows.FullTrustApplication'
+    })
+    if ($applications.Count -ne 1) {
+        throw 'preflight_desktop_executable_unbound'
+    }
+    $manifestRelativeExecutable = ([string]$applications[0].Executable).Replace('/', '\')
+    if (-not $manifestRelativeExecutable -or
+        [System.IO.Path]::IsPathRooted($manifestRelativeExecutable) -or
+        @($manifestRelativeExecutable -split '\\' | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0) {
+        throw 'preflight_desktop_executable_unbound'
+    }
+    $manifestExecutable = [System.IO.Path]::GetFullPath(
+        (Join-Path ([string]$package.InstallLocation) $manifestRelativeExecutable)
+    )
+    if (-not (Test-Path -LiteralPath $manifestExecutable -PathType Leaf) -or
+        -not (Test-ExecutableBoundToInstallLocation -Executable $manifestExecutable -InstallLocation ([string]$package.InstallLocation))) {
+        throw 'preflight_desktop_executable_unbound'
+    }
     return [pscustomobject]@{
         package_name = [string]$package.Name
         package_version = [string]$package.Version
         install_location = [string]$package.InstallLocation
+        manifest_executable = $manifestExecutable
     }
 }
 
@@ -1853,6 +1893,12 @@ function Get-NativeClientVersion {
             throw 'preflight_desktop_version_mismatch'
         }
         if (-not (Test-ExecutableBoundToInstallLocation -Executable $Executable -InstallLocation ([string]$metadata.install_location))) {
+            throw 'preflight_desktop_executable_unbound'
+        }
+        $manifestExecutable = ([string](Get-JsonProperty -Value $metadata -Name 'manifest_executable' -Default '')).Trim()
+        if (-not $manifestExecutable -or
+            -not (Test-Path -LiteralPath $manifestExecutable -PathType Leaf) -or
+            (Resolve-Path -LiteralPath $Executable).Path -cne (Resolve-Path -LiteralPath $manifestExecutable).Path) {
             throw 'preflight_desktop_executable_unbound'
         }
         return $packageVersion
@@ -2361,7 +2407,7 @@ if ($TestWindowsInstallMetadataFixture) {
     Assert-IsolatedRegularFile -Path $TestWindowsInstallMetadataFixture -IsolationRoot $isolationRoot
     $script:WindowsInstallMetadata = Read-JsonObject -Path $TestWindowsInstallMetadataFixture -Failure 'preflight_windows_install_metadata_invalid'
     Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata -Names @('schema', 'desktop', 'zcode') -Failure 'preflight_windows_install_metadata_invalid'
-    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.desktop -Names @('package_name', 'package_version', 'install_location', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
+    Assert-ExactJsonProperties -Value $script:WindowsInstallMetadata.desktop -Names @('package_name', 'package_version', 'install_location', 'manifest_executable', 'executable_product_version') -Failure 'preflight_windows_install_metadata_invalid'
     $zcodeFixtureProperties = @('DisplayName', 'DisplayVersion', 'Publisher', 'DisplayIcon', 'UninstallString', 'ExecutableProductVersion')
     if ($null -ne $script:WindowsInstallMetadata.zcode.PSObject.Properties['InstallLocation']) {
         $zcodeFixtureProperties += 'InstallLocation'
@@ -2562,7 +2608,15 @@ try {
         $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
         [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
         [void]$manualSentinelPaths.Add($guiSentinelPath)
-        $guiProcess = Start-IsolatedProcess -Executable $executables[$guiClient] -Arguments @() -CaseRoot $guiCaseRoot -Environment @{
+        $guiArguments = if ($guiClient -ceq 'desktop') {
+            $desktopUserDataRoot = Join-Path $guiCaseRoot 'browser-profile'
+            [void](New-Item -ItemType Directory -Path $desktopUserDataRoot)
+            @("--user-data-dir=$desktopUserDataRoot", '--no-first-run')
+        }
+        else {
+            @()
+        }
+        $guiProcess = Start-IsolatedProcess -Executable $executables[$guiClient] -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
             CODEXHUB_E2E_MODELS = $guiCase.canonical_model

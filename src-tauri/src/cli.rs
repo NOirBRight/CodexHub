@@ -412,12 +412,17 @@ fn run_codex_managed_client_config(
     } else {
         gateway::validate_isolated_root(&request.root)?
     };
-    let (_settings, _providers, paths, _staged_catalog_path) =
+    let (_settings, _providers, paths, staged_catalog_path) =
         load_settings_and_providers(request, isolated.root())?;
     let model = request.model.clone().unwrap_or_else(|| "gpt-5.5".to_string());
     match request.verb.as_str() {
         "preview" => {
-            let preview = config::preview_codex_config_isolated(&paths, "custom", &model)?;
+            let preview = config::preview_codex_config_isolated(
+                &paths,
+                "custom",
+                &model,
+                staged_catalog_path.as_deref(),
+            )?;
             Ok(serde_json::to_value(&preview).map_err(|error| error.to_string())?)
         }
         "apply" => {
@@ -427,8 +432,15 @@ fn run_codex_managed_client_config(
                 .map(Path::to_path_buf)
                 .unwrap_or_else(config::find_python);
             let runner = config::ProcessCommandRunner;
-            let status =
-                config::apply_codex_config_isolated(&paths, "custom", false, &model, &python, &runner)?;
+            let status = config::apply_codex_config_isolated(
+                &paths,
+                "custom",
+                false,
+                &model,
+                staged_catalog_path.as_deref(),
+                &python,
+                &runner,
+            )?;
             Ok(serde_json::to_value(&status).map_err(|error| error.to_string())?)
         }
         "readback" => {
@@ -918,6 +930,57 @@ gateway_exported = true
             // "custom/gpt-5.6-luna". This CLI test ensures the dispatch path
             // that wires ConfigPaths + populate_isolated_repo_resources does
             // not regress for Codex preview.
+        }
+
+        #[test]
+        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference()
+        {
+            let root = temp_root("mcc-codex-volc-no-catalog");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let isolated = root.join("isolated");
+            let common_args = [
+                "--client",
+                "codex",
+                "--root",
+                isolated.to_str().unwrap(),
+                "--settings-path",
+                settings_path.to_str().unwrap(),
+                "--providers-path",
+                providers_path.to_str().unwrap(),
+                "--model",
+                "volc/glm-5.2",
+            ];
+
+            let apply_args = std::iter::once("managed-client-config")
+                .chain(std::iter::once("apply"))
+                .chain(common_args)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(run(&apply_args), 0, "Codex Volc apply should succeed");
+
+            let readback_args = std::iter::once("managed-client-config")
+                .chain(std::iter::once("readback"))
+                .chain(common_args)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(run(&readback_args), 0, "Codex Volc readback should succeed");
+
+            let config_path = isolated.join("codex-target").join("config.toml");
+            let config_text = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                !config_text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("model_catalog_json")),
+                "Codex config must not reference a catalog when --catalog-path was omitted:\n{config_text}"
+            );
+            assert!(
+                !isolated
+                    .join("runtime")
+                    .join("model-catalogs")
+                    .join("codexhub-model-catalog.json")
+                    .exists(),
+                "Volc apply without --catalog-path must not synthesize an Official catalog"
+            );
         }
 
         // F6: table-driven all-client CLI dispatch. Every supported client

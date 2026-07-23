@@ -35,6 +35,11 @@ if exist "%~f0.bootstrap-fail" (
   >&2 echo published Official catalog contains no safe resolved context budget
   exit /b 33
 )
+if exist "%~f0.bootstrap-fail-once" if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\bootstrap-fail-once.seen" (
+  >"%CODEXHUB_RUNTIME_HOME%\proxy\bootstrap-fail-once.seen" echo seen
+  >&2 echo codex app-server model list did not publish a readable native models cache before the refresh deadline; failed to publish a degraded safe snapshot: published Official catalog contains no safe resolved context budget
+  exit /b 39
+)
 if exist "%~f0.bootstrap-slow" (
   ping.exe 127.0.0.1 -n 4 >nul
 )

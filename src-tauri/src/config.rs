@@ -858,6 +858,27 @@ fn switch_mode_with_paths_takeover_as_owner(
     python: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<AppStatus, String> {
+    let catalog_path = paths.generated_catalog_path();
+    switch_mode_with_paths_takeover_as_owner_and_catalog(
+        current_app_owner,
+        mode,
+        force_takeover,
+        paths,
+        Some(&catalog_path),
+        python,
+        runner,
+    )
+}
+
+fn switch_mode_with_paths_takeover_as_owner_and_catalog(
+    current_app_owner: crate::app_flavor::RoutingOwner,
+    mode: &str,
+    force_takeover: bool,
+    paths: &ConfigPaths,
+    catalog_path: Option<&Path>,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<AppStatus, String> {
     if mode != "official" && mode != "custom" {
         return Err(format!(
             "unsupported mode: {mode}; expected official or custom"
@@ -918,8 +939,14 @@ fn switch_mode_with_paths_takeover_as_owner(
                 .config_backup_path_for_owner(current_app_owner)
                 .to_string_lossy()
                 .into_owned(),
-            "--catalog".to_string(),
-            paths.generated_catalog_path().to_string_lossy().into_owned(),
+        ];
+        if let Some(catalog_path) = catalog_path {
+            args.extend([
+                "--catalog".to_string(),
+                catalog_path.to_string_lossy().into_owned(),
+            ]);
+        }
+        args.extend([
             "--base-url".to_string(),
             format!("http://127.0.0.1:{}", settings.proxy_port),
             "--gateway-key".to_string(),
@@ -929,7 +956,7 @@ fn switch_mode_with_paths_takeover_as_owner(
                 crate::app_flavor::RoutingOwner::Beta => "beta".to_string(),
                 _ => "release".to_string(),
             },
-        ];
+        ]);
         if force_takeover && target_owner != Some(current_app_owner) {
             args.push("--takeover".to_string());
         }
@@ -1230,6 +1257,7 @@ pub(crate) fn preview_codex_config_isolated(
     paths: &ConfigPaths,
     mode: &str,
     model: &str,
+    catalog_path: Option<&Path>,
 ) -> Result<IsolatedCodexPreview, String> {
     if mode != "custom" && mode != "official" {
         return Err(format!("unsupported Codex mode: {mode}"));
@@ -1242,7 +1270,8 @@ pub(crate) fn preview_codex_config_isolated(
         .to_string()];
     // Build the overlay args that apply would invoke, expressed as relative
     // tokens so the structured output never leaks absolute paths.
-    let overlay_args_relative = build_codex_overlay_args_relative(paths, mode, model);
+    let overlay_args_relative =
+        build_codex_overlay_args_relative(paths, mode, model, catalog_path);
     Ok(IsolatedCodexPreview {
         client_id: "codex".to_string(),
         selector: format!("{CODEX_OVERLAY_PROVIDER_ID}/{model}"),
@@ -1258,16 +1287,18 @@ pub(crate) fn apply_codex_config_isolated(
     mode: &str,
     force_takeover: bool,
     model: &str,
+    catalog_path: Option<&Path>,
     python: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<crate::AppStatus, String> {
     let _ = model; // The overlay derives the selected model from config.toml.
     let current_app_owner = crate::app_flavor::current().routing_owner();
-    switch_mode_with_paths_takeover_as_owner(
+    switch_mode_with_paths_takeover_as_owner_and_catalog(
         current_app_owner,
         mode,
         force_takeover,
         paths,
+        catalog_path,
         python,
         runner,
     )
@@ -1389,7 +1420,12 @@ fn parse_toml_string_value(value: &str) -> Option<String> {
     }
 }
 
-fn build_codex_overlay_args_relative(paths: &ConfigPaths, mode: &str, _model: &str) -> Vec<String> {
+fn build_codex_overlay_args_relative(
+    paths: &ConfigPaths,
+    mode: &str,
+    _model: &str,
+    catalog_path: Option<&Path>,
+) -> Vec<String> {
     // The structured preview reports the overlay *shape* using relative tokens
     // so absolute paths never leak. The actual apply path resolves them
     // through `switch_mode_with_paths_takeover_as_owner`.
@@ -1405,22 +1441,24 @@ fn build_codex_overlay_args_relative(paths: &ConfigPaths, mode: &str, _model: &s
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml.release.backup")
         .to_string();
-    let catalog_name = paths
-        .generated_catalog_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("codexhub-model-catalog.json")
-        .to_string();
     let command = if mode == "official" { "restore" } else { "apply" };
-    vec![
+    let mut args = vec![
         command.to_string(),
         "--config".to_string(),
         config_name,
         "--backup".to_string(),
         backup_name,
-        "--catalog".to_string(),
-        catalog_name,
-    ]
+    ];
+    if mode == "custom" && catalog_path.is_some() {
+        let catalog_name = paths
+            .generated_catalog_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("codexhub-model-catalog.json")
+            .to_string();
+        args.extend(["--catalog".to_string(), catalog_name]);
+    }
+    args
 }
 
 #[cfg(test)]
@@ -2968,7 +3006,14 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         fn codex_preview_under_isolated_root_reports_relative_target_and_no_secret() {
             let root = temp_root("codex-preview-isolated");
             let paths = isolated_paths(&root);
-            let preview = preview_codex_config_isolated(&paths, "custom", "gpt-5.6-luna").unwrap();
+            let catalog_path = paths.generated_catalog_path();
+            let preview = preview_codex_config_isolated(
+                &paths,
+                "custom",
+                "gpt-5.6-luna",
+                Some(&catalog_path),
+            )
+            .unwrap();
 
             assert_eq!(preview.client_id, "codex");
             // F4: the Codex preview now reports the real overlay provider/route
@@ -3003,9 +3048,17 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             .unwrap();
             let runner = RecordingRunner::successful();
 
-            let result =
-                apply_codex_config_isolated(&paths, "custom", false, "gpt-5.6-luna", Path::new("python-test"), &runner)
-                    .unwrap();
+            let catalog_path = paths.generated_catalog_path();
+            let result = apply_codex_config_isolated(
+                &paths,
+                "custom",
+                false,
+                "gpt-5.6-luna",
+                Some(&catalog_path),
+                Path::new("python-test"),
+                &runner,
+            )
+            .unwrap();
             assert_eq!(result.mode, "custom");
 
             let commands = runner.commands.borrow();
