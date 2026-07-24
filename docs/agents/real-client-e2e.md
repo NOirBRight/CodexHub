@@ -81,12 +81,26 @@ Use a new output directory for every invocation. Before launch it contains:
     config/
       gateway.json
       host-environment.json
+    gui-seed/
+      desktop-luna/
+      desktop-volc/
+      zcode-luna/
+      zcode-volc/
 ```
 
 `isolated/work` must not exist before invocation. The runner verifies the
 output/isolation ancestors are canonical and non-reparse, rejects any stale or
 linked work root, creates the directory once without `-Force`, and verifies it
 is empty before any executable probe or launch.
+
+`isolated/gui-seed` is the invocation-local staging location for an
+operator-controlled durable seed stored outside all run output directories.
+Before launch, copy each of the four named case directories from that durable
+seed into this location. Never copy a prior run's `isolated/work`. The runner
+accepts only canonical, non-reparse, independently copied seed files and
+normalizes or discards client runtime state before it creates the fresh case
+roots. Keep the durable seed private; it contains dedicated-account browser
+login state and is never uploaded.
 
 `profile.json` contains only readiness assertions and no account identifier:
 
@@ -105,9 +119,12 @@ root; it is never discovered or copied from the current user's Codex home. It
 must use `chatgpt` mode and contain non-empty access and refresh tokens.
 `volc.json` has schema
 `codexhub.real-client-volc.v1` and one non-empty `api_key`. `gateway.json` has
-schema `codexhub.real-client-gateway.v1`, a loopback `listen_port`, and a
-dedicated `gateway_client_key`. These secret-bearing inputs remain under
-`isolated/` and are never uploaded.
+schema `codexhub.real-client-gateway.v1`, a loopback `listen_port` below the
+Windows dynamic client range (`1024`–`49151`), and a dedicated
+`gateway_client_key`. Preflight must also be able to bind that port
+exclusively; a bound outbound socket is rejected even when it is not a
+listener. These secret-bearing inputs remain under `isolated/` and are never
+uploaded.
 
 Build the runnable, release-optimized Debug portable from the exact candidate
 SHA. A plain `cargo build` or `src-tauri/target/debug/codexhub.exe` is not a
@@ -259,6 +276,17 @@ one successful read-only read tool, emit the named sentinel once, and finish
 once. The compatibility-baseline client parsers consume their real JSONL
 contracts; accepting a newer version never relaxes these shapes:
 
+- every automated prompt names `./sentinel.txt` explicitly instead of asking
+  the model to discover an unnamed file;
+- Codex CLI receives the prompt once through stdin and binds the case root with
+  `-C`;
+- OpenCode binds the case root with `--dir`, uses a fixed title, and runs
+  `--pure`;
+- Pi enables only the built-in `read` tool and disables context files,
+  extensions, skills, and prompt templates;
+- OMP binds the case root with `--cwd`, enables only `read`, disables title
+  generation, extensions, skills, and rules, and does not persist a session.
+
 - Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
   items, and `turn.completed`; the read command must explicitly report
   `status = completed` and integer `exit_code = 0`;
@@ -272,8 +300,9 @@ contracts; accepting a newer version never relaxes these shapes:
   contradictory ordering, and duplicate/missing agent ends fail closed.
 
 OMP's `17.0.3` compatibility baseline is launched through its one-shot JSON interface as
-`omp --print --mode json --model <selector> <prompt>`. It has no `run`
-subcommand, and `--format` is not a supported launch flag.
+`omp --print --mode json --model <selector> --no-session --no-title --tools
+read --no-extensions --no-skills --no-rules --cwd <case-root> <prompt>`. It
+has no `run` subcommand, and `--format` is not a supported launch flag.
 
 Completed/final assistant messages prove the exact sentinel content but are
 not relabeled as stream deltas. Streaming is proven separately from correlated
@@ -418,6 +447,17 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
 
 6. Wait for the template and four case-local GUI launches (Desktop Luna/Volc
    and ZCode Luna/Volc). Each launch consumes its own #194-applied root.
+   Reusable Desktop GUI seeds preserve the browser profile and a normalized
+   allowlist of completed-onboarding state. The normalized `.codex` state
+   never copies project history, remote installation or host identity, session
+   databases, unknown fields, or stale workspace paths; browser-profile data
+   remains the dedicated-account login boundary.
+   Reusable ZCode GUI seeds preserve network/login state and durable UI
+   preferences, but the runner discards task databases and browser
+   local/session/IndexedDB state before launch. It also rewrites
+   `recentProjects` and `lastWorkspaceSession` to the fresh case root. This
+   prevents a copied task from silently resolving relative tools against an
+   older run while retaining the operator's completed setup.
    Complete and finalize the four GUI cases as described above while the
    runner is waiting.
 7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the
