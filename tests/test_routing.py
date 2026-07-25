@@ -9284,6 +9284,142 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED,
         )
 
+    def test_transparent_responses_stream_commit_writes_synthetic_terminal_on_interruption(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1","model":"glm-5.2"}}\n\n',
+                URLError("connection reset"),
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="req_transparent_responses_interrupt",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"response.created", data)
+        self.assertIn(b"event: response.failed", data)
+        self.assertIn(b'"type":"response.failed"', data)
+        self.assertIn(b'"upstream":"volcengine"', data)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("transparent_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+        self.assertTrue(closed_event["synthetic_terminal_event_sent"])
+        self.assertEqual(closed_event["synthetic_terminal_event_type"], "response.failed")
+
+    def test_transparent_responses_stream_commit_ignores_interruption_after_terminal(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                URLError("connection reset"),
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="req_transparent_responses_terminal",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", data)
+        self.assertNotIn(b"response.failed", data)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("transparent_stream_closed", event_names)
+
+    def test_transparent_chat_stream_commit_writes_synthetic_terminal_on_interruption(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "id": "chatcmpl_1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [URLError("connection reset")]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_transparent_chat_interrupt",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"data: ", data)
+        self.assertIn(b'"error"', data)
+        self.assertNotIn(b"event: response.failed", data)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("transparent_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+        self.assertTrue(closed_event["synthetic_terminal_event_sent"])
+
+    def test_transparent_chat_stream_commit_treats_done_as_terminal(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "id": "chatcmpl_1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_transparent_chat_done",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"data: [DONE]", data)
+        self.assertNotIn(b"response.failed", data)
+        self.assertNotIn(b'"error"', data)
+
     def test_responses_sse_incomplete_custom_tool_input_defers_without_body(self):
         handler = FakeHandler()
         response = FakeSseResponse(
