@@ -2171,10 +2171,8 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(event["headers_sent_downstream"])
         self.assertTrue(event["downstream_sse_started"])
 
-    def test_official_passthrough_downstream_close_after_terminal_returns_success(self):
+    def test_official_passthrough_suppresses_post_terminal_write_and_returns_success(self):
         fake = FakeHandler()
-        # created line (0), completed/terminal line (1), in_progress line (2) -> fail after terminal
-        fake.wfile = FakeWFile(fail_on_write=lambda _data, index: index == 2)
         response = FakeSseResponse(
             [
                 b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
@@ -2184,25 +2182,34 @@ class RoutingTests(unittest.TestCase):
             ]
         )
 
-        status = CodexProxyHandler._relay_upstream_response(
-            fake,
-            response,
-            "official",
-            request_id="req-close-after-terminal",
-            model="openai/gpt-5.5",
-            upstream_format="responses",
-            inbound_format="responses",
-            caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
-            usage_capture={},
-        )
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "official",
+                request_id="req-close-after-terminal",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
 
         body = b"".join(fake.wfile.writes)
         self.assertEqual(status, 200)
         self.assertIn(b"response.created", body)
         self.assertIn(b"response.completed", body)
         self.assertNotIn(b"response.failed", body)
+        self.assertNotIn(b"response.in_progress", body)
         self.assertTrue(fake.close_connection)
+        # Suppression after terminal must not be logged as a downstream disconnect.
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
 
     def test_official_passthrough_stream_commit_seam_classifies_before_output(self):
         fake = FakeHandler()
@@ -2350,6 +2357,64 @@ class RoutingTests(unittest.TestCase):
                 for call in write_event.call_args_list
             )
         )
+
+    def test_stream_commit_seam_prevents_write_after_terminal_commitment(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b'data: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "official",
+            request_id="req-no-write-after-terminal",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"response.in_progress", body)
+
+    def test_stream_commit_seam_preserves_chat_done_after_finish_reason(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n',
+                b"\n",
+                b"data: [DONE]\n",
+                b"\n",
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "ollama_cloud",
+            request_id="req-chat-done-after-finish",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b'"finish_reason":"stop"', body)
+        self.assertIn(b"data: [DONE]", body)
 
     def test_official_passthrough_cancellation_closes_upstream_and_reader(self):
         fake = FakeHandler()
@@ -9349,7 +9414,39 @@ class RoutingTests(unittest.TestCase):
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertNotIn("transparent_stream_closed", event_names)
 
-    def test_transparent_chat_stream_commit_writes_synthetic_terminal_on_interruption(self):
+    def test_transparent_responses_stream_commit_suppresses_post_terminal_line(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b'data: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "volcengine",
+            request_id="req_transparent_post_terminal_suppress",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", data)
+        self.assertNotIn(b"response.in_progress", data)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("transparent_stream_closed", event_names)
+        self.assertNotIn("downstream_stream_closed", event_names)
+
+    def test_transparent_chat_stream_commit_closes_without_synthetic_terminal_on_interruption(self):
         handler = FakeHandler()
         chunks = [
             {
@@ -9378,15 +9475,68 @@ class RoutingTests(unittest.TestCase):
         data = b"".join(handler.wfile.writes)
         self.assertEqual(status, 502)
         self.assertIn(b"data: ", data)
-        self.assertIn(b'"error"', data)
+        self.assertNotIn(b'"error"', data)
         self.assertNotIn(b"event: response.failed", data)
+        self.assertNotIn(b"data: [DONE]", data)
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertIn("transparent_stream_closed", event_names)
         closed_event = next(
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "transparent_stream_closed"
         )
-        self.assertTrue(closed_event["synthetic_terminal_event_sent"])
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+        self.assertEqual(closed_event["failure_class"], "upstream_stream_interrupted")
+
+    def test_transparent_responses_cancellation_closes_upstream_and_reader(self):
+        handler = FakeHandler()
+        response = FakeCancellableSseResponse(
+            [
+                (0.5, b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'),
+            ]
+        )
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.attach_upstream_transport(response)
+        previous = codex_proxy._activate_gateway_request(admission)
+
+        def cancel_soon() -> None:
+            time.sleep(0.05)
+            admission.cancel()
+
+        try:
+            thread = threading.Thread(target=cancel_soon)
+            thread.start()
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                status = CodexProxyHandler._relay_transparent_upstream_response(
+                    handler,
+                    response,
+                    "volcengine",
+                    request_id="req-transparent-cancel",
+                    model="volc/glm-5.2",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    defer_stream_errors=True,
+                )
+            thread.join(timeout=1)
+        finally:
+            codex_proxy._restore_gateway_request(previous)
+
+        body = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"")
+        self.assertTrue(handler.close_connection)
+        self.assertFalse(handler.headers_ended)
+        self.assertGreaterEqual(response.close_call_count, 1)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 503)
+        self.assertEqual(closed_event["failure_class"], "gateway_shutdown")
+        self.assertFalse(closed_event["client_disconnected"])
+        self.assertEqual(closed_event["close_phase"], "before_output")
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+        self.assertFalse(closed_event["downstream_sse_started"])
 
     def test_transparent_chat_stream_commit_treats_done_as_terminal(self):
         handler = FakeHandler()
