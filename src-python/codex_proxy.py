@@ -3965,6 +3965,22 @@ class UpstreamStreamErrorEvent(RuntimeError):
         super().__init__(_stream_error_event_detail(payload))
 
 
+class DownstreamClosedError(RuntimeError):
+    """Raised when a downstream closure aborts Gateway output for a request."""
+
+
+class DownstreamClosedBeforeRetryError(DownstreamClosedError):
+    """Raised when a downstream closure aborts an upstream retry attempt."""
+
+
+class DownstreamClosedDuringImageProxyError(DownstreamClosedError):
+    """Raised when a downstream closure aborts image-proxy preprocessing."""
+
+
+class DownstreamKeepaliveFailedError(DownstreamClosedError):
+    """Raised when a downstream keepalive write fails, aborting upstream iteration."""
+
+
 RESPONSES_TERMINAL_EVENT_TYPES = {
     "response.completed",
     "response.failed",
@@ -11407,7 +11423,7 @@ def apply_image_proxy_to_responses_payload(
     target_model: str | None,
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
-    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
     if not gateway_image_proxy_enabled():
         return False
@@ -11422,25 +11438,28 @@ def apply_image_proxy_to_responses_payload(
     progress_sent = False
     image_count = _image_proxy_unique_image_count(payload.get("input"), vision_model)
 
-    def emit_progress_once() -> None:
+    def emit_progress_once() -> bool:
         nonlocal progress_sent
         if progress_sent or progress_callback is None:
-            return
-        progress_callback(
+            return True
+        if not progress_callback(
             {
                 "type": "image_proxy",
                 "status": "reading",
                 "image_count": image_count,
                 "vision_model": canonical_model_id(vision_model),
             }
-        )
+        ):
+            return False
         progress_sent = True
+        return True
 
     def describe(part: Mapping[str, Any]) -> tuple[str, str]:
         cache_key = _image_proxy_cache_key(part, vision_model)
         if cache_key not in descriptions:
             if _image_proxy_cache_lookup(cache_key) is None:
-                emit_progress_once()
+                if not emit_progress_once():
+                    raise DownstreamClosedDuringImageProxyError("downstream closed during image proxy")
             descriptions[cache_key] = _image_proxy_description_for_part(
                 part,
                 vision_model,
@@ -11467,7 +11486,7 @@ def apply_image_proxy_to_chat_payload(
     target_model: str | None,
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
-    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
     if not gateway_image_proxy_enabled():
         return False
@@ -11481,25 +11500,28 @@ def apply_image_proxy_to_chat_payload(
     progress_sent = False
     image_count = _image_proxy_unique_image_count(payload.get("messages"), vision_model)
 
-    def emit_progress_once() -> None:
+    def emit_progress_once() -> bool:
         nonlocal progress_sent
         if progress_sent or progress_callback is None:
-            return
-        progress_callback(
+            return True
+        if not progress_callback(
             {
                 "type": "image_proxy",
                 "status": "reading",
                 "image_count": image_count,
                 "vision_model": canonical_model_id(vision_model),
             }
-        )
+        ):
+            return False
         progress_sent = True
+        return True
 
     def describe(part: Mapping[str, Any]) -> tuple[str, str]:
         cache_key = _image_proxy_cache_key(part, vision_model)
         if cache_key not in descriptions:
             if _image_proxy_cache_lookup(cache_key) is None:
-                emit_progress_once()
+                if not emit_progress_once():
+                    raise DownstreamClosedDuringImageProxyError("downstream closed during image proxy")
             descriptions[cache_key] = _image_proxy_description_for_part(
                 part,
                 vision_model,
@@ -11529,7 +11551,7 @@ def apply_vision_proxy_adapter(
     target_upstream: Mapping[str, Any],
     vision_proxy_policy: str,
     event_context: Mapping[str, Any] | None = None,
-    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
     if vision_proxy_policy == VISION_PROXY_DISABLED:
         return False
@@ -11558,7 +11580,7 @@ def enforce_text_only_image_boundary(
     target_model: str | None,
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
-    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
     if target_model and model_supports_image(target_model, target_upstream):
         return False
@@ -12551,7 +12573,7 @@ def _open_upstream_response(
                 failure_class=failure_class,
             )
             if downstream_retry_callback is not None and retry_policy != RETRY_CONSERVATIVE_PRE_OUTPUT:
-                downstream_retry_callback(
+                if not downstream_retry_callback(
                     _downstream_retry_payload(
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
@@ -12561,8 +12583,9 @@ def _open_upstream_response(
                         exc=exc,
                         delay_seconds=delay_seconds,
                         failure_class=failure_class,
-                )
-            )
+                    )
+                ):
+                    raise DownstreamClosedBeforeRetryError("downstream closed before upstream retry")
             _sleep_for_retry_with_gateway_cancellation(delay_seconds)
             attempt += 1
 
@@ -12577,20 +12600,55 @@ def _responses_synthetic_terminal_failure(
     model: str | None,
 ) -> tuple[bool, str | None, str | None]:
     """Write a Responses-format synthetic terminal failure event."""
-    try:
-        handler._write_sse_event(
-            "response.failed",
-            _responses_failed_event_for_stream_error(
-                upstream_name=upstream_name,
-                model=model,
-                status=status,
-                exc=exc,
-                response_id=response_id,
-            ),
-        )
-        return True, None, None
-    except OSError as write_exc:
+    if not handler._write_sse_event(
+        "response.failed",
+        _responses_failed_event_for_stream_error(
+            upstream_name=upstream_name,
+            model=model,
+            status=status,
+            exc=exc,
+            response_id=response_id,
+        ),
+    ):
+        seam = _handler_downstream_stream_commit(handler)
+        write_exc = seam.last_write_error() if seam is not None else None
+        if write_exc is None:
+            write_exc = OSError("downstream closed")
         return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
+    return True, None, None
+
+
+# Downstream writes that do not participate in the stream-commit seam.
+# Non-streaming JSON responses, WebSocket handshakes/frames, and non-streaming
+# body-relay writes are intentionally allowlisted: they either carry no SSE
+# terminal semantics or are complete payloads whose lifecycle is bounded by the
+# calling context. All production SSE headers/bodies must be authorized by the
+# request-scoped _GatewayDownstreamStreamCommit seam.
+DOWNSTREAM_STREAM_COMMIT_ALLOWLIST: frozenset[str] = frozenset({
+    "_send_json",
+    "_safe_send_json",
+    "_send_local_responses_no_content",
+    "_send_method_not_allowed",
+    "_reject_local_responses_websocket_probe",
+    "_handle_websocket_recording_probe",
+    "_write_non_streaming_body_relay",
+    "_write_sse_bytes",
+})
+
+# Low-level seam methods that are the only legitimate direct ``self.wfile.write``
+# callers inside the stream-commit seam. They are kept separate from the allowlist
+# because they participate in (rather than bypass) the seam.
+DOWNSTREAM_STREAM_COMMIT_SEAM_METHODS: frozenset[str] = frozenset({
+    "commit_data",
+    "commit_sse_bytes",
+    "commit_terminal_failure",
+})
+
+
+def _handler_downstream_stream_commit(handler: Any) -> _GatewayDownstreamStreamCommit | None:
+    """Return the request-scoped stream-commit seam bound to ``handler`` if active."""
+    seam = getattr(handler, "_downstream_stream_commit", None)
+    return seam if isinstance(seam, _GatewayDownstreamStreamCommit) else None
 
 
 class _GatewayDownstreamStreamCommit:
@@ -12607,12 +12665,17 @@ class _GatewayDownstreamStreamCommit:
     Protocol-specific observers (terminal detection, usage extraction, and
     synthetic terminal formatting) are injected by the caller; the seam itself
     owns only the lifecycle ledger and byte commitment.
+
+    When promoted to request scope the seam may be created before the upstream
+    response is opened. The upstream response is attached later via
+    ``attach_upstream_response`` so cancellation or a downstream write failure
+    can still close the owned upstream work.
     """
 
     def __init__(
         self,
         handler: CodexProxyHandler,
-        upstream_response: Any,
+        upstream_response: Any | None,
         upstream_name: str,
         *,
         model: str | None = None,
@@ -12671,16 +12734,46 @@ class _GatewayDownstreamStreamCommit:
         self._sse_stats.finalize_pending()
         return self._sse_stats.fields()
 
-    def _close_upstream(self) -> None:
-        response = self._upstream_response
-        if response is None:
+    def attach_upstream_response(self, response: Any) -> None:
+        """Bind the upstream response after the seam has been created."""
+        if self._downstream_closed:
+            self._close_upstream_response(response)
             return
+        self._upstream_response = response
+
+    def set_terminal_observer(self, terminal_observer: Callable[[str | None, bytes, Any], bool] | None) -> None:
+        self._sse_stats = PassthroughSseSemanticStats(terminal_observer=terminal_observer)
+
+    def set_usage_line_callback(self, usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None) -> None:
+        self._usage_line_callback = (
+            usage_line_callback
+            if usage_line_callback is not None
+            else _offer_official_passthrough_usage_line
+        )
+
+    def set_synthetic_terminal_failure_callback(
+        self,
+        synthetic_terminal_failure_callback: Callable[
+            [CodexProxyHandler, BaseException, int, str | None, str, str | None],
+            tuple[bool, str | None, str | None],
+        ]
+        | None,
+    ) -> None:
+        self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
+
+    def _close_upstream_response(self, response: Any) -> None:
         close = getattr(response, "close", None)
         if callable(close):
             try:
                 close()
             except Exception:
                 pass
+
+    def _close_upstream(self) -> None:
+        response = self._upstream_response
+        if response is None:
+            return
+        self._close_upstream_response(response)
 
     def close(self) -> None:
         """Close the downstream and upstream sides; idempotent."""
@@ -12761,6 +12854,59 @@ class _GatewayDownstreamStreamCommit:
         )
         return True
 
+    def commit_headers(self, status: int, send_headers: Callable[[], None]) -> bool:
+        """Authorize and record the sending of HTTP response headers.
+
+        ``send_headers`` is called only when the stream is still open and no
+        terminal has been committed. Any OSError is captured, closes the owned
+        upstream work, and seals the downstream side.
+        """
+        if self._downstream_closed or self._terminal_committed:
+            return False
+        try:
+            send_headers()
+        except OSError as write_exc:
+            self._last_write_error = write_exc
+            self.close()
+            return False
+        return True
+
+    def commit_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
+        """Commit constructed SSE bytes to the downstream stream.
+
+        This is used for retry diagnostics, converted-route events, keepalives,
+        and error events that are produced above the raw upstream line layer.
+        When ``observe`` is True the bytes are inspected for terminal events.
+        """
+        if self._downstream_closed:
+            return False
+        if not data:
+            return True
+        if self._terminal_committed:
+            return False
+        terminal_observed_now = False
+        if observe:
+            terminal_observed_now = self._observe_line(data)
+            if terminal_observed_now:
+                _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=False)
+        try:
+            self._handler.wfile.write(data)
+            self._handler.wfile.flush()
+        except OSError as write_exc:
+            self._last_write_error = write_exc
+            self.close()
+            return False
+        self._downstream_output_started = True
+        self._lines_streamed += 1
+        self._bytes_streamed += len(data)
+        if terminal_observed_now:
+            self._terminal_committed = True
+            _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
+            self._record_terminal()
+            self._downstream_closed = True
+            self._handler.close_connection = True
+        return True
+
     def commit_terminal_failure(
         self,
         exc: BaseException,
@@ -12781,8 +12927,6 @@ class _GatewayDownstreamStreamCommit:
         """
         if self._downstream_closed or self._terminal_committed:
             return False, None, None
-        self._downstream_closed = True
-        self._handler.close_connection = True
         if self._synthetic_terminal_failure_callback is None:
             return False, None, None
         try:
@@ -12790,7 +12934,12 @@ class _GatewayDownstreamStreamCommit:
                 self._handler.wfile.write(b"\n")
                 self._handler.wfile.flush()
                 self._sse_stats.finalize_pending()
-            response_id = self._sse_stats.response_id
+        except OSError as write_exc:
+            self._last_write_error = write_exc
+            self.close()
+            return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
+        response_id = self._sse_stats.response_id
+        try:
             (
                 synthetic_terminal_event_sent,
                 synthetic_terminal_write_error,
@@ -12803,15 +12952,19 @@ class _GatewayDownstreamStreamCommit:
                 upstream_name=self._upstream_name,
                 model=self._model,
             )
-            if synthetic_terminal_event_sent:
-                self._terminal_committed = True
-            return (
-                synthetic_terminal_event_sent,
-                synthetic_terminal_write_error,
-                synthetic_terminal_write_detail,
-            )
         except OSError as write_exc:
+            self._last_write_error = write_exc
+            self.close()
             return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
+        if synthetic_terminal_event_sent:
+            self._terminal_committed = True
+            self._downstream_closed = True
+            self._handler.close_connection = True
+        return (
+            synthetic_terminal_event_sent,
+            synthetic_terminal_write_error,
+            synthetic_terminal_write_detail,
+        )
 
     def last_write_error(self) -> OSError | None:
         return self._last_write_error
@@ -12949,16 +13102,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._send_json(401, _local_gateway_auth_error_payload())
             self.close_connection = True
             return
-        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
-        admission = shutdown_controller.admit()
-        if admission is None:
-            _record_user_requested_shutdown()
-            self._send_user_requested_shutdown_outcome(
-                inbound_format=inbound_format,
-                downstream_sse_started=False,
-            )
-            return
-        previous_admission = _activate_gateway_request(admission)
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
         raw_provider_probe = raw_provider_probe_requested(self.headers, self.path)
@@ -12971,23 +13114,79 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         upstream_format = "responses"
         reports_cached_input_tokens = False
         behavior_profile = None
+        route_reason: str | None = None
         route_decision: RouteDecision | None = None
         route_policy_event_fields: dict[str, Any] = {}
         vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
         response_lifecycle_state: dict[str, str] = {}
         caller_body = b""
+        caller_stream = True
         caller_request_observability: dict[str, Any] = {}
         request_observability: dict[str, Any] = {}
+        usage_capture: dict[str, Any] = {}
         request_start_written = False
         write_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
 
         def send_user_requested_shutdown() -> None:
             _record_user_requested_shutdown()
-            self._send_user_requested_shutdown_outcome(
+            if not self._send_user_requested_shutdown_outcome(
                 inbound_format=inbound_format,
                 downstream_sse_started=downstream_sse_started,
+            ):
+                finish_downstream_write_failure()
+
+        def finish_downstream_write_failure(*, write_exc: OSError | None = None) -> None:
+            exc = write_exc or OSError("downstream closed")
+            failure_seam = _handler_downstream_stream_commit(self)
+            if failure_seam is not None:
+                failure_seam.close()
+            self.close_connection = True
+            write_proxy_event(
+                "downstream_stream_closed",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name or "upstream_error",
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                status=499,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+                **proxy_request_context,
             )
+            write_proxy_event(
+                "request_complete",
+                request_id=request_id,
+                method="POST",
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                model_canonical=canonical_model_id(model) if model else None,
+                upstream=upstream_name or "upstream_error",
+                provider_id=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                route_reason=route_reason,
+                route_mode="official" if upstream_name == "official" else "codexhub",
+                is_stream=caller_stream,
+                status=499,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_observability,
+                **usage_capture,
+                **proxy_request_context,
+            )
+
+        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
+        admission = shutdown_controller.admit()
+        if admission is None:
+            send_user_requested_shutdown()
+            return
+        previous_admission = _activate_gateway_request(admission)
 
         try:
             admission.raise_if_cancelled()
@@ -13174,6 +13373,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **route_policy_event_fields,
             }
             model_canonical = canonical_model_id(model) if model else None
+            # Create the request-scoped downstream stream-commit seam early so that
+            # every production SSE header/body (status, retry, keepalive, converted
+            # output, error, terminal) is authorized by the same lifecycle owner.
+            # The upstream response is attached once it is opened.
+            self._downstream_stream_commit = _GatewayDownstreamStreamCommit(
+                self,
+                None,
+                upstream_name or "unknown",
+                model=model_canonical,
+                request_id=request_id,
+                inbound_format=inbound_format,
+                upstream_format=upstream_format,
+            )
             if (
                 request_kind == RETRY_REQUEST_COMPACT
                 and not is_transparent_metered
@@ -13255,16 +13467,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 "_caller_wire_format": inbound_format,
             }
 
-            def emit_downstream_status(status_payload: Mapping[str, Any]) -> None:
+            def emit_downstream_status(status_payload: Mapping[str, Any]) -> bool:
                 nonlocal downstream_sse_started
                 if not caller_stream:
-                    return
+                    return True
                 if not downstream_sse_started:
-                    self._send_sse_headers(200, upstream_name)
+                    if not self._send_sse_headers(200, upstream_name):
+                        return False
                     downstream_sse_started = True
-                self._write_sse_data(
+                return self._write_sse_data(
                     _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
-            )
+                )
 
             usage_capture: dict[str, Any] = {}
             if is_official_http_passthrough:
@@ -13353,36 +13566,46 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     parsed_image_proxy_payload = None
                 if isinstance(parsed_image_proxy_payload, dict):
                     image_proxy_payload = parsed_image_proxy_payload
-            if image_proxy_payload is not None and vision_proxy_policy != VISION_PROXY_DISABLED:
-                if apply_vision_proxy_adapter(
+            try:
+                if image_proxy_payload is not None and vision_proxy_policy != VISION_PROXY_DISABLED:
+                    if apply_vision_proxy_adapter(
+                        image_proxy_payload,
+                        inbound_format=vision_proxy_payload_format,
+                        target_model=model,
+                        target_upstream=upstream,
+                        vision_proxy_policy=vision_proxy_policy,
+                        event_context=adapter_event_context,
+                        progress_callback=emit_downstream_status if caller_stream else None,
+                    ):
+                        body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                if image_proxy_payload is not None and enforce_text_only_image_boundary(
                     image_proxy_payload,
                     inbound_format=vision_proxy_payload_format,
                     target_model=model,
                     target_upstream=upstream,
-                    vision_proxy_policy=vision_proxy_policy,
                     event_context=adapter_event_context,
                     progress_callback=emit_downstream_status if caller_stream else None,
                 ):
+                    if vision_proxy_policy == VISION_PROXY_DISABLED:
+                        vision_proxy_policy = VISION_PROXY_TRANSPARENT_OVERLAY
+                        proxy_request_context = {
+                            **proxy_request_context,
+                            "vision_proxy_policy": vision_proxy_policy,
+                        }
+                        adapter_event_context = {
+                            **adapter_event_context,
+                            "vision_proxy_policy": vision_proxy_policy,
+                        }
                     body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            if image_proxy_payload is not None and enforce_text_only_image_boundary(
-                image_proxy_payload,
-                inbound_format=vision_proxy_payload_format,
-                target_model=model,
-                target_upstream=upstream,
-                event_context=adapter_event_context,
-                progress_callback=emit_downstream_status if caller_stream else None,
-            ):
-                if vision_proxy_policy == VISION_PROXY_DISABLED:
-                    vision_proxy_policy = VISION_PROXY_TRANSPARENT_OVERLAY
-                    proxy_request_context = {
-                        **proxy_request_context,
-                        "vision_proxy_policy": vision_proxy_policy,
-                    }
-                    adapter_event_context = {
-                        **adapter_event_context,
-                        "vision_proxy_policy": vision_proxy_policy,
-                    }
-                body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            except DownstreamClosedDuringImageProxyError:
+                finish_downstream_write_failure()
+                return
+            seam = _handler_downstream_stream_commit(self)
+            if seam is not None and seam.downstream_closed:
+                finish_downstream_write_failure(
+                    write_exc=seam.last_write_error() or OSError("downstream closed")
+                )
+                return
             responses_body = body
             headers = upstream_headers(
                 self.headers,
@@ -13464,14 +13687,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     method="POST",
                 )
 
-            def emit_downstream_retry(payload: Mapping[str, Any]) -> None:
+            def emit_downstream_retry(payload: Mapping[str, Any]) -> bool:
                 nonlocal downstream_sse_started
                 if not emit_retry_to_downstream:
-                    return
+                    return True
                 if not downstream_sse_started:
-                    self._send_sse_headers(200, upstream_name)
+                    if not self._send_sse_headers(200, upstream_name):
+                        return False
                     downstream_sse_started = True
-                self._write_sse_event("codexhub.retry", payload)
+                if not self._write_sse_event("codexhub.retry", payload):
+                    return False
                 notice_fields = dict(proxy_request_context)
                 notice_fields.update(
                     {
@@ -13493,6 +13718,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 retry_payload.pop("type", None)
                 notice_fields.update(retry_payload)
                 write_proxy_event("sse_retry_notice", **notice_fields)
+                return True
 
             def mark_downstream_sse_started() -> None:
                 nonlocal downstream_sse_started
@@ -13541,6 +13767,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 else RETRY_GATEWAY_FULL,
                                 retry_http_errors=not is_official_http_passthrough,
                             ) as response:
+                                seam = _handler_downstream_stream_commit(self)
+                                if seam is not None:
+                                    seam.attach_upstream_response(response)
                                 status = self._relay_upstream_response(
                                     response,
                                     upstream_name,
@@ -13559,6 +13788,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     behavior_profile=behavior_profile,
                                 )
                             break
+                        except DownstreamClosedBeforeRetryError:
+                            finish_downstream_write_failure()
+                            return
                         except (
                             CompactEmptyResponseError,
                             IncompleteRead,
@@ -13636,7 +13868,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 failure_class=failure_class,
                                 failure_phase="stream_body" if stream_failure else None,
                             )
-                            emit_downstream_retry(
+                            if not emit_downstream_retry(
                                 _downstream_retry_payload(
                                     upstream_name=upstream_name,
                                     upstream_format=selected_upstream_format,
@@ -13648,7 +13880,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     failure_class=failure_class,
                                     failure_phase="stream_body" if stream_failure else None,
                                 )
-                            )
+                            ):
+                                finish_downstream_write_failure()
+                                return
                             _sleep_for_retry_with_gateway_cancellation(delay_seconds)
                             relay_attempt += 1
                             continue
@@ -13735,14 +13969,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     status=502,
                     exc=exc,
                     error="compact_empty_response",
                     detail=detail,
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 502,
@@ -13780,14 +14015,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     status=502,
                     exc=exc,
                     error=error_code,
                     detail=detail,
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 502,
@@ -13826,14 +14062,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     status=502,
                     exc=exc,
                     error="image_proxy_error",
                     detail=str(exc),
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 502,
@@ -13882,7 +14119,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     and inbound_format == "responses"
                     and selected_native_responses_tool_codec == "strict_apply_patch"
                 ):
-                    self._write_sse_event(
+                    if not self._write_sse_event(
                         "response.failed",
                         _responses_failed_event_for_stream_error(
                             upstream_name=upstream_name or "upstream_error",
@@ -13893,7 +14130,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             detail=detail,
                             response_id=response_lifecycle_state.get("response_id"),
                         ),
-                    )
+                    ):
+                        finish_downstream_write_failure()
+                        return
                     write_proxy_event(
                         "third_party_apply_patch_terminal",
                         request_id=request_id,
@@ -13906,7 +14145,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     self.close_connection = True
                 else:
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name or "upstream_error",
                         status=error_status,
@@ -13915,7 +14154,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         detail=detail,
                         error_type=sse_error_type,
                         preserve_explicit_error=True,
-                    )
+                    ):
+                        finish_downstream_write_failure()
+                        return
                 return
             self._safe_send_downstream_json_error(
                 error_status,
@@ -13962,23 +14203,35 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 send_user_requested_shutdown()
                 return
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     status=getattr(exc, "code", 502),
                     exc=exc,
-                )
+                ):
+                    finish_downstream_write_failure()
+                    return
                 write_proxy_event(
-                    "request_error",
+                    "request_complete",
                     request_id=request_id,
+                    method="POST",
                     model=canonical_model_id(model) if model else None,
+                    model_requested=model_requested,
+                    model_canonical=canonical_model_id(model) if model else None,
                     upstream=upstream_name,
+                    provider_id=upstream_name,
+                    provider_hint=provider_hint,
                     upstream_format=upstream_format,
+                    reports_cached_input_tokens=reports_cached_input_tokens,
                     behavior_profile=behavior_profile,
+                    inbound_format=inbound_format,
+                    route_reason=route_reason,
+                    route_mode="official" if upstream_name == "official" else "codexhub",
+                    is_stream=caller_stream,
                     status=getattr(exc, "code", 502),
-                    error="HTTPError",
-                    detail=safe_upstream_error_detail(exc),
                     duration_ms=int((time.monotonic() - started_at) * 1000),
+                    **request_observability,
+                    **usage_capture,
                     **proxy_request_context,
                 )
                 return
@@ -14018,17 +14271,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             write_proxy_event(
-                "request_error",
+                "request_complete",
                 request_id=request_id,
+                method="POST",
                 model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                model_canonical=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
+                provider_id=upstream_name,
+                provider_hint=provider_hint,
                 upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
                 behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                route_reason=route_reason,
+                route_mode="official" if upstream_name == "official" else "codexhub",
+                is_stream=caller_stream,
                 status=status,
-                error="HTTPError",
-                detail=safe_upstream_error_detail(exc),
-                failure_phase=transport_failure_phase(exc),
                 duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_observability,
+                **usage_capture,
                 **proxy_request_context,
             )
         except IncompleteRead as exc:
@@ -14051,11 +14313,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     exc=exc,
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 502,
@@ -14085,11 +14348,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     exc=exc,
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 502,
@@ -14119,12 +14383,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name or "upstream_error",
                     status=500,
                     exc=exc,
-                )
+                ):
+                    finish_downstream_write_failure()
                 return
             self._safe_send_downstream_json_error(
                 500,
@@ -14417,24 +14682,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         *,
         inbound_format: str,
         downstream_sse_started: bool,
-    ) -> None:
+    ) -> bool:
         payload = user_requested_shutdown_payload(inbound_format)
         try:
             if downstream_sse_started:
                 if inbound_format == "chat_completions":
-                    self.wfile.write(
-                        b"data: "
-                        + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-                        + b"\n\n"
-                    )
-                    self.wfile.flush()
+                    written = self._write_sse_data(payload)
                 else:
-                    self._write_sse_event("error", payload)
-            else:
-                self._send_json(503, payload)
+                    written = self._write_sse_event("error", payload)
+                self.close_connection = True
+                return written
+            self._send_json(503, payload)
         except OSError:
-            pass
+            self.close_connection = True
+            return False
         self.close_connection = True
+        return True
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = _json_response_bytes(payload)
@@ -14444,30 +14707,72 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_sse_headers(self, status: int, upstream_name: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-        self.send_header("Connection", "close")
-        self.end_headers()
+    def _send_sse_headers(self, status: int, upstream_name: str) -> bool:
+        seam = _handler_downstream_stream_commit(self)
 
-    def _write_sse_event(self, event: str, payload: Mapping[str, Any]) -> None:
-        self.wfile.write(f"event: {event}\n".encode("utf-8"))
-        self.wfile.write(
-            b"data: "
+        def _send() -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+        if seam is not None:
+            return seam.commit_headers(status, _send)
+        _send()
+        return True
+
+    def _write_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
+        """Commit arbitrary SSE bytes through the request-scoped seam if active.
+
+        When no seam is active the bytes are written directly and any OSError is
+        allowed to propagate so callers can recover the original exception.
+        """
+        seam = _handler_downstream_stream_commit(self)
+        if seam is not None:
+            return seam.commit_sse_bytes(data, observe=observe)
+        self.wfile.write(data)
+        self.wfile.flush()
+        return True
+
+    def _write_non_streaming_body_relay(self, body: bytes) -> bool:
+        """Write a complete non-streaming response body directly to the downstream.
+
+        This is the narrow allowlisted helper for non-streaming JSON and body-relay
+        writes. It returns True on success and False when the downstream socket is
+        closed, matching the seam contract so callers can surface a 499.
+        """
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+        except OSError:
+            self.close_connection = True
+            return False
+        return True
+
+    def _write_sse_event(self, event: str, payload: Mapping[str, Any]) -> bool:
+        data = (
+            f"event: {event}\n".encode("utf-8")
+            + b"data: "
             + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             + b"\n\n"
         )
-        self.wfile.flush()
+        return self._write_sse_bytes(data)
 
-    def _write_sse_data(self, payload: Mapping[str, Any]) -> None:
-        self.wfile.write(_sse_json_line(payload, b"\n") + b"\n")
-        self.wfile.flush()
+    def _write_sse_data(self, payload: Mapping[str, Any]) -> bool:
+        return self._write_sse_bytes(_sse_json_line(payload, b"\n") + b"\n")
 
-    def _write_sse_keepalive(self) -> None:
-        self.wfile.write(b": codexhub.keepalive\n\n")
-        self.wfile.flush()
+    def _write_sse_keepalive(self) -> bool:
+        return self._write_sse_bytes(b": codexhub.keepalive\n\n", observe=False)
+
+    def _write_sse_done(self) -> bool:
+        seam = _handler_downstream_stream_commit(self)
+        if seam is not None and seam.terminal_committed:
+            # The protocol-specific terminal has already been committed; do not
+            # write the legacy Chat [DONE] sentinel after Responses terminals.
+            return True
+        return self._write_sse_bytes(b"data: [DONE]\n\n")
 
     def _iter_upstream_sse_lines(
         self,
@@ -14584,7 +14889,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if model_event_idle_guard_enabled and (now - last_model_event_at) >= model_event_timeout_seconds:
                     raise_idle_timeout(model_event_timeout_seconds, "model_event")
                 if keepalive_interval > 0:
-                    self._write_sse_keepalive()
+                    if not self._write_sse_keepalive():
+                        close_response_for_idle_timeout()
+                        raise DownstreamKeepaliveFailedError(
+                            "downstream keepalive write failed"
+                        )
                     last_keepalive_at = time.monotonic()
                 continue
             if kind == "error":
@@ -14623,7 +14932,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         detail: str | None = None,
         error_type: str = "upstream_error",
         preserve_explicit_error: bool = False,
-    ) -> None:
+    ) -> bool:
         error_spec = DownstreamErrorSpec(
             inbound_format=inbound_format,
             upstream_name=upstream_name,
@@ -14635,7 +14944,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             preserve_explicit_error=preserve_explicit_error,
         )
         if inbound_format == "chat_completions":
-            self.wfile.write(
+            data = (
                 b"data: "
                 + json.dumps(
                     _downstream_sse_error_payload_for_inbound_format(error_spec),
@@ -14644,11 +14953,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 ).encode("utf-8")
                 + b"\n\n"
             )
-            self.wfile.flush()
+            if not self._write_sse_bytes(data):
+                return False
             self.close_connection = True
-            return
-        self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec))
+            return True
+        if not self._write_sse_event("error", _downstream_sse_error_payload_for_inbound_format(error_spec)):
+            return False
         self.close_connection = True
+        return True
 
     def _write_sse_protocol_error_event(
         self,
@@ -14729,34 +15041,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         headers_sent_downstream = bool(headers_already_sent)
         admission = _active_gateway_request()
-
-        def send_downstream_headers_once() -> None:
-            nonlocal headers_sent_downstream
-            if headers_sent_downstream:
-                return
-            self.send_response(status)
-            for key, value in _filtered_response_headers(response.headers, True):
-                self.send_header(key, value)
-            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-            self.send_header("Connection", "close")
-            self.end_headers()
-            headers_sent_downstream = True
-            if mark_downstream_sse_started is not None:
-                mark_downstream_sse_started()
-
-        if not defer_stream_errors:
-            send_downstream_headers_once()
-
-        seam = _GatewayDownstreamStreamCommit(
-            self,
-            response,
-            upstream_name,
-            model=model,
-            request_id=request_id,
-            inbound_format=inbound_format,
-            terminal_observer=_responses_terminal_observer,
-            synthetic_terminal_failure_callback=_responses_synthetic_terminal_failure,
-        )
+        request_scoped_seam = _handler_downstream_stream_commit(self)
+        if request_scoped_seam is not None:
+            request_scoped_seam.set_terminal_observer(_responses_terminal_observer)
+            request_scoped_seam.set_synthetic_terminal_failure_callback(_responses_synthetic_terminal_failure)
+            request_scoped_seam.set_usage_line_callback(_offer_official_passthrough_usage_line)
+            seam = request_scoped_seam
+        else:
+            seam = _GatewayDownstreamStreamCommit(
+                self,
+                response,
+                upstream_name,
+                model=model,
+                request_id=request_id,
+                inbound_format=inbound_format,
+                terminal_observer=_responses_terminal_observer,
+                synthetic_terminal_failure_callback=_responses_synthetic_terminal_failure,
+            )
         _capture_usage(usage_capture, None, missing_reason="async_official_passthrough")
 
         def _last_upstream_byte_age_ms(now: float, last_at: float | None) -> int | None:
@@ -14808,6 +15109,48 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **seam.stats(),
             )
 
+        def _handle_downstream_header_failure() -> int:
+            write_error = seam.last_write_error()
+            exc = write_error if write_error is not None else OSError("downstream closed")
+            _emit_stream_closed(
+                status_code=499,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+                failure_phase=seam.close_phase or "before_output",
+                failure_side="downstream_write",
+                failure_class="client_disconnected",
+                client_disconnected=True,
+                synthetic_terminal_event_sent=False,
+                synthetic_terminal_event_type=None,
+                synthetic_terminal_write_error=None,
+                synthetic_terminal_write_detail=None,
+            )
+            return 499
+
+        def send_downstream_headers_once() -> bool:
+            nonlocal headers_sent_downstream
+            if headers_sent_downstream:
+                return True
+
+            def _send() -> None:
+                self.send_response(status)
+                for key, value in _filtered_response_headers(response.headers, True):
+                    self.send_header(key, value)
+                self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+            if not seam.commit_headers(status, _send):
+                return False
+            headers_sent_downstream = True
+            if mark_downstream_sse_started is not None:
+                mark_downstream_sse_started()
+            return True
+
+        if not defer_stream_errors:
+            if not send_downstream_headers_once():
+                return _handle_downstream_header_failure()
+
         def _handle_cancellation() -> int:
             seam.cancel()
             _emit_stream_closed(
@@ -14849,7 +15192,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if defer_stream_errors and not headers_sent_downstream:
                         raise UpstreamStreamIncompleteError("Official stream ended before its first SSE byte")
                     break
-                send_downstream_headers_once()
+                if not send_downstream_headers_once():
+                    return _handle_downstream_header_failure()
                 _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 if not seam.commit_data(line):
                     if seam.terminal_committed:
@@ -14902,6 +15246,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 synthetic_terminal_write_error,
                 synthetic_terminal_write_detail,
             ) = seam.commit_terminal_failure(exc, status=502)
+            if seam.downstream_closed and seam.last_write_error() is not None:
+                return _handle_downstream_header_failure()
             sse_fields = seam.stats()
             if usage_capture is not None:
                 usage_capture.update(sse_fields)
@@ -14958,45 +15304,104 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         )
         admission = _active_gateway_request()
         headers_sent = bool(headers_already_sent)
+        chat_mode = inbound_format == "chat_completions"
+        request_scoped_seam = _handler_downstream_stream_commit(self)
+        if request_scoped_seam is not None:
+            request_scoped_seam.set_terminal_observer(
+                _chat_terminal_observer if chat_mode else _responses_terminal_observer
+            )
+            request_scoped_seam.set_usage_line_callback(
+                lambda context, line: _offer_usage_observed_sse_line(
+                    context, line, upstream_format=upstream_format
+                )
+            )
+            request_scoped_seam.set_synthetic_terminal_failure_callback(
+                _responses_synthetic_terminal_failure if not chat_mode else None
+            )
+            seam = request_scoped_seam
+        else:
+            seam = _GatewayDownstreamStreamCommit(
+                self,
+                response,
+                upstream_name,
+                model=model,
+                request_id=request_id,
+                inbound_format=inbound_format,
+                upstream_format=upstream_format,
+                terminal_observer=(
+                    _chat_terminal_observer if chat_mode else _responses_terminal_observer
+                ),
+                usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
+                    context, line, upstream_format=upstream_format
+                ),
+                synthetic_terminal_failure_callback=(
+                    _responses_synthetic_terminal_failure if not chat_mode else None
+                ),
+            )
+        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
 
-        def send_downstream_headers_once() -> None:
+        def _handle_write_failure() -> int:
+            """Emit downstream_stream_closed using the actual OSError when available.
+
+            If commit_data returned False because the terminal was already
+            committed, no client disconnect occurred; just return success.
+            """
+            close_phase = seam.close_phase
+            write_error = seam.last_write_error()
+            if write_error is None and seam.terminal_committed:
+                # Stopped only because a terminal event was already committed.
+                return status
+            exc = write_error if write_error is not None else OSError("downstream closed")
+            event_fields = _public_event_context(event_context)
+            for key in (
+                "request_id",
+                "model",
+                "upstream",
+                "status",
+                "upstream_format",
+                "inbound_format",
+                "error",
+                "detail",
+            ):
+                event_fields.pop(key, None)
+            write_proxy_event(
+                "downstream_stream_closed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=499,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+                close_phase=close_phase,
+                **event_fields,
+            )
+            return 499
+
+        def send_downstream_headers_once() -> bool:
             nonlocal headers_sent
             if headers_sent:
-                return
-            self.send_response(status)
-            for key, value in _filtered_response_headers(response.headers, is_event_stream):
-                self.send_header(key, value)
-            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-            self.send_header("Connection", "close")
-            self.end_headers()
+                return True
+
+            def _send() -> None:
+                self.send_response(status)
+                for key, value in _filtered_response_headers(response.headers, is_event_stream):
+                    self.send_header(key, value)
+                self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+            if not seam.commit_headers(status, _send):
+                return False
             headers_sent = True
             if is_event_stream and mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
-
-        chat_mode = inbound_format == "chat_completions"
-
-        seam = _GatewayDownstreamStreamCommit(
-            self,
-            response,
-            upstream_name,
-            model=model,
-            request_id=request_id,
-            inbound_format=inbound_format,
-            upstream_format=upstream_format,
-            terminal_observer=(
-                _chat_terminal_observer if chat_mode else _responses_terminal_observer
-            ),
-            usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
-                context, line, upstream_format=upstream_format
-            ),
-            synthetic_terminal_failure_callback=(
-                _responses_synthetic_terminal_failure if not chat_mode else None
-            ),
-        )
-        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+            return True
 
         if not (defer_stream_errors and is_event_stream and not headers_already_sent):
-            send_downstream_headers_once()
+            if not send_downstream_headers_once():
+                return _handle_write_failure()
 
         def _last_upstream_byte_age_ms(now: float, last_at: float | None) -> int | None:
             return None if last_at is None else int(max(0.0, now - last_at) * 1000)
@@ -15108,8 +15513,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 return 502
 
-            self.wfile.write(body)
-            self.wfile.flush()
+            if not self._write_non_streaming_body_relay(body):
+                return _handle_write_failure()
             _offer_usage_observed_body(usage_context, body)
             self.close_connection = True
             return status
@@ -15130,45 +15535,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return False
             pending_lines.clear()
             return True
-
-        def _handle_write_failure() -> int:
-            """Emit downstream_stream_closed using the actual OSError when available.
-
-            If commit_data returned False because the terminal was already
-            committed, no client disconnect occurred; just return success.
-            """
-            close_phase = seam.close_phase
-            write_error = seam.last_write_error()
-            if write_error is None and seam.terminal_committed:
-                # Stopped only because a terminal event was already committed.
-                return status
-            exc = write_error if write_error is not None else OSError("downstream closed")
-            event_fields = _public_event_context(event_context)
-            for key in (
-                "request_id",
-                "model",
-                "upstream",
-                "status",
-                "upstream_format",
-                "inbound_format",
-                "error",
-                "detail",
-            ):
-                event_fields.pop(key, None)
-            write_proxy_event(
-                "downstream_stream_closed",
-                request_id=request_id,
-                model=model,
-                upstream=upstream_name,
-                status=status,
-                upstream_format=upstream_format,
-                inbound_format=inbound_format,
-                error=type(exc).__name__,
-                detail=safe_upstream_error_detail(exc),
-                close_phase=close_phase,
-                **event_fields,
-            )
-            return status
 
         try:
             while True:
@@ -15208,6 +15574,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         synthetic_terminal_write_error,
                         synthetic_terminal_write_detail,
                     ) = seam.commit_terminal_failure(exc, status=502)
+                    if seam.downstream_closed and seam.last_write_error() is not None:
+                        return _handle_write_failure()
                     sse_fields = seam.stats()
                     if usage_capture is not None:
                         usage_capture.update(sse_fields)
@@ -15223,6 +15591,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         synthetic_terminal_event_type = (
                             "response.failed" if inbound_format == "responses" else "chat.error"
                         )
+                    self.close_connection = True
                     _emit_stream_closed(
                         status_code=502,
                         error=type(exc).__name__,
@@ -15266,15 +15635,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 )
                     if not release_pending:
                         continue
-                    send_downstream_headers_once()
+                    if not send_downstream_headers_once():
+                        return _handle_write_failure()
                     if not _commit_pending_lines():
                         return _handle_write_failure()
                     continue
-                send_downstream_headers_once()
+                if not send_downstream_headers_once():
+                    return _handle_write_failure()
                 if not seam.commit_data(line):
                     return _handle_write_failure()
             if pending_lines and not headers_sent:
-                send_downstream_headers_once()
+                if not send_downstream_headers_once():
+                    return _handle_write_failure()
                 if not _commit_pending_lines():
                     return _handle_write_failure()
             self.close_connection = True
@@ -15310,6 +15682,34 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # When the caller spoke Chat Completions, the response must be converted
         # back to Chat Completions format regardless of the upstream wire format.
         want_chat_output = inbound_format == "chat_completions"
+        request_scoped_seam = _handler_downstream_stream_commit(self)
+        seam: _GatewayDownstreamStreamCommit | None = request_scoped_seam
+        if request_scoped_seam is not None:
+            request_scoped_seam.set_terminal_observer(
+                _chat_terminal_observer if want_chat_output else _responses_terminal_observer
+            )
+            request_scoped_seam.set_usage_line_callback(
+                lambda context, line: _offer_usage_observed_sse_line(
+                    context, line, upstream_format=upstream_format
+                )
+            )
+        else:
+            seam = _GatewayDownstreamStreamCommit(
+                self,
+                response,
+                upstream_name,
+                model=model,
+                request_id=request_id,
+                inbound_format=inbound_format,
+                upstream_format=upstream_format,
+                terminal_observer=(
+                    _chat_terminal_observer if want_chat_output else _responses_terminal_observer
+                ),
+                usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
+                    context, line, upstream_format=upstream_format
+                ),
+            )
+            self._downstream_stream_commit = seam
         compatibility_event_context = dict(event_context or {})
         compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
         # When the caller asked for a non-streaming response but the upstream
@@ -15382,6 +15782,33 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             and caller_stream
             and lifecycle_empty_final_resample_enabled(event_context, request_kind)
         )
+
+        def finish_downstream_stream_closed(exc: OSError) -> int:
+            self.close_connection = True
+            event_fields = _public_event_context(event_context)
+            for key in ("request_id", "model", "upstream", "status", "error", "detail"):
+                event_fields.pop(key, None)
+            write_proxy_event(
+                "downstream_stream_closed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=499,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+                **event_fields,
+            )
+            _capture_usage(
+                usage_capture,
+                None,
+                missing_reason="async_usage_pending"
+                if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                else "client_disconnected",
+            )
+            return 499
+
         headers_sent = headers_already_sent
         if not is_event_stream or buffer_sse_to_json:
             if buffer_sse_to_json:
@@ -15584,7 +16011,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     response_events = []
                 if response_events:
                     if not headers_sent:
-                        self._send_sse_headers(status, upstream_name)
+                        if not self._send_sse_headers(status, upstream_name):
+                            return finish_downstream_stream_closed(
+                                seam.last_write_error() or OSError("downstream closed")
+                            )
                         headers_sent = True
                         if mark_downstream_sse_started is not None:
                             mark_downstream_sse_started()
@@ -15601,7 +16031,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
                         event_type = event.get("type")
                         if isinstance(event_type, str) and event_type:
-                            self._write_sse_event(event_type, event)
+                            if not self._write_sse_event(event_type, event):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
+                    sse_seam = _handler_downstream_stream_commit(self)
+                    if (
+                        sse_seam is not None
+                        and sse_seam.downstream_closed
+                        and sse_seam.last_write_error() is not None
+                    ):
+                        return finish_downstream_stream_closed(
+                            sse_seam.last_write_error() or OSError("downstream closed")
+                        )
                     self.close_connection = True
                     _capture_usage(
                         usage_capture,
@@ -15612,68 +16054,54 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     )
                     return status
             if headers_sent:
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     status=status,
                     error="UpstreamProtocolError",
                     detail=f"upstream returned non-SSE response after downstream SSE retry status: HTTP {status}",
-                )
+                ):
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 self.close_connection = True
                 _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
                 return status
 
-        def send_downstream_response_headers_once() -> None:
+        def send_downstream_response_headers_once() -> bool:
             nonlocal headers_sent
             if headers_sent:
-                return
-            self.send_response(status)
+                return True
             content_length = None if is_event_stream else len(body)
             content_type = "application/json" if buffered_json_response else None
-            for key, value in _filtered_response_headers(
-                response.headers,
-                is_event_stream,
-                content_length,
-                content_type=content_type,
-            ):
-                self.send_header(key, value)
-            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-            self.send_header("Connection", "close")
-            self.end_headers()
+
+            def _send() -> None:
+                self.send_response(status)
+                for key, value in _filtered_response_headers(
+                    response.headers,
+                    is_event_stream,
+                    content_length,
+                    content_type=content_type,
+                ):
+                    self.send_header(key, value)
+                self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+            if not seam.commit_headers(status, _send):
+                return False
             headers_sent = True
             if mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
+            return True
 
         if not defer_stream_headers:
-            send_downstream_response_headers_once()
+            if not send_downstream_response_headers_once():
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
 
         if is_event_stream:
-            def finish_downstream_stream_closed(exc: OSError) -> int:
-                self.close_connection = True
-                event_fields = _public_event_context(event_context)
-                for key in ("request_id", "model", "upstream", "status", "error", "detail"):
-                    event_fields.pop(key, None)
-                write_proxy_event(
-                    "downstream_stream_closed",
-                    request_id=request_id,
-                    model=model,
-                    upstream=upstream_name,
-                    status=status,
-                    upstream_format=upstream_format,
-                    inbound_format=inbound_format,
-                    error=type(exc).__name__,
-                    detail=safe_upstream_error_detail(exc),
-                    **event_fields,
-                )
-                _capture_usage(
-                    usage_capture,
-                    None,
-                    missing_reason="async_usage_pending"
-                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                    else "client_disconnected",
-                )
-                return status
-
             if (
                 behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
                 and want_chat_output
@@ -15720,22 +16148,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 error=error_type,
                                 detail=detail,
                             )
-                            self._write_downstream_sse_error(
+                            if not self._write_downstream_sse_error(
                                 inbound_format=inbound_format,
                                 upstream_name=upstream_name,
                                 status=502,
                                 error=error_type,
                                 detail=detail,
-                            )
+                            ):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
                             _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                             return 502
                         for chunk in converter.chunks_for_event(event):
-                            self.wfile.write(
-                                b"data: "
-                                + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-                                + b"\n\n"
-                            )
-                            self.wfile.flush()
+                            if not self._write_sse_data(chunk):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
                 except UpstreamStreamIdleTimeoutError as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -15750,16 +16179,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_idle_timeout",
                         detail=safe_upstream_error_detail(exc),
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                     return 502
+                except DownstreamKeepaliveFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -15771,12 +16210,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         exc=exc,
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if not converter.completed:
@@ -15790,18 +16235,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_incomplete",
                         detail="Upstream stream ended before response.completed.",
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                if not self._write_sse_done():
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 self.close_connection = True
                 _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
                 return status
@@ -15848,13 +16301,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     error="chat_completions_error",
                                     detail=chat_error_detail,
                                 )
-                                self._write_downstream_sse_error(
+                                if not self._write_downstream_sse_error(
                                     inbound_format=inbound_format,
                                     upstream_name=upstream_name,
                                     status=502,
                                     error="chat_completions_error",
                                     detail=chat_error_detail,
-                                )
+                                ):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
                                 _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                                 return 502
                             _offer_usage_observed_sse_line(
@@ -15865,8 +16321,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             events = converter.events_for_chunk(payload)
                         for event in events:
                             try:
-                                self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
-                                self.wfile.flush()
+                                if not self._write_sse_bytes(
+                                    _sse_json_line(event, line_ending) + line_ending
+                                ):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
                             except OSError as exc:
                                 return finish_downstream_stream_closed(exc)
                 except UpstreamStreamIdleTimeoutError as exc:
@@ -15883,15 +16343,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_idle_timeout",
                         detail=safe_upstream_error_detail(exc),
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                     return 502
+                except DownstreamKeepaliveFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -15903,11 +16370,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         exc=exc,
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if not converter.completed:
@@ -15921,18 +16391,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_incomplete",
                         detail="Upstream Chat Completions stream ended without finish_reason or [DONE].",
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
                 try:
-                    self.wfile.write(b"data: [DONE]\n\n")
-                    self.wfile.flush()
+                    if not self._write_sse_done():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                 except OSError as exc:
                     return finish_downstream_stream_closed(exc)
                 self.close_connection = True
@@ -15985,15 +16460,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_idle_timeout",
                         detail=safe_upstream_error_detail(exc),
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                     return 502
+                except DownstreamKeepaliveFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     if defer_stream_errors:
                         raise UpstreamStreamInterruptedError(exc) from exc
@@ -16007,11 +16489,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         exc=exc,
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 try:
@@ -16033,24 +16518,34 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_incomplete",
                         detail="Upstream stream ended before response.completed.",
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
 
-                send_downstream_response_headers_once()
+                if not send_downstream_response_headers_once():
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 for chunk in _chat_completion_body_to_stream_chunks(
                     _response_body_to_chat_completion_body(response_body)
                 ):
-                    self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
-                    self.wfile.flush()
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                    if not self._write_sse_data(chunk):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                if not self._write_sse_done():
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 self.close_connection = True
                 _capture_usage(
                     usage_capture,
@@ -16109,15 +16604,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_idle_timeout",
                         detail=safe_upstream_error_detail(exc),
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                     return 502
+                except DownstreamKeepaliveFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     if defer_stream_errors:
                         raise UpstreamStreamInterruptedError(exc) from exc
@@ -16131,11 +16633,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         exc=exc,
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if not _chat_stream_chunks_have_terminal(chunks):
@@ -16153,13 +16658,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                    self._write_downstream_sse_error(
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_incomplete",
                         detail="Upstream Chat Completions stream ended without finish_reason or [DONE].",
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
                 chat_summary = _chat_stream_shape_summary(chunks)
@@ -16197,12 +16705,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_name,
                         event_context=compatibility_event_context,
                     )
-                    send_downstream_response_headers_once()
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     for chunk in _chat_completion_body_to_stream_chunks(
                         _response_body_to_chat_completion_body(response_body)
                     ):
-                        self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n\n")
-                        self.wfile.flush()
+                        if not self._write_sse_data(chunk):
+                            return finish_downstream_stream_closed(
+                                seam.last_write_error() or OSError("downstream closed")
+                            )
                 else:
                     events = _chat_stream_chunks_to_response_events(chunks)
                     _write_adapter_event(
@@ -16275,12 +16788,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stage="final",
                         **_response_events_shape_summary(events),
                     )
-                    send_downstream_response_headers_once()
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     for event in events:
-                        self.wfile.write(_sse_json_line(event, line_ending) + line_ending)
-                    self.wfile.flush()
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                        if not self._write_sse_bytes(
+                            _sse_json_line(event, line_ending) + line_ending
+                        ):
+                            return finish_downstream_stream_closed(
+                                seam.last_write_error() or OSError("downstream closed")
+                            )
+                if not self._write_sse_done():
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 self.close_connection = True
                 _capture_usage(
                     usage_capture,
@@ -16376,16 +16898,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         downstream_output_started=downstream_output_started,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_idle_timeout",
                         detail=safe_upstream_error_detail(exc),
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                     return 502
+                except DownstreamKeepaliveFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -16397,12 +16929,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         exc=exc,
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 if apply_patch_stream_adapter is not None and saw_terminal_event:
@@ -16418,14 +16956,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
-                    send_downstream_response_headers_once()
-                    self._write_downstream_sse_error(
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
+                    if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
                         status=502,
                         error="upstream_stream_incomplete",
                         detail="Upstream Responses stream ended without a terminal event.",
-                    )
+                    ):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
                 lifecycle_issue = (
@@ -16459,14 +17003,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         delta_events=reasoning_stats["delta_events"],
                         delta_chars=reasoning_stats["delta_chars"],
                     )
-                send_downstream_response_headers_once()
+                if not send_downstream_response_headers_once():
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 for buffered_line, terminal in buffered_lines:
-                    self.wfile.write(buffered_line)
+                    if not self._write_sse_bytes(buffered_line):
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if terminal:
                         separator = _sse_event_separator_after_line(buffered_line)
                         if separator:
-                            self.wfile.write(separator)
-                    self.wfile.flush()
+                            if not self._write_sse_bytes(separator):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
                     if terminal:
                         break
                 self.close_connection = True
@@ -16500,6 +17052,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 else None
             )
 
+            class DownstreamWriteFailedError(Exception):
+                """Raised when a required downstream SSE commit fails."""
+
             def write_or_queue_downstream_line(out_line: bytes, *, buffer: bool = False, force: bool = False) -> None:
                 if not out_line:
                     return
@@ -16508,18 +17063,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     return
                 if pending_downstream_lines:
                     for pending_line in pending_downstream_lines:
-                        self.wfile.write(pending_line)
+                        if not self._write_sse_bytes(pending_line):
+                            raise DownstreamWriteFailedError()
                     pending_downstream_lines.clear()
-                self.wfile.write(out_line)
-                self.wfile.flush()
+                if not self._write_sse_bytes(out_line):
+                    raise DownstreamWriteFailedError()
 
             def flush_pending_downstream_lines() -> None:
                 if not pending_downstream_lines:
                     return
                 for pending_line in pending_downstream_lines:
-                    self.wfile.write(pending_line)
+                    if not self._write_sse_bytes(pending_line):
+                        raise DownstreamWriteFailedError()
                 pending_downstream_lines.clear()
-                self.wfile.flush()
 
             def write_response_failed_event(error_payload: Mapping[str, Any]) -> None:
                 pending_downstream_lines.clear()
@@ -16532,10 +17088,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     "output": [],
                     "error": error_value if isinstance(error_value, Mapping) else {"message": str(error_value or "Upstream stream error")},
                 }
-                self._write_sse_event(
+                if not self._write_sse_event(
                     "response.failed",
                     {"type": "response.failed", "response": response_payload},
-                )
+                ):
+                    raise DownstreamWriteFailedError()
 
             def remember_completed_tool_event(payload: Mapping[str, Any]) -> None:
                 nonlocal created_response
@@ -16567,7 +17124,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 pending_line_count = len(pending_downstream_lines)
                 pending_byte_count = sum(len(pending_line) for pending_line in pending_downstream_lines)
                 flush_pending_downstream_lines()
-                self._write_sse_event("response.completed", event)
+                if not self._write_sse_event("response.completed", event):
+                    raise DownstreamWriteFailedError()
                 write_proxy_event(
                     "upstream_stream_incomplete_synthesized_terminal",
                     request_id=request_id,
@@ -16743,15 +17301,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     downstream_output_started=downstream_output_started,
                     detail=safe_upstream_error_detail(exc),
                 )
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     status=502,
                     error="upstream_stream_idle_timeout",
                     detail=safe_upstream_error_detail(exc),
-                )
+                ):
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
+            except DownstreamKeepaliveFailedError:
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
             except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                 if defer_stream_errors and not downstream_output_started:
                     raise UpstreamStreamInterruptedError(exc) from exc
@@ -16765,15 +17330,28 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     error=type(exc).__name__,
                     detail=safe_upstream_error_detail(exc),
                 )
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     exc=exc,
-                )
+                ):
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
+            except DownstreamWriteFailedError:
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
             if status < 400 and not saw_terminal_event:
-                if synthesize_completed_tool_response():
+                try:
+                    synthesized_terminal = synthesize_completed_tool_response()
+                except DownstreamWriteFailedError:
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
+                if synthesized_terminal:
                     if apply_patch_stream_adapter is not None:
                         apply_patch_stream_adapter.finish(allow_missing_terminal=True)
                     self.close_connection = True
@@ -16797,13 +17375,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     pending_downstream_bytes=sum(len(pending_line) for pending_line in pending_downstream_lines),
                     last_event_type=last_response_event_type,
                 )
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     status=502,
                     error="upstream_stream_incomplete",
                     detail="Upstream Responses stream ended without a terminal event.",
-                )
+                ):
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             if apply_patch_stream_adapter is not None:
@@ -16839,13 +17420,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     pending_downstream_bytes=pending_byte_count,
                     last_event_type=last_response_event_type,
                 )
-                self._write_downstream_sse_error(
+                if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     status=502,
                     error="upstream_empty_completed_response",
                     detail=detail,
-                )
+                ):
+                    return finish_downstream_stream_closed(
+                        seam.last_write_error() or OSError("downstream closed")
+                    )
                 _capture_usage(usage_capture, None, missing_reason="empty_completed_response")
                 return 502
             if upstream_name != "official" and reasoning_stats["seen"]:
@@ -16869,8 +17453,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             return status
 
-        self.wfile.write(body)
-        self.wfile.flush()
+        if not self._write_non_streaming_body_relay(body):
+            return finish_downstream_stream_closed(
+                seam.last_write_error() or OSError("downstream closed")
+            )
         self.close_connection = True
         _capture_usage(
             usage_capture,

@@ -2808,7 +2808,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         written = b"".join(handler.wfile.writes)
         self.assertIn(b"response.output_text.delta", written)
         self.assertIn(b"Hi", written)
-        self.assertIn(b"data: [DONE]", written)
+        self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_does_not_retry_after_headers(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -3107,7 +3107,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b'"call_id":"call_tool"', written)
         self.assertIn(b'"name":"lookup"', written)
         self.assertIn(b'"arguments":"{\\"q\\":\\"codex\\"}"', written)
-        self.assertIn(b"data: [DONE]", written)
+        self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_converts_chat_error_payload(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)

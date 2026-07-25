@@ -87,14 +87,29 @@ class FakeHandler:
     def _write_sse_event(self, event, payload):
         return CodexProxyHandler._write_sse_event(self, event, payload)
 
+    def _write_sse_data(self, payload):
+        return CodexProxyHandler._write_sse_data(self, payload)
+
     def _send_sse_headers(self, status, upstream_name):
         return CodexProxyHandler._send_sse_headers(self, status, upstream_name)
+
+    def _send_json(self, status, payload):
+        return CodexProxyHandler._send_json(self, status, payload)
 
     def _write_sse_error_event(self, upstream_name, exc):
         return CodexProxyHandler._write_sse_error_event(self, upstream_name, exc)
 
     def _write_sse_keepalive(self):
         return CodexProxyHandler._write_sse_keepalive(self)
+
+    def _write_sse_bytes(self, data, *, observe=True):
+        return CodexProxyHandler._write_sse_bytes(self, data, observe=observe)
+
+    def _write_non_streaming_body_relay(self, body):
+        return CodexProxyHandler._write_non_streaming_body_relay(self, body)
+
+    def _write_sse_done(self):
+        return CodexProxyHandler._write_sse_done(self)
 
     def _iter_upstream_sse_lines(self, *args, **kwargs):
         return CodexProxyHandler._iter_upstream_sse_lines(self, *args, **kwargs)
@@ -1099,9 +1114,9 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
-        request_error = next(fields for event, fields in events if event == "request_error")
+        request_complete = next(fields for event, fields in events if event == "request_complete")
         self.assertEqual(
-            request_error["behavior_profile"],
+            request_complete["behavior_profile"],
             codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
         )
 
@@ -2124,7 +2139,7 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(event["client_disconnected"])
         self.assertTrue(event["synthetic_terminal_event_sent"])
         self.assertEqual(event["synthetic_terminal_event_type"], "response.failed")
-        self.assertEqual(event["lines_streamed"], 1)
+        self.assertEqual(event["lines_streamed"], 2)
         self.assertGreater(event["bytes_streamed"], 0)
         self.assertIsInstance(event["last_upstream_byte_age_ms"], int)
         self.assertGreaterEqual(event["last_upstream_byte_age_ms"], 0)
@@ -2624,6 +2639,82 @@ class RoutingTests(unittest.TestCase):
                 for call in write_event.call_args_list
             )
         )
+
+    def test_upstream_http_error_emits_request_complete_with_status(self):
+        body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
+        handler, fake = post_handler("/v1/providers/volc/chat/completions", body, headers={"X-Codex-Client-Id": "opencode"})
+        error_body = json.dumps({"error": {"message": "bad request", "type": "invalid_request_error"}}).encode("utf-8")
+        http_error = HTTPError(
+            "https://ark.example.test/v1/chat/completions",
+            400,
+            "bad request",
+            {"Content-Type": "application/json", "Content-Length": str(len(error_body))},
+            io.BytesIO(error_body),
+        )
+
+        with patch("codex_proxy._open_upstream_response", side_effect=http_error):
+            CodexProxyHandler.do_POST(handler)
+
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("request_complete", event_names)
+        request_complete = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
+        )
+        self.assertEqual(request_complete["status"], 400)
+        self.assertEqual(request_complete["upstream"], "volcengine")
+
+    def test_converted_route_downstream_oserror_closes_upstream_and_emits_request_complete_499(self):
+        self.external_model["upstream_format"] = "chat_completions"
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler("/v1/providers/volc/responses", body, headers={"X-Codex-Client-Id": "opencode"})
+
+        class ClosableJsonResponse:
+            status = 200
+            headers = {"Content-Type": "application/json", "Content-Length": "999"}
+
+            def __init__(self):
+                self.closed = False
+                self.body = json.dumps({
+                    "id": "chatcmpl_converted",
+                    "object": "chat.completion",
+                    "model": "glm-5.2",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+                }).encode("utf-8")
+
+            def read(self, size=-1):
+                data = self.body
+                self.body = b""
+                return data
+
+            def close(self):
+                self.closed = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+                return False
+
+        upstream_response = ClosableJsonResponse()
+        failing_wfile = FakeWFile(fail_on_write=lambda _data, _index: True)
+        fake.wfile = failing_wfile
+        handler.wfile = failing_wfile
+
+        with patch("codex_proxy._open_upstream_response", return_value=upstream_response):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(upstream_response.closed)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("request_complete", event_names)
+        request_complete = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
+        )
+        self.assertEqual(request_complete["status"], 499)
 
     def test_official_http_passthrough_open_failure_does_not_emit_gateway_retry_or_notice(self):
         body = json.dumps(
@@ -4487,15 +4578,15 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 1)
-        error_events = [
+        complete_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "request_error"
+            if call.args and call.args[0] == "request_complete"
         ]
-        self.assertEqual(len(error_events), 1)
-        self.assertEqual(error_events[0]["request_kind"], "main_generation")
-        self.assertEqual(error_events[0]["client_request_kind"], "turn")
-        self.assertEqual(error_events[0]["turn_id"], "turn-error")
-        self.assertEqual(error_events[0]["status"], 400)
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["request_kind"], "main_generation")
+        self.assertEqual(complete_events[0]["client_request_kind"], "turn")
+        self.assertEqual(complete_events[0]["turn_id"], "turn-error")
+        self.assertEqual(complete_events[0]["status"], 400)
         retry_events = [
             call for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
@@ -6923,6 +7014,46 @@ class RoutingTests(unittest.TestCase):
         self.assertLess(keepalive_index, first_event_index)
         self.assertTrue(handler.close_connection)
 
+    def test_sse_relay_aborts_on_keepalive_write_failure(self):
+        handler = FakeHandler()
+
+        def fail_on_keepalive(data, _index):
+            return b": codexhub.keepalive" in data
+
+        handler.wfile = FakeWFile(fail_on_write=fail_on_keepalive)
+        response = FakeDelayedSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_keepalive_fail","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                b"",
+            ],
+            first_delay_seconds=0.05,
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            with patch.dict(
+                os.environ, {"CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0.01"}, clear=False
+            ):
+                status = CodexProxyHandler._relay_upstream_response(
+                    handler,
+                    response,
+                    "official",
+                    request_id="req_keepalive_fail",
+                    model="openai/gpt-5.5",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    caller_stream=True,
+                )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 499)
+
     def test_ollama_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
         event = {
@@ -8652,10 +8783,10 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(output["type"], "message")
         self.assertEqual(output["content"][0]["text"], "hello")
 
-    def test_transparent_chat_to_responses_stream_treats_done_write_reset_as_downstream_close(self):
+    def test_transparent_chat_to_responses_stream_treats_terminal_commit_failure_as_downstream_close(self):
         handler = FakeHandler()
         handler.wfile = FakeWFile(
-            fail_on_write=lambda data, _index: data == b"data: [DONE]\n\n"
+            fail_on_write=lambda data, _index: b'"type":"response.completed"' in data
         )
         chunks = [
             {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
@@ -8677,7 +8808,7 @@ class RoutingTests(unittest.TestCase):
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
         )
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 499)
         self.assertTrue(handler.close_connection)
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertIn("downstream_stream_closed", event_names)
@@ -8687,6 +8818,86 @@ class RoutingTests(unittest.TestCase):
             if call.args and call.args[0] == "downstream_stream_closed"
         )
         self.assertEqual(downstream_event["client_id"], "omp")
+        self.assertEqual(downstream_event["status"], 499)
+        self.assertEqual(downstream_event["error"], "ConnectionResetError")
+
+    def test_converted_chat_to_responses_downstream_terminal_commit_failure_yields_request_complete_499(self):
+        self.external_model["upstream_format"] = "chat_completions"
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler("/v1/providers/volc/responses", body, headers={"X-Codex-Client-Id": "opencode"})
+        fake.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: b'"type":"response.completed"' in data
+        )
+        handler.wfile = fake.wfile
+        chat_stream = [
+            b'data: {"id":"chatcmpl_donefail","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n',
+            b'\n',
+            b'data: [DONE]\n',
+            b'\n',
+            b'',
+        ]
+
+        with patch("codex_proxy.urlopen", return_value=FakeSseResponse(chat_stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("upstream_stream_interrupted", event_names)
+        complete_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["status"], 499)
+        downstream_closed_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(downstream_closed_event["error"], "ConnectionResetError")
+
+    def test_same_format_responses_downstream_write_failure_yields_request_complete_499(self):
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler("/v1/providers/volc/responses", body)
+        fake.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: b'"type":"response.output_text.delta"' in data
+        )
+        handler.wfile = fake.wfile
+        responses_stream = [
+            b'data: {"type":"response.created","response":{"id":"resp_samefmt","model":"glm-5.2"}}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_samefmt","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}\n\n',
+            b'',
+            b'',
+            b'',
+        ]
+
+        with patch("codex_proxy.urlopen", return_value=FakeSseResponse(responses_stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("upstream_stream_interrupted", event_names)
+        complete_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["status"], 499)
+        downstream_closed_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(downstream_closed_event["error"], "ConnectionResetError")
 
     def test_transparent_chat_passthrough_stream_treats_done_write_reset_as_downstream_close(self):
         handler = FakeHandler()
@@ -8711,7 +8922,7 @@ class RoutingTests(unittest.TestCase):
             event_context={"client_id": "omp", "client_inference_source": "header"},
         )
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 499)
         self.assertTrue(handler.close_connection)
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertIn("downstream_stream_closed", event_names)
@@ -8721,6 +8932,8 @@ class RoutingTests(unittest.TestCase):
             if call.args and call.args[0] == "downstream_stream_closed"
         )
         self.assertEqual(downstream_event["client_id"], "omp")
+        self.assertEqual(downstream_event["status"], 499)
+
     def test_responses_sse_passthrough_without_terminal_writes_sse_error(self):
         handler = FakeHandler()
         response = FakeSseResponse(
@@ -13751,7 +13964,7 @@ Execution constraints:
 
         close_context = guarded_context()
         close_handler = FakeHandler()
-        close_handler.wfile = FakeWFile(fail_on_write=lambda data, _index: data == b"data: [DONE]\n\n")
+        close_handler.wfile = FakeWFile(fail_on_write=lambda data, _index: data.startswith(b"data: {"))
         close_chunks = [
             {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
             {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
@@ -19061,6 +19274,617 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         ])
         self.assertEqual(events[-1][1]["frames_recorded"], 1)
         self.assertEqual(events[-1][1]["stop_reason"], "idle_timeout")
+
+    def test_header_commit_oserror_yields_request_complete_499_no_json_fallback(self):
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "codex-app"},
+        )
+
+        def failing_end_headers():
+            raise ConnectionResetError("socket reset")
+
+        handler.end_headers = failing_end_headers
+        responses_stream = [
+            b'data: {"type":"response.created","response":{"id":"resp_header","model":"glm-5.2"}}\n\n',
+            b"",
+        ]
+
+        with patch("codex_proxy.urlopen", return_value=FakeSseResponse(responses_stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("request_error", event_names)
+        complete_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["status"], 499)
+
+    def test_same_format_transparent_write_failure_yields_request_complete_499(self):
+        handler = FakeHandler()
+        handler.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: data.startswith(b"data: [DONE]")
+        )
+        chunks = [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_transparent_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_chat_passthrough_done_reset",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            event_context={"client_id": "omp", "client_inference_source": "header"},
+        )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("transparent_stream_closed", event_names)
+        downstream_event = next(
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(downstream_event["client_id"], "omp")
+        self.assertEqual(downstream_event["status"], 499)
+
+    def test_retry_notice_commit_failure_aborts_new_upstream_attempt(self):
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "codex-app"},
+        )
+        error = HTTPError(
+            "http://volc/responses",
+            503,
+            "Service Unavailable",
+            {"Content-Type": "application/json"},
+            io.BytesIO(b'{"error":{"type":"server_error","message":"try later"}}'),
+        )
+        # fail when the retry notice event is written
+        failing_wfile = FakeWFile(
+            fail_on_write=lambda data, _index: b"codexhub.retry" in data
+        )
+        fake.wfile = failing_wfile
+        handler.wfile = failing_wfile
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                    "CODEX_PROXY_DOWNSTREAM_RETRY_NOTICE_ENABLED": "1",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[error, error]) as mock_urlopen,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_sleep,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertNotIn("sse_retry_notice", event_names)
+        self.assertIn("downstream_stream_closed", event_names)
+        complete_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["status"], 499)
+
+    def test_error_event_write_failure_overrides_upstream_status_to_499(self):
+        body = json.dumps({
+            "model": "volc/glm-5.2",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "codex-app"},
+        )
+        failing_wfile = FakeWFile(
+            fail_on_write=lambda data, _index: b"upstream_stream_error" in data
+        )
+        fake.wfile = failing_wfile
+        handler.wfile = failing_wfile
+        responses_stream = [
+            b'data: {"type":"response.created","response":{"id":"resp_err","model":"glm-5.2"}}\n\n',
+            ConnectionResetError("upstream died"),
+        ]
+
+        with patch("codex_proxy.urlopen", return_value=FakeSseResponse(responses_stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("upstream_stream_interrupted", event_names)
+        complete_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0]["status"], 499)
+
+    def test_synthetic_terminal_write_failure_returns_499_not_500(self):
+        handler = FakeHandler()
+        handler.wfile = FakeWFile(
+            fail_on_write=lambda data, _index: b'"type":"response.completed"' in data
+        )
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_synth","model":"glm-5.2"}}\n\n',
+            (
+                b'data: {"type":"response.output_item.done","output_index":0,"item":'
+                b'{"id":"fc_synth","type":"function_call","status":"completed","call_id":"call_synth",'
+                b'"name":"shell_command","arguments":"{\\"command\\":\\"echo hi\\"}"}}\n\n'
+            ),
+            b"",
+        ])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_synth_terminal",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("upstream_stream_incomplete", event_names)
+
+    def test_image_proxy_progress_callback_false_aborts_with_downstream_closed_error(self):
+        payload = {
+            "model": "volc/glm-5.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is this?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+        upstream = choose_upstream("volc/glm-5.2")
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-cn/MiniMax-M3",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(codex_proxy.DownstreamClosedDuringImageProxyError):
+                codex_proxy.apply_image_proxy_to_responses_payload(
+                    payload,
+                    "volc/glm-5.2",
+                    upstream,
+                    event_context={"request_id": "req_img_closed"},
+                    progress_callback=lambda _payload: False,
+                )
+
+    def test_official_passthrough_header_commit_failure_yields_499(self):
+        handler = FakeHandler()
+
+        def failing_end_headers():
+            raise ConnectionResetError("socket reset")
+
+        handler.end_headers = failing_end_headers
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_official_header"}}\n\n',
+            b"",
+        ])
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_official_passthrough_sse_response(
+                handler,
+                response,
+                "official",
+                request_id="req_official_header",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+            )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in write_event.call_args_list if call.args]
+        self.assertIn("official_passthrough_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 499)
+        self.assertEqual(closed_event["lines_streamed"], 0)
+
+    def test_transparent_header_commit_failure_yields_499(self):
+        handler = FakeHandler()
+
+        def failing_end_headers():
+            raise ConnectionResetError("socket reset")
+
+        handler.end_headers = failing_end_headers
+        response = FakeSseResponse([
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            b"",
+        ])
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_transparent_upstream_response(
+                handler,
+                response,
+                "ollama_cloud",
+                request_id="req_transparent_header",
+                model="ollama-cloud/glm-5.2",
+                upstream_format="chat_completions",
+                inbound_format="chat_completions",
+            )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in write_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in write_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 499)
+        self.assertEqual(handler.wfile.writes, [])
+
+    def test_official_passthrough_synthetic_terminal_write_failure_yields_499(self):
+        handler = FakeHandler()
+
+        def fail_on_response_failed(data, _index):
+            return b"response.failed" in data
+
+        handler.wfile = FakeWFile(fail_on_write=fail_on_response_failed)
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_synth_fail"}}\n\n',
+            OSError("upstream read failed"),
+        ])
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_official_passthrough_sse_response(
+                handler,
+                response,
+                "official",
+                request_id="req_synth_fail",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+            )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in write_event.call_args_list if call.args]
+        self.assertIn("official_passthrough_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 499)
+
+    def test_transparent_synthetic_terminal_write_failure_yields_499(self):
+        handler = FakeHandler()
+
+        def fail_on_response_failed(data, _index):
+            return b"response.failed" in data
+
+        handler.wfile = FakeWFile(fail_on_write=fail_on_response_failed)
+        response = FakeSseResponse([
+            b'data: {"type":"response.created","response":{"id":"resp_synth_fail"}}\n\n',
+            OSError("upstream read failed"),
+        ])
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_transparent_upstream_response(
+                handler,
+                response,
+                "volcengine",
+                request_id="req_transparent_synth",
+                model="volc/glm-5.2",
+                upstream_format="responses",
+                inbound_format="responses",
+            )
+
+        self.assertEqual(status, 499)
+        self.assertTrue(handler.close_connection)
+        event_names = [call.args[0] for call in write_event.call_args_list if call.args]
+        self.assertIn("downstream_stream_closed", event_names)
+        closed_event = next(
+            call.kwargs for call in write_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 499)
+
+    def test_streaming_shutdown_outcome_write_failure_returns_false(self):
+        handler = FakeHandler()
+
+        def fail_on_shutdown(data, _index):
+            return b"user_requested_shutdown" in data
+
+        handler.wfile = FakeWFile(fail_on_write=fail_on_shutdown)
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "official",
+            request_id="req_shutdown_write",
+            inbound_format="responses",
+            upstream_format="responses",
+        )
+
+        result = CodexProxyHandler._send_user_requested_shutdown_outcome(
+            handler,
+            inbound_format="responses",
+            downstream_sse_started=True,
+        )
+
+        self.assertFalse(result)
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(handler._downstream_stream_commit.downstream_closed)
+        self.assertIsNotNone(handler._downstream_stream_commit.last_write_error())
+
+    def test_non_streaming_shutdown_outcome_write_failure_returns_false(self):
+        handler = FakeHandler()
+
+        def fail_on_all(_data, _index):
+            return True
+
+        handler.wfile = FakeWFile(fail_on_write=fail_on_all)
+
+        result = CodexProxyHandler._send_user_requested_shutdown_outcome(
+            handler,
+            inbound_format="responses",
+            downstream_sse_started=False,
+        )
+
+        self.assertFalse(result)
+        self.assertTrue(handler.close_connection)
+
+    def test_streaming_responses_shutdown_outcome_success_closes_connection(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "official",
+            request_id="req_shutdown_ok",
+            inbound_format="responses",
+            upstream_format="responses",
+        )
+
+        result = CodexProxyHandler._send_user_requested_shutdown_outcome(
+            handler,
+            inbound_format="responses",
+            downstream_sse_started=True,
+        )
+
+        self.assertTrue(result)
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(handler.wfile.writes)
+
+    def test_streaming_chat_shutdown_outcome_success_closes_connection(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "official",
+            request_id="req_shutdown_chat_ok",
+            inbound_format="chat_completions",
+            upstream_format="chat_completions",
+        )
+
+        result = CodexProxyHandler._send_user_requested_shutdown_outcome(
+            handler,
+            inbound_format="chat_completions",
+            downstream_sse_started=True,
+        )
+
+        self.assertTrue(result)
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(handler.wfile.writes)
+
+    def test_non_streaming_shutdown_outcome_success_closes_connection(self):
+        handler = FakeHandler()
+
+        result = CodexProxyHandler._send_user_requested_shutdown_outcome(
+            handler,
+            inbound_format="responses",
+            downstream_sse_started=False,
+        )
+
+        self.assertTrue(result)
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(handler.status, 503)
+
+    def test_admission_rejected_shutdown_write_failure_emits_one_499(self):
+        body = json.dumps({"model": "openai/gpt-5.5", "input": []}).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        class RejectingController:
+            def admit(self):
+                return None
+
+            def complete(self, _admission):
+                pass
+
+        def fail_on_shutdown(data, _index):
+            return b"user_requested_shutdown" in data
+
+        fake.wfile = FakeWFile(fail_on_write=fail_on_shutdown)
+        handler.wfile = fake.wfile
+
+        with patch(
+            "codex_proxy._gateway_shutdown_controller_for_handler",
+            return_value=RejectingController(),
+        ):
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                CodexProxyHandler._proxy_post_request(
+                    handler, inbound_format="responses"
+                )
+
+        request_complete_events = [
+            call
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(request_complete_events), 1)
+        self.assertEqual(request_complete_events[0].kwargs["status"], 499)
+        closed_events = [
+            call
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        ]
+        self.assertEqual(len(closed_events), 1)
+
+    def test_early_cancellation_emits_one_request_cancelled(self):
+        body = json.dumps({"model": "openai/gpt-5.5", "input": []}).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.cancel()
+
+        class CancellingController:
+            def admit(self):
+                return admission
+
+            def complete(self, _admission):
+                pass
+
+        with patch(
+            "codex_proxy._gateway_shutdown_controller_for_handler",
+            return_value=CancellingController(),
+        ):
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                CodexProxyHandler._proxy_post_request(
+                    handler, inbound_format="responses"
+                )
+
+        cancelled_events = [
+            call
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "request_cancelled"
+        ]
+        self.assertEqual(len(cancelled_events), 1)
+        self.assertEqual(cancelled_events[0].kwargs["status"], 503)
+        self.assertTrue(handler.close_connection)
+
+    def test_early_cancellation_write_failure_emits_one_499(self):
+        body = json.dumps({"model": "openai/gpt-5.5", "input": []}).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.cancel()
+
+        class CancellingController:
+            def admit(self):
+                return admission
+
+            def complete(self, _admission):
+                pass
+
+        def fail_on_shutdown(data, _index):
+            return b"user_requested_shutdown" in data
+
+        fake.wfile = FakeWFile(fail_on_write=fail_on_shutdown)
+        handler.wfile = fake.wfile
+
+        with patch(
+            "codex_proxy._gateway_shutdown_controller_for_handler",
+            return_value=CancellingController(),
+        ):
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                CodexProxyHandler._proxy_post_request(
+                    handler, inbound_format="responses"
+                )
+
+        request_complete_events = [
+            call
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(request_complete_events), 1)
+        self.assertEqual(request_complete_events[0].kwargs["status"], 499)
+        closed_events = [
+            call
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        ]
+        self.assertEqual(len(closed_events), 1)
+
+    def test_all_wfile_writes_are_in_allowlist_or_seam_low_level(self):
+        import ast
+        source = Path("src-python/codex_proxy.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        allowed = set(
+            codex_proxy.DOWNSTREAM_STREAM_COMMIT_ALLOWLIST
+            | codex_proxy.DOWNSTREAM_STREAM_COMMIT_SEAM_METHODS
+        )
+
+        parents: dict[ast.AST, ast.AST | None] = {tree: None}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+
+        def enclosing_function(node: ast.AST) -> str | None:
+            current: ast.AST | None = node
+            while current is not None:
+                if isinstance(current, ast.FunctionDef):
+                    return current.name
+                if isinstance(current, ast.AsyncFunctionDef):
+                    return current.name
+                current = parents.get(current)
+            return None
+
+        violations = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "write":
+                continue
+            value = func.value
+            if not isinstance(value, ast.Attribute) or value.attr != "wfile":
+                continue
+            enclosing = enclosing_function(node)
+            if enclosing not in allowed:
+                violations.append((enclosing, ast.get_source_segment(source, node)))
+
+        self.assertEqual(violations, [])
 
 
 if __name__ == "__main__":
