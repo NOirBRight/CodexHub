@@ -170,6 +170,70 @@ class FakeSequencedDelayedSseResponse(FakeSseResponse):
         self.closed = True
 
 
+class FakeCancellableSseResponse:
+    """Blocking SSE-like response whose readline is interrupted by close()."""
+
+    status = 200
+
+    def __init__(self, lines=None):
+        self.headers = {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Transfer-Encoding": "chunked",
+            "Content-Length": "999",
+        }
+        self._lines = list(lines or [])
+        self._closed = threading.Event()
+        self.closed = False
+        self.close_call_count = 0
+
+    def readline(self):
+        if self._closed.is_set():
+            raise ConnectionResetError("response closed")
+        if self._lines:
+            delay, line = self._lines.pop(0)
+            if self._closed.wait(timeout=delay):
+                raise ConnectionResetError("response closed")
+            return line
+        if self._closed.wait(timeout=10):
+            raise ConnectionResetError("response closed")
+        return b""
+
+    def close(self):
+        self.close_call_count += 1
+        self.closed = True
+        self._closed.set()
+
+
+class FakeCancellableEofSseResponse:
+    """Blocking SSE-like response whose close() unblocks an EOF readline()."""
+
+    status = 200
+
+    def __init__(self, lines=None):
+        self.headers = {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Transfer-Encoding": "chunked",
+            "Content-Length": "999",
+        }
+        self._lines = list(lines or [])
+        self._closed = threading.Event()
+        self.closed = False
+        self.close_call_count = 0
+
+    def readline(self):
+        if self._lines:
+            delay, line = self._lines.pop(0)
+            self._closed.wait(timeout=delay)
+            return line
+        self._closed.wait()
+        return b""
+
+    def close(self):
+        self.close_call_count += 1
+        self.closed = True
+        self._closed.set()
+
+
 class FakeResponse:
     status = 200
 
@@ -2106,6 +2170,395 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(event["bytes_streamed"], 0)
         self.assertTrue(event["headers_sent_downstream"])
         self.assertTrue(event["downstream_sse_started"])
+
+    def test_official_passthrough_downstream_close_after_terminal_returns_success(self):
+        fake = FakeHandler()
+        # created line (0), completed/terminal line (1), in_progress line (2) -> fail after terminal
+        fake.wfile = FakeWFile(fail_on_write=lambda _data, index: index == 2)
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                b'data: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "official",
+            request_id="req-close-after-terminal",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.created", body)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"response.failed", body)
+        self.assertTrue(fake.close_connection)
+
+    def test_official_passthrough_stream_commit_seam_classifies_before_output(self):
+        fake = FakeHandler()
+        fake.wfile = FakeWFile(fail_on_write=lambda _data, index: index == 0)
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b"",
+            ]
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "official",
+                request_id="req-close-before-output",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
+
+        self.assertEqual(status, 499)
+        event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(event["close_phase"], "before_output")
+        self.assertFalse(event["synthetic_terminal_event_sent"])
+
+    def test_official_passthrough_stream_commit_seam_classifies_during_event(self):
+        fake = FakeHandler()
+        fake.wfile = FakeWFile(fail_on_write=lambda _data, index: index == 1)
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed",\n',
+                b'data: "response":{"id":"resp_1","status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "official",
+                request_id="req-close-mid-event",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 499)
+        self.assertIn(b"response.created", body)
+        self.assertNotIn(b"response.completed", body)
+        event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(event["close_phase"], "during_event")
+
+    def test_official_passthrough_partial_event_upstream_failure_separates_frames(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.in_progress","response":{"id":"resp_original"}}\n',
+                URLError("connection reset"),
+            ]
+        )
+
+        with patch("codex_proxy.write_proxy_event"):
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "official",
+                request_id="req-partial-event-failure",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 502)
+        # The partial data frame is preserved.
+        self.assertIn(b'data: {"type":"response.in_progress","response":{"id":"resp_original"}}', body)
+        # The synthetic terminal failure is a distinct SSE frame separated by a blank line.
+        events = [chunk for chunk in body.split(b"\n\n") if chunk]
+        self.assertGreaterEqual(len(events), 2, body)
+        self.assertTrue(events[0].startswith(b"data:"))
+        self.assertTrue(events[1].startswith(b"event: response.failed"))
+        self.assertNotIn(
+            b'data: {"type":"response.in_progress","response":{"id":"resp_original"}}\nevent: response.failed',
+            body,
+        )
+        # The original response identity is preserved in the synthetic terminal failure.
+        failed_payload = json.loads(events[1].split(b"\ndata: ", 1)[1].decode("utf-8"))
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(failed_payload["response"]["id"], "resp_original")
+
+    def test_official_passthrough_stream_commit_seam_prevents_duplicate_terminal(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                URLError("connection reset"),
+            ]
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                response,
+                "official",
+                request_id="req-no-duplicate-terminal",
+                model="openai/gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture={},
+            )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"response.failed", body)
+        # No duplicate terminal is emitted after the natural terminal event.
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
+
+    def test_official_passthrough_cancellation_closes_upstream_and_reader(self):
+        fake = FakeHandler()
+        response = FakeCancellableSseResponse(
+            [
+                (0.5, b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'),
+            ]
+        )
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.attach_upstream_transport(response)
+        previous = codex_proxy._activate_gateway_request(admission)
+
+        def cancel_soon() -> None:
+            time.sleep(0.05)
+            admission.cancel()
+
+        try:
+            thread = threading.Thread(target=cancel_soon)
+            thread.start()
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                status = CodexProxyHandler._relay_upstream_response(
+                    fake,
+                    response,
+                    "official",
+                    request_id="req-cancel",
+                    model="openai/gpt-5.5",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    caller_stream=True,
+                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    usage_capture={},
+                )
+            thread.join(timeout=1)
+        finally:
+            codex_proxy._restore_gateway_request(previous)
+
+        body = b"".join(fake.wfile.writes)
+        # Bounded completion: no successful terminal bytes, no fallback error event.
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"")
+        self.assertTrue(fake.close_connection)
+        self.assertGreaterEqual(response.close_call_count, 1)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 503)
+        self.assertEqual(closed_event["failure_class"], "gateway_shutdown")
+        self.assertFalse(closed_event["client_disconnected"])
+        self.assertEqual(closed_event["close_phase"], "before_output")
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+
+    def test_official_passthrough_deferred_first_event_cancellation_owned_by_seam(self):
+        fake = FakeHandler()
+        response = FakeCancellableSseResponse(
+            [
+                (0.5, b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'),
+            ]
+        )
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.attach_upstream_transport(response)
+        previous = codex_proxy._activate_gateway_request(admission)
+
+        def cancel_soon() -> None:
+            time.sleep(0.05)
+            admission.cancel()
+
+        try:
+            thread = threading.Thread(target=cancel_soon)
+            thread.start()
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                status = fake._relay_official_passthrough_sse_response(
+                    response,
+                    "official",
+                    request_id="req-deferred-cancel",
+                    model="openai/gpt-5.5",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    defer_stream_errors=True,
+                )
+            thread.join(timeout=1)
+        finally:
+            codex_proxy._restore_gateway_request(previous)
+
+        body = b"".join(fake.wfile.writes)
+        # The seam owns the cancellation before any deferred retry/fallback path.
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"")
+        self.assertTrue(fake.close_connection)
+        self.assertFalse(fake.headers_ended)
+        self.assertGreaterEqual(response.close_call_count, 1)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+        self.assertEqual(closed_event["status"], 503)
+        self.assertEqual(closed_event["failure_class"], "gateway_shutdown")
+        self.assertFalse(closed_event["client_disconnected"])
+        self.assertEqual(closed_event["close_phase"], "before_output")
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+        self.assertFalse(closed_event["downstream_sse_started"])
+
+    def test_official_passthrough_cancellation_after_terminal_returns_success(self):
+        fake = FakeHandler()
+        response = FakeCancellableSseResponse(
+            [
+                (
+                    0,
+                    b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                ),
+                (0.5, b""),
+            ]
+        )
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.attach_upstream_transport(response)
+        previous = codex_proxy._activate_gateway_request(admission)
+
+        def cancel_soon() -> None:
+            time.sleep(0.05)
+            admission.cancel()
+
+        try:
+            thread = threading.Thread(target=cancel_soon)
+            thread.start()
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                status = CodexProxyHandler._relay_upstream_response(
+                    fake,
+                    response,
+                    "official",
+                    request_id="req-cancel-after-terminal",
+                    model="openai/gpt-5.5",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    caller_stream=True,
+                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    usage_capture={},
+                )
+            thread.join(timeout=1)
+        finally:
+            codex_proxy._restore_gateway_request(previous)
+
+        body = b"".join(fake.wfile.writes)
+        # Terminal commitment wins: the stream is successful even if cancellation
+        # interrupts the post-terminal drain.
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count(b"response.completed"), 1)
+        self.assertNotIn(b"response.failed", body)
+        self.assertNotIn(b"event: error", body)
+        self.assertGreaterEqual(response.close_call_count, 1)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
+
+    def test_official_passthrough_eof_cancellation_after_terminal_returns_success(self):
+        fake = FakeHandler()
+        response = FakeCancellableEofSseResponse(
+            [
+                (
+                    0,
+                    b'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+                ),
+            ]
+        )
+        admission = codex_proxy.GatewayRequestAdmission()
+        admission.attach_upstream_transport(response)
+        previous = codex_proxy._activate_gateway_request(admission)
+
+        def cancel_soon() -> None:
+            time.sleep(0.05)
+            admission.cancel()
+
+        try:
+            thread = threading.Thread(target=cancel_soon)
+            thread.start()
+            with patch("codex_proxy.write_proxy_event") as write_event:
+                status = CodexProxyHandler._relay_upstream_response(
+                    fake,
+                    response,
+                    "official",
+                    request_id="req-eof-cancel-after-terminal",
+                    model="openai/gpt-5.5",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    caller_stream=True,
+                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    usage_capture={},
+                )
+            thread.join(timeout=1)
+        finally:
+            codex_proxy._restore_gateway_request(previous)
+
+        body = b"".join(fake.wfile.writes)
+        # Non-exception EOF path after terminal commitment must stay successful.
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count(b"response.completed"), 1)
+        self.assertNotIn(b"response.failed", body)
+        self.assertNotIn(b"event: error", body)
+        self.assertGreaterEqual(response.close_call_count, 1)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "official_passthrough_stream_closed"
+                for call in write_event.call_args_list
+            )
+        )
 
     def test_official_http_passthrough_open_failure_does_not_emit_gateway_retry_or_notice(self):
         body = json.dumps(
