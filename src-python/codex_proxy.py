@@ -2734,7 +2734,11 @@ def _decode_sse_metadata_value(value: bytes) -> str | None:
 
 
 class PassthroughSseSemanticStats:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
+    ) -> None:
         self.events_streamed = 0
         self.json_events_streamed = 0
         self.terminal_event_seen = False
@@ -2746,6 +2750,9 @@ class PassthroughSseSemanticStats:
         self.response_id: str | None = None
         self.event_type_counts: dict[str, int] = {}
         self.event_types_truncated = False
+        self._terminal_observer = (
+            terminal_observer if terminal_observer is not None else _responses_terminal_observer
+        )
         self._event_name: str | None = None
         self._data_lines: list[bytes] = []
 
@@ -2809,7 +2816,6 @@ class PassthroughSseSemanticStats:
         payload: Any = None
         if data == b"[DONE]":
             self.done_sentinel_seen = True
-            self.terminal_event_seen = True
             event_type = event_type or "[DONE]"
         elif data:
             try:
@@ -2821,23 +2827,25 @@ class PassthroughSseSemanticStats:
                 payload_type = payload.get("type")
                 if isinstance(payload_type, str) and payload_type:
                     event_type = payload_type
-                if _responses_event_commits_downstream_output(payload, "official"):
-                    self.downstream_output_seen = True
-                response = payload.get("response")
-                if isinstance(response, Mapping):
-                    response_id = response.get("id")
-                    if isinstance(response_id, str) and response_id:
-                        self.response_id = response_id
+                if self._terminal_observer is _responses_terminal_observer:
+                    if _responses_event_commits_downstream_output(payload, "official"):
+                        self.downstream_output_seen = True
+                    response = payload.get("response")
+                    if isinstance(response, Mapping):
+                        response_id = response.get("id")
+                        if isinstance(response_id, str) and response_id:
+                            self.response_id = response_id
 
         if event_type is None:
             return
         self.last_event_type = event_type
         self._record_event_type(event_type)
-        if event_type.startswith("response."):
-            self.response_event_seen = True
-        if event_type == "response.completed":
-            self.completed_event_seen = True
-        if event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+        if self._terminal_observer is _responses_terminal_observer:
+            if event_type.startswith("response."):
+                self.response_event_seen = True
+            if event_type == "response.completed":
+                self.completed_event_seen = True
+        if self._terminal_observer(event_name, data, payload):
             self.terminal_event_seen = True
 
     def _record_event_type(self, event_type: str) -> None:
@@ -2856,6 +2864,32 @@ RESPONSES_TERMINAL_EVENT_TYPES = {
     "response.incomplete",
     "error",
 }
+
+
+def _responses_terminal_observer(
+    event_name: str | None,
+    data: bytes,
+    payload: Any,
+) -> bool:
+    """Responses protocol terminal predicate: [DONE] or known terminal types."""
+    if data == b"[DONE]":
+        return True
+    event_type = event_name
+    if isinstance(payload, Mapping):
+        payload_type = payload.get("type")
+        if isinstance(payload_type, str) and payload_type:
+            event_type = payload_type
+    return event_type in RESPONSES_TERMINAL_EVENT_TYPES
+
+
+def _chat_terminal_observer(
+    event_name: str | None,
+    data: bytes,
+    payload: Any,
+) -> bool:
+    """Chat Completions protocol terminal predicate: only the [DONE] sentinel."""
+    del event_name, payload
+    return data == b"[DONE]"
 
 
 def _responses_events_have_terminal(events: list[Mapping[str, Any]]) -> bool:
@@ -12533,16 +12567,46 @@ def _open_upstream_response(
             attempt += 1
 
 
+def _responses_synthetic_terminal_failure(
+    handler: CodexProxyHandler,
+    exc: BaseException,
+    *,
+    status: int,
+    response_id: str | None,
+    upstream_name: str,
+    model: str | None,
+) -> tuple[bool, str | None, str | None]:
+    """Write a Responses-format synthetic terminal failure event."""
+    try:
+        handler._write_sse_event(
+            "response.failed",
+            _responses_failed_event_for_stream_error(
+                upstream_name=upstream_name,
+                model=model,
+                status=status,
+                exc=exc,
+                response_id=response_id,
+            ),
+        )
+        return True, None, None
+    except OSError as write_exc:
+        return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
+
+
 class _GatewayDownstreamStreamCommit:
-    """Owns downstream writes and terminal commitment for an Official Responses SSE stream.
+    """Owns downstream writes and terminal commitment for an SSE stream.
 
     The seam is the single owner of all bytes written to the downstream client for
-    an Official Responses passthrough stream: data events, terminal events, and
-    sanitized error events. It tracks whether a terminal event has been committed
-    to the downstream, classifies the close phase (before output, during an event,
-    or after terminal commitment), and hands off cancellation/closure to the owned
+    a passthrough SSE stream: data events, terminal events, and sanitized error
+    events. It tracks whether a terminal event has been committed to the
+    downstream, classifies the close phase (before output, during an event, or
+    after terminal commitment), and hands off cancellation/closure to the owned
     upstream response so that no later write, retry, fallback, or duplicate
     terminal can occur on this stream.
+
+    Protocol-specific observers (terminal detection, usage extraction, and
+    synthetic terminal formatting) are injected by the caller; the seam itself
+    owns only the lifecycle ledger and byte commitment.
     """
 
     def __init__(
@@ -12554,6 +12618,14 @@ class _GatewayDownstreamStreamCommit:
         model: str | None = None,
         request_id: str | None = None,
         inbound_format: str = "responses",
+        upstream_format: str = "responses",
+        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
+        usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None = None,
+        synthetic_terminal_failure_callback: Callable[
+            [CodexProxyHandler, BaseException, int, str | None, str, str | None],
+            tuple[bool, str | None, str | None],
+        ]
+        | None = None,
     ) -> None:
         self._handler = handler
         self._upstream_response = upstream_response
@@ -12561,7 +12633,14 @@ class _GatewayDownstreamStreamCommit:
         self._model = model
         self._request_id = request_id
         self._inbound_format = inbound_format
-        self._sse_stats = PassthroughSseSemanticStats()
+        self._upstream_format = upstream_format
+        self._usage_line_callback = (
+            usage_line_callback
+            if usage_line_callback is not None
+            else _offer_official_passthrough_usage_line
+        )
+        self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
+        self._sse_stats = PassthroughSseSemanticStats(terminal_observer=terminal_observer)
         self._terminal_observed = False
         self._terminal_committed = False
         self._downstream_closed = False
@@ -12570,6 +12649,7 @@ class _GatewayDownstreamStreamCommit:
         self._lines_streamed = 0
         self._bytes_streamed = 0
         self._last_upstream_byte_at: float | None = None
+        self._last_write_error: OSError | None = None
 
     @property
     def terminal_committed(self) -> bool:
@@ -12638,19 +12718,23 @@ class _GatewayDownstreamStreamCommit:
         """Commit one upstream SSE line to the downstream stream.
 
         Returns True if the line was written (or was empty). Returns False if the
-        downstream stream is closed, in which case the caller must stop writing.
+        downstream stream is closed or a terminal event has already been committed,
+        in which case the caller must stop writing.
         """
         if self._downstream_closed:
             return False
         if not line:
             return True
+        if self._terminal_committed:
+            return False
         terminal_observed_now = self._observe_line(line)
         if terminal_observed_now:
             _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=False)
         try:
             self._handler.wfile.write(line)
             self._handler.wfile.flush()
-        except OSError:
+        except OSError as write_exc:
+            self._last_write_error = write_exc
             self.close()
             return False
         self._downstream_output_started = True
@@ -12660,12 +12744,17 @@ class _GatewayDownstreamStreamCommit:
             self._terminal_committed = True
             _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
             self._record_terminal()
-        _offer_official_passthrough_usage_line(
+            # Terminal ledger is sealed: close the downstream side deterministically
+            # so no later upstream byte can be written or mislabeled as a disconnect.
+            # Upstream is left open so the caller can drain to the natural EOF.
+            self._downstream_closed = True
+            self._handler.close_connection = True
+        self._usage_line_callback(
             {
                 "request_id": self._request_id,
                 "model": self._model,
                 "upstream": self._upstream_name,
-                "upstream_format": "responses",
+                "upstream_format": self._upstream_format,
                 "inbound_format": self._inbound_format,
             },
             line,
@@ -12686,33 +12775,46 @@ class _GatewayDownstreamStreamCommit:
         available.
 
         Returns (sent, write_error_name, write_error_detail). No event is written
-        if the stream is already closed or a terminal has already been committed,
-        which prevents duplicate terminals and fallback writes.
+        if the stream is already closed, a terminal has already been committed,
+        or no synthetic terminal failure callback is configured, which prevents
+        duplicate terminals and fallback writes.
         """
         if self._downstream_closed or self._terminal_committed:
             return False, None, None
         self._downstream_closed = True
         self._handler.close_connection = True
+        if self._synthetic_terminal_failure_callback is None:
+            return False, None, None
         try:
             if self._sse_stats.has_pending_event():
                 self._handler.wfile.write(b"\n")
                 self._handler.wfile.flush()
                 self._sse_stats.finalize_pending()
             response_id = self._sse_stats.response_id
-            self._handler._write_sse_event(
-                "response.failed",
-                _responses_failed_event_for_stream_error(
-                    upstream_name=self._upstream_name,
-                    model=self._model,
-                    status=status,
-                    exc=exc,
-                    response_id=response_id,
-                ),
+            (
+                synthetic_terminal_event_sent,
+                synthetic_terminal_write_error,
+                synthetic_terminal_write_detail,
+            ) = self._synthetic_terminal_failure_callback(
+                self._handler,
+                exc,
+                status=status,
+                response_id=response_id,
+                upstream_name=self._upstream_name,
+                model=self._model,
             )
-            self._terminal_committed = True
-            return True, None, None
+            if synthetic_terminal_event_sent:
+                self._terminal_committed = True
+            return (
+                synthetic_terminal_event_sent,
+                synthetic_terminal_write_error,
+                synthetic_terminal_write_detail,
+            )
         except OSError as write_exc:
             return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
+
+    def last_write_error(self) -> OSError | None:
+        return self._last_write_error
 
     def counters(self) -> dict[str, Any]:
         return {
@@ -14652,6 +14754,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             model=model,
             request_id=request_id,
             inbound_format=inbound_format,
+            terminal_observer=_responses_terminal_observer,
+            synthetic_terminal_failure_callback=_responses_synthetic_terminal_failure,
         )
         _capture_usage(usage_capture, None, missing_reason="async_official_passthrough")
 
@@ -14748,22 +14852,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 send_downstream_headers_once()
                 _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
                 if not seam.commit_data(line):
-                    close_phase = seam.close_phase
-                    if close_phase == "after_terminal":
-                        _emit_stream_closed(
-                            status_code=499,
-                            error="OSError",
-                            detail=f"downstream_client_closed ({close_phase})",
-                            failure_phase="downstream_write",
-                            failure_side="downstream_write",
-                            failure_class="downstream_client_closed",
-                            client_disconnected=True,
-                            synthetic_terminal_event_sent=False,
-                            synthetic_terminal_event_type=None,
-                            synthetic_terminal_write_error=None,
-                            synthetic_terminal_write_detail=None,
-                        )
+                    if seam.terminal_committed:
+                        # Terminal ledger is sealed; suppress the post-terminal
+                        # upstream line without writing or mislabeling it as a
+                        # downstream client disconnect.
                         return status
+                    close_phase = seam.close_phase
                     _emit_stream_closed(
                         status_code=499,
                         error="OSError",
@@ -14862,8 +14956,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format=upstream_format,
             inbound_format=inbound_format,
         )
-
-        headers_sent = headers_already_sent
+        admission = _active_gateway_request()
+        headers_sent = bool(headers_already_sent)
 
         def send_downstream_headers_once() -> None:
             nonlocal headers_sent
@@ -14879,48 +14973,273 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if is_event_stream and mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
 
+        chat_mode = inbound_format == "chat_completions"
+
+        seam = _GatewayDownstreamStreamCommit(
+            self,
+            response,
+            upstream_name,
+            model=model,
+            request_id=request_id,
+            inbound_format=inbound_format,
+            upstream_format=upstream_format,
+            terminal_observer=(
+                _chat_terminal_observer if chat_mode else _responses_terminal_observer
+            ),
+            usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
+                context, line, upstream_format=upstream_format
+            ),
+            synthetic_terminal_failure_callback=(
+                _responses_synthetic_terminal_failure if not chat_mode else None
+            ),
+        )
+        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+
         if not (defer_stream_errors and is_event_stream and not headers_already_sent):
             send_downstream_headers_once()
 
-        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
-        if is_event_stream:
-            pending_lines: list[bytes] = []
+        def _last_upstream_byte_age_ms(now: float, last_at: float | None) -> int | None:
+            return None if last_at is None else int(max(0.0, now - last_at) * 1000)
 
-            def transparent_error_event(payload: Mapping[str, Any]) -> UpstreamStreamErrorEvent | None:
-                if upstream_format == "responses" and _responses_stream_error_type(payload) is not None:
-                    return UpstreamStreamErrorEvent(payload)
-                if upstream_format == "chat_completions" and _chat_stream_error_detail(payload) is not None:
-                    return UpstreamStreamErrorEvent(payload)
+        def _emit_stream_closed(
+            *,
+            status_code: int,
+            error: str,
+            detail: str,
+            failure_phase: str,
+            failure_side: str,
+            failure_class: str,
+            client_disconnected: bool,
+            synthetic_terminal_event_sent: bool,
+            synthetic_terminal_event_type: str | None,
+            synthetic_terminal_write_error: str | None,
+            synthetic_terminal_write_detail: str | None,
+        ) -> None:
+            close_phase = seam.close_phase
+            counters = seam.counters()
+            now = time.monotonic()
+            write_proxy_event(
+                "transparent_stream_closed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=status_code,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=error,
+                detail=detail,
+                failure_phase=failure_phase,
+                failure_side=failure_side,
+                failure_class=failure_class,
+                client_disconnected=client_disconnected,
+                synthetic_terminal_event_sent=synthetic_terminal_event_sent,
+                synthetic_terminal_event_type=synthetic_terminal_event_type,
+                synthetic_terminal_write_error=synthetic_terminal_write_error,
+                synthetic_terminal_write_detail=synthetic_terminal_write_detail,
+                lines_streamed=counters["lines_streamed"],
+                bytes_streamed=counters["bytes_streamed"],
+                last_upstream_byte_age_ms=_last_upstream_byte_age_ms(
+                    now, counters["last_upstream_byte_at"]
+                ),
+                headers_sent_downstream=headers_sent,
+                downstream_sse_started=headers_sent,
+                close_phase=close_phase,
+                **seam.stats(),
+            )
+
+        def _handle_cancellation() -> int:
+            seam.cancel()
+            _emit_stream_closed(
+                status_code=503,
+                error="GatewayUserRequestedShutdown",
+                detail="request cancelled by gateway shutdown",
+                failure_phase="upstream_read",
+                failure_side="upstream_read",
+                failure_class="gateway_shutdown",
+                client_disconnected=False,
+                synthetic_terminal_event_sent=False,
+                synthetic_terminal_event_type=None,
+                synthetic_terminal_write_error=None,
+                synthetic_terminal_write_detail=None,
+            )
+            return 503
+
+        def _observed_cancellation() -> int | None:
+            """Return a status if cancellation was observed, honoring terminal commitment."""
+            if admission is None or not admission.cancelled:
                 return None
+            if seam.terminal_committed:
+                sse_fields = seam.stats()
+                if usage_capture is not None:
+                    usage_capture.update(sse_fields)
+                return status
+            return _handle_cancellation()
 
-            def write_transparent_line(line: bytes) -> None:
-                self.wfile.write(line)
-                self.wfile.flush()
-                _offer_usage_observed_sse_line(
-                    usage_context,
-                    line,
+        if not is_event_stream:
+            body = b""
+            try:
+                while True:
+                    result = _observed_cancellation()
+                    if result is not None:
+                        return result
+                    chunk = response.read(65536)
+                    result = _observed_cancellation()
+                    if result is not None:
+                        return result
+                    if not chunk:
+                        break
+                    body += chunk
+            except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                if seam.terminal_committed:
+                    return status
+                if admission is not None and admission.cancelled:
+                    return _handle_cancellation()
+                self.close_connection = True
+                write_proxy_event(
+                    "transparent_body_read_failed",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
                     upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    error=type(exc).__name__,
+                    detail=safe_upstream_error_detail(exc),
                 )
+                return 502
 
+            self.wfile.write(body)
+            self.wfile.flush()
+            _offer_usage_observed_body(usage_context, body)
+            self.close_connection = True
+            return status
+
+        pending_lines: list[bytes] = []
+
+        def transparent_error_event(payload: Mapping[str, Any]) -> UpstreamStreamErrorEvent | None:
+            if upstream_format == "responses" and _responses_stream_error_type(payload) is not None:
+                return UpstreamStreamErrorEvent(payload)
+            if upstream_format == "chat_completions" and _chat_stream_error_detail(payload) is not None:
+                return UpstreamStreamErrorEvent(payload)
+            return None
+
+        def _commit_pending_lines() -> bool:
+            """Commit buffered pending lines through the seam. Returns True on success."""
+            for pending_line in pending_lines:
+                if not seam.commit_data(pending_line):
+                    return False
+            pending_lines.clear()
+            return True
+
+        def _handle_write_failure() -> int:
+            """Emit downstream_stream_closed using the actual OSError when available.
+
+            If commit_data returned False because the terminal was already
+            committed, no client disconnect occurred; just return success.
+            """
+            close_phase = seam.close_phase
+            write_error = seam.last_write_error()
+            if write_error is None and seam.terminal_committed:
+                # Stopped only because a terminal event was already committed.
+                return status
+            exc = write_error if write_error is not None else OSError("downstream closed")
+            event_fields = _public_event_context(event_context)
+            for key in (
+                "request_id",
+                "model",
+                "upstream",
+                "status",
+                "upstream_format",
+                "inbound_format",
+                "error",
+                "detail",
+            ):
+                event_fields.pop(key, None)
+            write_proxy_event(
+                "downstream_stream_closed",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=status,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=safe_upstream_error_detail(exc),
+                close_phase=close_phase,
+                **event_fields,
+            )
+            return status
+
+        try:
             while True:
+                result = _observed_cancellation()
+                if result is not None:
+                    return result
                 try:
                     line = response.readline()
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+                    result = _observed_cancellation()
+                    if result is not None:
+                        return result
+                    if seam.terminal_committed:
+                        sse_fields = seam.stats()
+                        if usage_capture is not None:
+                            usage_capture.update(sse_fields)
+                        return status
                     if defer_stream_errors and not headers_sent:
                         raise UpstreamStreamInterruptedError(exc) from exc
-                    self.close_connection = True
-                    write_proxy_event(
-                        "transparent_stream_closed",
-                        request_id=request_id,
-                        model=model,
-                        upstream=upstream_name,
-                        status=502,
-                        upstream_format=upstream_format,
-                        inbound_format=inbound_format,
+                    if seam.downstream_closed:
+                        _emit_stream_closed(
+                            status_code=499,
+                            error=type(exc).__name__,
+                            detail=safe_upstream_error_detail(exc),
+                            failure_phase="stream_body",
+                            failure_side="upstream_read",
+                            failure_class="downstream_client_closed",
+                            client_disconnected=True,
+                            synthetic_terminal_event_sent=False,
+                            synthetic_terminal_event_type=None,
+                            synthetic_terminal_write_error=None,
+                            synthetic_terminal_write_detail=None,
+                        )
+                        return 499
+                    (
+                        synthetic_terminal_event_sent,
+                        synthetic_terminal_write_error,
+                        synthetic_terminal_write_detail,
+                    ) = seam.commit_terminal_failure(exc, status=502)
+                    sse_fields = seam.stats()
+                    if usage_capture is not None:
+                        usage_capture.update(sse_fields)
+                        usage_capture["synthetic_terminal_event_sent"] = synthetic_terminal_event_sent
+                        if synthetic_terminal_event_sent:
+                            usage_capture["synthetic_terminal_event_type"] = (
+                                "response.failed" if inbound_format == "responses" else "chat.error"
+                            )
+                        if synthetic_terminal_write_error is not None:
+                            usage_capture["synthetic_terminal_write_error"] = synthetic_terminal_write_error
+                    synthetic_terminal_event_type = None
+                    if synthetic_terminal_event_sent:
+                        synthetic_terminal_event_type = (
+                            "response.failed" if inbound_format == "responses" else "chat.error"
+                        )
+                    _emit_stream_closed(
+                        status_code=502,
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
+                        failure_phase="stream_body",
+                        failure_side="upstream_read",
+                        failure_class="upstream_stream_interrupted",
+                        client_disconnected=False,
+                        synthetic_terminal_event_sent=synthetic_terminal_event_sent,
+                        synthetic_terminal_event_type=synthetic_terminal_event_type,
+                        synthetic_terminal_write_error=synthetic_terminal_write_error,
+                        synthetic_terminal_write_detail=synthetic_terminal_write_detail,
                     )
                     return 502
+                result = _observed_cancellation()
+                if result is not None:
+                    return result
                 if not line:
                     break
                 _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
@@ -14948,102 +15267,25 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     if not release_pending:
                         continue
                     send_downstream_headers_once()
-                    try:
-                        for pending_line in pending_lines:
-                            write_transparent_line(pending_line)
-                    except OSError as exc:
-                        self.close_connection = True
-                        event_fields = _public_event_context(event_context)
-                        for key in (
-                            "request_id",
-                            "model",
-                            "upstream",
-                            "status",
-                            "upstream_format",
-                            "inbound_format",
-                            "error",
-                            "detail",
-                        ):
-                            event_fields.pop(key, None)
-                        write_proxy_event(
-                            "downstream_stream_closed",
-                            request_id=request_id,
-                            model=model,
-                            upstream=upstream_name,
-                            status=status,
-                            upstream_format=upstream_format,
-                            inbound_format=inbound_format,
-                            error=type(exc).__name__,
-                            detail=safe_upstream_error_detail(exc),
-                            **event_fields,
-                        )
-                        return status
-                    pending_lines.clear()
+                    if not _commit_pending_lines():
+                        return _handle_write_failure()
                     continue
-                try:
-                    send_downstream_headers_once()
-                    write_transparent_line(line)
-                except OSError as exc:
-                    self.close_connection = True
-                    event_fields = _public_event_context(event_context)
-                    for key in (
-                        "request_id",
-                        "model",
-                        "upstream",
-                        "status",
-                        "upstream_format",
-                        "inbound_format",
-                        "error",
-                        "detail",
-                    ):
-                        event_fields.pop(key, None)
-                    write_proxy_event(
-                        "downstream_stream_closed",
-                        request_id=request_id,
-                        model=model,
-                        upstream=upstream_name,
-                        status=status,
-                        upstream_format=upstream_format,
-                        inbound_format=inbound_format,
-                        error=type(exc).__name__,
-                        detail=safe_upstream_error_detail(exc),
-                        **event_fields,
-                    )
-                    return status
+                send_downstream_headers_once()
+                if not seam.commit_data(line):
+                    return _handle_write_failure()
             if pending_lines and not headers_sent:
                 send_downstream_headers_once()
-                for pending_line in pending_lines:
-                    write_transparent_line(pending_line)
+                if not _commit_pending_lines():
+                    return _handle_write_failure()
             self.close_connection = True
+            sse_fields = seam.stats()
+            if usage_capture is not None:
+                usage_capture.update(sse_fields)
             return status
-
-        body = b""
-        try:
-            while True:
-                chunk = response.read(65536)
-                if not chunk:
-                    break
-                body += chunk
-        except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
-            self.close_connection = True
-            write_proxy_event(
-                "transparent_body_read_failed",
-                request_id=request_id,
-                model=model,
-                upstream=upstream_name,
-                status=502,
-                upstream_format=upstream_format,
-                inbound_format=inbound_format,
-                error=type(exc).__name__,
-                detail=safe_upstream_error_detail(exc),
-            )
-            return 502
-
-        self.wfile.write(body)
-        self.wfile.flush()
-        _offer_usage_observed_body(usage_context, body)
-        self.close_connection = True
-        return status
+        except UpstreamStreamErrorEvent:
+            # Stream error events are intentionally raised without sending headers
+            # so the caller can retry. The seam owns any bytes already committed.
+            raise
 
     def _relay_upstream_response(
         self,
