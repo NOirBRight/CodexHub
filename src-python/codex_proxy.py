@@ -2734,7 +2734,11 @@ def _decode_sse_metadata_value(value: bytes) -> str | None:
 
 
 class PassthroughSseSemanticStats:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
+    ) -> None:
         self.events_streamed = 0
         self.json_events_streamed = 0
         self.terminal_event_seen = False
@@ -2746,6 +2750,9 @@ class PassthroughSseSemanticStats:
         self.response_id: str | None = None
         self.event_type_counts: dict[str, int] = {}
         self.event_types_truncated = False
+        self._terminal_observer = (
+            terminal_observer if terminal_observer is not None else _responses_terminal_observer
+        )
         self._event_name: str | None = None
         self._data_lines: list[bytes] = []
 
@@ -2809,7 +2816,6 @@ class PassthroughSseSemanticStats:
         payload: Any = None
         if data == b"[DONE]":
             self.done_sentinel_seen = True
-            self.terminal_event_seen = True
             event_type = event_type or "[DONE]"
         elif data:
             try:
@@ -2821,23 +2827,25 @@ class PassthroughSseSemanticStats:
                 payload_type = payload.get("type")
                 if isinstance(payload_type, str) and payload_type:
                     event_type = payload_type
-                if _responses_event_commits_downstream_output(payload, "official"):
-                    self.downstream_output_seen = True
-                response = payload.get("response")
-                if isinstance(response, Mapping):
-                    response_id = response.get("id")
-                    if isinstance(response_id, str) and response_id:
-                        self.response_id = response_id
+                if self._terminal_observer is _responses_terminal_observer:
+                    if _responses_event_commits_downstream_output(payload, "official"):
+                        self.downstream_output_seen = True
+                    response = payload.get("response")
+                    if isinstance(response, Mapping):
+                        response_id = response.get("id")
+                        if isinstance(response_id, str) and response_id:
+                            self.response_id = response_id
 
         if event_type is None:
             return
         self.last_event_type = event_type
         self._record_event_type(event_type)
-        if event_type.startswith("response."):
-            self.response_event_seen = True
-        if event_type == "response.completed":
-            self.completed_event_seen = True
-        if event_type in RESPONSES_TERMINAL_EVENT_TYPES:
+        if self._terminal_observer is _responses_terminal_observer:
+            if event_type.startswith("response."):
+                self.response_event_seen = True
+            if event_type == "response.completed":
+                self.completed_event_seen = True
+        if self._terminal_observer(event_name, data, payload):
             self.terminal_event_seen = True
 
     def _record_event_type(self, event_type: str) -> None:
@@ -2856,6 +2864,32 @@ RESPONSES_TERMINAL_EVENT_TYPES = {
     "response.incomplete",
     "error",
 }
+
+
+def _responses_terminal_observer(
+    event_name: str | None,
+    data: bytes,
+    payload: Any,
+) -> bool:
+    """Responses protocol terminal predicate: [DONE] or known terminal types."""
+    if data == b"[DONE]":
+        return True
+    event_type = event_name
+    if isinstance(payload, Mapping):
+        payload_type = payload.get("type")
+        if isinstance(payload_type, str) and payload_type:
+            event_type = payload_type
+    return event_type in RESPONSES_TERMINAL_EVENT_TYPES
+
+
+def _chat_terminal_observer(
+    event_name: str | None,
+    data: bytes,
+    payload: Any,
+) -> bool:
+    """Chat Completions protocol terminal predicate: only the [DONE] sentinel."""
+    del event_name, payload
+    return data == b"[DONE]"
 
 
 def _responses_events_have_terminal(events: list[Mapping[str, Any]]) -> bool:
@@ -12585,6 +12619,7 @@ class _GatewayDownstreamStreamCommit:
         request_id: str | None = None,
         inbound_format: str = "responses",
         upstream_format: str = "responses",
+        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
         usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None = None,
         synthetic_terminal_failure_callback: Callable[
             [CodexProxyHandler, BaseException, int, str | None, str, str | None],
@@ -12604,12 +12639,8 @@ class _GatewayDownstreamStreamCommit:
             if usage_line_callback is not None
             else _offer_official_passthrough_usage_line
         )
-        self._synthetic_terminal_failure_callback = (
-            synthetic_terminal_failure_callback
-            if synthetic_terminal_failure_callback is not None
-            else _responses_synthetic_terminal_failure
-        )
-        self._sse_stats = PassthroughSseSemanticStats()
+        self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
+        self._sse_stats = PassthroughSseSemanticStats(terminal_observer=terminal_observer)
         self._terminal_observed = False
         self._terminal_committed = False
         self._downstream_closed = False
@@ -12744,13 +12775,16 @@ class _GatewayDownstreamStreamCommit:
         available.
 
         Returns (sent, write_error_name, write_error_detail). No event is written
-        if the stream is already closed or a terminal has already been committed,
-        which prevents duplicate terminals and fallback writes.
+        if the stream is already closed, a terminal has already been committed,
+        or no synthetic terminal failure callback is configured, which prevents
+        duplicate terminals and fallback writes.
         """
         if self._downstream_closed or self._terminal_committed:
             return False, None, None
         self._downstream_closed = True
         self._handler.close_connection = True
+        if self._synthetic_terminal_failure_callback is None:
+            return False, None, None
         try:
             if self._sse_stats.has_pending_event():
                 self._handler.wfile.write(b"\n")
@@ -14720,6 +14754,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             model=model,
             request_id=request_id,
             inbound_format=inbound_format,
+            terminal_observer=_responses_terminal_observer,
+            synthetic_terminal_failure_callback=_responses_synthetic_terminal_failure,
         )
         _capture_usage(usage_capture, None, missing_reason="async_official_passthrough")
 
@@ -14937,25 +14973,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if is_event_stream and mark_downstream_sse_started is not None:
                 mark_downstream_sse_started()
 
-        # Transparent Chat Completions streams preserve the existing protocol
-        # convention of closing on interruption without a synthetic terminal error
-        # frame; the seam still prevents duplicate terminals and later writes.
-        def _no_synthetic_terminal_failure(
-            _handler: CodexProxyHandler,
-            _exc: BaseException,
-            *,
-            status: int,
-            response_id: str | None,
-            upstream_name: str,
-            model: str | None,
-        ) -> tuple[bool, str | None, str | None]:
-            return False, None, None
-
-        synthetic_terminal_failure = (
-            _responses_synthetic_terminal_failure
-            if inbound_format == "responses"
-            else _no_synthetic_terminal_failure
-        )
+        chat_mode = inbound_format == "chat_completions"
 
         seam = _GatewayDownstreamStreamCommit(
             self,
@@ -14965,10 +14983,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_id=request_id,
             inbound_format=inbound_format,
             upstream_format=upstream_format,
+            terminal_observer=(
+                _chat_terminal_observer if chat_mode else _responses_terminal_observer
+            ),
             usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
                 context, line, upstream_format=upstream_format
             ),
-            synthetic_terminal_failure_callback=synthetic_terminal_failure,
+            synthetic_terminal_failure_callback=(
+                _responses_synthetic_terminal_failure if not chat_mode else None
+            ),
         )
         _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
 

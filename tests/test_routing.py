@@ -9487,6 +9487,71 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(closed_event["synthetic_terminal_event_sent"])
         self.assertEqual(closed_event["failure_class"], "upstream_stream_interrupted")
 
+    def test_transparent_chat_ignores_responses_type_in_extension_field(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "id": "chatcmpl_1",
+                "object": "chat.completion.chunk",
+                "type": "response.completed",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+            },
+            {
+                "id": "chatcmpl_1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n\n", b""]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_chat_extension_type",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b'"type": "response.completed"', data)
+        self.assertIn(b'"finish_reason": "stop"', data)
+        self.assertIn(b"data: [DONE]", data)
+        self.assertNotIn(b"event: response.failed", data)
+        self.assertNotIn(b'"error"', data)
+
+    def test_transparent_chat_interruption_preserves_exact_bytes_without_framing(self):
+        handler = FakeHandler()
+        line = b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n'
+        response = FakeSseResponse([line, URLError("connection reset")])
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            request_id="req_chat_exact_interrupt",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertEqual(data, line)
+        self.assertNotIn(b"event: response.failed", data)
+        self.assertNotIn(b'"error"', data)
+        # No extra blank-line separator from a no-op synthetic terminal.
+        self.assertFalse(data.endswith(b"\n\n"))
+
     def test_transparent_responses_cancellation_closes_upstream_and_reader(self):
         handler = FakeHandler()
         response = FakeCancellableSseResponse(
