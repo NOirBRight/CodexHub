@@ -47,6 +47,7 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
 
+from sse_events import SseEvent, SseEventAssembler
 from protocol_translation import (
     ChatToResponsesStreamConverter,
     ResponsesToChatStreamConverter,
@@ -2718,21 +2719,6 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
 SSE_EVENT_TYPE_TELEMETRY_LIMIT = 64
 
 
-def _sse_field_value(line_without_ending: bytes, prefix: bytes) -> bytes:
-    value = line_without_ending[len(prefix) :]
-    if value.startswith(b" "):
-        value = value[1:]
-    return value
-
-
-def _decode_sse_metadata_value(value: bytes) -> str | None:
-    try:
-        text = value.decode("utf-8", errors="replace").strip()
-    except Exception:
-        return None
-    return text or None
-
-
 class PassthroughSseSemanticStats:
     def __init__(
         self,
@@ -2753,19 +2739,25 @@ class PassthroughSseSemanticStats:
         self._terminal_observer = (
             terminal_observer if terminal_observer is not None else _responses_terminal_observer
         )
-        self._event_name: str | None = None
-        self._data_lines: list[bytes] = []
+        self._assembler = SseEventAssembler()
+        self._eof_disposition: str | None = None
+        self._incomplete_bytes_discarded = 0
 
-    def observe_line(self, line: bytes) -> None:
-        for physical_line in line.splitlines(keepends=True):
-            self._observe_physical_line(physical_line)
+    def observe_bytes(self, chunk: bytes) -> None:
+        for event in self._assembler.feed(chunk):
+            self._observe_event(event)
 
     def finalize_pending(self) -> None:
-        if self._event_name is not None or self._data_lines:
-            self._finish_event()
+        if self._eof_disposition is not None:
+            return
+        termination = self._assembler.finish()
+        for event in termination.events:
+            self._observe_event(event)
+        self._eof_disposition = termination.disposition
+        self._incomplete_bytes_discarded = termination.discarded_bytes
 
     def has_pending_event(self) -> bool:
-        return self._event_name is not None or bool(self._data_lines)
+        return self._assembler.buffered_bytes > 0
 
     def fields(self) -> dict[str, Any]:
         event_types = sorted(self.event_type_counts)
@@ -2784,32 +2776,19 @@ class PassthroughSseSemanticStats:
             fields["sse_last_event_type"] = self.last_event_type
         if self.event_types_truncated:
             fields["sse_event_types_truncated"] = True
+        if self._eof_disposition == "incomplete":
+            fields["sse_eof_disposition"] = "incomplete"
+            fields["sse_incomplete_bytes_discarded"] = self._incomplete_bytes_discarded
         return fields
 
-    def _observe_physical_line(self, physical_line: bytes) -> None:
-        line = physical_line
-        for candidate in (b"\r\n", b"\n", b"\r"):
-            if line.endswith(candidate):
-                line = line[: -len(candidate)]
-                break
-        if line == b"":
-            self._finish_event()
+    def _observe_event(self, event: SseEvent) -> None:
+        event_name: str | None = None
+        if event.event is not None:
+            event_name = event.event.decode("utf-8", errors="replace").strip() or None
+        has_data_field = any(line.name == b"data" for line in event.lines)
+        if event_name is None and not has_data_field:
             return
-        if line.startswith(b":"):
-            return
-        if line.startswith(b"event:"):
-            self._event_name = _decode_sse_metadata_value(_sse_field_value(line, b"event:"))
-            return
-        if line.startswith(b"data:"):
-            self._data_lines.append(_sse_field_value(line, b"data:"))
-
-    def _finish_event(self) -> None:
-        if self._event_name is None and not self._data_lines:
-            return
-        event_name = self._event_name
-        data = b"\n".join(self._data_lines)
-        self._event_name = None
-        self._data_lines = []
+        data = event.data
 
         self.events_streamed += 1
         event_type = event_name
@@ -12801,7 +12780,7 @@ class _GatewayDownstreamStreamCommit:
     def _observe_line(self, line: bytes) -> bool:
         """Observe one raw SSE line and return True if it contains a terminal event."""
         self._last_upstream_byte_at = time.monotonic()
-        self._sse_stats.observe_line(line)
+        self._sse_stats.observe_bytes(line)
         if self._sse_stats.terminal_event_seen and not self._terminal_observed:
             self._terminal_observed = True
             return True
@@ -12933,7 +12912,7 @@ class _GatewayDownstreamStreamCommit:
             if self._sse_stats.has_pending_event():
                 self._handler.wfile.write(b"\n")
                 self._handler.wfile.flush()
-                self._sse_stats.finalize_pending()
+                self._sse_stats.observe_bytes(b"\n")
         except OSError as write_exc:
             self._last_write_error = write_exc
             self.close()

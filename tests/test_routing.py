@@ -1902,6 +1902,75 @@ class RoutingTests(unittest.TestCase):
             ],
         )
 
+    def test_passthrough_semantics_wait_for_a_complete_sse_event(self):
+        stats = codex_proxy.PassthroughSseSemanticStats()
+
+        stats.observe_bytes(
+            b"event: response.completed\r\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_complete"}}\r\n'
+        )
+
+        self.assertEqual(stats.fields()["sse_events_streamed"], 0)
+        self.assertEqual(stats.fields()["sse_json_events_streamed"], 0)
+        self.assertFalse(stats.terminal_event_seen)
+
+        stats.observe_bytes(b"\r\n")
+
+        self.assertEqual(stats.fields()["sse_events_streamed"], 1)
+        self.assertEqual(stats.fields()["sse_json_events_streamed"], 1)
+        self.assertTrue(stats.terminal_event_seen)
+        self.assertEqual(stats.response_id, "resp_complete")
+
+    def test_passthrough_semantics_report_and_discard_incomplete_eof(self):
+        stats = codex_proxy.PassthroughSseSemanticStats()
+        stats.observe_bytes(b'data: {"type":"response.completed"}\r\n')
+
+        stats.finalize_pending()
+        fields = stats.fields()
+
+        self.assertEqual(fields["sse_events_streamed"], 0)
+        self.assertEqual(fields["sse_json_events_streamed"], 0)
+        self.assertFalse(fields["sse_terminal_event_seen"])
+        self.assertEqual(fields["sse_eof_disposition"], "incomplete")
+        self.assertEqual(fields["sse_incomplete_bytes_discarded"], 37)
+
+    def test_official_passthrough_preserves_fragmented_metadata_event_bytes(self):
+        fake = FakeHandler()
+        usage_capture = {}
+        raw = (
+            b": keepalive \xff\r\n"
+            b"event: response.completed\r\n"
+            b'data: {"type":"response.completed",\r\n'
+            b'data: "response":{"id":"resp_chunked","status":"completed"}}\r\n'
+            b"id: 7\r\n"
+            b"\r\n"
+        )
+        split_points = (1, 13, 37, 64, len(raw) - 1)
+        chunks = [
+            raw[start:end]
+            for start, end in zip((0, *split_points), (*split_points, len(raw)))
+        ]
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            FakeSseResponse([*chunks, b""]),
+            "official",
+            request_id="req-fragmented-semantics",
+            model="gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture=usage_capture,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(b"".join(fake.wfile.writes), raw)
+        self.assertEqual(usage_capture["sse_events_streamed"], 1)
+        self.assertEqual(usage_capture["sse_json_events_streamed"], 1)
+        self.assertTrue(usage_capture["sse_terminal_event_seen"])
+        self.assertEqual(usage_capture["sse_last_event_type"], "response.completed")
+
     def test_official_http_passthrough_raw_relay_even_when_caller_stream_false(self):
         fake = FakeHandler()
         response = FakeSseResponse(
