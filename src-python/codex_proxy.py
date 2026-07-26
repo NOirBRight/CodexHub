@@ -12714,6 +12714,7 @@ class _GatewayDownstreamStreamCommit:
         self._bytes_streamed = 0
         self._last_upstream_byte_at: float | None = None
         self._last_write_error: OSError | None = None
+        self._last_successful_completion_bytes = b""
 
     @property
     def terminal_committed(self) -> bool:
@@ -12837,6 +12838,7 @@ class _GatewayDownstreamStreamCommit:
         self._downstream_output_started = True
         self._lines_streamed += 1
         self._bytes_streamed += len(line)
+        self._last_successful_completion_bytes = self._sse_stats.pending_completion_bytes()
         if terminal_observed_now:
             self._terminal_committed = True
             _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
@@ -12903,6 +12905,8 @@ class _GatewayDownstreamStreamCommit:
         self._downstream_output_started = True
         self._lines_streamed += 1
         self._bytes_streamed += len(data)
+        if observe:
+            self._last_successful_completion_bytes = self._sse_stats.pending_completion_bytes()
         if terminal_observed_now:
             self._terminal_committed = True
             _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
@@ -12934,11 +12938,17 @@ class _GatewayDownstreamStreamCommit:
         if self._synthetic_terminal_failure_callback is None:
             return False, None, None
         try:
-            completion = self._sse_stats.pending_completion_bytes()
+            size_limit_exceeded = isinstance(exc, SseFrameTooLargeError)
+            completion = (
+                self._last_successful_completion_bytes
+                if size_limit_exceeded
+                else self._sse_stats.pending_completion_bytes()
+            )
             if completion:
                 self._handler.wfile.write(completion)
                 self._handler.wfile.flush()
-                self._sse_stats.observe_bytes(completion)
+                if not size_limit_exceeded:
+                    self._sse_stats.observe_bytes(completion)
         except OSError as write_exc:
             self._last_write_error = write_exc
             self.close()

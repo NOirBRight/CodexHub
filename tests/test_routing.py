@@ -9884,11 +9884,12 @@ class RoutingTests(unittest.TestCase):
             max_frame_bytes=64,
         )
         secret = b"transparent-responses-secret"
+        forwarded_prefix = b"data: " + (b"x" * 40)
         usage_capture = {}
 
         status = CodexProxyHandler._relay_upstream_response(
             handler,
-            FakeSseResponse([b"data: " + (b"x" * 64) + secret, b""]),
+            FakeSseResponse([forwarded_prefix, (b"y" * 24) + secret, b""]),
             "volcengine",
             request_id="req_transparent_responses_size_limit",
             model="volc/glm-5.2",
@@ -9901,7 +9902,7 @@ class RoutingTests(unittest.TestCase):
 
         body = b"".join(handler.wfile.writes)
         events = SseEventAssembler().feed(body)
-        failed_payload = json.loads(events[0].data)
+        failed_payload = json.loads(events[1].data)
         closed_event = next(
             call.kwargs
             for call in self.write_proxy_event.call_args_list
@@ -9910,7 +9911,8 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(status, 502)
         self.assertEqual(handler.status, 200)
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, forwarded_prefix + b"\n\n")
         self.assertEqual(failed_payload["type"], "response.failed")
         self.assertEqual(
             failed_payload["response"]["error"]["code"],
