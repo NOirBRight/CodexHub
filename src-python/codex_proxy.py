@@ -13003,6 +13003,7 @@ class _GatewayDownstreamStreamCommit:
         self._last_upstream_byte_at: float | None = None
         self._last_write_error: OSError | None = None
         self._last_successful_completion_bytes = b""
+        self._ensure_headers_committed_callback: Callable[[], bool] | None = None
 
     @property
     def terminal_committed(self) -> bool:
@@ -13053,6 +13054,21 @@ class _GatewayDownstreamStreamCommit:
         | None,
     ) -> None:
         self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
+
+    def set_ensure_headers_committed_callback(
+        self,
+        callback: Callable[[], bool] | None,
+    ) -> None:
+        self._ensure_headers_committed_callback = callback
+
+    def _ensure_headers_committed_before_write(self) -> bool:
+        callback = self._ensure_headers_committed_callback
+        if callback is None:
+            return True
+        if not callback():
+            return False
+        self._ensure_headers_committed_callback = None
+        return True
 
     def _close_upstream_response(self, response: Any) -> None:
         close = getattr(response, "close", None)
@@ -13112,6 +13128,8 @@ class _GatewayDownstreamStreamCommit:
         if not line:
             return True
         if self._terminal_committed:
+            return False
+        if not self._ensure_headers_committed_before_write():
             return False
         terminal_observed_now = self._observe_line(line)
         if terminal_observed_now:
@@ -13178,6 +13196,8 @@ class _GatewayDownstreamStreamCommit:
             return True
         if self._terminal_committed:
             return False
+        if not self._ensure_headers_committed_before_write():
+            return False
         terminal_observed_now = False
         if observe:
             terminal_observed_now = self._observe_line(data)
@@ -13224,6 +13244,8 @@ class _GatewayDownstreamStreamCommit:
         if self._downstream_closed or self._terminal_committed:
             return False, None, None
         if self._synthetic_terminal_failure_callback is None:
+            return False, None, None
+        if not self._ensure_headers_committed_before_write():
             return False, None, None
         try:
             size_limit_exceeded = isinstance(exc, SseFrameTooLargeError)
@@ -16794,6 +16816,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 mark_downstream_sse_started()
             return True
 
+        seam.set_ensure_headers_committed_callback(
+            send_downstream_response_headers_once if defer_stream_headers else None
+        )
         if not defer_stream_headers:
             if not send_downstream_response_headers_once():
                 return finish_downstream_stream_closed(

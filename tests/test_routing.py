@@ -3866,6 +3866,114 @@ class RoutingTests(unittest.TestCase):
         for write_index in write_indices:
             self.assertLess(end_headers_index, write_index)
 
+    def test_lifecycle_resample_stream_headers_precede_keepalives(self):
+        handler = FakeHandler()
+        call_order = []
+
+        class RecordingWFile(FakeWFile):
+            def write(self, data):
+                call_order.append(("write", data))
+                super().write(data)
+
+        handler.wfile = RecordingWFile()
+
+        def record_send_response(status, message=None):
+            call_order.append(("send_response", status))
+            handler.status = status
+
+        def record_send_header(key, value):
+            call_order.append(("send_header", key))
+            handler.headers.append((key, value))
+
+        def record_end_headers():
+            call_order.append(("end_headers", None))
+            handler.headers_ended = True
+
+        handler.send_response = record_send_response
+        handler.send_header = record_send_header
+        handler.end_headers = record_end_headers
+        terminal = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_lifecycle_complete",
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [
+                    {
+                        "id": "msg_lifecycle_complete",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Lifecycle complete.",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        response = FakeDelayedSseResponse(
+            [
+                b"data: "
+                + json.dumps(terminal, separators=(",", ":")).encode("utf-8")
+                + b"\n\n",
+                b"",
+            ],
+            first_delay_seconds=0.05,
+        )
+
+        with patch.dict(
+            os.environ,
+            {"CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0.01"},
+            clear=False,
+        ):
+            result = CodexProxyHandler._relay_upstream_response(
+                handler,
+                response,
+                "official",
+                request_id="req-lifecycle-header-order",
+                model="gpt-5.5",
+                upstream_format="responses",
+                inbound_format="chat_completions",
+                caller_stream=True,
+                event_context={
+                    "request_id": "req-lifecycle-header-order",
+                    "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                    "subagent_lifecycle_complete": True,
+                },
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+            )
+
+        written = b"".join(handler.wfile.writes)
+        self.assertEqual(result, 200)
+        self.assertGreaterEqual(written.count(b": codexhub.keepalive\n\n"), 1)
+        self.assertIn(b"Lifecycle complete.", written)
+        self.assertEqual(written.count(b"data: [DONE]\n\n"), 1)
+        self.assertEqual(
+            sum(name == "send_response" for name, _value in call_order),
+            1,
+        )
+        self.assertEqual(
+            sum(name == "end_headers" for name, _value in call_order),
+            1,
+        )
+        end_headers_index = next(
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "end_headers"
+        )
+        write_indices = [
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "write"
+        ]
+        self.assertTrue(write_indices)
+        for write_index in write_indices:
+            self.assertLess(end_headers_index, write_index)
+
     def test_verified_cross_protocol_source_shape_table_fails_once_without_retry(self):
         cases = (
             (
