@@ -1,3 +1,4 @@
+import gc
 import os
 import gzip
 import io
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +17,7 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
-from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler
+from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler, SseFrameTooLargeError
 from subagent_state import build_subagent_state
 from codex_proxy import (
     CodexProxyHandler,
@@ -1934,6 +1936,25 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(fields["sse_terminal_event_seen"])
         self.assertEqual(fields["sse_eof_disposition"], "incomplete")
         self.assertEqual(fields["sse_incomplete_bytes_discarded"], 37)
+
+    def test_passthrough_semantics_releases_size_limit_exception_traceback(self):
+        stats = codex_proxy.PassthroughSseSemanticStats(max_frame_bytes=8)
+
+        def capture_failure():
+            try:
+                stats.observe_bytes(b"data: private")
+            except SseFrameTooLargeError as exc:
+                return weakref.ref(exc)
+            self.fail("expected the frame size limit to fail closed")
+
+        failure_ref = capture_failure()
+        gc.collect()
+
+        self.assertIsNone(failure_ref())
+        self.assertEqual(stats.pending_completion_bytes(), b"")
+        stats.observe_bytes(b"data: ignored")
+        stats.finalize_pending()
+        self.assertEqual(stats.fields()["sse_events_streamed"], 0)
 
     def test_official_passthrough_preserves_fragmented_metadata_event_bytes(self):
         fake = FakeHandler()

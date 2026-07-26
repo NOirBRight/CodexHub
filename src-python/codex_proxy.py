@@ -2748,15 +2748,13 @@ class PassthroughSseSemanticStats:
         self._assembler = SseEventAssembler(max_frame_bytes=max_frame_bytes)
         self._eof_disposition: str | None = None
         self._incomplete_bytes_discarded = 0
-        self._terminal_error: SseFrameTooLargeError | None = None
 
     def observe_bytes(self, chunk: bytes) -> None:
-        if self._terminal_error is not None:
+        if self._eof_disposition == "size_limit":
             return
         try:
             self._assembler.feed(chunk, on_event=self._observe_event)
-        except SseFrameTooLargeError as exc:
-            self._terminal_error = exc
+        except SseFrameTooLargeError:
             self._eof_disposition = "size_limit"
             raise
 
@@ -2770,7 +2768,7 @@ class PassthroughSseSemanticStats:
         self._incomplete_bytes_discarded = termination.discarded_bytes
 
     def pending_completion_bytes(self) -> bytes:
-        if self._terminal_error is not None:
+        if self._eof_disposition == "size_limit":
             return b""
         return self._assembler.completion_bytes()
 
