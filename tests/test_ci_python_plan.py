@@ -7,6 +7,14 @@ from pathlib import Path
 
 import pytest
 
+
+try:
+    import yaml
+
+    _HAS_YAML = True
+except Exception:  # pragma: no cover
+    _HAS_YAML = False
+
 ROOT = Path(__file__).resolve().parents[1]
 PLANNER_PATH = ROOT / "scripts" / "ci" / "python_test_plan.py"
 CHECKER_PATH = ROOT / "scripts" / "ci" / "check_python_test_partitions.py"
@@ -237,3 +245,60 @@ def test_checker_runs_without_executing_tests():
     assert "disjoint" in out.stdout.lower()
     assert "union" in out.stdout.lower()
     assert "true" in out.stdout.lower()
+
+
+@pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed")
+def test_ci_yaml_has_full_checkout_for_synthetic_merge_base():
+    """Regression: shallow checkout breaks git merge-base on a fresh PR runner."""
+    workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    synthetic_job = workflow["jobs"]["python-synthetic"]
+    checkout_steps = [
+        step
+        for step in synthetic_job["steps"]
+        if isinstance(step, dict) and step.get("name") == "Check out repository"
+    ]
+    assert len(checkout_steps) == 1
+    checkout = checkout_steps[0]
+    assert checkout.get("uses", "").startswith("actions/checkout")
+    assert checkout.get("with", {}).get("fetch-depth") == 0
+
+
+def test_ci_yaml_synthetic_run_uses_watchdog_with_3600s_bound():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    # The synthetic run step must invoke the checked-in watchdog and use 3600s.
+    assert "run-with-windows-watchdog.py" in workflow_text
+    assert "--timeout-seconds 3600" in workflow_text
+    # Direct unattended pytest of the synthetic module is not allowed.
+    synthetic_step = workflow_text.split("Run or skip synthetic partition")[1]
+    assert "python -m pytest" in synthetic_step
+    assert "run-with-windows-watchdog.py" in synthetic_step
+
+
+def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
+    ci_md = (ROOT / "docs" / "agents" / "ci.md").read_text(encoding="utf-8")
+    # Both fallback blocks must run the synthetic module through the watchdog.
+    assert "run-with-windows-watchdog.py" in ci_md
+    assert "--timeout-seconds 3600" in ci_md
+    # Direct unattended synthetic pytest must not remain in a fallback block.
+    fallback_start = ci_md.find("## Full manual fallback")
+    assert fallback_start != -1
+    fallback_section = ci_md[fallback_start:]
+    # Every synthetic pytest command in the fallback must be a continuation of
+    # a watchdog invocation, not a direct unattended command.
+    marker = "python -m pytest -q tests/test_real_client_e2e.py"
+    pos = 0
+    while True:
+        idx = fallback_section.find(marker, pos)
+        if idx == -1:
+            break
+        preceding = fallback_section[:idx]
+        watchdog_pos = preceding.rfind("run-with-windows-watchdog.py")
+        continuation_pos = preceding.rfind("-- `")
+        assert watchdog_pos != -1, "synthetic pytest without watchdog in fallback section"
+        assert watchdog_pos < continuation_pos < idx, (
+            "unattended synthetic pytest in fallback section"
+        )
+        pos = idx + len(marker)

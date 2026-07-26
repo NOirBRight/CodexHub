@@ -5,7 +5,7 @@ GitHub Actions runs the required PR validation for branches targeting `dev` and 
 ## CI jobs
 
 - **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0`. Runs on every PR.
-- **Synthetic real-client contract**: appears on every PR. For unrelated paths it succeeds explicitly as `not applicable` and does not start `scripts/Run-RealClientE2E.ps1`. For relevant paths, and for all non-PR events, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 1800-second outer bound while retaining JUnit and per-test duration output. The planner at `scripts/ci/python_test_plan.py` decides which paths are relevant using the PR merge-base; `python scripts/ci/check_python_test_partitions.py` proves the core and synthetic partitions are disjoint and complete.
+- **Synthetic real-client contract**: appears on every PR. For unrelated paths it succeeds explicitly as `not applicable` and does not start `scripts/Run-RealClientE2E.ps1`. For relevant paths, and for all non-PR events, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The planner at `scripts/ci/python_test_plan.py` decides which paths are relevant using the PR merge-base; `python scripts/ci/check_python_test_partitions.py` proves the core and synthetic partitions are disjoint and complete.
 - Frontend build and UI contract: `npm ci`, `npm run build`, `npm run test:ui-contract` in `frontend/`
 - Rust tests (normal and debug flavors): `cargo test --locked` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
@@ -40,7 +40,8 @@ Use all of these commands when GitHub Actions is unavailable and the change must
 
 ```powershell
 python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
-python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0
+python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
+  python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0
 python scripts/ci/check_python_test_partitions.py
 
 Push-Location frontend
@@ -60,14 +61,18 @@ Pop-Location
 ### One-command Python fallback
 
 For changes that touch only Python, run both partitions and the completeness
-checker in one chained command:
+checker in one chained command. The synthetic partition must use the checked-in
+Windows watchdog:
 
 ```powershell
-python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0 && python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0 && python scripts/ci/check_python_test_partitions.py
+python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0 && `
+python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
+  python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0 && `
+python scripts/ci/check_python_test_partitions.py
 ```
 
-This executes the core suite, the synthetic suite, and proves the two partitions
-are disjoint and complete.
+This executes the core suite, the watchdog-bounded synthetic suite, and proves
+the two partitions are disjoint and complete.
 
 To verify only the planner/path logic and collection completeness without
 executing `tests/test_real_client_e2e.py`, use:
