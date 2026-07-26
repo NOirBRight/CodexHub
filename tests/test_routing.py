@@ -9808,8 +9808,8 @@ class RoutingTests(unittest.TestCase):
         fixture = _load_glm_apply_patch_retry_fixture()
         handler = FakeHandler()
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in fixture["stream_chunks"]]
-            + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in fixture["stream_chunks"]]
+            + [b"data: [DONE]\n\n", b""]
         )
 
         status = CodexProxyHandler._relay_upstream_response(
@@ -16343,8 +16343,8 @@ Execution constraints:
             {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
         ]
         close_response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in close_chunks]
-            + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in close_chunks]
+            + [b"data: [DONE]\n\n", b""]
         )
         CodexProxyHandler._relay_upstream_response(
             close_handler,
@@ -18589,8 +18589,8 @@ Execution constraints:
             },
         ]
         return FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks]
-            + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n\n", b""]
         )
 
     def _native_wait_sse_events(self, *, call_id):
