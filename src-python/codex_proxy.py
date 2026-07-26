@@ -16336,10 +16336,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 event_context=event_context,
                 defer_stream_errors=defer_stream_errors,
             )
+        defer_verified_final_conversion_headers = (
+            is_event_stream
+            and caller_stream
+            and verified_source_format == "responses"
+            and want_chat_output
+            and behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+        )
         defer_stream_headers = (
             is_event_stream
             and caller_stream
-            and lifecycle_empty_final_resample_enabled(event_context, request_kind)
+            and (
+                lifecycle_empty_final_resample_enabled(event_context, request_kind)
+                or defer_verified_final_conversion_headers
+            )
         )
 
         def finish_downstream_stream_closed(exc: OSError) -> int:
@@ -17176,6 +17186,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -17205,6 +17219,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -17238,6 +17256,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -17251,13 +17273,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
 
+                try:
+                    converted_chat_chunks = _chat_completion_body_to_stream_chunks(
+                        _response_body_to_chat_completion_body(response_body)
+                    )
+                except UpstreamProtocolTranslationError:
+                    if verified_source_format is None:
+                        raise
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error(
+                            verified_source_format
+                        )
+                    )
+
                 if not send_downstream_response_headers_once():
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                for chunk in _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
-                ):
+                for chunk in converted_chat_chunks:
                     if not self._write_sse_data(chunk):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")

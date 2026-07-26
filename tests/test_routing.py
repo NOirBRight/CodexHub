@@ -3740,6 +3740,83 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"later_success", written)
         self.assertNotIn(b"data: [DONE]", written)
 
+    def test_official_streaming_final_conversion_error_is_sanitized_before_headers(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/chat/completions", body)
+        terminal = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_official_annotations",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "msg_official_annotations",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "SECRET_OFFICIAL_RESPONSE_TEXT",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "SECRET_OFFICIAL_ANNOTATION",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        frames = [
+            (
+                b"data: "
+                + json.dumps(terminal, separators=(",", ":")).encode("utf-8")
+                + b"\n\n"
+            ),
+            b"",
+        ]
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._official_urlopen",
+                side_effect=lambda *_args, **_kwargs: FakeSseResponse(frames),
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(fake.wfile.writes)
+        request_complete = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(len(request_complete), 1)
+        self.assertEqual(request_complete[0]["status"], 502)
+        self.assertEqual(written.count(b'"code":"upstream_protocol_error"'), 1)
+        self.assertNotIn(b"SECRET_", written)
+        self.assertNotIn(b"unsupported_protocol_semantics", written)
+        self.assertNotIn(b"data: [DONE]", written)
+
     def test_verified_cross_protocol_source_shape_table_fails_once_without_retry(self):
         cases = (
             (
