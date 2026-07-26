@@ -47,7 +47,7 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
 
-from sse_events import SseEvent, SseEventAssembler
+from sse_events import SseEvent, SseEventAssembler, SseFrameTooLargeError
 from protocol_translation import (
     ChatToResponsesStreamConverter,
     ResponsesToChatStreamConverter,
@@ -2742,9 +2742,18 @@ class PassthroughSseSemanticStats:
         self._assembler = SseEventAssembler()
         self._eof_disposition: str | None = None
         self._incomplete_bytes_discarded = 0
+        self._terminal_error: SseFrameTooLargeError | None = None
 
     def observe_bytes(self, chunk: bytes) -> None:
-        for event in self._assembler.feed(chunk):
+        if self._terminal_error is not None:
+            return
+        try:
+            events = self._assembler.feed(chunk)
+        except SseFrameTooLargeError as exc:
+            self._terminal_error = exc
+            self._eof_disposition = "size_limit"
+            raise
+        for event in events:
             self._observe_event(event)
 
     def finalize_pending(self) -> None:
@@ -2757,6 +2766,8 @@ class PassthroughSseSemanticStats:
         self._incomplete_bytes_discarded = termination.discarded_bytes
 
     def pending_completion_bytes(self) -> bytes:
+        if self._terminal_error is not None:
+            return b""
         return self._assembler.completion_bytes()
 
     def fields(self) -> dict[str, Any]:
@@ -15375,7 +15386,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         synthetic_terminal_write_detail=None,
                     )
                     return 499
-        except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+        except (IncompleteRead, TimeoutError, OSError, URLError, SseFrameTooLargeError) as exc:
             if seam.terminal_committed:
                 sse_fields = seam.stats()
                 if usage_capture is not None:
@@ -15421,7 +15432,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 detail=safe_upstream_error_detail(exc),
                 failure_phase="stream_body",
                 failure_side="upstream_read",
-                failure_class="upstream_stream_interrupted",
+                failure_class=getattr(exc, "classification", "upstream_stream_interrupted"),
                 client_disconnected=False,
                 synthetic_terminal_event_sent=synthetic_terminal_event_sent,
                 synthetic_terminal_event_type="response.failed" if synthetic_terminal_event_sent else None,

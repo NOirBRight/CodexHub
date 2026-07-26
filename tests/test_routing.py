@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
-from sse_events import SseEventAssembler
+from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler
 from subagent_state import build_subagent_state
 from codex_proxy import (
     CodexProxyHandler,
@@ -2132,6 +2132,52 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"code":"URLError"', body)
         self.assertIn(b'"upstream":"official"', body)
         self.assertTrue(fake.close_connection)
+
+    def test_official_passthrough_size_limit_preserves_typed_terminal_failure(self):
+        fake = FakeHandler()
+        usage_capture = {}
+        secret = b"oversized-frame-secret"
+        prefix = b"data: "
+        oversized_frame = (
+            prefix
+            + (b"x" * (DEFAULT_MAX_FRAME_BYTES + 1 - len(prefix) - len(secret)))
+            + secret
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                FakeSseResponse([oversized_frame, b""]),
+                "official",
+                request_id="req-size-limit",
+                model="gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture=usage_capture,
+            )
+
+        body = b"".join(fake.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[0].data)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(
+            failed_payload["response"]["error"]["code"],
+            "SseFrameTooLargeError",
+        )
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["error"], "SseFrameTooLargeError")
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertTrue(usage_capture["synthetic_terminal_event_sent"])
 
     def test_official_passthrough_closes_unterminated_data_before_synthetic_failure(self):
         fake = FakeHandler()
