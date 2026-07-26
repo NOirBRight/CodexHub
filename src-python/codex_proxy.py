@@ -2754,13 +2754,11 @@ class PassthroughSseSemanticStats:
         if self._terminal_error is not None:
             return
         try:
-            events = self._assembler.feed(chunk)
+            self._assembler.feed(chunk, on_event=self._observe_event)
         except SseFrameTooLargeError as exc:
             self._terminal_error = exc
             self._eof_disposition = "size_limit"
             raise
-        for event in events:
-            self._observe_event(event)
 
     def finalize_pending(self) -> None:
         if self._eof_disposition is not None:

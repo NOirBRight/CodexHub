@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 
 __all__ = [
@@ -85,12 +86,17 @@ class SseEventAssembler:
     def buffered_bytes(self) -> int:
         return len(self._frame_raw) + len(self._buffer) - self._line_start
 
-    def feed(self, chunk: bytes) -> tuple[SseEvent, ...]:
+    def feed(
+        self,
+        chunk: bytes,
+        *,
+        on_event: Callable[[SseEvent], None] | None = None,
+    ) -> tuple[SseEvent, ...]:
         """Consume bytes and return every complete frame in their original order."""
         self._require_open()
         self._buffer.extend(chunk)
         try:
-            events = self._drain(eof=False)
+            events = self._drain(eof=False, on_event=on_event)
             self._check_size(self.buffered_bytes)
             self._compact_buffer()
             return events
@@ -155,7 +161,12 @@ class SseEventAssembler:
             discarded_bytes=discarded_bytes,
         )
 
-    def _drain(self, *, eof: bool) -> tuple[SseEvent, ...]:
+    def _drain(
+        self,
+        *,
+        eof: bool,
+        on_event: Callable[[SseEvent], None] | None = None,
+    ) -> tuple[SseEvent, ...]:
         events: list[SseEvent] = []
         while True:
             extracted = self._extract_line(eof=eof)
@@ -172,7 +183,10 @@ class SseEventAssembler:
                 self._check_size(len(self._frame_raw))
                 continue
             self._check_size(len(self._frame_raw))
-            events.append(self._complete_event())
+            event = self._complete_event()
+            events.append(event)
+            if on_event is not None:
+                on_event(event)
         return tuple(events)
 
     def _extract_line(self, *, eof: bool) -> tuple[bytes, bytes] | None:

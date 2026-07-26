@@ -9961,6 +9961,51 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(failed_payload["type"], "response.failed")
         self.assertNotIn(secret, body)
 
+    def test_transparent_responses_size_crossing_cr_preserves_response_id(self):
+        handler = FakeHandler()
+        response_id = "resp_size_crossing_cr"
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_size_crossing_cr",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=128,
+        )
+        created_prefix = (
+            b'data: {"type":"response.created","response":{"id":"'
+            + response_id.encode("ascii")
+            + b'"}}\r'
+        )
+        secret = b"size-crossing-cr-secret"
+        crossing_chunk = b"\rdata: " + (b"x" * 128) + secret
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([created_prefix, crossing_chunk, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_size_crossing_cr",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        created_payload = json.loads(events[0].data)
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(created_payload["response"]["id"], response_id)
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(failed_payload["response"]["id"], response_id)
+        self.assertNotIn(secret, body)
+
     def test_transparent_responses_cr_completion_preserves_response_id_on_interruption(self):
         handler = FakeHandler()
         response_id = "resp_cr_boundary"
