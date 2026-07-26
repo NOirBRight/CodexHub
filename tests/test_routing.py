@@ -140,12 +140,18 @@ class FakeSseResponse:
             "Content-Length": "999",
         }
         self.lines = list(lines)
+        self.closed = False
+        self.close_call_count = 0
 
     def readline(self):
         line = self.lines.pop(0)
         if isinstance(line, BaseException):
             raise line
         return line
+
+    def close(self):
+        self.close_call_count += 1
+        self.closed = True
 
     def __enter__(self):
         return self
@@ -167,6 +173,19 @@ class FakeDelayedSseResponse(FakeSseResponse):
         return super().readline()
 
 
+class FakeConcurrentSseResponse(FakeSseResponse):
+    def __init__(self, lines, barrier):
+        super().__init__(lines)
+        self.barrier = barrier
+        self.readline_calls = 0
+
+    def readline(self):
+        self.readline_calls += 1
+        if self.readline_calls == 1:
+            self.barrier.wait(timeout=2)
+        return super().readline()
+
+
 class FakeSequencedDelayedSseResponse(FakeSseResponse):
     def __init__(self, items):
         super().__init__([])
@@ -182,6 +201,7 @@ class FakeSequencedDelayedSseResponse(FakeSseResponse):
         return line
 
     def close(self):
+        self.close_call_count += 1
         self.closed = True
 
 
@@ -2639,6 +2659,112 @@ class RoutingTests(unittest.TestCase):
                 for call in write_event.call_args_list
             )
         )
+
+    def test_four_concurrent_official_and_third_party_responses_chat_streams_complete_independently(self):
+        barrier = threading.Barrier(4)
+        response_events = [
+            b'data: {"type":"response.created","response":{"id":"resp_concurrent","model":"gpt-5.5"}}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"sentinel"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_concurrent","status":"completed"}}\n\n',
+            b"",
+        ]
+        chat_events = [
+            b'data: {"id":"chatcmpl_concurrent","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"sentinel"},"finish_reason":"stop"}]}\n\n',
+            b"data: [DONE]\n\n",
+            b"",
+        ]
+        cases = [
+            {
+                "name": "official_responses",
+                "upstream_name": "official",
+                "upstream_format": "responses",
+                "inbound_format": "responses",
+                "behavior_profile": codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                "lines": response_events,
+                "terminal": b"response.completed",
+            },
+            {
+                "name": "official_chat",
+                "upstream_name": "official",
+                "upstream_format": "responses",
+                "inbound_format": "chat_completions",
+                "behavior_profile": None,
+                "lines": response_events,
+                "terminal": b"data: [DONE]",
+            },
+            {
+                "name": "third_party_responses",
+                "upstream_name": "volcengine",
+                "upstream_format": "responses",
+                "inbound_format": "responses",
+                "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                "lines": response_events,
+                "terminal": b"response.completed",
+            },
+            {
+                "name": "third_party_chat",
+                "upstream_name": "ollama_cloud",
+                "upstream_format": "chat_completions",
+                "inbound_format": "chat_completions",
+                "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                "lines": chat_events,
+                "terminal": b"data: [DONE]",
+            },
+        ]
+        results = {}
+        failures = []
+        result_lock = threading.Lock()
+
+        def relay(case):
+            handler = FakeHandler()
+            response = FakeConcurrentSseResponse(case["lines"], barrier)
+            admission = codex_proxy.GatewayRequestAdmission()
+            previous = codex_proxy._activate_gateway_request(admission)
+            try:
+                status = CodexProxyHandler._relay_upstream_response(
+                    handler,
+                    response,
+                    case["upstream_name"],
+                    request_id=f"req-{case['name']}",
+                    model="openai/gpt-5.5",
+                    upstream_format=case["upstream_format"],
+                    inbound_format=case["inbound_format"],
+                    caller_stream=True,
+                    behavior_profile=case["behavior_profile"],
+                    usage_capture={},
+                )
+                with result_lock:
+                    results[case["name"]] = (
+                        status,
+                        b"".join(handler.wfile.writes),
+                        response.close_call_count,
+                    )
+            except BaseException as exc:
+                with result_lock:
+                    failures.append(exc)
+            finally:
+                codex_proxy._restore_gateway_request(previous)
+
+        threads = [
+            threading.Thread(target=relay, args=(case,), name=f"relay-{case['name']}")
+            for case in cases
+        ]
+        started_at = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertLess(time.monotonic() - started_at, 2)
+        self.assertFalse([thread.name for thread in threads if thread.is_alive()])
+        self.assertEqual(failures, [])
+        self.assertEqual(set(results), {case["name"] for case in cases})
+        for case in cases:
+            status, body, close_call_count = results[case["name"]]
+            self.assertEqual(status, 200, case["name"])
+            self.assertEqual(body.count(case["terminal"]), 1, case["name"])
+            self.assertIn(b"sentinel", body, case["name"])
+            self.assertEqual(close_call_count, 1, case["name"])
 
     def test_upstream_http_error_emits_request_complete_with_status(self):
         body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
@@ -6993,6 +7119,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(handler.wfile.writes, lines[:-1])
         self.assertGreaterEqual(handler.wfile.flush_count, 3)
         self.assertTrue(handler.close_connection)
+        self.assertEqual(response.close_call_count, 1)
 
     def test_sse_relay_keeps_downstream_alive_while_waiting_for_upstream_line(self):
         handler = FakeHandler()
@@ -7047,6 +7174,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(status, 499)
         self.assertTrue(handler.close_connection)
+        self.assertEqual(response.close_call_count, 1)
         closed_event = next(
             call.kwargs
             for call in write_event.call_args_list
@@ -9033,6 +9161,7 @@ class RoutingTests(unittest.TestCase):
         event_kwargs = matching_events[-1].kwargs
         self.assertEqual(event_kwargs["stream_idle_timeout_seconds"], 0.02)
         self.assertEqual(event_kwargs["stream_idle_phase"], "model_event")
+        self.assertEqual(response.close_call_count, 1)
 
     def test_responses_sse_passthrough_aborts_on_transport_idle_timeout(self):
         handler = FakeHandler()
@@ -9076,6 +9205,7 @@ class RoutingTests(unittest.TestCase):
         event_kwargs = matching_events[-1].kwargs
         self.assertEqual(event_kwargs["stream_idle_timeout_seconds"], 0.01)
         self.assertEqual(event_kwargs["stream_idle_phase"], "transport")
+        self.assertEqual(response.close_call_count, 1)
 
     def test_responses_sse_passthrough_aborts_after_output_model_event_idle_timeout(self):
         handler = FakeHandler()
@@ -9126,6 +9256,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(event_kwargs["stream_idle_timeout_seconds"], 0.02)
         self.assertEqual(event_kwargs["stream_idle_phase"], "model_event")
         self.assertTrue(event_kwargs["downstream_output_started"])
+        self.assertEqual(response.close_call_count, 1)
 
     def test_responses_sse_function_call_argument_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()

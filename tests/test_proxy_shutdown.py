@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
@@ -13,6 +15,51 @@ from urllib.request import Request
 import codex_proxy
 import pytest
 from codex_proxy import CodexProxyHandler
+
+
+class _LifecycleResponse:
+    def __init__(self, lines: list[bytes | BaseException]) -> None:
+        self._lines = list(lines)
+        self.close_calls = 0
+
+    def readline(self) -> bytes:
+        value = self._lines.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _ProducingResponse:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.read_calls = 0
+        self.closed = threading.Event()
+
+    def readline(self) -> bytes:
+        self.read_calls += 1
+        return f"data: {self.read_calls}\n\n".encode()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed.set()
+
+
+class _NonTerminatingResponse:
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def readline(self) -> bytes:
+        self.entered.set()
+        self.release.wait()
+        return b""
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def _run_server_with_event_writer_result(writer_result):
@@ -33,6 +80,126 @@ def _run_server_with_event_writer_result(writer_result):
             codex_proxy.run_server("127.0.0.1", 8080)
 
     return server, writer, warning
+
+
+def test_upstream_sse_reader_queue_is_exactly_32_and_full_queue_cancellation_is_bounded() -> None:
+    controller = codex_proxy.GatewayShutdownController()
+    admission = controller.admit()
+    assert admission is not None
+    response = _ProducingResponse()
+    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response, admission=admission)
+    full_queue_put_entered = threading.Event()
+    queue_put = lifecycle._queue.put
+
+    def observe_full_queue_put(item, block=True, timeout=None):
+        if lifecycle._queue.full():
+            full_queue_put_entered.set()
+        return queue_put(item, block=block, timeout=timeout)
+
+    with patch.object(lifecycle._queue, "put", side_effect=observe_full_queue_put):
+        lifecycle.start()
+        assert full_queue_put_entered.wait(timeout=1.0)
+
+        assert lifecycle.QUEUE_CAPACITY == 32
+        assert lifecycle.queue_depth == 32
+        assert response.read_calls == 33
+        assert lifecycle.reader_alive
+
+        started_at = time.monotonic()
+        assert controller.close_admission() == 1
+        joined, outcome = lifecycle.join(timeout=1.0)
+
+        assert time.monotonic() - started_at < 1.0
+        assert joined is True
+        assert outcome == "upstream_sse_reader_thread_terminated"
+        assert lifecycle.queue_depth == 32
+        assert lifecycle.reader_alive is False
+        assert response.close_calls == 1
+    controller.complete(admission)
+
+
+def test_upstream_sse_reader_closes_once_on_normal_eof_and_preserves_order() -> None:
+    response = _LifecycleResponse([b"data: first\n\n", b"data: second\n\n", b""])
+    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+
+    assert list(lifecycle.iter_lines()) == [
+        b"data: first\n\n",
+        b"data: second\n\n",
+        b"",
+    ]
+    lifecycle.close()
+    joined, outcome = lifecycle.join()
+
+    assert joined is True
+    assert outcome == "upstream_sse_reader_thread_terminated"
+    assert response.close_calls == 1
+    assert lifecycle.reader_alive is False
+
+
+def test_upstream_sse_reader_closes_once_and_wakes_consumer_on_upstream_error() -> None:
+    response = _LifecycleResponse([OSError("synthetic upstream failure")])
+    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+
+    with pytest.raises(OSError, match="synthetic upstream failure"):
+        lifecycle.readline()
+    lifecycle.close()
+    joined, outcome = lifecycle.join()
+
+    assert joined is True
+    assert outcome == "upstream_sse_reader_thread_terminated"
+    assert response.close_calls == 1
+    assert lifecycle.reader_alive is False
+
+
+def test_upstream_sse_reader_repeated_close_wakes_unstarted_consumer_without_starting_reader() -> None:
+    response = _LifecycleResponse([b"must not be read"])
+    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+
+    lifecycle.close()
+    lifecycle.close()
+
+    assert lifecycle.readline() == b""
+    assert lifecycle.join() == (True, None)
+    assert response.close_calls == 1
+    assert response._lines == [b"must not be read"]
+
+
+def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classified() -> None:
+    response = _NonTerminatingResponse()
+    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+    lifecycle.start()
+    assert response.entered.wait(timeout=1.0)
+    lifecycle.close()
+
+    started_at = time.monotonic()
+    with patch.object(codex_proxy.logger, "warning") as warning:
+        joined, outcome = lifecycle.join(timeout=10.0)
+    elapsed = time.monotonic() - started_at
+
+    assert joined is False
+    assert outcome == "upstream_sse_reader_thread_did_not_terminate"
+    assert lifecycle.join_outcome == outcome
+    assert elapsed <= 1.1
+    warning.assert_called_once_with("upstream SSE reader join ended with %s", outcome)
+    assert response.close_calls == 1
+
+    response.release.set()
+    joined_after_release, retained_outcome = lifecycle.join(timeout=1.0)
+    assert joined_after_release is True
+    assert retained_outcome == outcome
+    assert lifecycle.reader_alive is False
+
+
+def test_upstream_sse_reader_scope_audit_keeps_bounded_queue_and_thread_in_one_owner() -> None:
+    lifecycle_source = inspect.getsource(codex_proxy._UpstreamSseReaderLifecycle)
+    module_source = inspect.getsource(codex_proxy)
+
+    assert "QUEUE_CAPACITY = 32" in lifecycle_source
+    assert "queue.Queue(maxsize=self.QUEUE_CAPACITY)" in lifecycle_source
+    assert "self._queue.put(item, timeout=self.PRODUCER_PUT_TIMEOUT_SECONDS)" in lifecycle_source
+    assert "self._queue.put(item)" not in lifecycle_source
+    assert module_source.count('"codex-proxy-sse-reader"') == 1
+    assert "target=self._read_upstream" in lifecycle_source
 
 
 def test_shutdown_endpoint_stops_server() -> None:
