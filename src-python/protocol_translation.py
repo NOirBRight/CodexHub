@@ -73,6 +73,36 @@ def _default_usage_from_response(response: Mapping[str, Any]) -> Mapping[str, An
     return usage if isinstance(usage, Mapping) else None
 
 
+def _chat_completion_usage_to_responses_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
+    mapped: dict[str, Any] = {}
+    for source_name, target_name in (
+        ("prompt_tokens", "input_tokens"),
+        ("completion_tokens", "output_tokens"),
+        ("total_tokens", "total_tokens"),
+        ("prompt_tokens_details", "input_tokens_details"),
+        ("completion_tokens_details", "output_tokens_details"),
+    ):
+        if source_name in usage:
+            value = usage[source_name]
+            mapped[target_name] = dict(value) if isinstance(value, Mapping) else value
+    return mapped
+
+
+def _responses_usage_to_chat_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
+    mapped: dict[str, Any] = {}
+    for source_name, target_name in (
+        ("input_tokens", "prompt_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("total_tokens", "total_tokens"),
+        ("input_tokens_details", "prompt_tokens_details"),
+        ("output_tokens_details", "completion_tokens_details"),
+    ):
+        if source_name in usage:
+            value = usage[source_name]
+            mapped[target_name] = dict(value) if isinstance(value, Mapping) else value
+    return mapped
+
+
 def _raise_for_unsupported_chat_message_semantics(message: Mapping[str, Any]) -> None:
     for field in ("refusal", "audio", "annotations", "reasoning", "reasoning_content"):
         value = message.get(field)
@@ -1072,8 +1102,9 @@ def chat_completion_to_response_body(
     }
     if incomplete_details is not None:
         response_payload["incomplete_details"] = incomplete_details
-    if "usage" in payload:
-        response_payload["usage"] = payload["usage"]
+    usage = payload.get("usage")
+    if isinstance(usage, Mapping):
+        response_payload["usage"] = _chat_completion_usage_to_responses_usage(usage)
 
     if repair and repair_response is not None:
         response_payload = repair_response(response_payload)
@@ -1220,7 +1251,7 @@ def response_body_to_chat_completion_body(
     }
     usage = payload.get("usage")
     if isinstance(usage, dict):
-        chat_payload["usage"] = usage
+        chat_payload["usage"] = _responses_usage_to_chat_usage(usage)
     return json.dumps(chat_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -1452,6 +1483,7 @@ def chat_stream_chunks_to_response_events(
     incomplete_details: dict[str, str] | None = None
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     model: str | None = None
+    usage: dict[str, Any] | None = None
     next_output_index = 0
     message_output_index: int | None = None
 
@@ -1522,6 +1554,9 @@ def chat_stream_chunks_to_response_events(
         choices = chunk.get("choices")
         if not isinstance(choices, list):
             continue
+        chunk_usage = chunk.get("usage")
+        if isinstance(chunk_usage, Mapping):
+            usage = _chat_completion_usage_to_responses_usage(chunk_usage)
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
@@ -1759,6 +1794,8 @@ def chat_stream_chunks_to_response_events(
         completed_response["incomplete_details"] = incomplete_details
     if model:
         completed_response["model"] = model
+    if usage is not None:
+        completed_response["usage"] = usage
     events.append(
         {
             "type": "response.incomplete" if incomplete_details is not None else "response.completed",
@@ -2377,6 +2414,12 @@ class ResponsesToChatStreamConverter:
             chunks: list[dict[str, Any]] = []
             response_obj = event.get("response")
             if isinstance(response_obj, Mapping):
+                response_id = response_obj.get("id")
+                if isinstance(response_id, str) and response_id:
+                    self.response_id = response_id
+                response_model = response_obj.get("model")
+                if isinstance(response_model, str) and response_model:
+                    self.model = response_model
                 output = response_obj.get("output")
                 if "output" in response_obj and not isinstance(output, list):
                     raise UnsupportedProtocolTranslationError(
@@ -2410,6 +2453,18 @@ class ResponsesToChatStreamConverter:
                         finish_reason = "tool_calls"
             self.completed = True
             chunks.append(self._chunk({}, finish_reason=finish_reason))
+            usage = response_obj.get("usage") if isinstance(response_obj, Mapping) else None
+            if isinstance(usage, Mapping):
+                chunks.append(
+                    {
+                        "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": self.model,
+                        "choices": [],
+                        "usage": _responses_usage_to_chat_usage(usage),
+                    }
+                )
             return chunks
         return []
 
@@ -2428,6 +2483,8 @@ class ChatToResponsesStreamConverter:
         self.created = False
         self.message_started = False
         self.completed = False
+        self.pending_incomplete: bool | None = None
+        self.usage: dict[str, Any] | None = None
 
     def _allocate_output_index(self) -> int:
         output_index = self.next_output_index
@@ -2591,11 +2648,13 @@ class ChatToResponsesStreamConverter:
         }
         if incomplete:
             response["incomplete_details"] = {"reason": "max_output_tokens"}
+        if self.usage is not None:
+            response["usage"] = dict(self.usage)
         events.append({"type": "response.incomplete" if incomplete else "response.completed", "response": response})
         return events
 
     def events_for_done(self) -> list[dict[str, Any]]:
-        return self._complete_events()
+        return self._complete_events(incomplete=self.pending_incomplete is True)
 
     def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
         _validate_chat_stream_choices(chunk)
@@ -2603,6 +2662,20 @@ class ChatToResponsesStreamConverter:
         if self.completed:
             if _is_chat_stream_usage_only_chunk(chunk):
                 return []
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate Chat Completions stream semantics after a terminal chunk.",
+            )
+        if _is_chat_stream_usage_only_chunk(chunk):
+            usage = chunk.get("usage")
+            if not isinstance(usage, Mapping):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate a Chat Completions usage chunk without an object usage payload.",
+                )
+            self.usage = _chat_completion_usage_to_responses_usage(usage)
+            return []
+        if self.pending_incomplete is not None:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot translate Chat Completions stream semantics after a terminal chunk.",
@@ -2724,14 +2797,14 @@ class ChatToResponsesStreamConverter:
                             )
             finish_reason = choice.get("finish_reason")
             if finish_reason == "length":
-                events.extend(self._complete_events(incomplete=True))
+                self.pending_incomplete = True
             elif finish_reason is not None:
                 if finish_reason not in {"stop", "tool_calls"}:
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
                         f"Cannot translate Chat Completions finish_reason {finish_reason!r} to Responses stream events.",
                     )
-                events.extend(self._complete_events())
+                self.pending_incomplete = False
         return events
 
 
@@ -2742,8 +2815,17 @@ def events_to_responses_body(
     usage_from_response: UsageFromResponse = _default_usage_from_response,
 ) -> bytes:
     """Reconstruct a non-streaming Responses body from Responses SSE events."""
-    if require_completed and not responses_events_have_completed(events):
-        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
+    terminal_types = {
+        event.get("type")
+        for event in events
+        if isinstance(event, Mapping)
+    }
+    if require_completed and not terminal_types.intersection(
+        {"response.completed", "response.incomplete"}
+    ):
+        raise UpstreamStreamIncompleteError(
+            "Responses stream ended before response.completed or response.incomplete"
+        )
 
     output: list[dict[str, Any]] = []
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
@@ -2752,6 +2834,7 @@ def events_to_responses_body(
     current_item: dict[str, Any] | None = None
     usage: Mapping[str, Any] | None = None
     response_payload: dict[str, Any] = {}
+    terminal_status: str | None = None
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -2784,7 +2867,7 @@ def events_to_responses_body(
             tool_input = event.get("input")
             if current_item and isinstance(tool_input, str):
                 current_item["input"] = tool_input
-        elif event_type == "response.completed":
+        elif event_type in {"response.completed", "response.incomplete"}:
             response = event.get("response")
             if isinstance(response, Mapping):
                 response_payload.update(dict(response))
@@ -2794,6 +2877,11 @@ def events_to_responses_body(
                 response_output = response.get("output")
                 if isinstance(response_output, list) and not output:
                     output = [dict(item) for item in response_output if isinstance(item, dict)]
+            terminal_status = (
+                "incomplete"
+                if event_type == "response.incomplete"
+                else "completed"
+            )
 
     if text_parts and not any(item.get("type") == "message" for item in output):
         output.append(
@@ -2807,7 +2895,10 @@ def events_to_responses_body(
     payload: dict[str, Any] = dict(response_payload)
     payload["id"] = response_id
     payload.setdefault("object", "response")
-    payload.setdefault("status", "completed")
+    if terminal_status is not None:
+        payload["status"] = terminal_status
+    else:
+        payload.setdefault("status", "completed")
     if model is not None or "model" not in payload:
         payload["model"] = model
     if output or not isinstance(payload.get("output"), list):

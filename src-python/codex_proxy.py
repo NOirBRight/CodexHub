@@ -49,6 +49,7 @@ import urllib3
 
 from sse_events import (
     DEFAULT_MAX_FRAME_BYTES,
+    SseAssemblerClosedError,
     SseEvent,
     SseEventAssembler,
     SseFrameTooLargeError,
@@ -2721,6 +2722,299 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+class UpstreamSseSemanticError(ValueError):
+    """A complete converted SSE frame is not valid source-protocol JSON."""
+
+
+def _verified_cross_protocol_source_format(
+    *,
+    behavior_profile: str | None,
+    upstream_format: str,
+    inbound_format: str,
+) -> str | None:
+    if upstream_format == inbound_format:
+        return None
+    if behavior_profile not in {
+        BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+    }:
+        return None
+    return upstream_format
+
+
+def _verified_converted_sse_semantic_error(
+    source_format: str,
+) -> UpstreamSseSemanticError:
+    source_label = (
+        "Responses" if source_format == "responses" else "Chat Completions"
+    )
+    return UpstreamSseSemanticError(
+        f"Upstream returned a structurally invalid complete {source_label} SSE event."
+    )
+
+
+def _validate_verified_converted_sse_payload(
+    payload: Mapping[str, Any],
+    source_format: str,
+) -> None:
+    def invalid_shape() -> None:
+        raise _verified_converted_sse_semantic_error(source_format)
+
+    def validate_usage(
+        usage: Any,
+        *,
+        token_fields: tuple[str, ...],
+        detail_fields: tuple[str, ...],
+    ) -> None:
+        if not isinstance(usage, Mapping):
+            invalid_shape()
+        for field in token_fields:
+            if field in usage and type(usage.get(field)) is not int:
+                invalid_shape()
+        for field in detail_fields:
+            if field not in usage:
+                continue
+            details = usage.get(field)
+            if not isinstance(details, Mapping):
+                invalid_shape()
+            if any(type(count) is not int for count in details.values()):
+                invalid_shape()
+
+    def validate_error_envelope(error: Any) -> None:
+        if isinstance(error, str):
+            if not error:
+                invalid_shape()
+            return
+        if not isinstance(error, Mapping):
+            invalid_shape()
+        message = error.get("message")
+        if not isinstance(message, str) or not message:
+            invalid_shape()
+        if "code" in error:
+            code = error.get("code")
+            if code is not None and type(code) not in {str, int}:
+                invalid_shape()
+
+    if source_format == "responses":
+        def validate_content_part(part: Any) -> None:
+            if not isinstance(part, Mapping):
+                invalid_shape()
+            part_type = part.get("type")
+            if not isinstance(part_type, str):
+                invalid_shape()
+            if part_type in {"input_text", "output_text", "text"}:
+                if not isinstance(part.get("text"), str):
+                    invalid_shape()
+                if (
+                    "annotations" in part
+                    and not isinstance(part.get("annotations"), list)
+                ):
+                    invalid_shape()
+            elif part_type == "input_image":
+                if not isinstance(part.get("image_url"), str):
+                    invalid_shape()
+                if (
+                    "detail" in part
+                    and not isinstance(part.get("detail"), str)
+                ):
+                    invalid_shape()
+
+        def validate_output_item(item: Any) -> None:
+            if not isinstance(item, Mapping):
+                invalid_shape()
+            if not isinstance(item.get("type"), str):
+                invalid_shape()
+            for field in ("id", "status"):
+                if field in item and not isinstance(item.get(field), str):
+                    invalid_shape()
+            if item.get("type") == "message":
+                if "role" in item and not isinstance(item.get("role"), str):
+                    invalid_shape()
+                if "content" in item:
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        invalid_shape()
+                    for part in content:
+                        validate_content_part(part)
+            if item.get("type") == "function_call":
+                for field in ("call_id", "namespace", "name", "arguments"):
+                    if field in item and not isinstance(item.get(field), str):
+                        invalid_shape()
+
+        event_type = payload.get("type")
+        if not isinstance(event_type, str):
+            invalid_shape()
+        if event_type in {
+            "response.created",
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        }:
+            response = payload.get("response")
+            if not isinstance(response, Mapping):
+                invalid_shape()
+            for field in ("id", "model", "status"):
+                if field in response and not isinstance(response.get(field), str):
+                    invalid_shape()
+            if "output" in response:
+                output = response.get("output")
+                if not isinstance(output, list):
+                    invalid_shape()
+                for item in output:
+                    validate_output_item(item)
+            if "usage" in response:
+                validate_usage(
+                    response.get("usage"),
+                    token_fields=("input_tokens", "output_tokens", "total_tokens"),
+                    detail_fields=(
+                        "input_tokens_details",
+                        "output_tokens_details",
+                    ),
+                )
+            if event_type == "response.failed":
+                if "error" not in response:
+                    invalid_shape()
+                validate_error_envelope(response.get("error"))
+        elif event_type == "error":
+            if "error" not in payload:
+                invalid_shape()
+            validate_error_envelope(payload.get("error"))
+        elif event_type == "response.output_text.delta":
+            if not isinstance(payload.get("delta"), str):
+                invalid_shape()
+        elif event_type in {
+            "response.content_part.added",
+            "response.content_part.done",
+        }:
+            validate_content_part(payload.get("part"))
+        elif event_type in {
+            "response.output_item.added",
+            "response.output_item.done",
+        }:
+            validate_output_item(payload.get("item"))
+        elif event_type == "response.function_call_arguments.delta":
+            if (
+                not isinstance(payload.get("item_id"), str)
+                or not isinstance(payload.get("delta"), str)
+            ):
+                invalid_shape()
+        elif event_type == "response.function_call_arguments.done":
+            if (
+                not isinstance(payload.get("item_id"), str)
+                or not isinstance(payload.get("arguments"), str)
+            ):
+                invalid_shape()
+        return
+    if source_format != "chat_completions":
+        return
+    choices = payload.get("choices")
+    if "error" in payload:
+        validate_error_envelope(payload.get("error"))
+        if choices is None:
+            return
+    if not isinstance(choices, list):
+        invalid_shape()
+    if "usage" in payload:
+        validate_usage(
+            payload.get("usage"),
+            token_fields=("prompt_tokens", "completion_tokens", "total_tokens"),
+            detail_fields=(
+                "prompt_tokens_details",
+                "completion_tokens_details",
+            ),
+        )
+    for field in ("id", "object", "model"):
+        if field in payload and not isinstance(payload.get(field), str):
+            invalid_shape()
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            invalid_shape()
+        if "index" in choice and type(choice.get("index")) is not int:
+            invalid_shape()
+        if "delta" in choice and not isinstance(choice.get("delta"), Mapping):
+            invalid_shape()
+        delta = choice.get("delta")
+        if isinstance(delta, Mapping):
+            content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                invalid_shape()
+            tool_calls = delta.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    invalid_shape()
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, Mapping):
+                        invalid_shape()
+                    if (
+                        "index" in tool_call
+                        and type(tool_call.get("index")) is not int
+                    ):
+                        invalid_shape()
+                    for field in ("id", "type"):
+                        if (
+                            field in tool_call
+                            and not isinstance(tool_call.get(field), str)
+                        ):
+                            invalid_shape()
+                    function = tool_call.get("function")
+                    if function is not None:
+                        if not isinstance(function, Mapping):
+                            invalid_shape()
+                        for field in ("name", "arguments"):
+                            if (
+                                field in function
+                                and not isinstance(function.get(field), str)
+                            ):
+                                invalid_shape()
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            invalid_shape()
+
+
+def _converted_sse_payload(
+    event: SseEvent,
+    *,
+    verified_source_format: str | None = None,
+) -> Mapping[str, Any] | str | None:
+    if not any(line.name == b"data" for line in event.lines) or not event.data:
+        return None
+    if event.data == b"[DONE]":
+        return "[DONE]"
+    try:
+        payload = json.loads(event.data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpstreamSseSemanticError(
+            "Upstream returned a malformed complete SSE event."
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise UpstreamSseSemanticError(
+            "Upstream returned a structurally invalid complete SSE event."
+        )
+    if verified_source_format is not None:
+        _validate_verified_converted_sse_payload(payload, verified_source_format)
+    return payload
+
+
+def _responses_sse_event_resets_idle_timeout(event: SseEvent) -> bool:
+    try:
+        payload = _converted_sse_payload(event)
+    except UpstreamSseSemanticError:
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    event_type = payload.get("type")
+    return isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error")
+
+
+def _chat_sse_event_resets_idle_timeout(event: SseEvent) -> bool:
+    try:
+        payload = _converted_sse_payload(event)
+    except UpstreamSseSemanticError:
+        return False
+    return payload == "[DONE]" or isinstance(payload, Mapping)
+
+
 SSE_EVENT_TYPE_TELEMETRY_LIMIT = 64
 
 
@@ -3136,19 +3430,6 @@ def _chat_stream_chunk_starts_downstream_output(chunk: Mapping[str, Any]) -> boo
             if isinstance(message.get("tool_calls"), list) and message.get("tool_calls"):
                 return True
     return False
-
-
-def _chat_sse_line_resets_idle_timeout(line: bytes) -> bool:
-    payload_bytes = _sse_payload_bytes(line)
-    if payload_bytes is None:
-        return False
-    if payload_bytes == b"[DONE]":
-        return True
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return isinstance(payload, Mapping)
 
 
 def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> bool:
@@ -11147,13 +11428,24 @@ def _extract_model_response_text(payload: Any) -> str:
 def _image_proxy_response_body(response: Any) -> bytes:
     if _is_event_stream(response.headers):
         events: list[Mapping[str, Any]] = []
+        assembler = SseEventAssembler()
         while True:
-            line = response.readline()
-            if not line:
+            chunk = response.readline()
+            if not chunk:
                 break
-            event = _parse_sse_json_payload(line)
-            if isinstance(event, Mapping):
-                events.append(event)
+            for frame in assembler.feed(chunk):
+                payload = _converted_sse_payload(frame)
+                if isinstance(payload, Mapping):
+                    events.append(payload)
+        termination = assembler.finish()
+        if termination.disposition == "incomplete":
+            raise UpstreamStreamIncompleteError(
+                "Image proxy SSE stream ended with an incomplete pending frame"
+            )
+        for frame in termination.events:
+            payload = _converted_sse_payload(frame)
+            if isinstance(payload, Mapping):
+                events.append(payload)
         return _events_to_responses_body(events)
 
     body = b""
@@ -12711,6 +13003,8 @@ class _GatewayDownstreamStreamCommit:
         self._last_upstream_byte_at: float | None = None
         self._last_write_error: OSError | None = None
         self._last_successful_completion_bytes = b""
+        self._headers_committed = False
+        self._ensure_headers_committed_callback: Callable[[], bool] | None = None
 
     @property
     def terminal_committed(self) -> bool:
@@ -12761,6 +13055,26 @@ class _GatewayDownstreamStreamCommit:
         | None,
     ) -> None:
         self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
+
+    def set_ensure_headers_committed_callback(
+        self,
+        callback: Callable[[], bool] | None,
+    ) -> None:
+        self._ensure_headers_committed_callback = (
+            None if self._headers_committed else callback
+        )
+
+    def _ensure_headers_committed_before_write(self) -> bool:
+        if self._headers_committed:
+            self._ensure_headers_committed_callback = None
+            return True
+        callback = self._ensure_headers_committed_callback
+        if callback is None:
+            return True
+        if not callback():
+            return False
+        self._ensure_headers_committed_callback = None
+        return True
 
     def _close_upstream_response(self, response: Any) -> None:
         close = getattr(response, "close", None)
@@ -12821,6 +13135,8 @@ class _GatewayDownstreamStreamCommit:
             return True
         if self._terminal_committed:
             return False
+        if not self._ensure_headers_committed_before_write():
+            return False
         terminal_observed_now = self._observe_line(line)
         if terminal_observed_now:
             _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=False)
@@ -12860,9 +13176,14 @@ class _GatewayDownstreamStreamCommit:
         """Authorize and record the sending of HTTP response headers.
 
         ``send_headers`` is called only when the stream is still open and no
-        terminal has been committed. Any OSError is captured, closes the owned
-        upstream work, and seals the downstream side.
+        terminal has been committed. A successful commit owns the one allowed
+        header block and disarms any deferred header callback. Later header
+        requests are successful no-ops. Any OSError is captured, closes the
+        owned upstream work, and seals the downstream side.
         """
+        if self._headers_committed:
+            self._ensure_headers_committed_callback = None
+            return True
         if self._downstream_closed or self._terminal_committed:
             return False
         try:
@@ -12871,6 +13192,8 @@ class _GatewayDownstreamStreamCommit:
             self._last_write_error = write_exc
             self.close()
             return False
+        self._headers_committed = True
+        self._ensure_headers_committed_callback = None
         return True
 
     def commit_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
@@ -12885,6 +13208,8 @@ class _GatewayDownstreamStreamCommit:
         if not data:
             return True
         if self._terminal_committed:
+            return False
+        if not self._ensure_headers_committed_before_write():
             return False
         terminal_observed_now = False
         if observe:
@@ -12932,6 +13257,8 @@ class _GatewayDownstreamStreamCommit:
         if self._downstream_closed or self._terminal_committed:
             return False, None, None
         if self._synthetic_terminal_failure_callback is None:
+            return False, None, None
+        if not self._ensure_headers_committed_before_write():
             return False, None, None
         try:
             size_limit_exceeded = isinstance(exc, SseFrameTooLargeError)
@@ -15084,7 +15411,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if isinstance(value, bytes) and value:
                     now = time.monotonic()
                     last_transport_at = now
-                    if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
+                    resets_model_event_timeout = (
+                        line_resets_idle_timeout(value)
+                        if line_resets_idle_timeout is not None
+                        else False
+                    )
+                    if model_event_idle_guard_enabled and resets_model_event_timeout:
                         last_model_event_at = now
                     observe_line(value)
                 yield value
@@ -15093,6 +15425,56 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         finally:
             lifecycle.close()
             lifecycle.join(timeout=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
+
+    def _iter_upstream_sse_events(
+        self,
+        response: Any,
+        *,
+        event_resets_idle_timeout: Callable[[SseEvent], bool],
+        on_chunk: Callable[[bytes], None] | None = None,
+    ) -> Any:
+        assembler = SseEventAssembler()
+        pending_events: list[SseEvent] = []
+        assembler_finished = False
+        deferred_size_error: SseFrameTooLargeError | None = None
+
+        def assemble_chunk(chunk: bytes) -> bool:
+            nonlocal deferred_size_error
+            events: list[SseEvent] = []
+            try:
+                assembler.feed(chunk, on_event=events.append)
+            except SseFrameTooLargeError as exc:
+                deferred_size_error = exc
+            pending_events.extend(events)
+            return any(event_resets_idle_timeout(event) for event in events)
+
+        try:
+            for chunk in self._iter_upstream_sse_lines(
+                response,
+                line_resets_idle_timeout=assemble_chunk,
+                on_line=on_chunk,
+            ):
+                if not chunk:
+                    break
+                ready_events = tuple(pending_events)
+                pending_events.clear()
+                yield from ready_events
+                if deferred_size_error is not None:
+                    raise deferred_size_error
+
+            termination = assembler.finish()
+            assembler_finished = True
+            yield from termination.events
+            if termination.disposition == "incomplete":
+                raise UpstreamStreamIncompleteError(
+                    "Upstream SSE stream ended with an incomplete pending frame"
+                )
+        finally:
+            if not assembler_finished:
+                try:
+                    assembler.cancel()
+                except SseAssemblerClosedError:
+                    pass
 
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
         self._write_sse_event(
@@ -15923,6 +16305,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # SSE into a single JSON response body.
         buffer_sse_to_json = is_event_stream and not caller_stream
         buffered_json_response = False
+        buffered_chat_sse_to_responses = False
+        verified_source_format = _verified_cross_protocol_source_format(
+            behavior_profile=behavior_profile,
+            upstream_format=upstream_format,
+            inbound_format=inbound_format,
+        )
         usage_context = _usage_observed_context(
             event_context,
             request_id=request_id,
@@ -16015,46 +16403,162 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             return 499
 
+        def finish_converted_sse_semantic_error(
+            exc: UpstreamSseSemanticError | SseFrameTooLargeError,
+        ) -> int:
+            if seam.terminal_committed:
+                self.close_connection = True
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="async_usage_pending",
+                )
+                return status
+            error_code = getattr(exc, "classification", "upstream_protocol_error")
+            self.close_connection = True
+            write_proxy_event(
+                "upstream_stream_protocol_error",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=502,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+            if not send_downstream_response_headers_once():
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
+            if not self._write_downstream_sse_error(
+                inbound_format=inbound_format,
+                upstream_name=upstream_name,
+                status=502,
+                error=error_code,
+                detail=str(exc),
+            ):
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
+            _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
+            return 502
+
+        def buffered_protocol_error_body(
+            exc: UpstreamSseSemanticError | SseFrameTooLargeError,
+        ) -> bytes:
+            write_proxy_event(
+                "upstream_stream_protocol_error",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=502,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+            return json.dumps(
+                _json_error_payload_for_inbound_format(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error="upstream_protocol_error",
+                    detail=str(exc),
+                    error_type="upstream_protocol_error",
+                ),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
         headers_sent = headers_already_sent
         if not is_event_stream or buffer_sse_to_json:
+            converted_stream_failure = False
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.
                 events: list[Mapping[str, Any]] = []
+                chat_chunks: list[Mapping[str, Any] | str] = []
+                incomplete_frame = False
+
                 try:
-                    while True:
-                        line = response.readline()
-                        if not line:
-                            break
-                        payload_bytes = _sse_payload_bytes(line)
-                        if payload_bytes is None:
+                    for frame in self._iter_upstream_sse_events(
+                        response,
+                        event_resets_idle_timeout=(
+                            _chat_sse_event_resets_idle_timeout
+                            if upstream_format == "chat_completions"
+                            else _responses_sse_event_resets_idle_timeout
+                        ),
+                        on_chunk=observe_diagnostic_sse_line,
+                    ):
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if payload is None:
                             continue
-                        try:
-                            event = json.loads(payload_bytes.decode("utf-8-sig"))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            continue
-                        if isinstance(event, dict):
-                            events.append(event)
+                        if upstream_format == "chat_completions":
+                            chat_chunks.append(payload)
+                        elif payload != "[DONE]":
+                            events.append(payload)
+                except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
+                    status = 502
+                    converted_stream_failure = True
+                    body = buffered_protocol_error_body(exc)
+                except UpstreamStreamIncompleteError:
+                    incomplete_frame = True
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     if defer_stream_errors:
                         raise UpstreamStreamInterruptedError(exc) from exc
                     raise
                 # Reconstruct a Responses-format body from the events.
-                try:
-                    body = _events_to_responses_body(events, require_completed=True)
-                except UpstreamStreamIncompleteError:
-                    if defer_stream_errors:
-                        raise
-                    status = 502
-                    body = _incomplete_stream_json_error_body(upstream_name)
-                    write_proxy_event(
-                        "upstream_stream_incomplete",
-                        request_id=request_id,
-                        model=model,
-                        upstream=upstream_name,
-                        status=status,
-                        upstream_format=upstream_format,
-                        inbound_format=inbound_format,
-                    )
+                if not converted_stream_failure:
+                    try:
+                        if incomplete_frame:
+                            raise UpstreamStreamIncompleteError(
+                                "Upstream SSE stream ended with an incomplete pending frame"
+                            )
+                        if (
+                            upstream_format == "chat_completions"
+                            and not want_chat_output
+                        ):
+                            response_events = _chat_stream_chunks_to_response_events(
+                                chat_chunks
+                            )
+                            body = _events_to_responses_body(
+                                response_events,
+                                require_completed=True,
+                            )
+                            buffered_chat_sse_to_responses = True
+                        else:
+                            body = _events_to_responses_body(
+                                events,
+                                require_completed=True,
+                            )
+                    except UpstreamStreamIncompleteError:
+                        if defer_stream_errors:
+                            raise
+                        status = 502
+                        converted_stream_failure = True
+                        body = _incomplete_stream_json_error_body(upstream_name)
+                        write_proxy_event(
+                            "upstream_stream_incomplete",
+                            request_id=request_id,
+                            model=model,
+                            upstream=upstream_name,
+                            status=status,
+                            upstream_format=upstream_format,
+                            inbound_format=inbound_format,
+                        )
+                    except UpstreamProtocolTranslationError:
+                        if verified_source_format is None:
+                            raise
+                        status = 502
+                        converted_stream_failure = True
+                        body = buffered_protocol_error_body(
+                            _verified_converted_sse_semantic_error(
+                                verified_source_format
+                            )
+                        )
                 is_event_stream = False
                 buffered_json_response = True
             else:
@@ -16070,38 +16574,62 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         raise UpstreamStreamInterruptedError(exc) from exc
                     raise
             upstream_body_for_usage = body
-            if want_chat_output:
-                if upstream_format == "chat_completions":
-                    body = _response_body_to_chat_completion_body(
-                        compatible_response_body(
-                            _chat_completion_to_response_body(body),
+            try:
+                if converted_stream_failure:
+                    pass
+                elif want_chat_output:
+                    if upstream_format == "chat_completions":
+                        body = _response_body_to_chat_completion_body(
+                            compatible_response_body(
+                                _chat_completion_to_response_body(body),
+                                upstream_name,
+                                event_context=compatibility_event_context,
+                            )
+                        )
+                    else:
+                        # Upstream returned Responses format; convert to Chat Completions.
+                        if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            body = _response_body_to_chat_completion_body(body)
+                        else:
+                            body = _response_body_to_chat_completion_body(
+                                compatible_response_body(
+                                    body,
+                                    upstream_name,
+                                    event_context=compatibility_event_context,
+                                )
+                            )
+                elif upstream_format == "chat_completions":
+                    if buffered_chat_sse_to_responses:
+                        converted_body = body
+                    else:
+                        converted_body = _chat_completion_to_response_body(
+                            body,
+                            repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                        )
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                        body = converted_body
+                    else:
+                        body = compatible_response_body(
+                            converted_body,
                             upstream_name,
                             event_context=compatibility_event_context,
                         )
-                    )
-                else:
-                    # Upstream returned Responses format; convert to Chat Completions.
-                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                        body = _response_body_to_chat_completion_body(body)
-                    else:
-                        body = _response_body_to_chat_completion_body(
-                            compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
-                        )
-            elif upstream_format == "chat_completions":
-                converted_body = _chat_completion_to_response_body(
-                    body,
-                    repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                )
-                if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                    body = converted_body
                 else:
                     body = compatible_response_body(
-                        converted_body,
+                        body,
                         upstream_name,
                         event_context=compatibility_event_context,
                     )
-            else:
-                body = compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
+            except UpstreamProtocolTranslationError:
+                if not buffer_sse_to_json or verified_source_format is None:
+                    raise
+                status = 502
+                converted_stream_failure = True
+                body = buffered_protocol_error_body(
+                    _verified_converted_sse_semantic_error(
+                        verified_source_format
+                    )
+                )
             if status >= 400:
                 body = _with_codexhub_http_error(
                     body,
@@ -16301,6 +16829,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 mark_downstream_sse_started()
             return True
 
+        seam.set_ensure_headers_committed_callback(
+            send_downstream_response_headers_once if defer_stream_headers else None
+        )
         if not defer_stream_headers:
             if not send_downstream_response_headers_once():
                 return finish_downstream_stream_closed(
@@ -16315,29 +16846,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             ):
                 line_ending = b"\n"
                 converter = _ResponsesToChatStreamConverter()
+                incomplete_frame = False
                 try:
-                    for line in self._iter_upstream_sse_lines(
+                    for frame in self._iter_upstream_sse_events(
                         response,
-                        line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
-                        on_line=observe_diagnostic_sse_line,
+                        event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
+                        on_chunk=observe_diagnostic_sse_line,
                     ):
-                        if not line:
-                            break
-                        line_ending = _sse_line_ending(line)
-                        payload_bytes = _sse_payload_bytes(line)
-                        if payload_bytes is None:
+                        line_ending = _sse_line_ending(frame.raw)
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if payload is None or payload == "[DONE]":
                             continue
-                        if payload_bytes == b"[DONE]":
-                            continue
-                        try:
-                            event = json.loads(payload_bytes.decode("utf-8-sig"))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            continue
-                        if not isinstance(event, Mapping):
-                            continue
+                        event = payload
                         _offer_usage_observed_sse_line(
                             usage_context,
-                            line,
+                            frame.raw,
                             upstream_format=upstream_format,
                         )
                         error_type = _responses_stream_error_type(event)
@@ -16371,6 +16897,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 return finish_downstream_stream_closed(
                                     seam.last_write_error() or OSError("downstream closed")
                                 )
+                except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
+                    return finish_converted_sse_semantic_error(exc)
+                except UpstreamProtocolTranslationError:
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error("responses")
+                    )
+                except UpstreamStreamIncompleteError:
+                    incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -16430,7 +16964,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
-                if not converter.completed:
+                if incomplete_frame or not converter.completed:
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_incomplete",
@@ -16472,28 +17006,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             ):
                 line_ending = b"\n"
                 converter = _ChatToResponsesStreamConverter()
+                incomplete_frame = False
                 try:
-                    for line in self._iter_upstream_sse_lines(
+                    for frame in self._iter_upstream_sse_events(
                         response,
-                        line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
-                        on_line=observe_diagnostic_sse_line,
+                        event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
+                        on_chunk=observe_diagnostic_sse_line,
                     ):
-                        if not line:
-                            break
-                        line_ending = _sse_line_ending(line)
-                        payload_bytes = _sse_payload_bytes(line)
-                        if payload_bytes is None:
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if payload is None:
                             continue
                         events: list[dict[str, Any]] = []
-                        if payload_bytes == b"[DONE]":
+                        if payload == "[DONE]":
                             events = converter.events_for_done()
                         else:
-                            try:
-                                payload = json.loads(payload_bytes.decode("utf-8-sig"))
-                            except (UnicodeDecodeError, json.JSONDecodeError):
-                                continue
-                            if not isinstance(payload, Mapping):
-                                continue
                             chat_error_detail = _chat_stream_error_detail(payload)
                             if chat_error_detail is not None:
                                 write_proxy_event(
@@ -16521,7 +17050,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 return 502
                             _offer_usage_observed_sse_line(
                                 usage_context,
-                                line,
+                                frame.raw,
                                 upstream_format=upstream_format,
                             )
                             events = converter.events_for_chunk(payload)
@@ -16535,6 +17064,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     )
                             except OSError as exc:
                                 return finish_downstream_stream_closed(exc)
+                except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
+                    return finish_converted_sse_semantic_error(exc)
+                except UpstreamProtocolTranslationError:
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error(
+                            "chat_completions"
+                        )
+                    )
+                except UpstreamStreamIncompleteError:
+                    incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:
                     self.close_connection = True
                     write_proxy_event(
@@ -16586,7 +17125,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
-                if not converter.completed:
+                if (
+                    not incomplete_frame
+                    and not converter.completed
+                    and converter.pending_incomplete is not None
+                ):
+                    for event in converter.events_for_done():
+                        try:
+                            if not self._write_sse_bytes(
+                                _sse_json_line(event, line_ending) + line_ending
+                            ):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
+                        except OSError as exc:
+                            return finish_downstream_stream_closed(exc)
+                if incomplete_frame or not converter.completed:
                     self.close_connection = True
                     write_proxy_event(
                         "upstream_stream_incomplete",
@@ -16609,13 +17163,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
-                try:
-                    if not self._write_sse_done():
-                        return finish_downstream_stream_closed(
-                            seam.last_write_error() or OSError("downstream closed")
-                        )
-                except OSError as exc:
-                    return finish_downstream_stream_closed(exc)
                 self.close_connection = True
                 _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
                 return status
@@ -16624,32 +17171,33 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 # Upstream returns Responses SSE; convert to Chat Completions SSE.
                 line_ending = b"\n"
                 events: list[Mapping[str, Any]] = []
+                incomplete_frame = False
                 try:
-                    for line in self._iter_upstream_sse_lines(
+                    for frame in self._iter_upstream_sse_events(
                         response,
-                        line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
-                        on_line=observe_diagnostic_sse_line,
+                        event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
+                        on_chunk=observe_diagnostic_sse_line,
                     ):
-                        if not line:
-                            break
-                        line_ending = _sse_line_ending(line)
-                        payload_bytes = _sse_payload_bytes(line)
-                        if payload_bytes is None:
+                        line_ending = _sse_line_ending(frame.raw)
+                        event = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if event is None or event == "[DONE]":
                             continue
-                        try:
-                            event = json.loads(payload_bytes.decode("utf-8-sig"))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            continue
-                        if isinstance(event, dict):
-                            events.append(event)
-                            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                                _offer_usage_observed_sse_line(
-                                    usage_context,
-                                    line,
-                                    upstream_format=upstream_format,
-                                )
-                            else:
-                                _capture_usage(usage_capture, _usage_from_response_event(event))
+                        events.append(event)
+                        if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            _offer_usage_observed_sse_line(
+                                usage_context,
+                                frame.raw,
+                                upstream_format=upstream_format,
+                            )
+                        else:
+                            _capture_usage(usage_capture, _usage_from_response_event(event))
+                except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
+                    return finish_converted_sse_semantic_error(exc)
+                except UpstreamStreamIncompleteError:
+                    incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:
                     if defer_stream_errors:
                         raise
@@ -16666,6 +17214,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         stream_idle_phase=exc.phase,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -16695,6 +17247,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         error=type(exc).__name__,
                         detail=safe_upstream_error_detail(exc),
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -16706,6 +17262,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
                 try:
+                    if incomplete_frame:
+                        raise UpstreamStreamIncompleteError(
+                            "Upstream SSE stream ended with an incomplete pending frame"
+                        )
                     response_body = compatible_response_body(
                         _events_to_responses_body(events, require_completed=True),
                         upstream_name,
@@ -16724,6 +17284,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                     )
+                    if not send_downstream_response_headers_once():
+                        return finish_downstream_stream_closed(
+                            seam.last_write_error() or OSError("downstream closed")
+                        )
                     if not self._write_downstream_sse_error(
                         inbound_format=inbound_format,
                         upstream_name=upstream_name,
@@ -16737,13 +17301,24 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
 
+                try:
+                    converted_chat_chunks = _chat_completion_body_to_stream_chunks(
+                        _response_body_to_chat_completion_body(response_body)
+                    )
+                except UpstreamProtocolTranslationError:
+                    if verified_source_format is None:
+                        raise
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error(
+                            verified_source_format
+                        )
+                    )
+
                 if not send_downstream_response_headers_once():
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                for chunk in _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
-                ):
+                for chunk in converted_chat_chunks:
                     if not self._write_sse_data(chunk):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
@@ -16765,35 +17340,36 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if upstream_format == "chat_completions":
                 line_ending = b"\n"
                 chunks: list[Mapping[str, Any] | str] = []
+                incomplete_frame = False
                 try:
-                    for line in self._iter_upstream_sse_lines(
+                    for frame in self._iter_upstream_sse_events(
                         response,
-                        line_resets_idle_timeout=_chat_sse_line_resets_idle_timeout,
-                        on_line=observe_diagnostic_sse_line,
+                        event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
+                        on_chunk=observe_diagnostic_sse_line,
                     ):
-                        if not line:
-                            break
-                        line_ending = _sse_line_ending(line)
-                        payload_bytes = _sse_payload_bytes(line)
-                        if payload_bytes is None:
+                        line_ending = _sse_line_ending(frame.raw)
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if payload is None:
                             continue
-                        if payload_bytes == b"[DONE]":
+                        if payload == "[DONE]":
                             chunks.append("[DONE]")
                             continue
-                        try:
-                            payload = json.loads(payload_bytes.decode("utf-8-sig"))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            continue
-                        if isinstance(payload, dict):
-                            chunks.append(payload)
-                            if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                                _offer_usage_observed_sse_line(
-                                    usage_context,
-                                    line,
-                                    upstream_format=upstream_format,
-                                )
-                            else:
-                                _capture_usage(usage_capture, _usage_from_payload(payload))
+                        chunks.append(payload)
+                        if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            _offer_usage_observed_sse_line(
+                                usage_context,
+                                frame.raw,
+                                upstream_format=upstream_format,
+                            )
+                        else:
+                            _capture_usage(usage_capture, _usage_from_payload(payload))
+                except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
+                    return finish_converted_sse_semantic_error(exc)
+                except UpstreamStreamIncompleteError:
+                    incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:
                     if defer_stream_errors:
                         raise
@@ -16849,7 +17425,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         )
                     _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                     return 502
-                if not _chat_stream_chunks_have_terminal(chunks):
+                if incomplete_frame or not _chat_stream_chunks_have_terminal(chunks):
                     if defer_stream_errors:
                         raise UpstreamStreamIncompleteError(
                             "Chat Completions stream ended without finish_reason or [DONE]"

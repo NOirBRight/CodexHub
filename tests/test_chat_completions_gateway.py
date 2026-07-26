@@ -525,7 +525,10 @@ class ResponseBodyToChatTests(unittest.TestCase):
         self.assertEqual(choice["message"]["role"], "assistant")
         self.assertEqual(choice["message"]["content"], "Hello!")
         self.assertEqual(choice["finish_reason"], "stop")
-        self.assertEqual(result["usage"]["input_tokens"], 10)
+        self.assertEqual(
+            result["usage"],
+            {"prompt_tokens": 10, "completion_tokens": 2},
+        )
 
     def test_function_call_response(self):
         body = json.dumps({
