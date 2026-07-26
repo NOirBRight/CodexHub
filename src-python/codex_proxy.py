@@ -2730,29 +2730,130 @@ def _validate_verified_converted_sse_payload(
     payload: Mapping[str, Any],
     source_format: str,
 ) -> None:
+    def invalid_shape() -> None:
+        source_label = (
+            "Responses" if source_format == "responses" else "Chat Completions"
+        )
+        raise UpstreamSseSemanticError(
+            f"Upstream returned a structurally invalid complete {source_label} SSE event."
+        )
+
     if source_format == "responses":
-        if (
-            payload.get("type") == "response.output_text.delta"
-            and not isinstance(payload.get("delta"), str)
-        ):
-            raise UpstreamSseSemanticError(
-                "Upstream returned a structurally invalid complete Responses SSE event."
-            )
+        def validate_output_item(item: Any) -> None:
+            if not isinstance(item, Mapping):
+                invalid_shape()
+            if not isinstance(item.get("type"), str):
+                invalid_shape()
+            if (
+                item.get("type") == "message"
+                and "content" in item
+                and not isinstance(item.get("content"), list)
+            ):
+                invalid_shape()
+            if item.get("type") == "function_call":
+                for field in ("call_id", "name", "arguments"):
+                    if field in item and not isinstance(item.get(field), str):
+                        invalid_shape()
+
+        event_type = payload.get("type")
+        if not isinstance(event_type, str):
+            invalid_shape()
+        if event_type in {
+            "response.created",
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        }:
+            response = payload.get("response")
+            if not isinstance(response, Mapping):
+                invalid_shape()
+            for field in ("id", "model", "status"):
+                if field in response and not isinstance(response.get(field), str):
+                    invalid_shape()
+            if "output" in response:
+                output = response.get("output")
+                if not isinstance(output, list):
+                    invalid_shape()
+                for item in output:
+                    validate_output_item(item)
+            if "usage" in response and not isinstance(response.get("usage"), Mapping):
+                invalid_shape()
+        elif event_type == "response.output_text.delta":
+            if not isinstance(payload.get("delta"), str):
+                invalid_shape()
+        elif event_type in {
+            "response.content_part.added",
+            "response.content_part.done",
+        }:
+            if not isinstance(payload.get("part"), Mapping):
+                invalid_shape()
+        elif event_type in {
+            "response.output_item.added",
+            "response.output_item.done",
+        }:
+            validate_output_item(payload.get("item"))
+        elif event_type == "response.function_call_arguments.delta":
+            if not isinstance(payload.get("delta"), str):
+                invalid_shape()
+        elif event_type == "response.function_call_arguments.done":
+            if not isinstance(payload.get("arguments"), str):
+                invalid_shape()
         return
     if source_format != "chat_completions":
         return
     choices = payload.get("choices")
-    if not isinstance(choices, list):
+    if choices is None and "error" in payload:
         return
+    if not isinstance(choices, list):
+        invalid_shape()
+    if "usage" in payload and not isinstance(payload.get("usage"), Mapping):
+        invalid_shape()
+    for field in ("id", "object", "model"):
+        if field in payload and not isinstance(payload.get(field), str):
+            invalid_shape()
     for choice in choices:
-        if (
-            isinstance(choice, Mapping)
-            and "delta" in choice
-            and not isinstance(choice.get("delta"), Mapping)
-        ):
-            raise UpstreamSseSemanticError(
-                "Upstream returned a structurally invalid complete Chat Completions SSE event."
-            )
+        if not isinstance(choice, Mapping):
+            invalid_shape()
+        if "index" in choice and not isinstance(choice.get("index"), int):
+            invalid_shape()
+        if "delta" in choice and not isinstance(choice.get("delta"), Mapping):
+            invalid_shape()
+        delta = choice.get("delta")
+        if isinstance(delta, Mapping):
+            content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                invalid_shape()
+            tool_calls = delta.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    invalid_shape()
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, Mapping):
+                        invalid_shape()
+                    if (
+                        "index" in tool_call
+                        and not isinstance(tool_call.get("index"), int)
+                    ):
+                        invalid_shape()
+                    for field in ("id", "type"):
+                        if (
+                            field in tool_call
+                            and not isinstance(tool_call.get(field), str)
+                        ):
+                            invalid_shape()
+                    function = tool_call.get("function")
+                    if function is not None:
+                        if not isinstance(function, Mapping):
+                            invalid_shape()
+                        for field in ("name", "arguments"):
+                            if (
+                                field in function
+                                and not isinstance(function.get(field), str)
+                            ):
+                                invalid_shape()
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            invalid_shape()
 
 
 def _converted_sse_payload(
@@ -16157,6 +16258,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         def finish_converted_sse_semantic_error(
             exc: UpstreamSseSemanticError | SseFrameTooLargeError,
         ) -> int:
+            if seam.terminal_committed:
+                self.close_connection = True
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="async_usage_pending",
+                )
+                return status
             error_code = getattr(exc, "classification", "upstream_protocol_error")
             self.close_connection = True
             write_proxy_event(
@@ -16714,7 +16823,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
                         on_chunk=observe_diagnostic_sse_line,
                     ):
-                        line_ending = _sse_line_ending(frame.raw)
                         payload = _converted_sse_payload(
                             frame,
                             verified_source_format="chat_completions",

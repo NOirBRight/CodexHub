@@ -2815,8 +2815,17 @@ def events_to_responses_body(
     usage_from_response: UsageFromResponse = _default_usage_from_response,
 ) -> bytes:
     """Reconstruct a non-streaming Responses body from Responses SSE events."""
-    if require_completed and not responses_events_have_completed(events):
-        raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
+    terminal_types = {
+        event.get("type")
+        for event in events
+        if isinstance(event, Mapping)
+    }
+    if require_completed and not terminal_types.intersection(
+        {"response.completed", "response.incomplete"}
+    ):
+        raise UpstreamStreamIncompleteError(
+            "Responses stream ended before response.completed or response.incomplete"
+        )
 
     output: list[dict[str, Any]] = []
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
@@ -2857,7 +2866,7 @@ def events_to_responses_body(
             tool_input = event.get("input")
             if current_item and isinstance(tool_input, str):
                 current_item["input"] = tool_input
-        elif event_type == "response.completed":
+        elif event_type in {"response.completed", "response.incomplete"}:
             response = event.get("response")
             if isinstance(response, Mapping):
                 response_payload.update(dict(response))
