@@ -1862,6 +1862,46 @@ class ProtocolTranslationTests(unittest.TestCase):
         self.assertEqual(input_done["input"], item["input"])
         self.assertEqual(reconstructed["output"], [item])
 
+    def test_events_to_responses_body_terminal_type_is_authoritative(self):
+        cases = (
+            ("incomplete_missing_status", "response.incomplete", None, "incomplete"),
+            ("incomplete_contradictory_status", "response.incomplete", "completed", "incomplete"),
+            ("completed_missing_status", "response.completed", None, "completed"),
+            ("completed_contradictory_status", "response.completed", "incomplete", "completed"),
+        )
+
+        for name, event_type, embedded_status, expected_status in cases:
+            with self.subTest(name=name):
+                response = {
+                    "id": f"resp_{name}",
+                    "object": "response",
+                    "output": [],
+                }
+                if embedded_status is not None:
+                    response["status"] = embedded_status
+                if event_type == "response.incomplete":
+                    response["incomplete_details"] = {"reason": "max_output_tokens"}
+
+                reconstructed = json.loads(
+                    protocol_translation.events_to_responses_body(
+                        [{"type": event_type, "response": response}],
+                        require_completed=True,
+                    )
+                )
+
+                self.assertEqual(reconstructed["status"], expected_status)
+                if event_type == "response.incomplete":
+                    self.assertEqual(
+                        reconstructed["incomplete_details"],
+                        {"reason": "max_output_tokens"},
+                    )
+
+        with self.assertRaises(protocol_translation.UpstreamStreamIncompleteError):
+            protocol_translation.events_to_responses_body(
+                [{"type": "response.output_text.delta", "delta": "partial"}],
+                require_completed=True,
+            )
+
     def test_stateful_stream_converters_emit_terminal_protocol_events(self):
         chat_to_responses = protocol_translation.ChatToResponsesStreamConverter()
         events = chat_to_responses.events_for_chunk(

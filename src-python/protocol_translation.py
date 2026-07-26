@@ -2834,6 +2834,7 @@ def events_to_responses_body(
     current_item: dict[str, Any] | None = None
     usage: Mapping[str, Any] | None = None
     response_payload: dict[str, Any] = {}
+    terminal_status: str | None = None
 
     for event in events:
         if not isinstance(event, Mapping):
@@ -2876,6 +2877,11 @@ def events_to_responses_body(
                 response_output = response.get("output")
                 if isinstance(response_output, list) and not output:
                     output = [dict(item) for item in response_output if isinstance(item, dict)]
+            terminal_status = (
+                "incomplete"
+                if event_type == "response.incomplete"
+                else "completed"
+            )
 
     if text_parts and not any(item.get("type") == "message" for item in output):
         output.append(
@@ -2889,7 +2895,10 @@ def events_to_responses_body(
     payload: dict[str, Any] = dict(response_payload)
     payload["id"] = response_id
     payload.setdefault("object", "response")
-    payload.setdefault("status", "completed")
+    if terminal_status is not None:
+        payload["status"] = terminal_status
+    else:
+        payload.setdefault("status", "completed")
     if model is not None or "model" not in payload:
         payload["model"] = model
     if output or not isinstance(payload.get("output"), list):

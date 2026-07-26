@@ -2726,32 +2726,87 @@ class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
 
+def _verified_converted_sse_semantic_error(
+    source_format: str,
+) -> UpstreamSseSemanticError:
+    source_label = (
+        "Responses" if source_format == "responses" else "Chat Completions"
+    )
+    return UpstreamSseSemanticError(
+        f"Upstream returned a structurally invalid complete {source_label} SSE event."
+    )
+
+
 def _validate_verified_converted_sse_payload(
     payload: Mapping[str, Any],
     source_format: str,
 ) -> None:
     def invalid_shape() -> None:
-        source_label = (
-            "Responses" if source_format == "responses" else "Chat Completions"
-        )
-        raise UpstreamSseSemanticError(
-            f"Upstream returned a structurally invalid complete {source_label} SSE event."
-        )
+        raise _verified_converted_sse_semantic_error(source_format)
+
+    def validate_usage(
+        usage: Any,
+        *,
+        token_fields: tuple[str, ...],
+        detail_fields: tuple[str, ...],
+    ) -> None:
+        if not isinstance(usage, Mapping):
+            invalid_shape()
+        for field in token_fields:
+            if field in usage and type(usage.get(field)) is not int:
+                invalid_shape()
+        for field in detail_fields:
+            if field not in usage:
+                continue
+            details = usage.get(field)
+            if not isinstance(details, Mapping):
+                invalid_shape()
+            if any(type(count) is not int for count in details.values()):
+                invalid_shape()
 
     if source_format == "responses":
+        def validate_content_part(part: Any) -> None:
+            if not isinstance(part, Mapping):
+                invalid_shape()
+            part_type = part.get("type")
+            if not isinstance(part_type, str):
+                invalid_shape()
+            if part_type in {"input_text", "output_text", "text"}:
+                if not isinstance(part.get("text"), str):
+                    invalid_shape()
+                if (
+                    "annotations" in part
+                    and not isinstance(part.get("annotations"), list)
+                ):
+                    invalid_shape()
+            elif part_type == "input_image":
+                if not isinstance(part.get("image_url"), str):
+                    invalid_shape()
+                if (
+                    "detail" in part
+                    and not isinstance(part.get("detail"), str)
+                ):
+                    invalid_shape()
+
         def validate_output_item(item: Any) -> None:
             if not isinstance(item, Mapping):
                 invalid_shape()
             if not isinstance(item.get("type"), str):
                 invalid_shape()
-            if (
-                item.get("type") == "message"
-                and "content" in item
-                and not isinstance(item.get("content"), list)
-            ):
-                invalid_shape()
+            for field in ("id", "status"):
+                if field in item and not isinstance(item.get(field), str):
+                    invalid_shape()
+            if item.get("type") == "message":
+                if "role" in item and not isinstance(item.get("role"), str):
+                    invalid_shape()
+                if "content" in item:
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        invalid_shape()
+                    for part in content:
+                        validate_content_part(part)
             if item.get("type") == "function_call":
-                for field in ("call_id", "name", "arguments"):
+                for field in ("call_id", "namespace", "name", "arguments"):
                     if field in item and not isinstance(item.get(field), str):
                         invalid_shape()
 
@@ -2776,8 +2831,15 @@ def _validate_verified_converted_sse_payload(
                     invalid_shape()
                 for item in output:
                     validate_output_item(item)
-            if "usage" in response and not isinstance(response.get("usage"), Mapping):
-                invalid_shape()
+            if "usage" in response:
+                validate_usage(
+                    response.get("usage"),
+                    token_fields=("input_tokens", "output_tokens", "total_tokens"),
+                    detail_fields=(
+                        "input_tokens_details",
+                        "output_tokens_details",
+                    ),
+                )
         elif event_type == "response.output_text.delta":
             if not isinstance(payload.get("delta"), str):
                 invalid_shape()
@@ -2785,8 +2847,7 @@ def _validate_verified_converted_sse_payload(
             "response.content_part.added",
             "response.content_part.done",
         }:
-            if not isinstance(payload.get("part"), Mapping):
-                invalid_shape()
+            validate_content_part(payload.get("part"))
         elif event_type in {
             "response.output_item.added",
             "response.output_item.done",
@@ -2806,15 +2867,22 @@ def _validate_verified_converted_sse_payload(
         return
     if not isinstance(choices, list):
         invalid_shape()
-    if "usage" in payload and not isinstance(payload.get("usage"), Mapping):
-        invalid_shape()
+    if "usage" in payload:
+        validate_usage(
+            payload.get("usage"),
+            token_fields=("prompt_tokens", "completion_tokens", "total_tokens"),
+            detail_fields=(
+                "prompt_tokens_details",
+                "completion_tokens_details",
+            ),
+        )
     for field in ("id", "object", "model"):
         if field in payload and not isinstance(payload.get(field), str):
             invalid_shape()
     for choice in choices:
         if not isinstance(choice, Mapping):
             invalid_shape()
-        if "index" in choice and not isinstance(choice.get("index"), int):
+        if "index" in choice and type(choice.get("index")) is not int:
             invalid_shape()
         if "delta" in choice and not isinstance(choice.get("delta"), Mapping):
             invalid_shape()
@@ -2832,7 +2900,7 @@ def _validate_verified_converted_sse_payload(
                         invalid_shape()
                     if (
                         "index" in tool_call
-                        and not isinstance(tool_call.get("index"), int)
+                        and type(tool_call.get("index")) is not int
                     ):
                         invalid_shape()
                     for field in ("id", "type"):
@@ -16304,6 +16372,34 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 events: list[Mapping[str, Any]] = []
                 chat_chunks: list[Mapping[str, Any] | str] = []
                 incomplete_frame = False
+
+                def buffered_protocol_error_body(
+                    exc: UpstreamSseSemanticError | SseFrameTooLargeError,
+                ) -> bytes:
+                    write_proxy_event(
+                        "upstream_stream_protocol_error",
+                        request_id=request_id,
+                        model=model,
+                        upstream=upstream_name,
+                        status=502,
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        error=type(exc).__name__,
+                        detail=str(exc),
+                    )
+                    return json.dumps(
+                        _json_error_payload_for_inbound_format(
+                            inbound_format=inbound_format,
+                            upstream_name=upstream_name,
+                            status=502,
+                            error="upstream_protocol_error",
+                            detail=str(exc),
+                            error_type="upstream_protocol_error",
+                        ),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+
                 try:
                     for frame in self._iter_upstream_sse_events(
                         response,
@@ -16327,29 +16423,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                     status = 502
                     converted_stream_failure = True
-                    body = json.dumps(
-                        _json_error_payload_for_inbound_format(
-                            inbound_format=inbound_format,
-                            upstream_name=upstream_name,
-                            status=status,
-                            error="upstream_protocol_error",
-                            detail=str(exc),
-                            error_type="upstream_protocol_error",
-                        ),
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    write_proxy_event(
-                        "upstream_stream_protocol_error",
-                        request_id=request_id,
-                        model=model,
-                        upstream=upstream_name,
-                        status=status,
-                        upstream_format=upstream_format,
-                        inbound_format=inbound_format,
-                        error=type(exc).__name__,
-                        detail=str(exc),
-                    )
+                    body = buffered_protocol_error_body(exc)
                 except UpstreamStreamIncompleteError:
                     incomplete_frame = True
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
@@ -16394,6 +16468,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             status=status,
                             upstream_format=upstream_format,
                             inbound_format=inbound_format,
+                        )
+                    except UpstreamProtocolTranslationError:
+                        if verified_source_format is None:
+                            raise
+                        status = 502
+                        converted_stream_failure = True
+                        body = buffered_protocol_error_body(
+                            _verified_converted_sse_semantic_error(
+                                verified_source_format
+                            )
                         )
                 is_event_stream = False
                 buffered_json_response = True
@@ -16713,6 +16797,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 )
                 except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                     return finish_converted_sse_semantic_error(exc)
+                except UpstreamProtocolTranslationError:
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error("responses")
+                    )
                 except UpstreamStreamIncompleteError:
                     incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:
@@ -16876,6 +16964,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 return finish_downstream_stream_closed(exc)
                 except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                     return finish_converted_sse_semantic_error(exc)
+                except UpstreamProtocolTranslationError:
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error(
+                            "chat_completions"
+                        )
+                    )
                 except UpstreamStreamIncompleteError:
                     incomplete_frame = True
                 except UpstreamStreamIdleTimeoutError as exc:

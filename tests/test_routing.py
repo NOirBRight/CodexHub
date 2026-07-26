@@ -3815,6 +3815,328 @@ class RoutingTests(unittest.TestCase):
                     written,
                 )
 
+    def test_verified_cross_protocol_consumed_leaf_table_fails_once_without_echo(self):
+        def responses_usage_payload(field):
+            usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            usage[field] = f"SECRET_RESPONSES_{field.upper()}"
+            return {
+                "type": "response.completed",
+                "response": {
+                    "id": f"resp_bad_{field}",
+                    "status": "completed",
+                    "output": [],
+                    "usage": usage,
+                },
+            }
+
+        def responses_function_payload(field):
+            item = {
+                "id": "fc_valid",
+                "type": "function_call",
+                "call_id": "call_valid",
+                "name": "tool_valid",
+                "arguments": "",
+            }
+            item[field] = {"secret": f"SECRET_RESPONSES_{field.upper()}"}
+            return {"type": "response.output_item.added", "item": item}
+
+        def chat_usage_payload(field):
+            usage = {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            }
+            usage[field] = f"SECRET_CHAT_{field.upper()}"
+            return {"choices": [], "usage": usage}
+
+        def chat_tool_payload(field):
+            tool_call = {
+                "index": 0,
+                "id": "call_valid",
+                "type": "function",
+                "function": {"name": "tool_valid", "arguments": ""},
+            }
+            target = tool_call["function"] if field in {"name", "arguments"} else tool_call
+            target[field] = {"secret": f"SECRET_CHAT_{field.upper()}"}
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [tool_call]},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+
+        cases = (
+            (
+                "responses_usage_input_tokens",
+                "responses",
+                responses_usage_payload("input_tokens"),
+            ),
+            (
+                "responses_usage_output_tokens",
+                "responses",
+                responses_usage_payload("output_tokens"),
+            ),
+            (
+                "responses_usage_total_tokens",
+                "responses",
+                responses_usage_payload("total_tokens"),
+            ),
+            (
+                "responses_content_part_text",
+                "responses",
+                {
+                    "type": "response.content_part.added",
+                    "part": {
+                        "type": "output_text",
+                        "text": 225,
+                        "annotations": [{"secret": "SECRET_RESPONSES_PART_TEXT"}],
+                    },
+                },
+            ),
+            (
+                "responses_message_content_text",
+                "responses",
+                {
+                    "type": "response.output_item.added",
+                    "item": {
+                        "id": "msg_bad_text",
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": {"secret": "SECRET_RESPONSES_MESSAGE_TEXT"},
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                },
+            ),
+            (
+                "responses_function_item_id",
+                "responses",
+                responses_function_payload("id"),
+            ),
+            (
+                "responses_function_call_id",
+                "responses",
+                responses_function_payload("call_id"),
+            ),
+            (
+                "responses_function_name",
+                "responses",
+                responses_function_payload("name"),
+            ),
+            (
+                "responses_function_arguments",
+                "responses",
+                responses_function_payload("arguments"),
+            ),
+            (
+                "chat_usage_prompt_tokens",
+                "chat_completions",
+                chat_usage_payload("prompt_tokens"),
+            ),
+            (
+                "chat_usage_completion_tokens",
+                "chat_completions",
+                chat_usage_payload("completion_tokens"),
+            ),
+            (
+                "chat_usage_total_tokens",
+                "chat_completions",
+                chat_usage_payload("total_tokens"),
+            ),
+            (
+                "chat_content",
+                "chat_completions",
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": {"secret": "SECRET_CHAT_CONTENT"}},
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+            ),
+            (
+                "chat_tool_id",
+                "chat_completions",
+                chat_tool_payload("id"),
+            ),
+            (
+                "chat_tool_name",
+                "chat_completions",
+                chat_tool_payload("name"),
+            ),
+            (
+                "chat_tool_arguments",
+                "chat_completions",
+                chat_tool_payload("arguments"),
+            ),
+            (
+                "chat_unsupported_consumed_delta",
+                "chat_completions",
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "reasoning_content": "SECRET_CHAT_UNSUPPORTED_DELTA"
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+            ),
+        )
+
+        for name, source_format, invalid_payload in cases:
+            with self.subTest(name=name):
+                self.write_proxy_event.reset_mock()
+                self.external_model["upstream_format"] = source_format
+                responses_source = source_format == "responses"
+                path = (
+                    "/v1/providers/volc/chat/completions"
+                    if responses_source
+                    else "/v1/providers/volc/responses"
+                )
+                request = (
+                    {
+                        "model": "volc/glm-5.2",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                    }
+                    if responses_source
+                    else {
+                        "model": "volc/glm-5.2",
+                        "input": [{"type": "message", "role": "user", "content": "hi"}],
+                        "stream": True,
+                    }
+                )
+                invalid_frame = (
+                    b"data: "
+                    + json.dumps(invalid_payload, separators=(",", ":")).encode("utf-8")
+                    + b"\n\n"
+                )
+                later_frames = (
+                    [
+                        b'data: {"type":"response.completed","response":{"id":"later_success","status":"completed","output":[]}}\n\n',
+                        b"",
+                    ]
+                    if responses_source
+                    else [
+                        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+                        b"data: [DONE]\n\n",
+                        b"",
+                    ]
+                )
+                handler, fake = post_handler(
+                    path,
+                    json.dumps(request).encode("utf-8"),
+                    headers={"X-Codex-Client-Id": "opencode"},
+                )
+
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                        },
+                        clear=False,
+                    ),
+                    patch(
+                        "codex_proxy.urlopen",
+                        side_effect=lambda *_args, **_kwargs: FakeSseResponse(
+                            [invalid_frame, *later_frames]
+                        ),
+                    ) as mock_urlopen,
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                written = b"".join(fake.wfile.writes)
+                request_complete = [
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "request_complete"
+                ]
+                self.assertEqual(mock_urlopen.call_count, 1)
+                self.assertEqual(len(request_complete), 1)
+                self.assertEqual(request_complete[0]["status"], 502)
+                self.assertEqual(
+                    written.count(b"data: " if responses_source else b"event: error"),
+                    1,
+                )
+                self.assertNotIn(b"SECRET_", written)
+                self.assertNotIn(b"later_success", written)
+                self.assertNotIn(
+                    b"data: [DONE]" if responses_source else b"response.completed",
+                    written,
+                )
+
+    def test_buffered_verified_conversion_error_is_sanitized_502_without_echo(self):
+        self.external_model["upstream_format"] = "chat_completions"
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            json.dumps(
+                {
+                    "model": "volc/glm-5.2",
+                    "input": [{"type": "message", "role": "user", "content": "hi"}],
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={"X-Codex-Client-Id": "opencode"},
+        )
+        frames = [
+            b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"SECRET_BUFFERED_CONVERSION"},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+            b"data: [DONE]\n\n",
+            b"",
+        ]
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=lambda *_args, **_kwargs: FakeSseResponse(frames),
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(fake.wfile.writes)
+        payload = json.loads(written)
+        request_complete = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(len(request_complete), 1)
+        self.assertEqual(request_complete[0]["status"], 502)
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["type"],
+            "upstream_protocol_error",
+        )
+        self.assertEqual(
+            payload["codexhub_error"]["details"]["error"],
+            "upstream_protocol_error",
+        )
+        self.assertNotIn(b"SECRET_", written)
+        self.assertNotIn(b"response.completed", written)
+
     def test_upstream_http_error_emits_request_complete_with_status(self):
         body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
         handler, fake = post_handler("/v1/providers/volc/chat/completions", body, headers={"X-Codex-Client-Id": "opencode"})
