@@ -133,6 +133,28 @@ class SseEventAssemblerTests(unittest.TestCase):
             assembler.feed(b"\r\n")
         self.assertEqual(raised.exception.disposition, "incomplete")
 
+    def test_completion_bytes_are_exact_across_line_endings_and_split_crlf(self):
+        cases = (
+            ("partial_line", (b"data: ok",), b"\n\n"),
+            ("lf_line", (b"data: ok\n",), b"\n"),
+            ("lf_event", (b"data: ok\n\n",), b""),
+            ("crlf_line", (b"data: ok\r\n",), b"\n"),
+            ("crlf_event", (b"data: ok\r\n\r\n",), b""),
+            ("cr_line", (b"data: ok\r",), b"\r"),
+            ("split_crlf_line", (b"data: ok\r", b"\n"), b"\n"),
+            ("cr_event", (b"data: ok\r\r",), b""),
+            ("split_consecutive_cr_event", (b"data: ok\r", b"\r"), b""),
+            ("empty_cr_event", (b"\r",), b""),
+        )
+
+        for name, chunks, expected in cases:
+            with self.subTest(name=name):
+                assembler = SseEventAssembler()
+                for chunk in chunks:
+                    assembler.feed(chunk)
+
+                self.assertEqual(assembler.completion_bytes(), expected)
+
     def test_size_limit_fails_closed_with_counts_only(self):
         self.assertEqual(DEFAULT_MAX_FRAME_BYTES, 16 * 1024 * 1024)
         assembler = SseEventAssembler(max_frame_bytes=12)

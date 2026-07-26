@@ -9923,6 +9923,44 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(closed_event["synthetic_terminal_event_sent"])
         self.assertTrue(usage_capture["synthetic_terminal_event_sent"])
 
+    def test_transparent_responses_size_limit_preserves_completed_cr_event_sequence(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_cr_size_limit",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=64,
+        )
+        completed_cr_event = b"data: first\r\r"
+        secret = b"transparent-cr-secret"
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([completed_cr_event, (b"x" * 64) + secret, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_cr_size_limit",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, completed_cr_event)
+        self.assertEqual(events[0].data, b"first")
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertNotIn(secret, body)
+
     def test_transparent_responses_stream_commit_ignores_interruption_after_terminal(self):
         handler = FakeHandler()
         response = FakeSseResponse(

@@ -100,10 +100,18 @@ class SseEventAssembler:
             raise
 
     def completion_bytes(self) -> bytes:
-        """Return the minimal LF suffix that completes the pending frame."""
+        """Return the minimal suffix that completes the pending frame."""
         self._require_open()
-        partial_line_bytes = len(self._buffer) - self._line_start
-        if partial_line_bytes:
+        partial_line = bytes(self._buffer[self._line_start :])
+        if partial_line:
+            trailing_cr = partial_line.endswith(b"\r")
+            content = partial_line[:-1] if trailing_cr else partial_line
+            if self._at_stream_start and content.startswith(b"\xef\xbb\xbf"):
+                content = content[3:]
+            if trailing_cr:
+                return b"" if not content else b"\r"
+            if not content:
+                return b"\n"
             return b"\n\n"
         if self._frame_raw:
             return b"\n"
