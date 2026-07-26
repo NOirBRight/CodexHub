@@ -2726,7 +2726,40 @@ class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
 
-def _converted_sse_payload(event: SseEvent) -> Mapping[str, Any] | str | None:
+def _validate_verified_converted_sse_payload(
+    payload: Mapping[str, Any],
+    source_format: str,
+) -> None:
+    if source_format == "responses":
+        if (
+            payload.get("type") == "response.output_text.delta"
+            and not isinstance(payload.get("delta"), str)
+        ):
+            raise UpstreamSseSemanticError(
+                "Upstream returned a structurally invalid complete Responses SSE event."
+            )
+        return
+    if source_format != "chat_completions":
+        return
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if (
+            isinstance(choice, Mapping)
+            and "delta" in choice
+            and not isinstance(choice.get("delta"), Mapping)
+        ):
+            raise UpstreamSseSemanticError(
+                "Upstream returned a structurally invalid complete Chat Completions SSE event."
+            )
+
+
+def _converted_sse_payload(
+    event: SseEvent,
+    *,
+    verified_source_format: str | None = None,
+) -> Mapping[str, Any] | str | None:
     if not any(line.name == b"data" for line in event.lines) or not event.data:
         return None
     if event.data == b"[DONE]":
@@ -2741,6 +2774,8 @@ def _converted_sse_payload(event: SseEvent) -> Mapping[str, Any] | str | None:
         raise UpstreamSseSemanticError(
             "Upstream returned a structurally invalid complete SSE event."
         )
+    if verified_source_format is not None:
+        _validate_verified_converted_sse_payload(payload, verified_source_format)
     return payload
 
 
@@ -15149,9 +15184,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         assembler = SseEventAssembler()
         pending_events: list[SseEvent] = []
         assembler_finished = False
+        deferred_size_error: SseFrameTooLargeError | None = None
 
         def assemble_chunk(chunk: bytes) -> bool:
-            events = assembler.feed(chunk)
+            nonlocal deferred_size_error
+            events: list[SseEvent] = []
+            try:
+                assembler.feed(chunk, on_event=events.append)
+            except SseFrameTooLargeError as exc:
+                deferred_size_error = exc
             pending_events.extend(events)
             return any(event_resets_idle_timeout(event) for event in events)
 
@@ -15166,6 +15207,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 ready_events = tuple(pending_events)
                 pending_events.clear()
                 yield from ready_events
+                if deferred_size_error is not None:
+                    raise deferred_size_error
 
             termination = assembler.finish()
             assembler_finished = True
@@ -16010,6 +16053,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # SSE into a single JSON response body.
         buffer_sse_to_json = is_event_stream and not caller_stream
         buffered_json_response = False
+        buffered_chat_sse_to_responses = False
+        verified_source_format = (
+            upstream_format
+            if (
+                behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                and upstream_format != inbound_format
+            )
+            else None
+        )
         usage_context = _usage_observed_context(
             event_context,
             request_id=request_id,
@@ -16141,17 +16193,28 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if buffer_sse_to_json:
                 # Buffer the full SSE stream into a list of events.
                 events: list[Mapping[str, Any]] = []
+                chat_chunks: list[Mapping[str, Any] | str] = []
                 incomplete_frame = False
                 try:
                     for frame in self._iter_upstream_sse_events(
                         response,
-                        event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
+                        event_resets_idle_timeout=(
+                            _chat_sse_event_resets_idle_timeout
+                            if upstream_format == "chat_completions"
+                            else _responses_sse_event_resets_idle_timeout
+                        ),
                         on_chunk=observe_diagnostic_sse_line,
                     ):
-                        payload = _converted_sse_payload(frame)
-                        if payload is None or payload == "[DONE]":
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
+                        if payload is None:
                             continue
-                        events.append(payload)
+                        if upstream_format == "chat_completions":
+                            chat_chunks.append(payload)
+                        elif payload != "[DONE]":
+                            events.append(payload)
                 except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                     status = 502
                     converted_stream_failure = True
@@ -16191,7 +16254,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             raise UpstreamStreamIncompleteError(
                                 "Upstream SSE stream ended with an incomplete pending frame"
                             )
-                        body = _events_to_responses_body(events, require_completed=True)
+                        if (
+                            upstream_format == "chat_completions"
+                            and not want_chat_output
+                        ):
+                            response_events = _chat_stream_chunks_to_response_events(
+                                chat_chunks
+                            )
+                            body = _events_to_responses_body(
+                                response_events,
+                                require_completed=True,
+                            )
+                            buffered_chat_sse_to_responses = True
+                        else:
+                            body = _events_to_responses_body(
+                                events,
+                                require_completed=True,
+                            )
                     except UpstreamStreamIncompleteError:
                         if defer_stream_errors:
                             raise
@@ -16242,10 +16321,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
                         )
             elif upstream_format == "chat_completions":
-                converted_body = _chat_completion_to_response_body(
-                    body,
-                    repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                )
+                if buffered_chat_sse_to_responses:
+                    converted_body = body
+                else:
+                    converted_body = _chat_completion_to_response_body(
+                        body,
+                        repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                    )
                 if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
                     body = converted_body
                 else:
@@ -16477,7 +16559,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         on_chunk=observe_diagnostic_sse_line,
                     ):
                         line_ending = _sse_line_ending(frame.raw)
-                        payload = _converted_sse_payload(frame)
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format="responses",
+                        )
                         if payload is None or payload == "[DONE]":
                             continue
                         event = payload
@@ -16630,7 +16715,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         on_chunk=observe_diagnostic_sse_line,
                     ):
                         line_ending = _sse_line_ending(frame.raw)
-                        payload = _converted_sse_payload(frame)
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format="chat_completions",
+                        )
                         if payload is None:
                             continue
                         events: list[dict[str, Any]] = []

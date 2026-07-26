@@ -3183,6 +3183,112 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["model"], "canonical-json")
         self.assertEqual(payload["output"][0]["content"][0]["text"], "buffered json")
 
+    def test_buffered_chat_sse_to_responses_reconstructs_chat_source_semantics(self):
+        chunks = [
+            {
+                "id": "chatcmpl_buffered",
+                "object": "chat.completion.chunk",
+                "model": "canonical-chat-buffered",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "buffered chat"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_buffered",
+                "object": "chat.completion.chunk",
+                "model": "canonical-chat-buffered",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_buffered",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": '{"q":',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_buffered",
+                "object": "chat.completion.chunk",
+                "model": "canonical-chat-buffered",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '"value"}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_buffered",
+                "object": "chat.completion.chunk",
+                "model": "canonical-chat-buffered",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "total_tokens": 12,
+                },
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\r\r".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\r\r", b""]
+        )
+        fake = FakeHandler()
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "chat_only_provider",
+            request_id="req-buffered-chat-to-responses",
+            model="caller-model",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=False,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture={},
+        )
+
+        payload = json.loads(b"".join(fake.wfile.writes))
+        output_by_type = {item["type"]: item for item in payload["output"]}
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["object"], "response")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["model"], "canonical-chat-buffered")
+        self.assertEqual(
+            output_by_type["message"]["content"][0]["text"],
+            "buffered chat",
+        )
+        self.assertEqual(output_by_type["function_call"]["call_id"], "call_buffered")
+        self.assertEqual(output_by_type["function_call"]["name"], "lookup")
+        self.assertEqual(output_by_type["function_call"]["arguments"], '{"q":"value"}')
+        self.assertEqual(
+            payload["usage"],
+            {"input_tokens": 7, "output_tokens": 5, "total_tokens": 12},
+        )
+
     def test_image_proxy_sse_to_body_uses_complete_frames(self):
         response = FakeSseResponse(
             [
@@ -3258,6 +3364,49 @@ class RoutingTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(outputs[1:], outputs[:-1])
 
+    def test_converted_event_iterator_emits_completed_cr_frame_before_same_read_size_failure(self):
+        completed_frame = (
+            b'data: {"type":"response.output_text.delta","delta":"before limit"}\r\r'
+        )
+        oversized_frame = b"data: " + (b"x" * DEFAULT_MAX_FRAME_BYTES)
+        partitions = (
+            ("same_read", [completed_frame + oversized_frame, b""]),
+            (
+                "split_reads",
+                [completed_frame + oversized_frame[:1], oversized_frame[1:], b""],
+            ),
+        )
+        observations = []
+
+        for name, chunks in partitions:
+            with self.subTest(name=name):
+                iterator = CodexProxyHandler._iter_upstream_sse_events(
+                    FakeHandler(),
+                    FakeSseResponse(chunks),
+                    event_resets_idle_timeout=lambda event: bool(event.data),
+                )
+
+                event = next(iterator)
+                with self.assertRaises(SseFrameTooLargeError) as raised:
+                    next(iterator)
+
+                self.assertEqual(event.raw, completed_frame)
+                self.assertEqual(
+                    json.loads(event.data),
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "before limit",
+                    },
+                )
+                self.assertEqual(raised.exception.classification, "sse_frame_too_large")
+                self.assertGreater(
+                    raised.exception.pending_bytes,
+                    raised.exception.max_frame_bytes,
+                )
+                observations.append((event.raw, event.data, raised.exception.classification))
+
+        self.assertEqual(observations[0], observations[1])
+
     def test_malformed_converted_request_completes_once_with_502_without_retry(self):
         self.external_model["upstream_format"] = "chat_completions"
         body = json.dumps(
@@ -3307,6 +3456,85 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"SECRET_CONVERTED", written)
         self.assertNotIn(b"later_success", written)
         self.assertNotIn(b"response.completed", written)
+
+    def test_verified_converted_structural_errors_complete_once_with_502_without_retry(self):
+        cases = (
+            {
+                "name": "responses_to_chat",
+                "upstream_format": "responses",
+                "path": "/v1/providers/volc/chat/completions",
+                "request": {
+                    "model": "volc/glm-5.2",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+                "frames": [
+                    b'data: {"type":"response.output_text.delta","delta":225,"secret":"SECRET_RESPONSES_STRUCTURAL"}\n\n',
+                    b'data: {"type":"response.completed","response":{"id":"later_success","model":"later-model","status":"completed","output":[]}}\n\n',
+                    b"",
+                ],
+                "error_marker": b"data: ",
+                "forbidden_terminal": b"data: [DONE]",
+            },
+            {
+                "name": "chat_to_responses",
+                "upstream_format": "chat_completions",
+                "path": "/v1/providers/volc/responses",
+                "request": {
+                    "model": "volc/glm-5.2",
+                    "input": [{"type": "message", "role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+                "frames": [
+                    b'data: {"id":"chatcmpl_secret","object":"chat.completion.chunk","choices":[{"index":0,"delta":"SECRET_CHAT_STRUCTURAL","finish_reason":null}]}\n\n',
+                    b'data: {"id":"chatcmpl_later","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                    b"",
+                ],
+                "error_marker": b"event: error",
+                "forbidden_terminal": b"response.completed",
+            },
+        )
+
+        for case in cases:
+            with self.subTest(name=case["name"]):
+                self.write_proxy_event.reset_mock()
+                self.external_model["upstream_format"] = case["upstream_format"]
+                handler, fake = post_handler(
+                    case["path"],
+                    json.dumps(case["request"]).encode("utf-8"),
+                    headers={"X-Codex-Client-Id": "opencode"},
+                )
+
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                        },
+                        clear=False,
+                    ),
+                    patch(
+                        "codex_proxy.urlopen",
+                        return_value=FakeSseResponse(case["frames"]),
+                    ) as mock_urlopen,
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                written = b"".join(fake.wfile.writes)
+                request_complete = [
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "request_complete"
+                ]
+                self.assertEqual(mock_urlopen.call_count, 1)
+                self.assertEqual(len(request_complete), 1)
+                self.assertEqual(request_complete[0]["status"], 502)
+                self.assertEqual(written.count(case["error_marker"]), 1)
+                self.assertNotIn(b"SECRET_", written)
+                self.assertNotIn(b"later_success", written)
+                self.assertNotIn(case["forbidden_terminal"], written)
 
     def test_upstream_http_error_emits_request_complete_with_status(self):
         body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
