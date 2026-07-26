@@ -140,11 +140,11 @@ class SseEventAssemblerTests(unittest.TestCase):
             ("lf_event", (b"data: ok\n\n",), b""),
             ("crlf_line", (b"data: ok\r\n",), b"\n"),
             ("crlf_event", (b"data: ok\r\n\r\n",), b""),
-            ("cr_line", (b"data: ok\r",), b"\r"),
+            ("cr_line", (b"data: ok\r",), b"\r\n"),
             ("split_crlf_line", (b"data: ok\r", b"\n"), b"\n"),
-            ("cr_event", (b"data: ok\r\r",), b""),
-            ("split_consecutive_cr_event", (b"data: ok\r", b"\r"), b""),
-            ("empty_cr_event", (b"\r",), b""),
+            ("cr_event", (b"data: ok\r\r",), b"\n"),
+            ("split_consecutive_cr_event", (b"data: ok\r", b"\r"), b"\n"),
+            ("empty_cr_event", (b"\r",), b"\n"),
         )
 
         for name, chunks, expected in cases:

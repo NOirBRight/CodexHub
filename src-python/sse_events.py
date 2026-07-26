@@ -109,7 +109,7 @@ class SseEventAssembler:
             if self._at_stream_start and content.startswith(b"\xef\xbb\xbf"):
                 content = content[3:]
             if trailing_cr:
-                return b"" if not content else b"\r"
+                return b"\n" if not content else b"\r\n"
             if not content:
                 return b"\n"
             return b"\n\n"

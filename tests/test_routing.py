@@ -9956,10 +9956,40 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(status, 502)
         self.assertEqual(len(events), 2)
-        self.assertEqual(events[0].raw, completed_cr_event)
+        self.assertEqual(events[0].raw, completed_cr_event + b"\n")
         self.assertEqual(events[0].data, b"first")
         self.assertEqual(failed_payload["type"], "response.failed")
         self.assertNotIn(secret, body)
+
+    def test_transparent_responses_cr_completion_preserves_response_id_on_interruption(self):
+        handler = FakeHandler()
+        response_id = "resp_cr_boundary"
+        completed_cr_event = (
+            b'data: {"type":"response.created","response":{"id":"'
+            + response_id.encode("ascii")
+            + b'"}}\r\r'
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([completed_cr_event, URLError("connection reset")]),
+            "volcengine",
+            request_id="req_transparent_responses_cr_interruption",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        events = SseEventAssembler().feed(b"".join(handler.wfile.writes))
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, completed_cr_event + b"\n")
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(failed_payload["response"]["id"], response_id)
 
     def test_transparent_responses_stream_commit_ignores_interruption_after_terminal(self):
         handler = FakeHandler()
