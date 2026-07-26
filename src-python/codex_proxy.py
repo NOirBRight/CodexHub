@@ -12977,6 +12977,200 @@ class _GatewayDownstreamStreamCommit:
         }
 
 
+class _UpstreamSseReaderLifecycle:
+    """Owns one upstream SSE reader thread, a bounded queue, and deterministic close/join.
+
+    This lifecycle is the single owner of the thread that reads raw SSE lines from
+    an upstream response. It uses a bounded queue (capacity 32) so a slow or stalled
+    downstream cannot create unbounded buffering. The producer observes close while
+    waiting on a full queue; the consumer observes close while waiting on an empty
+    queue. Close is idempotent and wakes both sides. Join is bounded and classifies a
+    non-terminating reader without hiding it.
+    """
+
+    QUEUE_CAPACITY = 32
+    PRODUCER_PUT_TIMEOUT_SECONDS = 0.05
+    CONSUMER_POLL_TIMEOUT_SECONDS = 0.1
+    JOIN_TIMEOUT_SECONDS = 1.0
+
+    def __init__(
+        self,
+        response: Any,
+        *,
+        admission: GatewayRequestAdmission | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
+        thread_name: str = "codex-proxy-sse-reader",
+    ) -> None:
+        self._response = response
+        self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=self.QUEUE_CAPACITY)
+        self._closed = threading.Event()
+        self._close_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._thread_name = thread_name
+        self._cancellation_requested = (
+            (lambda: admission.cancelled) if admission is not None else cancellation_requested
+        )
+        self._started = False
+        self._response_closed = False
+        self._join_outcome: str | None = None
+        if admission is not None:
+            admission.attach_upstream_transport(self)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed.is_set()
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def reader_alive(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    @property
+    def join_outcome(self) -> str | None:
+        return self._join_outcome
+
+    def _cancelled(self) -> bool:
+        if self._closed.is_set():
+            return True
+        cancellation_requested = self._cancellation_requested
+        if cancellation_requested is None:
+            return False
+        try:
+            return bool(cancellation_requested())
+        except Exception:
+            return False
+
+    def start(self) -> None:
+        """Start the reader thread idempotently."""
+        with self._close_lock:
+            if self._started or self._closed.is_set():
+                return
+            self._started = True
+            thread = threading.Thread(target=self._read_upstream, name=self._thread_name, daemon=True)
+            self._thread = thread
+        thread.start()
+
+    def _read_upstream(self) -> None:
+        """Producer loop: read lines and enqueue them with bounded backpressure."""
+        response = self._response
+        try:
+            while not self._cancelled():
+                try:
+                    line = response.readline()
+                except BaseException as exc:
+                    if not self._cancelled():
+                        self._enqueue(("error", exc))
+                    return
+                if not self._enqueue(("line", line)):
+                    return
+                if not line:
+                    return
+        finally:
+            self.close()
+
+    def _enqueue(self, item: tuple[str, Any]) -> bool:
+        """Enqueue one item, respecting close/cancellation. Returns False if closed."""
+        while not self._cancelled():
+            try:
+                self._queue.put(item, timeout=self.PRODUCER_PUT_TIMEOUT_SECONDS)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def get(self, timeout: float | None = None) -> tuple[str, Any]:
+        """Get one queued item.
+
+        Raises ``queue.Empty`` on timeout. The caller should check :attr:`closed`
+        to distinguish a transient empty queue from a closed lifecycle.
+        """
+        self.start()
+        if timeout is not None:
+            try:
+                return self._queue.get(timeout=max(0.0, timeout))
+            except queue.Empty:
+                if self._cancelled():
+                    return "line", b""
+                raise
+        while True:
+            try:
+                return self._queue.get(timeout=self.CONSUMER_POLL_TIMEOUT_SECONDS)
+            except queue.Empty:
+                if self._cancelled():
+                    return "line", b""
+
+    def readline(self) -> bytes:
+        """Read one upstream SSE line.
+
+        Returns ``b""`` when the lifecycle is closed. Raises the stored upstream
+        exception when the reader encountered an error.
+        """
+        self.start()
+        while True:
+            kind, value = self.get()
+            if kind == "error":
+                raise value
+            return value
+
+    def iter_lines(self):
+        """Yield raw upstream SSE lines until EOF or close."""
+        try:
+            while True:
+                line = self.readline()
+                yield line
+                if not line:
+                    return
+        finally:
+            self.close()
+
+    def shorten_terminal_drain_timeout(self, timeout_seconds: float) -> None:
+        """Forward the existing pooled-response terminal drain optimization."""
+        shorten = getattr(self._response, "shorten_terminal_drain_timeout", None)
+        if callable(shorten):
+            shorten(timeout_seconds)
+
+    def close(self) -> None:
+        """Close the lifecycle idempotently and wake both producer and consumer."""
+        with self._close_lock:
+            self._closed.set()
+            should_close_response = not self._response_closed
+            self._response_closed = True
+        if should_close_response:
+            close = getattr(self._response, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    def join(self, timeout: float = JOIN_TIMEOUT_SECONDS) -> tuple[bool, str | None]:
+        """Join the reader thread for at most ``timeout`` seconds.
+
+        Returns ``(joined, outcome)``. A started reader receives a sanitized
+        termination classification; ``outcome`` is ``None`` only when no reader
+        was started. Once a join timeout is observed, that classification remains
+        retained even if a later join observes termination.
+        """
+        thread = self._thread
+        if thread is None:
+            return True, None
+        bounded_timeout = min(self.JOIN_TIMEOUT_SECONDS, max(0.0, timeout))
+        thread.join(timeout=bounded_timeout)
+        if thread.is_alive():
+            outcome = "upstream_sse_reader_thread_did_not_terminate"
+            if self._join_outcome != outcome:
+                logger.warning("upstream SSE reader join ended with %s", outcome)
+            self._join_outcome = outcome
+            return False, self._join_outcome
+        if self._join_outcome is None:
+            self._join_outcome = "upstream_sse_reader_thread_terminated"
+        return True, self._join_outcome
+
+
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -14801,113 +14995,93 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
         transport_idle_guard_enabled = transport_timeout_seconds > 0
         model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
-        if (
-            admission is None
-            and keepalive_interval <= 0
-            and not transport_idle_guard_enabled
-            and not model_event_idle_guard_enabled
-        ):
+
+        lifecycle = _UpstreamSseReaderLifecycle(
+            response,
+            admission=admission,
+        )
+        request_scoped_seam = _handler_downstream_stream_commit(self)
+        if request_scoped_seam is not None:
+            request_scoped_seam.attach_upstream_response(lifecycle)
+        lifecycle.start()
+        try:
+            stream_started_at = time.monotonic()
+            last_transport_at = stream_started_at
+            last_model_event_at = stream_started_at
+            last_keepalive_at = stream_started_at
+
+            def raise_idle_timeout(timeout_seconds: float, phase: str) -> None:
+                lifecycle.close()
+                raise UpstreamStreamIdleTimeoutError(timeout_seconds, phase=phase)
+
             while True:
                 raise_if_shutdown_requested()
-                line = response.readline()
-                observe_line(line)
-                yield line
-                if not line:
-                    return
-
-        lines: queue.Queue[tuple[str, bytes | BaseException]] = queue.Queue()
-
-        def read_upstream_lines() -> None:
-            try:
-                while True:
-                    line = response.readline()
-                    lines.put(("line", line))
-                    if not line:
-                        return
-            except BaseException as exc:
-                lines.put(("error", exc))
-
-        threading.Thread(target=read_upstream_lines, name="codex-proxy-sse-reader", daemon=True).start()
-        stream_started_at = time.monotonic()
-        last_transport_at = stream_started_at
-        last_model_event_at = stream_started_at
-        last_keepalive_at = stream_started_at
-
-        def close_response_for_idle_timeout() -> None:
-            close = getattr(response, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-
-        def raise_idle_timeout(timeout_seconds: float, phase: str) -> None:
-            close_response_for_idle_timeout()
-            raise UpstreamStreamIdleTimeoutError(timeout_seconds, phase=phase)
-
-        while True:
-            raise_if_shutdown_requested()
-            now = time.monotonic()
-            timeout_seconds: float | None = None
-            if keepalive_interval > 0:
-                timeout_seconds = max(0.001, keepalive_interval - (now - last_keepalive_at))
-            if transport_idle_guard_enabled:
-                remaining_idle = transport_timeout_seconds - (now - last_transport_at)
-                if remaining_idle <= 0:
-                    raise_idle_timeout(transport_timeout_seconds, "transport")
-                timeout_seconds = (
-                    remaining_idle
-                    if timeout_seconds is None
-                    else max(0.001, min(timeout_seconds, remaining_idle))
-                )
-            if model_event_idle_guard_enabled:
-                remaining_idle = model_event_timeout_seconds - (now - last_model_event_at)
-                if remaining_idle <= 0:
-                    raise_idle_timeout(model_event_timeout_seconds, "model_event")
-                timeout_seconds = (
-                    remaining_idle
-                    if timeout_seconds is None
-                    else max(0.001, min(timeout_seconds, remaining_idle))
-                )
-            if admission is not None:
-                timeout_seconds = (
-                    0.1
-                    if timeout_seconds is None
-                    else max(0.001, min(timeout_seconds, 0.1))
-                )
-
-            try:
-                if timeout_seconds is None:
-                    kind, value = lines.get()
-                else:
-                    kind, value = lines.get(timeout=timeout_seconds)
-            except queue.Empty:
-                raise_if_shutdown_requested()
                 now = time.monotonic()
-                if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
-                    raise_idle_timeout(transport_timeout_seconds, "transport")
-                if model_event_idle_guard_enabled and (now - last_model_event_at) >= model_event_timeout_seconds:
-                    raise_idle_timeout(model_event_timeout_seconds, "model_event")
+                timeout_seconds: float | None = None
                 if keepalive_interval > 0:
-                    if not self._write_sse_keepalive():
-                        close_response_for_idle_timeout()
-                        raise DownstreamKeepaliveFailedError(
-                            "downstream keepalive write failed"
-                        )
-                    last_keepalive_at = time.monotonic()
-                continue
-            if kind == "error":
-                raise_if_shutdown_requested()
-                raise value
-            if isinstance(value, bytes) and value:
-                now = time.monotonic()
-                last_transport_at = now
-                if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
-                    last_model_event_at = now
-                observe_line(value)
-            yield value
-            if not value:
-                return
+                    timeout_seconds = max(0.001, keepalive_interval - (now - last_keepalive_at))
+                if transport_idle_guard_enabled:
+                    remaining_idle = transport_timeout_seconds - (now - last_transport_at)
+                    if remaining_idle <= 0:
+                        raise_idle_timeout(transport_timeout_seconds, "transport")
+                    timeout_seconds = (
+                        remaining_idle
+                        if timeout_seconds is None
+                        else max(0.001, min(timeout_seconds, remaining_idle))
+                    )
+                if model_event_idle_guard_enabled:
+                    remaining_idle = model_event_timeout_seconds - (now - last_model_event_at)
+                    if remaining_idle <= 0:
+                        raise_idle_timeout(model_event_timeout_seconds, "model_event")
+                    timeout_seconds = (
+                        remaining_idle
+                        if timeout_seconds is None
+                        else max(0.001, min(timeout_seconds, remaining_idle))
+                    )
+                if admission is not None:
+                    timeout_seconds = (
+                        0.1
+                        if timeout_seconds is None
+                        else max(0.001, min(timeout_seconds, 0.1))
+                    )
+
+                try:
+                    if timeout_seconds is None:
+                        kind, value = lifecycle.get()
+                    else:
+                        kind, value = lifecycle.get(timeout=timeout_seconds)
+                except queue.Empty:
+                    raise_if_shutdown_requested()
+                    if lifecycle.closed:
+                        return
+                    now = time.monotonic()
+                    if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
+                        raise_idle_timeout(transport_timeout_seconds, "transport")
+                    if model_event_idle_guard_enabled and (now - last_model_event_at) >= model_event_timeout_seconds:
+                        raise_idle_timeout(model_event_timeout_seconds, "model_event")
+                    if keepalive_interval > 0:
+                        if not self._write_sse_keepalive():
+                            lifecycle.close()
+                            raise DownstreamKeepaliveFailedError(
+                                "downstream keepalive write failed"
+                            )
+                        last_keepalive_at = time.monotonic()
+                    continue
+                if kind == "error":
+                    raise_if_shutdown_requested()
+                    raise value
+                if isinstance(value, bytes) and value:
+                    now = time.monotonic()
+                    last_transport_at = now
+                    if model_event_idle_guard_enabled and line_resets_idle_timeout is not None and line_resets_idle_timeout(value):
+                        last_model_event_at = now
+                    observe_line(value)
+                yield value
+                if not value:
+                    return
+        finally:
+            lifecycle.close()
+            lifecycle.join(timeout=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
 
     def _write_sse_error_event(self, upstream_name: str, exc: BaseException) -> None:
         self._write_sse_event(
@@ -15179,12 +15353,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return status
             return _handle_cancellation()
 
+        lifecycle = _UpstreamSseReaderLifecycle(
+            response,
+            admission=admission,
+        )
+        seam.attach_upstream_response(lifecycle)
         try:
             while True:
                 result = _observed_cancellation()
                 if result is not None:
                     return result
-                line = response.readline()
+                line = lifecycle.readline()
                 result = _observed_cancellation()
                 if result is not None:
                     return result
@@ -15270,6 +15449,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 synthetic_terminal_write_detail=synthetic_terminal_write_detail,
             )
             return 502
+        finally:
+            lifecycle.close()
+            lifecycle.join(timeout=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
 
         self.close_connection = True
         sse_fields = seam.stats()
@@ -15536,13 +15718,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             pending_lines.clear()
             return True
 
+        lifecycle = _UpstreamSseReaderLifecycle(
+            response,
+            admission=admission,
+        )
+        seam.attach_upstream_response(lifecycle)
         try:
             while True:
                 result = _observed_cancellation()
                 if result is not None:
                     return result
                 try:
-                    line = response.readline()
+                    line = lifecycle.readline()
                 except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                     result = _observed_cancellation()
                     if result is not None:
@@ -15658,6 +15845,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             # Stream error events are intentionally raised without sending headers
             # so the caller can retry. The seam owns any bytes already committed.
             raise
+        finally:
+            lifecycle.close()
+            lifecycle.join(timeout=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
 
     def _relay_upstream_response(
         self,
