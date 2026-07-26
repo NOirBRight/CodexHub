@@ -14,6 +14,8 @@ __all__ = [
 ]
 
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+# Retry metadata remains raw regardless; the semantic integer is deliberately bounded.
+MAX_RETRY_MILLISECONDS = (1 << 63) - 1
 
 
 class SseAssemblerClosedError(RuntimeError):
@@ -72,6 +74,7 @@ class SseEventAssembler:
             raise ValueError("max_frame_bytes must be positive")
         self._max_frame_bytes = max_frame_bytes
         self._buffer = bytearray()
+        self._line_start = 0
         self._scan_offset = 0
         self._frame_raw = bytearray()
         self._lines: list[SseLine] = []
@@ -80,7 +83,7 @@ class SseEventAssembler:
 
     @property
     def buffered_bytes(self) -> int:
-        return len(self._frame_raw) + len(self._buffer)
+        return len(self._frame_raw) + len(self._buffer) - self._line_start
 
     def feed(self, chunk: bytes) -> tuple[SseEvent, ...]:
         """Consume bytes and return every complete frame in their original order."""
@@ -88,12 +91,23 @@ class SseEventAssembler:
         self._buffer.extend(chunk)
         try:
             events = self._drain(eof=False)
-            self._check_size()
+            self._check_size(self.buffered_bytes)
+            self._compact_buffer()
             return events
         except SseFrameTooLargeError:
             self._discard()
             self._closed_disposition = "size_limit"
             raise
+
+    def completion_bytes(self) -> bytes:
+        """Return the minimal LF suffix that completes the pending frame."""
+        self._require_open()
+        partial_line_bytes = len(self._buffer) - self._line_start
+        if partial_line_bytes:
+            return b"\n\n"
+        if self._frame_raw:
+            return b"\n"
+        return b""
 
     def finish(self) -> SseTermination:
         """Close at EOF and report complete final-CR events or discarded bytes."""
@@ -147,9 +161,9 @@ class SseEventAssembler:
                     content = content[3:]
             if content:
                 self._lines.append(_parse_line(content, raw_line))
-                self._check_size()
+                self._check_size(len(self._frame_raw))
                 continue
-            self._check_size()
+            self._check_size(len(self._frame_raw))
             events.append(self._complete_event())
         return tuple(events)
 
@@ -157,9 +171,9 @@ class SseEventAssembler:
         for index in range(self._scan_offset, len(self._buffer)):
             byte = self._buffer[index]
             if byte == 0x0A:
-                raw_line = bytes(self._buffer[: index + 1])
-                del self._buffer[: index + 1]
-                self._scan_offset = 0
+                raw_line = bytes(self._buffer[self._line_start : index + 1])
+                self._line_start = index + 1
+                self._scan_offset = self._line_start
                 return raw_line[:-1], raw_line
             if byte != 0x0D:
                 continue
@@ -167,9 +181,9 @@ class SseEventAssembler:
                 self._scan_offset = index
                 return None
             ending_size = 2 if index + 1 < len(self._buffer) and self._buffer[index + 1] == 0x0A else 1
-            raw_line = bytes(self._buffer[: index + ending_size])
-            del self._buffer[: index + ending_size]
-            self._scan_offset = 0
+            raw_line = bytes(self._buffer[self._line_start : index + ending_size])
+            self._line_start = index + ending_size
+            self._scan_offset = self._line_start
             return raw_line[:-ending_size], raw_line
         self._scan_offset = len(self._buffer)
         return None
@@ -179,11 +193,13 @@ class SseEventAssembler:
         data_values = [line.value for line in lines if line.name == b"data"]
         event_values = [line.value for line in lines if line.name == b"event"]
         id_values = [line.value for line in lines if line.name == b"id" and b"\0" not in line.value]
-        retry_values = [
-            int(line.value)
-            for line in lines
-            if line.name == b"retry" and line.value and line.value.isdigit()
-        ]
+        retry_values: list[int] = []
+        for line in lines:
+            if line.name != b"retry":
+                continue
+            retry = _parse_retry_milliseconds(line.value)
+            if retry is not None:
+                retry_values.append(retry)
         event = SseEvent(
             raw=bytes(self._frame_raw),
             lines=lines,
@@ -196,8 +212,7 @@ class SseEventAssembler:
         self._lines.clear()
         return event
 
-    def _check_size(self) -> None:
-        pending_bytes = self.buffered_bytes
+    def _check_size(self, pending_bytes: int) -> None:
         if pending_bytes > self._max_frame_bytes:
             raise SseFrameTooLargeError(
                 pending_bytes=pending_bytes,
@@ -206,9 +221,18 @@ class SseEventAssembler:
 
     def _discard(self) -> None:
         self._buffer.clear()
+        self._line_start = 0
         self._scan_offset = 0
         self._frame_raw.clear()
         self._lines.clear()
+
+    def _compact_buffer(self) -> None:
+        if self._line_start == 0:
+            return
+        consumed = self._line_start
+        self._buffer = self._buffer[consumed:]
+        self._line_start = 0
+        self._scan_offset -= consumed
 
     def _require_open(self) -> None:
         if self._closed_disposition is not None:
@@ -225,3 +249,17 @@ def _parse_line(content: bytes, raw: bytes) -> SseLine:
     if separator and value.startswith(b" "):
         value = value[1:]
     return SseLine(raw=raw, kind="field", name=name, value=value)
+
+
+def _parse_retry_milliseconds(value: bytes) -> int | None:
+    if not value:
+        return None
+    result = 0
+    for byte in value:
+        digit = byte - 0x30
+        if digit < 0 or digit > 9:
+            return None
+        if result > (MAX_RETRY_MILLISECONDS - digit) // 10:
+            return None
+        result = result * 10 + digit
+    return result

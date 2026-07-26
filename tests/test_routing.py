@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
+from sse_events import SseEventAssembler
 from subagent_state import build_subagent_state
 from codex_proxy import (
     CodexProxyHandler,
@@ -2131,6 +2132,32 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"code":"URLError"', body)
         self.assertIn(b'"upstream":"official"', body)
         self.assertTrue(fake.close_connection)
+
+    def test_official_passthrough_closes_unterminated_data_before_synthetic_failure(self):
+        fake = FakeHandler()
+        partial = b'data: {"type":"response.created","response":{"id":"resp_partial"}}'
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            FakeSseResponse([partial, URLError("connection reset")]),
+            "official",
+            request_id="req-partial-before-failure",
+            model="gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        self.assertEqual(status, 502)
+        self.assertEqual(
+            [json.loads(event.data)["type"] for event in events],
+            ["response.created", "response.failed"],
+        )
+        self.assertIn(partial + b"\n\nevent: response.failed\n", body)
 
     def test_official_passthrough_ignores_stream_error_after_completed_event(self):
         fake = FakeHandler()

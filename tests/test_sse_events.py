@@ -100,6 +100,16 @@ class SseEventAssemblerTests(unittest.TestCase):
         self.assertEqual(event.lines[-1].value, b"")
         self.assertEqual(tuple(line.raw for line in event.lines), tuple(raw.splitlines(keepends=True)[:-1]))
 
+    def test_oversized_numeric_retry_is_ignored_without_blocking_a_later_valid_value(self):
+        oversized_retry = b"9" * 5000
+        raw = b"retry:" + oversized_retry + b"\nretry: 1500\ndata: ok\n\n"
+
+        event = SseEventAssembler().feed(raw)[0]
+
+        self.assertEqual(event.raw, raw)
+        self.assertEqual(event.retry, 1500)
+        self.assertEqual(event.data, b"ok")
+
     def test_empty_events_are_emitted_and_multiple_frames_release_storage(self):
         assembler = SseEventAssembler()
 
@@ -141,6 +151,14 @@ class SseEventAssemblerTests(unittest.TestCase):
             assembler.feed(b"\n\n")
         self.assertEqual(closed.exception.disposition, "size_limit")
 
+    def test_size_limit_applies_to_each_frame_not_the_whole_input_chunk(self):
+        assembler = SseEventAssembler(max_frame_bytes=8)
+
+        events = assembler.feed(b"data:a\n\ndata:b\n\n")
+
+        self.assertEqual([event.data for event in events], [b"a", b"b"])
+        self.assertEqual(assembler.buffered_bytes, 0)
+
     def test_cancel_and_reset_have_bounded_deterministic_outcomes(self):
         assembler = SseEventAssembler()
         assembler.feed(b"data: secret")
@@ -167,6 +185,17 @@ class SseEventAssemblerTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].data, payload)
+        self.assertEqual(assembler.buffered_bytes, 0)
+
+    def test_many_short_lines_in_one_chunk_assemble_as_one_frame(self):
+        line_count = 8192
+        assembler = SseEventAssembler()
+
+        events = assembler.feed((b"data:x\n" * line_count) + b"\n")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events[0].lines), line_count)
+        self.assertEqual(events[0].data.count(b"\n"), line_count - 1)
         self.assertEqual(assembler.buffered_bytes, 0)
 
 

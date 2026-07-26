@@ -2756,8 +2756,8 @@ class PassthroughSseSemanticStats:
         self._eof_disposition = termination.disposition
         self._incomplete_bytes_discarded = termination.discarded_bytes
 
-    def has_pending_event(self) -> bool:
-        return self._assembler.buffered_bytes > 0
+    def pending_completion_bytes(self) -> bytes:
+        return self._assembler.completion_bytes()
 
     def fields(self) -> dict[str, Any]:
         event_types = sorted(self.event_type_counts)
@@ -12909,10 +12909,11 @@ class _GatewayDownstreamStreamCommit:
         if self._synthetic_terminal_failure_callback is None:
             return False, None, None
         try:
-            if self._sse_stats.has_pending_event():
-                self._handler.wfile.write(b"\n")
+            completion = self._sse_stats.pending_completion_bytes()
+            if completion:
+                self._handler.wfile.write(completion)
                 self._handler.wfile.flush()
-                self._sse_stats.observe_bytes(b"\n")
+                self._sse_stats.observe_bytes(completion)
         except OSError as write_exc:
             self._last_write_error = write_exc
             self.close()
