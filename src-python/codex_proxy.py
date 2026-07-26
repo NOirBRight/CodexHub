@@ -2726,6 +2726,23 @@ class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
 
+def _verified_cross_protocol_source_format(
+    *,
+    behavior_profile: str | None,
+    upstream_format: str,
+    inbound_format: str,
+) -> str | None:
+    if upstream_format == inbound_format:
+        return None
+    if behavior_profile not in {
+        BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+    }:
+        return None
+    return upstream_format
+
+
 def _verified_converted_sse_semantic_error(
     source_format: str,
 ) -> UpstreamSseSemanticError:
@@ -2762,6 +2779,21 @@ def _validate_verified_converted_sse_payload(
             if not isinstance(details, Mapping):
                 invalid_shape()
             if any(type(count) is not int for count in details.values()):
+                invalid_shape()
+
+    def validate_error_envelope(error: Any) -> None:
+        if isinstance(error, str):
+            if not error:
+                invalid_shape()
+            return
+        if not isinstance(error, Mapping):
+            invalid_shape()
+        message = error.get("message")
+        if not isinstance(message, str) or not message:
+            invalid_shape()
+        if "code" in error:
+            code = error.get("code")
+            if code is not None and type(code) not in {str, int}:
                 invalid_shape()
 
     if source_format == "responses":
@@ -2840,6 +2872,14 @@ def _validate_verified_converted_sse_payload(
                         "output_tokens_details",
                     ),
                 )
+            if event_type == "response.failed":
+                if "error" not in response:
+                    invalid_shape()
+                validate_error_envelope(response.get("error"))
+        elif event_type == "error":
+            if "error" not in payload:
+                invalid_shape()
+            validate_error_envelope(payload.get("error"))
         elif event_type == "response.output_text.delta":
             if not isinstance(payload.get("delta"), str):
                 invalid_shape()
@@ -2854,17 +2894,25 @@ def _validate_verified_converted_sse_payload(
         }:
             validate_output_item(payload.get("item"))
         elif event_type == "response.function_call_arguments.delta":
-            if not isinstance(payload.get("delta"), str):
+            if (
+                not isinstance(payload.get("item_id"), str)
+                or not isinstance(payload.get("delta"), str)
+            ):
                 invalid_shape()
         elif event_type == "response.function_call_arguments.done":
-            if not isinstance(payload.get("arguments"), str):
+            if (
+                not isinstance(payload.get("item_id"), str)
+                or not isinstance(payload.get("arguments"), str)
+            ):
                 invalid_shape()
         return
     if source_format != "chat_completions":
         return
     choices = payload.get("choices")
-    if choices is None and "error" in payload:
-        return
+    if "error" in payload:
+        validate_error_envelope(payload.get("error"))
+        if choices is None:
+            return
     if not isinstance(choices, list):
         invalid_shape()
     if "usage" in payload:
@@ -16223,13 +16271,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         buffer_sse_to_json = is_event_stream and not caller_stream
         buffered_json_response = False
         buffered_chat_sse_to_responses = False
-        verified_source_format = (
-            upstream_format
-            if (
-                behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                and upstream_format != inbound_format
-            )
-            else None
+        verified_source_format = _verified_cross_protocol_source_format(
+            behavior_profile=behavior_profile,
+            upstream_format=upstream_format,
+            inbound_format=inbound_format,
         )
         usage_context = _usage_observed_context(
             event_context,
@@ -16364,6 +16409,33 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
             return 502
 
+        def buffered_protocol_error_body(
+            exc: UpstreamSseSemanticError | SseFrameTooLargeError,
+        ) -> bytes:
+            write_proxy_event(
+                "upstream_stream_protocol_error",
+                request_id=request_id,
+                model=model,
+                upstream=upstream_name,
+                status=502,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+            return json.dumps(
+                _json_error_payload_for_inbound_format(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error="upstream_protocol_error",
+                    detail=str(exc),
+                    error_type="upstream_protocol_error",
+                ),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
         headers_sent = headers_already_sent
         if not is_event_stream or buffer_sse_to_json:
             converted_stream_failure = False
@@ -16372,33 +16444,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 events: list[Mapping[str, Any]] = []
                 chat_chunks: list[Mapping[str, Any] | str] = []
                 incomplete_frame = False
-
-                def buffered_protocol_error_body(
-                    exc: UpstreamSseSemanticError | SseFrameTooLargeError,
-                ) -> bytes:
-                    write_proxy_event(
-                        "upstream_stream_protocol_error",
-                        request_id=request_id,
-                        model=model,
-                        upstream=upstream_name,
-                        status=502,
-                        upstream_format=upstream_format,
-                        inbound_format=inbound_format,
-                        error=type(exc).__name__,
-                        detail=str(exc),
-                    )
-                    return json.dumps(
-                        _json_error_payload_for_inbound_format(
-                            inbound_format=inbound_format,
-                            upstream_name=upstream_name,
-                            status=502,
-                            error="upstream_protocol_error",
-                            detail=str(exc),
-                            error_type="upstream_protocol_error",
-                        ),
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
 
                 try:
                     for frame in self._iter_upstream_sse_events(
@@ -16494,43 +16539,62 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         raise UpstreamStreamInterruptedError(exc) from exc
                     raise
             upstream_body_for_usage = body
-            if converted_stream_failure:
-                pass
-            elif want_chat_output:
-                if upstream_format == "chat_completions":
-                    body = _response_body_to_chat_completion_body(
-                        compatible_response_body(
-                            _chat_completion_to_response_body(body),
+            try:
+                if converted_stream_failure:
+                    pass
+                elif want_chat_output:
+                    if upstream_format == "chat_completions":
+                        body = _response_body_to_chat_completion_body(
+                            compatible_response_body(
+                                _chat_completion_to_response_body(body),
+                                upstream_name,
+                                event_context=compatibility_event_context,
+                            )
+                        )
+                    else:
+                        # Upstream returned Responses format; convert to Chat Completions.
+                        if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                            body = _response_body_to_chat_completion_body(body)
+                        else:
+                            body = _response_body_to_chat_completion_body(
+                                compatible_response_body(
+                                    body,
+                                    upstream_name,
+                                    event_context=compatibility_event_context,
+                                )
+                            )
+                elif upstream_format == "chat_completions":
+                    if buffered_chat_sse_to_responses:
+                        converted_body = body
+                    else:
+                        converted_body = _chat_completion_to_response_body(
+                            body,
+                            repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                        )
+                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+                        body = converted_body
+                    else:
+                        body = compatible_response_body(
+                            converted_body,
                             upstream_name,
                             event_context=compatibility_event_context,
                         )
-                    )
-                else:
-                    # Upstream returned Responses format; convert to Chat Completions.
-                    if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                        body = _response_body_to_chat_completion_body(body)
-                    else:
-                        body = _response_body_to_chat_completion_body(
-                            compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
-                        )
-            elif upstream_format == "chat_completions":
-                if buffered_chat_sse_to_responses:
-                    converted_body = body
-                else:
-                    converted_body = _chat_completion_to_response_body(
-                        body,
-                        repair=behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                    )
-                if behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
-                    body = converted_body
                 else:
                     body = compatible_response_body(
-                        converted_body,
+                        body,
                         upstream_name,
                         event_context=compatibility_event_context,
                     )
-            else:
-                body = compatible_response_body(body, upstream_name, event_context=compatibility_event_context)
+            except UpstreamProtocolTranslationError:
+                if not buffer_sse_to_json or verified_source_format is None:
+                    raise
+                status = 502
+                converted_stream_failure = True
+                body = buffered_protocol_error_body(
+                    _verified_converted_sse_semantic_error(
+                        verified_source_format
+                    )
+                )
             if status >= 400:
                 body = _with_codexhub_http_error(
                     body,
@@ -16754,7 +16818,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         line_ending = _sse_line_ending(frame.raw)
                         payload = _converted_sse_payload(
                             frame,
-                            verified_source_format="responses",
+                            verified_source_format=verified_source_format,
                         )
                         if payload is None or payload == "[DONE]":
                             continue
@@ -16913,7 +16977,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ):
                         payload = _converted_sse_payload(
                             frame,
-                            verified_source_format="chat_completions",
+                            verified_source_format=verified_source_format,
                         )
                         if payload is None:
                             continue
@@ -17077,7 +17141,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         on_chunk=observe_diagnostic_sse_line,
                     ):
                         line_ending = _sse_line_ending(frame.raw)
-                        event = _converted_sse_payload(frame)
+                        event = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
                         if event is None or event == "[DONE]":
                             continue
                         events.append(event)
@@ -17220,7 +17287,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         on_chunk=observe_diagnostic_sse_line,
                     ):
                         line_ending = _sse_line_ending(frame.raw)
-                        payload = _converted_sse_payload(frame)
+                        payload = _converted_sse_payload(
+                            frame,
+                            verified_source_format=verified_source_format,
+                        )
                         if payload is None:
                             continue
                         if payload == "[DONE]":

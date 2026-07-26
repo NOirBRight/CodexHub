@@ -3693,6 +3693,53 @@ class RoutingTests(unittest.TestCase):
                 self.assertNotIn(b"later_success", written)
                 self.assertNotIn(case["forbidden_terminal"], written)
 
+    def test_official_cross_protocol_stream_validates_complete_source_frames(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/chat/completions", body)
+        frames = [
+            b'data: {"type":"response.output_text.delta","delta":225,"secret":"SECRET_OFFICIAL_DELTA"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"later_success","status":"completed","output":[]}}\n\n',
+            b"",
+        ]
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch(
+                "codex_proxy._official_urlopen",
+                side_effect=lambda *_args, **_kwargs: FakeSseResponse(frames),
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(fake.wfile.writes)
+        request_complete = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(len(request_complete), 1)
+        self.assertEqual(request_complete[0]["status"], 502)
+        self.assertEqual(written.count(b"data: "), 1)
+        self.assertNotIn(b"SECRET_", written)
+        self.assertNotIn(b"later_success", written)
+        self.assertNotIn(b"data: [DONE]", written)
+
     def test_verified_cross_protocol_source_shape_table_fails_once_without_retry(self):
         cases = (
             (
@@ -4080,6 +4127,225 @@ class RoutingTests(unittest.TestCase):
                     written,
                 )
 
+    def test_verified_cross_protocol_consumed_ids_and_error_envelopes_are_sanitized(self):
+        def frame(payload):
+            return (
+                b"data: "
+                + json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                + b"\n\n"
+            )
+
+        tool_item = {
+            "id": "225",
+            "type": "function_call",
+            "status": "in_progress",
+            "call_id": "call_valid",
+            "name": "tool_valid",
+            "arguments": "",
+        }
+        paired_tool_frame = frame(
+            {"type": "response.output_item.added", "item": tool_item}
+        )
+        cases = (
+            (
+                "responses_function_arguments_delta_item_id",
+                "responses",
+                [
+                    paired_tool_frame,
+                    frame(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": 225,
+                            "delta": "SECRET_RESPONSES_ARGUMENT_DELTA",
+                        }
+                    ),
+                ],
+            ),
+            (
+                "responses_function_arguments_done_item_id",
+                "responses",
+                [
+                    paired_tool_frame,
+                    frame(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "item_id": 225,
+                            "arguments": "SECRET_RESPONSES_ARGUMENT_DONE",
+                        }
+                    ),
+                ],
+            ),
+            (
+                "responses_top_level_error_message",
+                "responses",
+                [
+                    frame(
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "provider_error",
+                                "message": {
+                                    "secret": "SECRET_RESPONSES_ERROR_MESSAGE"
+                                },
+                            },
+                        }
+                    )
+                ],
+            ),
+            (
+                "responses_failed_error_code",
+                "responses",
+                [
+                    frame(
+                        {
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_failed_secret",
+                                "status": "failed",
+                                "error": {
+                                    "code": {
+                                        "secret": "SECRET_RESPONSES_ERROR_CODE"
+                                    },
+                                    "message": "provider failed",
+                                },
+                            },
+                        }
+                    )
+                ],
+            ),
+            (
+                "chat_error_message",
+                "chat_completions",
+                [
+                    frame(
+                        {
+                            "error": {
+                                "code": "provider_error",
+                                "message": {
+                                    "secret": "SECRET_CHAT_ERROR_MESSAGE"
+                                },
+                            }
+                        }
+                    )
+                ],
+            ),
+            (
+                "chat_error_code",
+                "chat_completions",
+                [
+                    frame(
+                        {
+                            "choices": [],
+                            "error": {
+                                "code": {"secret": "SECRET_CHAT_ERROR_CODE"},
+                                "message": "provider failed",
+                            }
+                        }
+                    )
+                ],
+            ),
+        )
+
+        for name, source_format, invalid_frames in cases:
+            with self.subTest(name=name):
+                self.write_proxy_event.reset_mock()
+                self.external_model["upstream_format"] = source_format
+                responses_source = source_format == "responses"
+                path = (
+                    "/v1/providers/volc/chat/completions"
+                    if responses_source
+                    else "/v1/providers/volc/responses"
+                )
+                request = (
+                    {
+                        "model": "volc/glm-5.2",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                    }
+                    if responses_source
+                    else {
+                        "model": "volc/glm-5.2",
+                        "input": [{"type": "message", "role": "user", "content": "hi"}],
+                        "stream": True,
+                    }
+                )
+                later_frames = (
+                    [
+                        frame(
+                            {
+                                "type": "response.completed",
+                                "response": {
+                                    "id": "later_success",
+                                    "status": "completed",
+                                    "output": [],
+                                },
+                            }
+                        ),
+                        b"",
+                    ]
+                    if responses_source
+                    else [
+                        frame(
+                            {
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "stop",
+                                    }
+                                ]
+                            }
+                        ),
+                        b"data: [DONE]\n\n",
+                        b"",
+                    ]
+                )
+                handler, fake = post_handler(
+                    path,
+                    json.dumps(request).encode("utf-8"),
+                    headers={"X-Codex-Client-Id": "opencode"},
+                )
+
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                        },
+                        clear=False,
+                    ),
+                    patch(
+                        "codex_proxy.urlopen",
+                        side_effect=lambda *_args, **_kwargs: FakeSseResponse(
+                            [*invalid_frames, *later_frames]
+                        ),
+                    ) as mock_urlopen,
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                written = b"".join(fake.wfile.writes)
+                request_complete = [
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "request_complete"
+                ]
+                error_marker = (
+                    b'"code":"upstream_protocol_error"'
+                    if responses_source
+                    else b"event: error"
+                )
+                self.assertEqual(mock_urlopen.call_count, 1)
+                self.assertEqual(len(request_complete), 1)
+                self.assertEqual(request_complete[0]["status"], 502)
+                self.assertEqual(written.count(error_marker), 1)
+                self.assertNotIn(b"SECRET_", written)
+                self.assertNotIn(b"later_success", written)
+                self.assertNotIn(
+                    b"data: [DONE]" if responses_source else b"response.completed",
+                    written,
+                )
+
     def test_buffered_verified_conversion_error_is_sanitized_502_without_echo(self):
         self.external_model["upstream_format"] = "chat_completions"
         handler, fake = post_handler(
@@ -4136,6 +4402,91 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertNotIn(b"SECRET_", written)
         self.assertNotIn(b"response.completed", written)
+
+    def test_buffered_verified_responses_to_chat_conversion_error_is_sanitized_502(self):
+        self.external_model["upstream_format"] = "responses"
+        handler, fake = post_handler(
+            "/v1/providers/volc/chat/completions",
+            json.dumps(
+                {
+                    "model": "volc/glm-5.2",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={"X-Codex-Client-Id": "opencode"},
+        )
+        item = {
+            "id": "msg_buffered_annotations",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "SECRET_BUFFERED_RESPONSE_TEXT",
+                    "annotations": [
+                        {"type": "url_citation", "url": "SECRET_BUFFERED_ANNOTATION"}
+                    ],
+                }
+            ],
+        }
+        frames = [
+            (
+                b"data: "
+                + json.dumps(
+                    {"type": "response.output_item.done", "item": item},
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n\n"
+            ),
+            (
+                b"data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_buffered_annotations",
+                            "status": "completed",
+                            "output": [item],
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n\n"
+            ),
+            b"",
+        ]
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=lambda *_args, **_kwargs: FakeSseResponse(frames),
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(fake.wfile.writes)
+        payload = json.loads(written)
+        request_complete = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(len(request_complete), 1)
+        self.assertEqual(request_complete[0]["status"], 502)
+        self.assertEqual(payload["error"]["type"], "upstream_protocol_error")
+        self.assertNotIn(b"SECRET_", written)
+        self.assertNotIn(b"resp_buffered_annotations", written)
 
     def test_upstream_http_error_emits_request_complete_with_status(self):
         body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
