@@ -89,6 +89,11 @@ def test_pr_planner_test_change_runs_synthetic(plan):
     assert p.synthetic_status == "run"
 
 
+def test_pr_pytest_ini_change_runs_synthetic(plan):
+    p = plan.build_plan("pull_request", True, ["pytest.ini"])
+    assert p.synthetic_status == "run"
+
+
 def test_pr_mixed_unrelated_and_relevant_runs_synthetic(plan):
     p = plan.build_plan(
         "pull_request",
@@ -137,6 +142,36 @@ def test_synthetic_args_do_not_start_run_real_client_e2e_ps1(plan):
 def test_not_applicable_plan_description_is_explicit(plan):
     p = plan.build_plan("pull_request", True, ["src-python/codex_proxy.py"])
     assert "not applicable" in p.description.lower()
+
+
+def test_pr_missing_changed_paths_fails_closed_to_synthetic(plan):
+    p = plan.build_plan("pull_request", True, None)
+    assert p.synthetic_status == "run"
+    assert p.synthetic_args is not None
+
+
+def test_unreadable_changed_paths_file_fails_closed_to_synthetic(tmp_path):
+    # A directory at the path makes read_text fail, so the planner treats it as
+    # missing/unreadable and fails closed to full validation.
+    bad_path = tmp_path / "changed-paths.txt"
+    bad_path.mkdir()
+    out = subprocess.run(
+        [
+            sys.executable,
+            str(PLANNER_PATH),
+            "--event",
+            "pull_request",
+            "--is-pull-request",
+            "--changed-paths-file",
+            str(bad_path),
+            "--output-json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    payload = json.loads(out.stdout)
+    assert payload["synthetic_status"] == "run"
 
 
 def test_cli_json_output_matches_build_plan(plan, tmp_path):

@@ -32,6 +32,7 @@ RELEVANT_SYNTHETIC_PATHS = [
     "scripts/ci/python_test_plan.py",
     "scripts/ci/check_python_test_partitions.py",
     "tests/test_ci_python_plan.py",
+    "pytest.ini",
 ]
 
 
@@ -94,18 +95,28 @@ def _synthetic_args() -> List[str]:
 def build_plan(
     event_name: str,
     is_pull_request: bool,
-    changed_paths: List[str],
+    changed_paths: Optional[List[str]],
 ) -> PythonTestPlan:
     """Build a deterministic test plan from event metadata.
 
     PR events run the synthetic suite only when relevant paths changed.
-    Every other event type fails closed and always runs the synthetic suite.
-    The core partition always runs on PRs.
+    A ``None`` changed-path set means acquisition failed or was unavailable,
+    so PRs fail closed and run the synthetic suite. Every other event type
+    also fails closed and always runs the synthetic suite. The core partition
+    always runs on PRs.
     """
     core_args = _core_args()
 
     if is_pull_request:
-        if has_relevant_synthetic_path(changed_paths):
+        if changed_paths is None:
+            synthetic_status = "run"
+            synthetic_args = _synthetic_args()
+            description = (
+                "Pull request changed-path acquisition failed or was "
+                "unavailable; fail closed by running the synthetic "
+                "real-client contract."
+            )
+        elif has_relevant_synthetic_path(changed_paths):
             synthetic_status = "run"
             synthetic_args = _synthetic_args()
             description = (
@@ -136,36 +147,46 @@ def build_plan(
     )
 
 
-def _read_changed_paths_file(path: Path) -> List[str]:
-    if not path.exists():
-        return []
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+def _read_changed_paths_file(path: Path) -> Optional[List[str]]:
+    """Read changed paths or return ``None`` when the file is missing/unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def _changed_paths_from_git(base_ref: str, head_ref: str) -> List[str]:
-    """Return changed paths between two refs using git diff --name-only.
+def _changed_paths_from_git(base_ref: str, head_ref: str) -> Optional[List[str]]:
+    """Return changed paths between the merge-base and head, or ``None`` on failure.
 
-    Fetches the base ref shallowly if needed so the diff is always available.
+    Uses ``git merge-base`` so the comparison is against the actual PR fork
+    point, not a naive base-tip diff. Any fetch, merge-base, or diff failure
+    returns ``None`` so the caller can fail closed.
     """
     try:
         subprocess.run(
-            ["git", "fetch", "origin", f"{base_ref}:refs/remotes/origin/{base_ref}", "--depth=1"],
+            ["git", "fetch", "origin", base_ref, "--depth=1"],
             cwd=ROOT,
             check=True,
             capture_output=True,
         )
+        merge_base = subprocess.run(
+            ["git", "merge-base", f"origin/{base_ref}", head_ref],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        result = subprocess.run(
+            ["git", "diff", "--name-only", merge_base, head_ref],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except subprocess.CalledProcessError:
-        # If the ref already exists locally, fetch failure is non-fatal.
-        pass
-
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"origin/{base_ref}...{head_ref}"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return None
 
 
 def _plan_from_environment() -> PythonTestPlan:
@@ -183,7 +204,8 @@ def _plan_from_environment() -> PythonTestPlan:
         if base_ref:
             changed_paths = _changed_paths_from_git(base_ref, head_ref)
         else:
-            changed_paths = []
+            # Missing base ref means path acquisition is unavailable; fail closed.
+            changed_paths = None
     else:
         changed_paths = []
 

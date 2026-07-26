@@ -54,8 +54,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -72,13 +70,24 @@ jobs:
           $event = '${{ github.event_name }}'
           $isPr = $event -eq 'pull_request'
           $changedFile = '.changed-paths.txt'
+          $acquisitionFailed = $false
           if ($isPr) {
             $baseSha = '${{ github.event.pull_request.base.sha }}'
             $headSha = '${{ github.event.pull_request.head.sha }}'
-            git fetch origin $baseSha --depth=1 | Out-Null
-            git diff --name-only $baseSha $headSha | Out-File -Encoding utf8 $changedFile
-          } else {
-            New-Item -ItemType File -Force $changedFile | Out-Null
+            git fetch origin $baseSha --depth=1
+            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
+            $mergeBase = git merge-base $baseSha $headSha
+            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
+            $changed = git diff --name-only $mergeBase $headSha
+            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
+            if (-not $acquisitionFailed) {
+              $changed | Out-File -Encoding utf8 $changedFile
+            }
+          }
+          if ($acquisitionFailed) {
+            # Remove the file so the planner treats this as missing/unreadable
+            # and fails closed to the full synthetic suite.
+            Remove-Item $changedFile -ErrorAction SilentlyContinue
           }
           $plan = python scripts/ci/python_test_plan.py `
             --event $event `
@@ -94,7 +103,9 @@ jobs:
           if ($plan.synthetic_status -eq 'not_applicable') {
             Write-Host 'Synthetic real-client contract: not applicable'
           } else {
-            python -m pytest @($plan.synthetic_args)
+            python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
+              --timeout-seconds 1800 `
+              -- python -m pytest @($plan.synthetic_args)
           }
 
       - name: Upload synthetic JUnit evidence
