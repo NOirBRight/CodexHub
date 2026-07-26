@@ -79,6 +79,26 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     }
 
     let lock = FileLock::acquire(path)?;
+    write_text_locked(path, text, &lock)
+}
+
+/// Write `text` to `path` using a temp file and atomic rename while already
+/// holding an exclusive lock on `path`. Used for multi-step check-then-write
+/// operations that must remain atomic across processes.
+pub(crate) fn write_text_locked(
+    path: &Path,
+    text: &str,
+    lock: &FileLock,
+) -> Result<(), String> {
+    if lock.target_path() != path {
+        return Err("atomic write lock does not match target path".to_owned());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("failed to create file directory {}: {error}", parent.display())
+        })?;
+    }
+
     lock.verify_namespace_identity()?;
     let temp_path = unique_temp_path(path);
     let mut temp_file = File::create(&temp_path)
@@ -228,7 +248,8 @@ fn acquire_namespace_guard(path: &Path, started: &Instant, hook: Option<&dyn Fn(
 /// Python uses fcntl.flock/LockFileEx for exactly the same one-byte lock.  We
 /// never delete this file: process death releases the held lock, and the next
 /// owner overwrites the versioned metadata while holding it.
-struct FileLock {
+pub(crate) struct FileLock {
+    target_path: PathBuf,
     namespace_path: PathBuf,
     namespace: File,
     file: File,
@@ -237,7 +258,7 @@ struct FileLock {
 }
 
 impl FileLock {
-    fn acquire(target: &Path) -> Result<Self, String> {
+    pub(crate) fn acquire(target: &Path) -> Result<Self, String> {
         Self::acquire_inner(target, None)
     }
 
@@ -308,6 +329,7 @@ impl FileLock {
                                 return Err(error);
                             }
                             return Ok(Self {
+                                target_path: target.to_path_buf(),
                                 namespace_path: namespace_path.clone(),
                                 namespace,
                                 file,
@@ -334,6 +356,10 @@ impl FileLock {
 
             retry_lock(&started)?;
         }
+    }
+
+    fn target_path(&self) -> &Path {
+        &self.target_path
     }
 
     fn verify_namespace_identity(&self) -> Result<(), String> {
@@ -688,8 +714,8 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic, FileLock, LockState,
-        LOCK_PROTOCOL,
+        install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic, write_text_locked,
+        FileLock, LockState, LOCK_PROTOCOL,
     };
     use std::{
         fs,
@@ -935,14 +961,29 @@ mod tests {
         fs::remove_file(&guard).unwrap();
         fs::write(&guard, LOCK_PROTOCOL).unwrap();
 
-        let result = lock.verify_namespace_identity();
-
         // Rejection must fail closed; the message differs by platform:
         // Windows still resolves the delete-pending handle (identity mismatch),
         // while Linux reports the unlinked handle's zero link count first.
+        let result = write_text_locked(&target, "probe", &lock);
         let error = result.unwrap_err();
         assert!(
             error.contains("path changed") || error.contains("not a regular single-link file"),
+            "unexpected error: {error}"
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn write_text_locked_rejects_mismatched_target_path() {
+        let root = test_root("mismatched-target");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("settings.json");
+        let other = root.join("other.json");
+        let lock = FileLock::acquire(&target).unwrap();
+
+        let error = write_text_locked(&other, "probe", &lock).unwrap_err();
+        assert!(
+            error.contains("does not match target path"),
             "unexpected error: {error}"
         );
         drop(lock);
