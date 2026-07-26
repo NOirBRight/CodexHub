@@ -1,19 +1,12 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
-
-try:
-    import yaml
-
-    _HAS_YAML = True
-except Exception:  # pragma: no cover
-    _HAS_YAML = False
 
 ROOT = Path(__file__).resolve().parents[1]
 PLANNER_PATH = ROOT / "scripts" / "ci" / "python_test_plan.py"
@@ -31,6 +24,47 @@ def _load_module(path: Path, name: str):
 @pytest.fixture(scope="module")
 def plan():
     return _load_module(PLANNER_PATH, "python_test_plan")
+
+
+def _workflow_job_text(workflow_text: str, job_name: str) -> str:
+    """Return the raw text of a top-level GitHub Actions job."""
+    start = workflow_text.find(f"  {job_name}:")
+    assert start != -1, f"job {job_name!r} not found"
+    after = workflow_text[start + 1 :]
+    next_job = re.search(r"\n  [a-zA-Z0-9_-]+:", after)
+    if next_job:
+        end = start + 1 + next_job.start()
+    else:
+        end = len(workflow_text)
+    return workflow_text[start:end]
+
+
+def _step_run_text(job_text: str, step_name: str) -> str:
+    """Return the run-script text for a named step in a job."""
+    step_start = job_text.find(f"- name: {step_name}")
+    assert step_start != -1, f"step {step_name!r} not found"
+    after = job_text[step_start + 1 :]
+    next_step = re.search(r"\n  - name:", after)
+    if next_step:
+        step_end = step_start + 1 + next_step.start()
+    else:
+        step_end = len(job_text)
+    step_text = job_text[step_start:step_end]
+    run_match = re.search(r"\n        run: (.*)", step_text)
+    if not run_match:
+        return ""
+    run_first = run_match.group(1).strip()
+    if run_first and run_first not in ("|", ">", "|-", ">-"):
+        return run_first
+    run_lines = []
+    for line in step_text[run_match.end() :].splitlines():
+        if line.startswith("          "):
+            run_lines.append(line[10:])
+        elif line == "":
+            run_lines.append("")
+        else:
+            break
+    return "\n".join(run_lines)
 
 
 def test_module_paths_exist():
@@ -247,34 +281,40 @@ def test_checker_runs_without_executing_tests():
     assert "true" in out.stdout.lower()
 
 
-@pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed")
 def test_ci_yaml_has_full_checkout_for_synthetic_merge_base():
     """Regression: shallow checkout breaks git merge-base on a fresh PR runner."""
-    workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
-    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    synthetic_job = workflow["jobs"]["python-synthetic"]
-    checkout_steps = [
-        step
-        for step in synthetic_job["steps"]
-        if isinstance(step, dict) and step.get("name") == "Check out repository"
-    ]
-    assert len(checkout_steps) == 1
-    checkout = checkout_steps[0]
-    assert checkout.get("uses", "").startswith("actions/checkout")
-    assert checkout.get("with", {}).get("fetch-depth") == 0
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
+    checkout_start = synthetic_job.find("- name: Check out repository")
+    assert checkout_start != -1
+    checkout_end = synthetic_job.find("- name:", checkout_start + 1)
+    if checkout_end == -1:
+        checkout_end = len(synthetic_job)
+    checkout_step = synthetic_job[checkout_start:checkout_end]
+    assert checkout_step.strip().startswith("- name: Check out repository")
+    assert "actions/checkout" in checkout_step
+    assert "fetch-depth: 0" in checkout_step
 
 
 def test_ci_yaml_synthetic_run_uses_watchdog_with_3600s_bound():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    # The synthetic run step must invoke the checked-in watchdog and use 3600s.
-    assert "run-with-windows-watchdog.py" in workflow_text
-    assert "--timeout-seconds 3600" in workflow_text
-    # Direct unattended pytest of the synthetic module is not allowed.
-    synthetic_step = workflow_text.split("Run or skip synthetic partition")[1]
-    assert "python -m pytest" in synthetic_step
-    assert "run-with-windows-watchdog.py" in synthetic_step
+    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
+    run_script = _step_run_text(synthetic_job, "Run or skip synthetic partition")
+    # Normalize PowerShell backtick continuations and whitespace into one line.
+    normalized = run_script.replace("`", "").replace("\n", " ")
+    normalized = " ".join(normalized.split())
+    # Isolate the exact watchdog command and assert ordered components.
+    watchdog_idx = normalized.find(
+        "tests/fixtures/real_client_e2e/run-with-windows-watchdog.py"
+    )
+    timeout_idx = normalized.find("--timeout-seconds 3600")
+    separator_idx = normalized.find("-- ")
+    pytest_idx = normalized.find("python -m pytest")
+    assert -1 < watchdog_idx < timeout_idx < separator_idx < pytest_idx, normalized
 
 
 def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
