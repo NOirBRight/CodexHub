@@ -1,3 +1,4 @@
+import gc
 import os
 import gzip
 import io
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +17,7 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
+from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler, SseFrameTooLargeError
 from subagent_state import build_subagent_state
 from codex_proxy import (
     CodexProxyHandler,
@@ -1902,6 +1905,94 @@ class RoutingTests(unittest.TestCase):
             ],
         )
 
+    def test_passthrough_semantics_wait_for_a_complete_sse_event(self):
+        stats = codex_proxy.PassthroughSseSemanticStats()
+
+        stats.observe_bytes(
+            b"event: response.completed\r\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_complete"}}\r\n'
+        )
+
+        self.assertEqual(stats.fields()["sse_events_streamed"], 0)
+        self.assertEqual(stats.fields()["sse_json_events_streamed"], 0)
+        self.assertFalse(stats.terminal_event_seen)
+
+        stats.observe_bytes(b"\r\n")
+
+        self.assertEqual(stats.fields()["sse_events_streamed"], 1)
+        self.assertEqual(stats.fields()["sse_json_events_streamed"], 1)
+        self.assertTrue(stats.terminal_event_seen)
+        self.assertEqual(stats.response_id, "resp_complete")
+
+    def test_passthrough_semantics_report_and_discard_incomplete_eof(self):
+        stats = codex_proxy.PassthroughSseSemanticStats()
+        stats.observe_bytes(b'data: {"type":"response.completed"}\r\n')
+
+        stats.finalize_pending()
+        fields = stats.fields()
+
+        self.assertEqual(fields["sse_events_streamed"], 0)
+        self.assertEqual(fields["sse_json_events_streamed"], 0)
+        self.assertFalse(fields["sse_terminal_event_seen"])
+        self.assertEqual(fields["sse_eof_disposition"], "incomplete")
+        self.assertEqual(fields["sse_incomplete_bytes_discarded"], 37)
+
+    def test_passthrough_semantics_releases_size_limit_exception_traceback(self):
+        stats = codex_proxy.PassthroughSseSemanticStats(max_frame_bytes=8)
+
+        def capture_failure():
+            try:
+                stats.observe_bytes(b"data: private")
+            except SseFrameTooLargeError as exc:
+                return weakref.ref(exc)
+            self.fail("expected the frame size limit to fail closed")
+
+        failure_ref = capture_failure()
+        gc.collect()
+
+        self.assertIsNone(failure_ref())
+        self.assertEqual(stats.pending_completion_bytes(), b"")
+        stats.observe_bytes(b"data: ignored")
+        stats.finalize_pending()
+        self.assertEqual(stats.fields()["sse_events_streamed"], 0)
+
+    def test_official_passthrough_preserves_fragmented_metadata_event_bytes(self):
+        fake = FakeHandler()
+        usage_capture = {}
+        raw = (
+            b": keepalive \xff\r\n"
+            b"event: response.completed\r\n"
+            b'data: {"type":"response.completed",\r\n'
+            b'data: "response":{"id":"resp_chunked","status":"completed"}}\r\n'
+            b"id: 7\r\n"
+            b"\r\n"
+        )
+        split_points = (1, 13, 37, 64, len(raw) - 1)
+        chunks = [
+            raw[start:end]
+            for start, end in zip((0, *split_points), (*split_points, len(raw)))
+        ]
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            FakeSseResponse([*chunks, b""]),
+            "official",
+            request_id="req-fragmented-semantics",
+            model="gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture=usage_capture,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(b"".join(fake.wfile.writes), raw)
+        self.assertEqual(usage_capture["sse_events_streamed"], 1)
+        self.assertEqual(usage_capture["sse_json_events_streamed"], 1)
+        self.assertTrue(usage_capture["sse_terminal_event_seen"])
+        self.assertEqual(usage_capture["sse_last_event_type"], "response.completed")
+
     def test_official_http_passthrough_raw_relay_even_when_caller_stream_false(self):
         fake = FakeHandler()
         response = FakeSseResponse(
@@ -2062,6 +2153,78 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"code":"URLError"', body)
         self.assertIn(b'"upstream":"official"', body)
         self.assertTrue(fake.close_connection)
+
+    def test_official_passthrough_size_limit_preserves_typed_terminal_failure(self):
+        fake = FakeHandler()
+        usage_capture = {}
+        secret = b"oversized-frame-secret"
+        prefix = b"data: "
+        oversized_frame = (
+            prefix
+            + (b"x" * (DEFAULT_MAX_FRAME_BYTES + 1 - len(prefix) - len(secret)))
+            + secret
+        )
+
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = CodexProxyHandler._relay_upstream_response(
+                fake,
+                FakeSseResponse([oversized_frame, b""]),
+                "official",
+                request_id="req-size-limit",
+                model="gpt-5.5",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=True,
+                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                usage_capture=usage_capture,
+            )
+
+        body = b"".join(fake.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[0].data)
+        closed_event = next(
+            call.kwargs
+            for call in write_event.call_args_list
+            if call.args and call.args[0] == "official_passthrough_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(
+            failed_payload["response"]["error"]["code"],
+            "SseFrameTooLargeError",
+        )
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["error"], "SseFrameTooLargeError")
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertTrue(usage_capture["synthetic_terminal_event_sent"])
+
+    def test_official_passthrough_closes_unterminated_data_before_synthetic_failure(self):
+        fake = FakeHandler()
+        partial = b'data: {"type":"response.created","response":{"id":"resp_partial"}}'
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            FakeSseResponse([partial, URLError("connection reset")]),
+            "official",
+            request_id="req-partial-before-failure",
+            model="gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            usage_capture={},
+        )
+
+        body = b"".join(fake.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        self.assertEqual(status, 502)
+        self.assertEqual(
+            [json.loads(event.data)["type"] for event in events],
+            ["response.created", "response.failed"],
+        )
+        self.assertIn(partial + b"\n\nevent: response.failed\n", body)
 
     def test_official_passthrough_ignores_stream_error_after_completed_event(self):
         fake = FakeHandler()
@@ -9729,6 +9892,171 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(closed_event["synthetic_terminal_event_sent"])
         self.assertEqual(closed_event["synthetic_terminal_event_type"], "response.failed")
 
+    def test_transparent_responses_size_limit_writes_typed_synthetic_terminal(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_size_limit",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=64,
+        )
+        secret = b"transparent-responses-secret"
+        forwarded_prefix = b"data: " + (b"x" * 40)
+        usage_capture = {}
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([forwarded_prefix, (b"y" * 24) + secret, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_size_limit",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture=usage_capture,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[1].data)
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, forwarded_prefix + b"\n\n")
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(
+            failed_payload["response"]["error"]["code"],
+            "SseFrameTooLargeError",
+        )
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertTrue(closed_event["synthetic_terminal_event_sent"])
+        self.assertTrue(usage_capture["synthetic_terminal_event_sent"])
+
+    def test_transparent_responses_size_limit_preserves_completed_cr_event_sequence(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_cr_size_limit",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=64,
+        )
+        completed_cr_event = b"data: first\r\r"
+        secret = b"transparent-cr-secret"
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([completed_cr_event, (b"x" * 64) + secret, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_cr_size_limit",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, completed_cr_event + b"\n")
+        self.assertEqual(events[0].data, b"first")
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertNotIn(secret, body)
+
+    def test_transparent_responses_size_crossing_cr_preserves_response_id(self):
+        handler = FakeHandler()
+        response_id = "resp_size_crossing_cr"
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_size_crossing_cr",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=128,
+        )
+        created_prefix = (
+            b'data: {"type":"response.created","response":{"id":"'
+            + response_id.encode("ascii")
+            + b'"}}\r'
+        )
+        secret = b"size-crossing-cr-secret"
+        crossing_chunk = b"\rdata: " + (b"x" * 128) + secret
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([created_prefix, crossing_chunk, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_size_crossing_cr",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        created_payload = json.loads(events[0].data)
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(created_payload["response"]["id"], response_id)
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(failed_payload["response"]["id"], response_id)
+        self.assertNotIn(secret, body)
+
+    def test_transparent_responses_cr_completion_preserves_response_id_on_interruption(self):
+        handler = FakeHandler()
+        response_id = "resp_cr_boundary"
+        completed_cr_event = (
+            b'data: {"type":"response.created","response":{"id":"'
+            + response_id.encode("ascii")
+            + b'"}}\r\r'
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([completed_cr_event, URLError("connection reset")]),
+            "volcengine",
+            request_id="req_transparent_responses_cr_interruption",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+
+        events = SseEventAssembler().feed(b"".join(handler.wfile.writes))
+        failed_payload = json.loads(events[1].data)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].raw, completed_cr_event + b"\n")
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(failed_payload["response"]["id"], response_id)
+
     def test_transparent_responses_stream_commit_ignores_interruption_after_terminal(self):
         handler = FakeHandler()
         response = FakeSseResponse(
@@ -9830,6 +10158,49 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertFalse(closed_event["synthetic_terminal_event_sent"])
         self.assertEqual(closed_event["failure_class"], "upstream_stream_interrupted")
+
+    def test_transparent_chat_size_limit_closes_without_synthetic_terminal(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "ollama_cloud",
+            model="ollama-cloud/glm-5.2",
+            request_id="req_transparent_chat_size_limit",
+            inbound_format="chat_completions",
+            upstream_format="chat_completions",
+            max_frame_bytes=64,
+        )
+        secret = b"transparent-chat-secret"
+        usage_capture = {}
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([b"data: " + (b"x" * 64) + secret, b""]),
+            "ollama_cloud",
+            request_id="req_transparent_chat_size_limit",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture=usage_capture,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(body, b"")
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+        self.assertFalse(usage_capture["synthetic_terminal_event_sent"])
 
     def test_transparent_chat_ignores_responses_type_in_extension_field(self):
         handler = FakeHandler()
