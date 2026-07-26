@@ -4,12 +4,17 @@ GitHub Actions runs the required PR validation for branches targeting `dev` and 
 
 ## CI jobs
 
-- Python tests: `python -m pytest -q`
+- **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0`. Runs on every PR.
+- **Synthetic real-client contract**: appears on every PR. For unrelated paths it succeeds explicitly as `not applicable` and does not start `scripts/Run-RealClientE2E.ps1`. For relevant paths, and for all non-PR events, it runs `python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0`. The planner at `scripts/ci/python_test_plan.py` decides which paths are relevant; `python scripts/ci/check_python_test_partitions.py` proves the core and synthetic partitions are disjoint and complete.
 - Frontend build and UI contract: `npm ci`, `npm run build`, `npm run test:ui-contract` in `frontend/`
 - Rust tests (normal and debug flavors): `cargo test --locked` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
 - Release flavor contract: portable-build dry-run parity for the normal and debug flavors
 - Rust safe_file Linux compile and tests: standalone `rustc --test` compile of `src-tauri/src/safe_file.rs` on Ubuntu, a `clippy-driver -D warnings` lint of the same file, and the resulting cross-language test binary. This job exists because `safe_file.rs` contains `cfg(unix)` FFI that the Windows-only Rust jobs never compile; it must stay free of crate dependencies so the standalone compile keeps working.
+
+### Triggers
+
+PRs to `dev` and `main` run both Python checks, the frontend job, Rust normal/debug tests, Rust clippy, release flavor contract, and Linux `safe_file`. Pushes to `dev` and `main` preserve the same job set. `workflow_dispatch` and a weekly Sunday 03:17 UTC `schedule` run the full validation, including the synthetic suite.
 
 The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
 
@@ -18,7 +23,9 @@ The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` fi
 Use all of these commands when GitHub Actions is unavailable and the change must be integrated. Before opening a normal PR, run only the local suites selected by the verification policy:
 
 ```powershell
-python -m pytest -q
+python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
+python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0
+python scripts/ci/check_python_test_partitions.py
 
 Push-Location frontend
 npm ci
@@ -33,5 +40,17 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 Pop-Location
 ```
+
+### One-command Python fallback
+
+For changes that touch only Python, the CI planner and partition checker can be
+verified together with:
+
+```powershell
+python -m pytest -q tests/test_ci_python_plan.py && python scripts/ci/check_python_test_partitions.py
+```
+
+This runs the planner/path tests and proves the core and synthetic collections
+are disjoint and complete, without executing `tests/test_real_client_e2e.py`.
 
 Do not commit generated frontend output, local Tauri resource placeholders, or `dist/` artifacts.
