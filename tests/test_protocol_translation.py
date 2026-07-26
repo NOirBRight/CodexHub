@@ -1172,8 +1172,9 @@ class ProtocolTranslationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unpaired_tool_call")
 
         converter = protocol_translation.ChatToResponsesStreamConverter()
+        converter.events_for_chunk(chunk)
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
-            converter.events_for_chunk(chunk)
+            converter.events_for_done()
         self.assertEqual(raised.exception.code, "unpaired_tool_call")
 
     def test_chat_length_stream_maps_to_responses_incomplete_event(self):
@@ -1186,8 +1187,10 @@ class ProtocolTranslationTests(unittest.TestCase):
 
         converter = protocol_translation.ChatToResponsesStreamConverter()
         stateful_events = converter.events_for_chunk(chunk)
-        self.assertEqual(stateful_events[-1]["type"], "response.incomplete")
-        self.assertEqual(stateful_events[-1]["response"]["status"], "incomplete")
+        self.assertFalse(any(event["type"] == "response.incomplete" for event in stateful_events))
+        stateful_terminal = converter.events_for_done()
+        self.assertEqual(stateful_terminal[-1]["type"], "response.incomplete")
+        self.assertEqual(stateful_terminal[-1]["response"]["status"], "incomplete")
 
     def test_chat_stream_custom_tool_delta_fails_closed(self):
         chunk = {
@@ -1279,7 +1282,7 @@ class ProtocolTranslationTests(unittest.TestCase):
 
         converter = protocol_translation.ChatToResponsesStreamConverter()
         terminal_events = converter.events_for_chunk(terminal_chunk)
-        self.assertEqual(terminal_events[-1]["type"], "response.completed")
+        self.assertFalse(any(event["type"] == "response.completed" for event in terminal_events))
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
             converter.events_for_chunk(late_chunk)
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
@@ -1298,11 +1301,115 @@ class ProtocolTranslationTests(unittest.TestCase):
         )
         self.assertEqual(events[-1]["type"], "response.completed")
         self.assertEqual(events[-1]["response"]["output"][0]["content"][0]["text"], "A")
+        self.assertEqual(
+            events[-1]["response"]["usage"],
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
 
         converter = protocol_translation.ChatToResponsesStreamConverter()
-        converter.events_for_chunk(terminal_chunk)
+        pending_terminal = converter.events_for_chunk(terminal_chunk)
+        self.assertFalse(any(event["type"] == "response.completed" for event in pending_terminal))
         self.assertEqual(converter.events_for_chunk(usage_chunk), [])
-        self.assertEqual(converter.events_for_done(), [])
+        terminal_events = converter.events_for_done()
+        self.assertEqual(terminal_events[-1]["type"], "response.completed")
+        self.assertEqual(
+            terminal_events[-1]["response"]["usage"],
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    def test_responses_stream_usage_maps_to_chat_usage_chunk_before_done(self):
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        converter.chunks_for_event(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_usage", "model": "canonical-model"},
+            }
+        )
+
+        chunks = converter.chunks_for_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_usage",
+                    "model": "canonical-model",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 8,
+                        "input_tokens_details": {"cached_tokens": 3},
+                        "output_tokens": 5,
+                        "output_tokens_details": {"reasoning_tokens": 2},
+                        "total_tokens": 13,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(chunks[0]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[1]["choices"], [])
+        self.assertEqual(
+            chunks[1]["usage"],
+            {
+                "prompt_tokens": 8,
+                "prompt_tokens_details": {"cached_tokens": 3},
+                "completion_tokens": 5,
+                "completion_tokens_details": {"reasoning_tokens": 2},
+                "total_tokens": 13,
+            },
+        )
+
+    def test_body_usage_fields_map_between_protocol_names(self):
+        chat_body = json.dumps(
+            {
+                "id": "chatcmpl_usage",
+                "object": "chat.completion",
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 5,
+                    "total_tokens": 13,
+                },
+            }
+        ).encode("utf-8")
+        responses_body = json.dumps(
+            {
+                "id": "resp_usage",
+                "object": "response",
+                "status": "completed",
+                "model": "responses-model",
+                "output": [
+                    {
+                        "id": "msg_usage",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 4,
+                    "total_tokens": 11,
+                },
+            }
+        ).encode("utf-8")
+
+        as_responses = json.loads(protocol_translation.chat_completion_to_response_body(chat_body))
+        as_chat = json.loads(protocol_translation.response_body_to_chat_completion_body(responses_body))
+
+        self.assertEqual(
+            as_responses["usage"],
+            {"input_tokens": 8, "output_tokens": 5, "total_tokens": 13},
+        )
+        self.assertEqual(
+            as_chat["usage"],
+            {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+        )
 
     def test_chat_stream_rejects_unknown_tool_fields_and_non_string_arguments(self):
         tool_calls = (
@@ -1763,6 +1870,7 @@ class ProtocolTranslationTests(unittest.TestCase):
                 "choices": [{"delta": {"content": "Hello"}, "finish_reason": "stop"}],
             }
         )
+        events.extend(chat_to_responses.events_for_done())
         self.assertEqual(events[-1]["type"], "response.completed")
 
         responses_to_chat = protocol_translation.ResponsesToChatStreamConverter()

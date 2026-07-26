@@ -117,6 +117,9 @@ class FakeHandler:
     def _iter_upstream_sse_lines(self, *args, **kwargs):
         return CodexProxyHandler._iter_upstream_sse_lines(self, *args, **kwargs)
 
+    def _iter_upstream_sse_events(self, *args, **kwargs):
+        return CodexProxyHandler._iter_upstream_sse_events(self, *args, **kwargs)
+
     def _write_sse_protocol_error_event(self, upstream_name, status, detail, *, error="UpstreamProtocolError"):
         return CodexProxyHandler._write_sse_protocol_error_event(
             self,
@@ -2928,6 +2931,382 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(body.count(case["terminal"]), 1, case["name"])
             self.assertIn(b"sentinel", body, case["name"])
             self.assertEqual(close_call_count, 1, case["name"])
+
+    def test_converted_responses_stream_uses_complete_frames_across_transport_fragmentation(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b": keepalive\r",
+                b"\nretry: 1500\r\n\r",
+                b"\n",
+                b"event: response.created\r\ndata: {\"type\":\"response.created\",",
+                b"\r\ndata: \"response\":{\"id\":\"resp_fragmented\",\"model\":\"canonical-model\"}}\r\n\r\n",
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"frag",
+                b"mented\"}\r",
+                b"\n\r\n",
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fragmented\",",
+                b"\"model\":\"canonical-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":5,\"total_tokens\":13}}}\r\n\r\n",
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "responses_only_provider",
+            request_id="req-converted-fragmented",
+            model="caller-model",
+            upstream_format="responses",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture={},
+        )
+
+        written = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b'"model":"canonical-model"', written)
+        self.assertIn(b'"content":"fragmented"', written)
+        self.assertIn(b'"prompt_tokens":8', written)
+        self.assertIn(b'"completion_tokens":5', written)
+        self.assertEqual(written.count(b"data: [DONE]"), 1)
+        self.assertNotIn(b'"error"', written)
+
+    def test_converted_chat_stream_uses_complete_frames_across_transport_fragmentation(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b": keepalive\n\n",
+                b"event: chat.chunk\ndata: {\"id\":\"chatcmpl_fragmented\",\"object\":\"chat.completion.chunk\",",
+                b"\ndata: \"model\":\"canonical-chat-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"frag",
+                b"mented\"},\"finish_reason\":null}]}\n\n",
+                b"data: {\"id\":\"chatcmpl_fragmented\",\"object\":\"chat.completion.chunk\",",
+                b"\"model\":\"canonical-chat-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\r",
+                b'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":4,"total_tokens":11}}\r\r',
+                b"data: [DO",
+                b"NE]\r\r",
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "chat_only_provider",
+            request_id="req-converted-chat-fragmented",
+            model="caller-model",
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture={},
+        )
+
+        written = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b'"model":"canonical-chat-model"', written)
+        self.assertIn(b'"delta":"fragmented"', written)
+        self.assertIn(b'"input_tokens":7', written)
+        self.assertIn(b'"output_tokens":4', written)
+        self.assertEqual(written.count(b"response.completed"), 1)
+        self.assertNotIn(b"data: [DONE]", written)
+        self.assertNotIn(b'"error"', written)
+
+    def test_converted_stream_incomplete_frame_is_not_emitted_as_partial_success(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.output_text.delta","delta":"complete"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_SECRET',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "responses_only_provider",
+            request_id="req-converted-incomplete-frame",
+            model="caller-model",
+            upstream_format="responses",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture={},
+        )
+
+        written = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b'"content":"complete"', written)
+        self.assertNotIn(b"resp_SECRET", written)
+        self.assertEqual(written.count(b'"code":"upstream_stream_incomplete"'), 1)
+        self.assertNotIn(b"data: [DONE]", written)
+
+    def test_malformed_complete_converted_frames_fail_once_without_payload_echo_or_later_success(self):
+        cases = (
+            (
+                "responses_to_chat",
+                "responses",
+                "chat_completions",
+                b"data: \xffSECRET_RESPONSES\n\n",
+                b'data: {"type":"response.completed","response":{"id":"later_success"}}\n\n',
+                b'"code":"upstream_protocol_error"',
+                b"data: [DONE]",
+            ),
+            (
+                "chat_to_responses",
+                "chat_completions",
+                "responses",
+                b"data: {SECRET_CHAT]\r\n\r\n",
+                b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\r\n\r\n',
+                b"event: error",
+                b"response.completed",
+            ),
+        )
+
+        for (
+            name,
+            upstream_format,
+            inbound_format,
+            malformed,
+            later_success,
+            error_marker,
+            forbidden_terminal,
+        ) in cases:
+            with self.subTest(name=name):
+                fake = FakeHandler()
+                response = FakeSseResponse([malformed, later_success, b""])
+
+                status = CodexProxyHandler._relay_upstream_response(
+                    fake,
+                    response,
+                    f"{name}_provider",
+                    request_id=f"req-{name}-malformed",
+                    model="caller-model",
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    caller_stream=True,
+                    behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                    usage_capture={},
+                )
+
+                written = b"".join(fake.wfile.writes)
+                self.assertEqual(status, 502)
+                self.assertEqual(written.count(error_marker), 1)
+                self.assertNotIn(b"SECRET", written)
+                self.assertNotIn(b"later_success", written)
+                self.assertNotIn(forbidden_terminal, written)
+
+    def test_buffered_converted_streams_also_parse_only_complete_frames(self):
+        cases = (
+            (
+                "responses_to_chat",
+                "responses",
+                "chat_completions",
+                [
+                    b'data: {"type":"response.created","response":{"id":"resp_buffered","model":"canonical-responses"}}\n\n',
+                    b'data: {"type":"response.output_text.delta",\n',
+                    b'data: "delta":"buffered responses"}\n\n',
+                    b'data: {"type":"response.completed","response":{"id":"resp_buffered","model":"canonical-responses","status":"completed","output":[]}}\n\n',
+                    b"",
+                ],
+                b'"content":"buffered responses"',
+                b"data: [DONE]",
+            ),
+            (
+                "chat_to_responses",
+                "chat_completions",
+                "responses",
+                [
+                    b'data: {"id":"chatcmpl_buffered","object":"chat.completion.chunk","model":"canonical-chat",',
+                    b'\r\ndata: "choices":[{"index":0,"delta":{"content":"buffered chat"},"finish_reason":null}]}\r\n\r\n',
+                    b'data: {"id":"chatcmpl_buffered","object":"chat.completion.chunk","model":"canonical-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\r\n\r\n',
+                    b"data: [DONE]\r\n\r\n",
+                    b"",
+                ],
+                b'"delta":"buffered chat"',
+                b"response.completed",
+            ),
+        )
+
+        for name, upstream_format, inbound_format, stream, content, terminal in cases:
+            with self.subTest(name=name):
+                fake = FakeHandler()
+
+                status = CodexProxyHandler._relay_upstream_response(
+                    fake,
+                    FakeSseResponse(stream),
+                    f"{name}_generic_provider",
+                    request_id=f"req-{name}-buffered",
+                    model="caller-model",
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    caller_stream=True,
+                    behavior_profile=None,
+                    usage_capture={},
+                )
+
+                written = b"".join(fake.wfile.writes)
+                self.assertEqual(status, 200)
+                self.assertIn(content, written)
+                self.assertEqual(written.count(terminal), 1)
+                self.assertNotIn(b'"error"', written)
+
+    def test_sse_to_non_streaming_json_uses_complete_frames(self):
+        fake = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_json","model":"canonical-json"}}\r\n\r\n',
+                b'data: {"type":"response.output_text.delta",\r\n',
+                b'data: "delta":"buffered json"}\r\n\r\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_json","model":"canonical-json","status":"completed","output":[]}}\r\n\r\n',
+                b"",
+            ]
+        )
+
+        status = CodexProxyHandler._relay_upstream_response(
+            fake,
+            response,
+            "responses_provider",
+            request_id="req-sse-to-json-frames",
+            model="caller-model",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=False,
+            behavior_profile=None,
+            usage_capture={},
+        )
+
+        payload = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["id"], "resp_json")
+        self.assertEqual(payload["model"], "canonical-json")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], "buffered json")
+
+    def test_image_proxy_sse_to_body_uses_complete_frames(self):
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_image","model":"vision-model"}}\n\n',
+                b'data: {"type":"response.output_text.delta",\n',
+                b'data: "delta":"described image"}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_image","model":"vision-model","status":"completed","output":[]}}\n\n',
+                b"",
+            ]
+        )
+
+        payload = json.loads(codex_proxy._image_proxy_response_body(response))
+
+        self.assertEqual(payload["id"], "resp_image")
+        self.assertEqual(payload["model"], "vision-model")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], "described image")
+
+    def test_converted_target_events_are_invariant_to_transport_partitioning(self):
+        sources = (
+            (
+                "responses_to_chat",
+                "responses",
+                "chat_completions",
+                (
+                    b": comment\r\n\r\n"
+                    b'data: {"type":"response.created","response":{"id":"resp_partition","model":"responses-model"}}\r\n\r\n'
+                    b'data: {"type":"response.output_text.delta","delta":"partitioned"}\r\n\r\n'
+                    b'data: {"type":"response.completed","response":{"id":"resp_partition","model":"responses-model","status":"completed","output":[]}}\r\n\r\n'
+                ),
+            ),
+            (
+                "chat_to_responses",
+                "chat_completions",
+                "responses",
+                (
+                    b": comment\n\n"
+                    b'data: {"id":"chatcmpl_partition","object":"chat.completion.chunk","model":"chat-model","choices":[{"index":0,"delta":{"content":"partitioned"},"finish_reason":null}]}\n\n'
+                    b'data: {"id":"chatcmpl_partition","object":"chat.completion.chunk","model":"chat-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
+            ),
+        )
+        fixed_uuid = Mock(hex="0123456789abcdef0123456789abcdef")
+
+        for name, upstream_format, inbound_format, raw in sources:
+            partitions = (
+                [raw, b""],
+                [bytes((byte,)) for byte in raw] + [b""],
+                [raw[:7], raw[7:31], raw[31:-5], raw[-5:], b""],
+            )
+            outputs = []
+            with (
+                patch("protocol_translation.time.time", return_value=1234567890),
+                patch("protocol_translation.uuid.uuid4", return_value=fixed_uuid),
+            ):
+                for chunks in partitions:
+                    fake = FakeHandler()
+                    status = CodexProxyHandler._relay_upstream_response(
+                        fake,
+                        FakeSseResponse(chunks),
+                        f"{name}_provider",
+                        request_id=f"req-{name}-partition",
+                        model="caller-model",
+                        upstream_format=upstream_format,
+                        inbound_format=inbound_format,
+                        caller_stream=True,
+                        behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                        usage_capture={},
+                    )
+                    self.assertEqual(status, 200)
+                    outputs.append(b"".join(fake.wfile.writes))
+
+            with self.subTest(name=name):
+                self.assertEqual(outputs[1:], outputs[:-1])
+
+    def test_malformed_converted_request_completes_once_with_502_without_retry(self):
+        self.external_model["upstream_format"] = "chat_completions"
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/volc/responses",
+            body,
+            headers={"X-Codex-Client-Id": "opencode"},
+        )
+        malformed = FakeSseResponse(
+            [
+                b"data: \xffSECRET_CONVERTED\n\n",
+                b'data: {"choices":[{"index":0,"delta":{"content":"later_success"},"finish_reason":"stop"}]}\n\n',
+                b"data: [DONE]\n\n",
+                b"",
+            ]
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", return_value=malformed) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(fake.wfile.writes)
+        request_complete = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertEqual(len(request_complete), 1)
+        self.assertEqual(request_complete[0]["status"], 502)
+        self.assertEqual(written.count(b"event: error"), 1)
+        self.assertNotIn(b"SECRET_CONVERTED", written)
+        self.assertNotIn(b"later_success", written)
+        self.assertNotIn(b"response.completed", written)
 
     def test_upstream_http_error_emits_request_complete_with_status(self):
         body = json.dumps({"model": "volc/glm-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode("utf-8")
@@ -8800,7 +9179,7 @@ class RoutingTests(unittest.TestCase):
             },
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         CodexProxyHandler._relay_upstream_response(
@@ -8848,7 +9227,7 @@ class RoutingTests(unittest.TestCase):
             },
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         CodexProxyHandler._relay_upstream_response(
@@ -8937,7 +9316,7 @@ class RoutingTests(unittest.TestCase):
             },
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         CodexProxyHandler._relay_upstream_response(
@@ -9009,7 +9388,7 @@ class RoutingTests(unittest.TestCase):
             },
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         CodexProxyHandler._relay_upstream_response(
@@ -9054,7 +9433,7 @@ class RoutingTests(unittest.TestCase):
             {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]},
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         CodexProxyHandler._relay_upstream_response(
@@ -9083,7 +9462,7 @@ class RoutingTests(unittest.TestCase):
             {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
             {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},        ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         status = CodexProxyHandler._relay_upstream_response(
@@ -9199,7 +9578,7 @@ class RoutingTests(unittest.TestCase):
             {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
             {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},        ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         status = CodexProxyHandler._relay_transparent_upstream_response(
@@ -19822,7 +20201,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
             {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}, "choices": []},
         ]
         response = FakeSseResponse(
-            [f"data: {json.dumps(chunk)}\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n", b""]
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks] + [b"data: [DONE]\n\n", b""]
         )
 
         status = CodexProxyHandler._relay_transparent_upstream_response(
