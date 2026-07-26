@@ -76,11 +76,11 @@ jobs:
           if ($isPr) {
             $baseSha = '${{ github.event.pull_request.base.sha }}'
             $headSha = '${{ github.event.pull_request.head.sha }}'
-            git fetch origin $baseSha --depth=1
+            git fetch origin $baseSha
             if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
             $mergeBase = git merge-base $baseSha $headSha
             if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
-            $changed = git diff --name-only $mergeBase $headSha
+            $changed = git diff --no-renames --name-only $mergeBase $headSha
             if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
             if (-not $acquisitionFailed) {
               $changed | Out-File -Encoding utf8 $changedFile

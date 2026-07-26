@@ -24,7 +24,7 @@ Run targeted tests freely while implementing. At the candidate commit,
 
 | Changed boundary | Relevant local full suite |
 |---|---|
-| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | `python -m pytest -q --ignore=tests/test_real_client_e2e.py` plus `python -m pytest -q tests/test_real_client_e2e.py` when the changed paths touch the real-client E2E contract surface |
+| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | `python -m pytest -q --ignore=tests/test_real_client_e2e.py` plus `python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- python -m pytest -q tests/test_real_client_e2e.py` when the changed paths touch the real-client E2E contract surface |
 | Frontend source, UI contracts, frontend configuration, or frontend dependencies | `npm run build` and `npm run test:ui-contract` in `frontend/` |
 | Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/` |
 | Shared frontend/Tauri command or persisted-settings contract | Frontend and Rust suites |

@@ -342,3 +342,39 @@ def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
             "unattended synthetic pytest in fallback section"
         )
         pos = idx + len(marker)
+
+
+def test_ci_yaml_synthetic_job_has_no_depth_boundary():
+    """Regression: re-shallowing base history can make merge-base fail."""
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
+    assert "--depth=" not in synthetic_job, "synthetic job must not re-shallow history"
+
+
+def test_ci_yaml_changed_paths_uses_no_renames():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
+    plan_step = _step_run_text(synthetic_job, "Plan synthetic partition")
+    assert "git diff" in plan_step
+    assert "--no-renames" in plan_step
+    assert "--name-only" in plan_step
+
+
+def test_pr_rename_from_relevant_to_unrelated_runs_synthetic(plan):
+    # With --no-renames git diff emits both the old relevant path and the new
+    # unrelated path; the old path must keep the check synthetic.
+    changed = ["tests/test_real_client_e2e.py", "src-python/codex_proxy.py"]
+    p = plan.build_plan("pull_request", True, changed)
+    assert p.synthetic_status == "run"
+
+
+def test_pr_rename_from_unrelated_to_relevant_runs_synthetic(plan):
+    # With --no-renames git diff emits both the old unrelated path and the new
+    # relevant path; the new path must make the check synthetic.
+    changed = ["src-python/codex_proxy.py", "tests/test_real_client_e2e.py"]
+    p = plan.build_plan("pull_request", True, changed)
+    assert p.synthetic_status == "run"
