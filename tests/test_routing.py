@@ -3740,7 +3740,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"later_success", written)
         self.assertNotIn(b"data: [DONE]", written)
 
-    def test_official_streaming_final_conversion_error_is_sanitized_before_headers(self):
+    def test_official_streaming_headers_precede_keepalives_and_conversion_error_is_sanitized(self):
         body = json.dumps(
             {
                 "model": "openai/gpt-5.5",
@@ -3749,6 +3749,31 @@ class RoutingTests(unittest.TestCase):
             }
         ).encode("utf-8")
         handler, fake = post_handler("/v1/chat/completions", body)
+        call_order = []
+
+        class RecordingWFile(FakeWFile):
+            def write(self, data):
+                call_order.append(("write", data))
+                super().write(data)
+
+        fake.wfile = RecordingWFile()
+        handler.wfile = fake.wfile
+
+        def record_send_response(status, message=None):
+            call_order.append(("send_response", status))
+            fake.send_response(status, message)
+
+        def record_send_header(key, value):
+            call_order.append(("send_header", key))
+            fake.send_header(key, value)
+
+        def record_end_headers():
+            call_order.append(("end_headers", None))
+            fake.end_headers()
+
+        handler.send_response = record_send_response
+        handler.send_header = record_send_header
+        handler.end_headers = record_end_headers
         terminal = {
             "type": "response.completed",
             "response": {
@@ -3791,6 +3816,7 @@ class RoutingTests(unittest.TestCase):
                 {
                     "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
                     "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "3",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0.01",
                 },
                 clear=False,
             ),
@@ -3798,7 +3824,10 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch(
                 "codex_proxy._official_urlopen",
-                side_effect=lambda *_args, **_kwargs: FakeSseResponse(frames),
+                side_effect=lambda *_args, **_kwargs: FakeDelayedSseResponse(
+                    frames,
+                    first_delay_seconds=0.05,
+                ),
             ) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -3813,9 +3842,29 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(request_complete), 1)
         self.assertEqual(request_complete[0]["status"], 502)
         self.assertEqual(written.count(b'"code":"upstream_protocol_error"'), 1)
+        self.assertGreaterEqual(written.count(b": codexhub.keepalive\n\n"), 1)
         self.assertNotIn(b"SECRET_", written)
         self.assertNotIn(b"unsupported_protocol_semantics", written)
         self.assertNotIn(b"data: [DONE]", written)
+        send_response_index = next(
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "send_response"
+        )
+        end_headers_index = next(
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "end_headers"
+        )
+        write_indices = [
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "write"
+        ]
+        self.assertLess(send_response_index, end_headers_index)
+        self.assertTrue(write_indices)
+        for write_index in write_indices:
+            self.assertLess(end_headers_index, write_index)
 
     def test_verified_cross_protocol_source_shape_table_fails_once_without_retry(self):
         cases = (

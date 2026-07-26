@@ -16336,20 +16336,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 event_context=event_context,
                 defer_stream_errors=defer_stream_errors,
             )
-        defer_verified_final_conversion_headers = (
-            is_event_stream
-            and caller_stream
-            and verified_source_format == "responses"
-            and want_chat_output
-            and behavior_profile != BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-        )
         defer_stream_headers = (
             is_event_stream
             and caller_stream
-            and (
-                lifecycle_empty_final_resample_enabled(event_context, request_kind)
-                or defer_verified_final_conversion_headers
-            )
+            and lifecycle_empty_final_resample_enabled(event_context, request_kind)
         )
 
         def finish_downstream_stream_closed(exc: OSError) -> int:
