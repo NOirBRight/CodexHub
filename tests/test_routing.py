@@ -3974,6 +3974,84 @@ class RoutingTests(unittest.TestCase):
         for write_index in write_indices:
             self.assertLess(end_headers_index, write_index)
 
+    def test_retry_notice_disarms_deferred_lifecycle_headers(self):
+        handler = FakeHandler()
+        call_order = []
+
+        class RecordingWFile(FakeWFile):
+            def write(self, data):
+                call_order.append(("write", data))
+                super().write(data)
+
+        handler.wfile = RecordingWFile()
+
+        def record_send_response(status, message=None):
+            call_order.append(("send_response", status))
+            handler.status = status
+
+        def record_send_header(key, value):
+            call_order.append(("send_header", key))
+            handler.headers.append((key, value))
+
+        def record_end_headers():
+            call_order.append(("end_headers", None))
+            handler.headers_ended = True
+
+        handler.send_response = record_send_response
+        handler.send_header = record_send_header
+        handler.end_headers = record_end_headers
+        seam = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "ollama_cloud",
+            request_id="req-lifecycle-retry-headers",
+            inbound_format="responses",
+            upstream_format="responses",
+        )
+        handler._downstream_stream_commit = seam
+        seam.set_ensure_headers_committed_callback(
+            lambda: handler._send_sse_headers(200, "ollama_cloud")
+        )
+
+        retry_headers_sent = handler._send_sse_headers(200, "ollama_cloud")
+        retry_notice_sent = handler._write_sse_event(
+            "codexhub.retry",
+            {
+                "type": "codexhub.retry",
+                "attempt": 1,
+                "max_attempts": 2,
+                "retry_in_seconds": 0,
+            },
+        )
+
+        self.assertTrue(retry_headers_sent)
+        self.assertTrue(retry_notice_sent)
+        self.assertEqual(
+            sum(name == "send_response" for name, _value in call_order),
+            1,
+        )
+        self.assertEqual(
+            sum(name == "end_headers" for name, _value in call_order),
+            1,
+        )
+        end_headers_index = next(
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "end_headers"
+        )
+        write_indices = [
+            index
+            for index, (name, _value) in enumerate(call_order)
+            if name == "write"
+        ]
+        self.assertTrue(write_indices)
+        for write_index in write_indices:
+            self.assertLess(end_headers_index, write_index)
+        self.assertEqual(
+            b"".join(handler.wfile.writes).count(b"event: codexhub.retry\n"),
+            1,
+        )
+
     def test_verified_cross_protocol_source_shape_table_fails_once_without_retry(self):
         cases = (
             (

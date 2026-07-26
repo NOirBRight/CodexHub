@@ -13003,6 +13003,7 @@ class _GatewayDownstreamStreamCommit:
         self._last_upstream_byte_at: float | None = None
         self._last_write_error: OSError | None = None
         self._last_successful_completion_bytes = b""
+        self._headers_committed = False
         self._ensure_headers_committed_callback: Callable[[], bool] | None = None
 
     @property
@@ -13059,9 +13060,14 @@ class _GatewayDownstreamStreamCommit:
         self,
         callback: Callable[[], bool] | None,
     ) -> None:
-        self._ensure_headers_committed_callback = callback
+        self._ensure_headers_committed_callback = (
+            None if self._headers_committed else callback
+        )
 
     def _ensure_headers_committed_before_write(self) -> bool:
+        if self._headers_committed:
+            self._ensure_headers_committed_callback = None
+            return True
         callback = self._ensure_headers_committed_callback
         if callback is None:
             return True
@@ -13170,9 +13176,14 @@ class _GatewayDownstreamStreamCommit:
         """Authorize and record the sending of HTTP response headers.
 
         ``send_headers`` is called only when the stream is still open and no
-        terminal has been committed. Any OSError is captured, closes the owned
-        upstream work, and seals the downstream side.
+        terminal has been committed. A successful commit owns the one allowed
+        header block and disarms any deferred header callback. Later header
+        requests are successful no-ops. Any OSError is captured, closes the
+        owned upstream work, and seals the downstream side.
         """
+        if self._headers_committed:
+            self._ensure_headers_committed_callback = None
+            return True
         if self._downstream_closed or self._terminal_committed:
             return False
         try:
@@ -13181,6 +13192,8 @@ class _GatewayDownstreamStreamCommit:
             self._last_write_error = write_exc
             self.close()
             return False
+        self._headers_committed = True
+        self._ensure_headers_committed_callback = None
         return True
 
     def commit_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
