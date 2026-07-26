@@ -9871,6 +9871,56 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(closed_event["synthetic_terminal_event_sent"])
         self.assertEqual(closed_event["synthetic_terminal_event_type"], "response.failed")
 
+    def test_transparent_responses_size_limit_writes_typed_synthetic_terminal(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "volcengine",
+            model="volc/glm-5.2",
+            request_id="req_transparent_responses_size_limit",
+            inbound_format="responses",
+            upstream_format="responses",
+            max_frame_bytes=64,
+        )
+        secret = b"transparent-responses-secret"
+        usage_capture = {}
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([b"data: " + (b"x" * 64) + secret, b""]),
+            "volcengine",
+            request_id="req_transparent_responses_size_limit",
+            model="volc/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture=usage_capture,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        events = SseEventAssembler().feed(body)
+        failed_payload = json.loads(events[0].data)
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(failed_payload["type"], "response.failed")
+        self.assertEqual(
+            failed_payload["response"]["error"]["code"],
+            "SseFrameTooLargeError",
+        )
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertTrue(closed_event["synthetic_terminal_event_sent"])
+        self.assertTrue(usage_capture["synthetic_terminal_event_sent"])
+
     def test_transparent_responses_stream_commit_ignores_interruption_after_terminal(self):
         handler = FakeHandler()
         response = FakeSseResponse(
@@ -9972,6 +10022,49 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertFalse(closed_event["synthetic_terminal_event_sent"])
         self.assertEqual(closed_event["failure_class"], "upstream_stream_interrupted")
+
+    def test_transparent_chat_size_limit_closes_without_synthetic_terminal(self):
+        handler = FakeHandler()
+        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
+            handler,
+            None,
+            "ollama_cloud",
+            model="ollama-cloud/glm-5.2",
+            request_id="req_transparent_chat_size_limit",
+            inbound_format="chat_completions",
+            upstream_format="chat_completions",
+            max_frame_bytes=64,
+        )
+        secret = b"transparent-chat-secret"
+        usage_capture = {}
+
+        status = CodexProxyHandler._relay_upstream_response(
+            handler,
+            FakeSseResponse([b"data: " + (b"x" * 64) + secret, b""]),
+            "ollama_cloud",
+            request_id="req_transparent_chat_size_limit",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="chat_completions",
+            inbound_format="chat_completions",
+            caller_stream=True,
+            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            usage_capture=usage_capture,
+        )
+
+        body = b"".join(handler.wfile.writes)
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "transparent_stream_closed"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(body, b"")
+        self.assertNotIn(secret, body)
+        self.assertEqual(closed_event["failure_class"], "sse_frame_too_large")
+        self.assertFalse(closed_event["synthetic_terminal_event_sent"])
+        self.assertFalse(usage_capture["synthetic_terminal_event_sent"])
 
     def test_transparent_chat_ignores_responses_type_in_extension_field(self):
         handler = FakeHandler()
