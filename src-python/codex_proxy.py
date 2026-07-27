@@ -972,7 +972,8 @@ DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
 DEFAULT_POST_CONTENT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
-DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 3
+DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS = 180.0
+DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS = 2
 DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS = 30
 DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS = 300.0
 DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS = 600.0
@@ -1294,6 +1295,22 @@ class UpstreamStreamIdleTimeoutError(TimeoutError):
         super().__init__(f"Upstream stream stalled for {timeout_seconds:g} seconds {detail}.")
 
 
+class GatewayPreResponseBudgetExhausted(TimeoutError):
+    """Raised when main generation cannot reach a usable response within its shared budget."""
+
+    def __init__(
+        self,
+        *,
+        phase: str = "pre_response",
+        attempt: int | None = None,
+        budget_seconds: float = DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS,
+    ):
+        self.phase = phase
+        self.attempt = attempt
+        self.budget_seconds = budget_seconds
+        super().__init__("Gateway pre-response budget exhausted before a usable upstream response.")
+
+
 def upstream_timeout_seconds() -> int:
     settings_value = _runtime_settings_value("gateway_request_timeout_seconds")
     if isinstance(settings_value, int):
@@ -1446,7 +1463,9 @@ def official_upstream_open_attempts() -> int:
         value = int(raw_value)
     except ValueError:
         return DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
-    return value if value > 0 else DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+    if value <= 0:
+        return DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS
+    return min(value, DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -12541,6 +12560,8 @@ def _typed_error_code(
 ) -> str:
     if error_type == "gateway_auth_error":
         return "gateway.auth"
+    if error_type == "gateway_pre_response_budget_exhausted":
+        return "gateway.pre_response_budget_exhausted"
     if error_type == USER_REQUESTED_SHUTDOWN_OUTCOME:
         return "gateway.user_requested_shutdown"
     if error_type in {"invalid_request_error", "validation_error"}:
@@ -12572,6 +12593,8 @@ def _codexhub_error_payload(
 ) -> dict[str, Any]:
     error_code = error or (type(exc).__name__ if exc is not None else "UpstreamError")
     resolved_failure_class = failure_class
+    if error_code == "gateway_pre_response_budget_exhausted":
+        resolved_failure_class = RETRY_FAILURE_PERMANENT
     if resolved_failure_class is None and exc is not None:
         resolved_failure_class = _upstream_failure_class(exc)
     if resolved_failure_class is None and (
@@ -12962,11 +12985,53 @@ def _parse_gateway_request_input(
     )
 
 
+def _main_generation_pre_response_deadline(
+    started_at: float,
+    request_kind: str,
+) -> float | None:
+    if request_kind != RETRY_REQUEST_MAIN_GENERATION:
+        return None
+    return started_at + DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS
+
+
+def _remaining_pre_response_budget_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _clamp_timeout_to_pre_response_budget(
+    timeout: int | float,
+    deadline: float | None,
+    *,
+    phase: str,
+    attempt: int | None = None,
+) -> int | float:
+    remaining = _remaining_pre_response_budget_seconds(deadline)
+    if remaining is None:
+        return timeout
+    if remaining <= 0:
+        raise GatewayPreResponseBudgetExhausted(phase=phase, attempt=attempt)
+    return min(float(timeout), remaining)
+
+
+def _require_retry_delay_within_pre_response_budget(
+    deadline: float | None,
+    delay_seconds: int | float,
+    *,
+    phase: str,
+    attempt: int | None = None,
+) -> None:
+    remaining = _remaining_pre_response_budget_seconds(deadline)
+    if remaining is not None and delay_seconds >= remaining:
+        raise GatewayPreResponseBudgetExhausted(phase=phase, attempt=attempt)
+
+
 def _open_upstream_once(
     request: Request,
     *,
     upstream_name: str,
-    timeout: int,
+    timeout: int | float,
 ) -> Any:
     if upstream_name == "official":
         return _official_urlopen(request, timeout=timeout)
@@ -12978,7 +13043,7 @@ def _open_upstream_response(
     *,
     upstream_name: str,
     upstream_format: str,
-    timeout: int,
+    timeout: int | float,
     event_context: Mapping[str, Any] | None = None,
     downstream_retry_callback: Any = None,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
@@ -12986,9 +13051,22 @@ def _open_upstream_response(
     retry_policy: str = RETRY_GATEWAY_FULL,
     retry_http_errors: bool = True,
     downstream_exposed: Callable[[], bool] | None = None,
+    pre_response_deadline: float | None = None,
+    open_attempt_budget: dict[str, int] | None = None,
 ) -> Any:
     explicit_max_attempts = max_attempts is not None
     base_retry_attempts = _upstream_retry_attempts(request_kind) if max_attempts is None else max(1, max_attempts)
+    if open_attempt_budget is not None:
+        remaining_open_attempts = max(
+            0,
+            open_attempt_budget["max_attempts"] - open_attempt_budget["attempts_started"],
+        )
+        if remaining_open_attempts <= 0:
+            raise GatewayPreResponseBudgetExhausted(
+                phase="upstream_open_attempts",
+                attempt=open_attempt_budget["attempts_started"],
+            )
+        base_retry_attempts = min(base_retry_attempts, remaining_open_attempts)
     retry_started_at = time.monotonic()
     diagnostic_request_key = _diagnostic_context_value(event_context, "request_id")
     diagnostic_model = _diagnostic_context_value(event_context, "model")
@@ -12999,6 +13077,12 @@ def _open_upstream_response(
     )
     attempt = 1
     while True:
+        if open_attempt_budget is not None:
+            request_attempt = open_attempt_budget["attempts_started"] + 1
+            request_retry_budget = open_attempt_budget["max_attempts"]
+        else:
+            request_attempt = attempt
+            request_retry_budget = base_retry_attempts
         admission = _active_gateway_request()
         if admission is not None:
             admission.raise_if_cancelled()
@@ -13008,13 +13092,33 @@ def _open_upstream_response(
                 request,
                 model_access_path,
             )
+        attempt_timeout = _clamp_timeout_to_pre_response_budget(
+            timeout,
+            pre_response_deadline,
+            phase="upstream_open",
+            attempt=request_attempt,
+        )
+        if open_attempt_budget is not None:
+            open_attempt_budget["attempts_started"] = request_attempt
         attempt_started_at = time.monotonic()
         try:
             response = _open_upstream_once(
                 request,
                 upstream_name=upstream_name,
-                timeout=timeout,
+                timeout=attempt_timeout,
             )
+            remaining_budget = _remaining_pre_response_budget_seconds(pre_response_deadline)
+            if remaining_budget is not None and remaining_budget <= 0:
+                close_response = getattr(response, "close", None)
+                if callable(close_response):
+                    try:
+                        close_response()
+                    except Exception:
+                        pass
+                raise GatewayPreResponseBudgetExhausted(
+                    phase="response_headers",
+                    attempt=request_attempt,
+                )
             if admission is not None:
                 admission.attach_upstream_transport(response)
                 admission.raise_if_cancelled()
@@ -13029,8 +13133,8 @@ def _open_upstream_response(
                 "observe_upstream_phase",
                 diagnostic_request_key,
                 phase="upstream_request_write",
-                attempt=attempt,
-                retry_budget=base_retry_attempts,
+                attempt=request_attempt,
+                retry_budget=request_retry_budget,
                 elapsed_ms=elapsed_ms,
                 outcome="ok",
                 provider=upstream_name,
@@ -13039,8 +13143,8 @@ def _open_upstream_response(
             _observe_gateway_diagnostic(
                 "observe_upstream_attempt",
                 diagnostic_request_key,
-                attempt=attempt,
-                retry_budget=base_retry_attempts,
+                attempt=request_attempt,
+                retry_budget=request_retry_budget,
                 elapsed_ms=elapsed_ms,
                 outcome="ok",
                 connection_disposition=connection_disposition,
@@ -13055,6 +13159,8 @@ def _open_upstream_response(
                 headers=diagnostic_headers,
             )
             return response
+        except GatewayPreResponseBudgetExhausted:
+            raise
         except (HTTPError, IncompleteRead, OSError, URLError) as exc:
             if admission is not None:
                 admission.raise_if_cancelled()
@@ -13082,8 +13188,8 @@ def _open_upstream_response(
                     "observe_upstream_phase",
                     diagnostic_request_key,
                     phase=diagnostic_phase,
-                    attempt=attempt,
-                    retry_budget=base_retry_attempts,
+                    attempt=request_attempt,
+                    retry_budget=request_retry_budget,
                     elapsed_ms=elapsed_ms,
                     outcome="error",
                     failure_phase=transport_phase,
@@ -13094,8 +13200,8 @@ def _open_upstream_response(
                 _observe_gateway_diagnostic(
                     "observe_upstream_attempt",
                     diagnostic_request_key,
-                    attempt=attempt,
-                    retry_budget=attempt,
+                    attempt=request_attempt,
+                    retry_budget=request_attempt,
                     elapsed_ms=elapsed_ms,
                     outcome="error",
                     failure_phase=telemetry_failure_phase,
@@ -13121,12 +13227,17 @@ def _open_upstream_response(
                 failure_class=failure_class,
                 explicit_max_attempts=explicit_max_attempts,
             )
+            error_retry_budget = (
+                open_attempt_budget["max_attempts"]
+                if open_attempt_budget is not None
+                else retry_attempts
+            )
             if retry_safety_class in _SUPPRESSED_RETRY_SAFETY_CLASSES:
                 _observe_gateway_diagnostic(
                     "observe_upstream_attempt",
                     diagnostic_request_key,
-                    attempt=attempt,
-                    retry_budget=retry_attempts,
+                    attempt=request_attempt,
+                    retry_budget=error_retry_budget,
                     elapsed_ms=elapsed_ms,
                     outcome="error",
                     failure_phase=telemetry_failure_phase,
@@ -13134,13 +13245,19 @@ def _open_upstream_response(
                     provider=upstream_name,
                     model=diagnostic_model,
                 )
+                remaining_budget = _remaining_pre_response_budget_seconds(pre_response_deadline)
+                if remaining_budget is not None and remaining_budget <= 0:
+                    raise GatewayPreResponseBudgetExhausted(
+                        phase=telemetry_failure_phase,
+                        attempt=request_attempt,
+                    ) from exc
                 _emit_upstream_retry_suppressed_event(
                     event_context,
                     upstream_name=upstream_name,
                     upstream_format=upstream_format,
                     request_kind=request_kind,
-                    attempt=attempt,
-                    max_attempts=retry_attempts,
+                    attempt=request_attempt,
+                    max_attempts=error_retry_budget,
                     exc=exc,
                     failure_class=failure_class,
                     failure_phase=telemetry_failure_phase,
@@ -13150,8 +13267,8 @@ def _open_upstream_response(
             _observe_gateway_diagnostic(
                 "observe_upstream_attempt",
                 diagnostic_request_key,
-                attempt=attempt,
-                retry_budget=retry_attempts,
+                attempt=request_attempt,
+                retry_budget=error_retry_budget,
                 elapsed_ms=elapsed_ms,
                 outcome="error",
                 failure_phase=telemetry_failure_phase,
@@ -13159,21 +13276,37 @@ def _open_upstream_response(
                 provider=upstream_name,
                 model=diagnostic_model,
             )
+            remaining_budget = _remaining_pre_response_budget_seconds(pre_response_deadline)
+            if remaining_budget is not None and remaining_budget <= 0:
+                raise GatewayPreResponseBudgetExhausted(
+                    phase=telemetry_failure_phase,
+                    attempt=request_attempt,
+                ) from exc
             if attempt >= retry_attempts or failure_class == RETRY_FAILURE_PERMANENT:
                 raise
-            delay_seconds = gateway_retry_delay_seconds(attempt, failure_class=failure_class, exc=exc)
+            delay_seconds = gateway_retry_delay_seconds(
+                request_attempt,
+                failure_class=failure_class,
+                exc=exc,
+            )
             if (
                 failure_class in CAPACITY_RETRY_FAILURE_CLASSES
                 and not _capacity_retry_elapsed_limit_allows(retry_started_at, delay_seconds)
             ):
                 raise
+            _require_retry_delay_within_pre_response_budget(
+                pre_response_deadline,
+                delay_seconds,
+                phase="retry_delay",
+                attempt=request_attempt,
+            )
             _emit_upstream_retry_event(
                 event_context,
                 upstream_name=upstream_name,
                 upstream_format=upstream_format,
                 request_kind=request_kind,
-                attempt=attempt,
-                max_attempts=retry_attempts,
+                attempt=request_attempt,
+                max_attempts=error_retry_budget,
                 exc=exc,
                 delay_seconds=delay_seconds,
                 failure_class=failure_class,
@@ -13186,8 +13319,8 @@ def _open_upstream_response(
                         upstream_name=upstream_name,
                         upstream_format=upstream_format,
                         request_kind=request_kind,
-                        attempt=attempt,
-                        max_attempts=retry_attempts,
+                        attempt=request_attempt,
+                        max_attempts=error_retry_budget,
                         exc=exc,
                         failure_phase=telemetry_failure_phase,
                         delay_seconds=delay_seconds,
@@ -13952,6 +14085,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         """
         request_id = uuid.uuid4().hex[:12]
         self._diagnostic_request_id = request_id
+        self._pre_response_deadline = None
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
@@ -14232,6 +14366,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if is_transparent_metered:
                 request_kind = RETRY_REQUEST_MAIN_GENERATION
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+            self._pre_response_deadline = _main_generation_pre_response_deadline(
+                started_at,
+                request_kind,
+            )
             vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
             reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
@@ -14598,6 +14736,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             configured_upstream_format = upstream_format
             selected_upstream_format = upstream_format
             upstream_format_options = _upstream_format_candidates(configured_upstream_format)
+            official_open_attempt_budget = (
+                {
+                    "max_attempts": official_upstream_open_attempts(),
+                    "attempts_started": 0,
+                }
+                if is_official_http_passthrough
+                else None
+            )
             for format_index, selected_upstream_format in enumerate(upstream_format_options):
                 if isinstance(adapter_event_context, dict):
                     adapter_event_context["tool_protocol"] = _external_tool_protocol(
@@ -14632,12 +14778,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 event_context=adapter_event_context,
                                 downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
                                 request_kind=request_kind,
-                                max_attempts=official_upstream_open_attempts() if is_official_http_passthrough else None,
+                                max_attempts=(
+                                    official_open_attempt_budget["max_attempts"]
+                                    if official_open_attempt_budget is not None
+                                    else None
+                                ),
                                 retry_policy=route_decision.retry_policy
                                 if enable_transparent_metered
                                 else RETRY_GATEWAY_FULL,
                                 retry_http_errors=not is_official_http_passthrough,
                                 downstream_exposed=lambda: _downstream_has_been_exposed(self),
+                                pre_response_deadline=(
+                                    None if downstream_sse_started else self._pre_response_deadline
+                                ),
+                                open_attempt_budget=official_open_attempt_budget,
                             ) as response:
                                 seam = _handler_downstream_stream_commit(self)
                                 if seam is not None:
@@ -15313,6 +15467,68 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **usage_capture,
                 **proxy_request_context,
             )
+        except GatewayPreResponseBudgetExhausted as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
+            error_code = "gateway_pre_response_budget_exhausted"
+            detail = "Gateway pre-response budget exhausted before a usable upstream response."
+            event_fields = {
+                "failure_phase": exc.phase,
+                "attempt": exc.attempt,
+                "pre_response_budget_ms": int(exc.budget_seconds * 1000),
+                "retryable": False,
+            }
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                upstream=upstream_name,
+                upstream_format=upstream_format,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                status=504,
+                error=error_code,
+                detail=detail,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **event_fields,
+                **proxy_request_context,
+            )
+            self._safe_send_downstream_json_error(
+                504,
+                inbound_format=inbound_format,
+                upstream_name=upstream_name or "gateway",
+                request_id=request_id,
+                error=error_code,
+                detail=detail,
+                error_type=error_code,
+            )
+            self.close_connection = True
+            write_proxy_event(
+                "request_complete",
+                request_id=request_id,
+                method="POST",
+                model=canonical_model_id(model) if model else None,
+                model_requested=model_requested,
+                model_canonical=canonical_model_id(model) if model else None,
+                upstream=upstream_name,
+                provider_id=upstream_name,
+                provider_hint=provider_hint,
+                upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
+                behavior_profile=behavior_profile,
+                inbound_format=inbound_format,
+                route_reason=route_reason,
+                route_mode="official" if upstream_name == "official" else "codexhub",
+                is_stream=caller_stream,
+                status=504,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **event_fields,
+                **request_observability,
+                **usage_capture,
+                **proxy_request_context,
+            )
         except IncompleteRead as exc:
             if admission.cancelled:
                 send_user_requested_shutdown()
@@ -15431,6 +15647,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 redact_identity=identity,
             )
         finally:
+            self._pre_response_deadline = None
             _restore_gateway_request(previous_admission)
             shutdown_controller.complete(admission)
 
