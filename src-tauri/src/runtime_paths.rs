@@ -34,6 +34,20 @@ pub(crate) fn runtime_home_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// Version-independent directory for managed-client rollback provenance.
+///
+/// This store is intentionally outside per-channel runtime homes so that a
+/// baseline recorded by one app version/flavor can be restored by another.
+/// `CODEXHUB_ROLLBACK_PROVENANCE_DIR` overrides the location for tests.
+pub(crate) fn client_rollback_provenance_dir() -> Result<PathBuf, String> {
+    match std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR").filter(|value| !value.is_empty()) {
+        Some(value) => Ok(PathBuf::from(value)),
+        None => dirs::home_dir()
+            .ok_or_else(|| "failed to resolve user home directory".to_string())
+            .map(|home| home.join(".codexhub-rollback-provenance")),
+    }
+}
+
 pub(crate) fn codex_target_home_dir() -> Result<PathBuf, String> {
     match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         Some(value) => Ok(PathBuf::from(value)),
