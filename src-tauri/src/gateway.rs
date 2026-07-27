@@ -4009,6 +4009,13 @@ thread_local! {
     static ROLLBACK_PROVENANCE_DIR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+/// Test-only hook invoked after a thread has acquired the rollback baseline lock
+/// and confirmed no baseline exists, but before it writes the first baseline.
+/// Allows concurrency tests to force contenders to overlap at the lock seam.
+#[cfg(test)]
+static TEST_BASELINE_WRITE_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
 /// Override the canonical rollback provenance directory for the current thread.
 /// Used by isolated apply seams so they never read or write production provenance.
 fn with_rollback_provenance_dir_override<T>(path: Option<PathBuf>, f: impl FnOnce() -> T) -> T {
@@ -4295,6 +4302,12 @@ fn adopt_legacy_baseline_locked(
     let lock = safe_file::FileLock::acquire(&baseline_path)?;
     if read_rollback_baseline(client_id)?.is_some() {
         return Ok(None);
+    }
+    #[cfg(test)]
+    {
+        if let Some(hook) = TEST_BASELINE_WRITE_HOOK.lock().unwrap().as_ref() {
+            hook();
+        }
     }
     let adopted_files = match adopt_latest_legacy_snapshot_files(client_id, backup_roots)? {
         Some(files) => files,
@@ -7149,7 +7162,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
     use std::thread;
@@ -7170,6 +7183,62 @@ mod tests {
 
     fn beta_root(path: PathBuf) -> (PathBuf, super::BackupChannel) {
         (path, super::BackupChannel::Beta)
+    }
+
+    /// Force two restore/apply calls to overlap at the absent-baseline lock seam.
+    /// `a_restore` acquires the lock first and pauses until `b_restore` has
+    /// entered the lock acquisition; then A publishes and B re-reads the baseline.
+    fn run_overlapping_first_baseline<A, B>(
+        a_restore: impl FnOnce() -> A + Send + 'static,
+        b_restore: impl FnOnce() -> B + Send + 'static,
+    ) -> (A, B)
+    where
+        A: Send + 'static,
+        B: Send + 'static,
+    {
+        let a_has_lock = std::sync::Arc::new(AtomicBool::new(false));
+        let b_is_waiting = std::sync::Arc::new(AtomicBool::new(false));
+        let release_a = std::sync::Arc::new(AtomicBool::new(false));
+
+        let hook = {
+            let a_has_lock = a_has_lock.clone();
+            let b_is_waiting = b_is_waiting.clone();
+            let release_a = release_a.clone();
+            move || {
+                a_has_lock.store(true, Ordering::SeqCst);
+                while !b_is_waiting.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                while !release_a.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+        };
+        *super::TEST_BASELINE_WRITE_HOOK.lock().unwrap() = Some(Box::new(hook));
+
+        let a_handle = std::thread::spawn(a_restore);
+
+        let a_has_lock_main = a_has_lock.clone();
+        while !a_has_lock_main.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        let b_is_waiting_main = b_is_waiting.clone();
+        let b_handle = std::thread::spawn(move || {
+            b_is_waiting.store(true, Ordering::SeqCst);
+            b_restore()
+        });
+
+        while !b_is_waiting_main.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        // Give B enough time to block on the lock that A already holds.
+        std::thread::sleep(Duration::from_millis(50));
+        release_a.store(true, Ordering::SeqCst);
+
+        let result = (a_handle.join().unwrap(), b_handle.join().unwrap());
+        *super::TEST_BASELINE_WRITE_HOOK.lock().unwrap() = None;
+        result
     }
 
     #[test]
@@ -12293,55 +12362,37 @@ mod tests {
             .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let mut handles = Vec::new();
-
-        // Thread A: Stable-only contender proposes baseline A.
-        {
-            let config_path = config_path.clone();
-            let stable_roots = vec![stable_root(stable_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let result = super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots);
-                let (lock, cvar) = &*pair;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                result
-            }));
-        }
-
-        // Thread B: Beta-only contender proposes distinct baseline B, but must wait until A has published.
-        {
-            let config_path = config_path.clone();
-            let beta_roots = vec![beta_root(beta_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let (lock, cvar) = &*pair;
-                let mut published = lock.lock().unwrap();
-                while !*published {
-                    published = cvar.wait(published).unwrap();
-                }
-                drop(published);
-                super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
-            }));
-        }
-
-        let mut restored = 0;
-        for handle in handles {
-            if handle.join().unwrap().is_ok() {
-                restored += 1;
-            }
-        }
+        let (a_result, b_result) = run_overlapping_first_baseline(
+            {
+                let config_path = config_path.clone();
+                let stable_roots = vec![stable_root(stable_backups.clone())];
+                move || super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+            },
+            {
+                let config_path = config_path.clone();
+                let beta_roots = vec![beta_root(beta_backups.clone())];
+                move || super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
+            },
+        );
 
         let baseline = super::read_rollback_baseline("opencode").unwrap().unwrap();
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert_eq!(restored, 2);
+        assert!(
+            a_result.is_ok(),
+            "Stable contender A must succeed: {:?}",
+            a_result.err()
+        );
+        assert!(
+            b_result.is_ok(),
+            "Beta contender B must succeed: {:?}",
+            b_result.err()
+        );
         assert_eq!(
             baseline.files.get("opencode.json"),
             Some(&super::BaselineFile::Snapshot {
                 content: r#"{"model":"anthropic/claude-sonnet-4-stable"}"#.to_string()
             }),
-            "first-published Stable baseline A must remain immutable after Beta contender B re-reads"
+            "Stable baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
     }
 
@@ -12407,64 +12458,46 @@ mod tests {
             .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let mut handles = Vec::new();
-
-        // Thread A: Stable-only contender proposes baseline A.
-        {
-            let settings_path = settings_path.clone();
-            let models_path = models_path.clone();
-            let stable_roots = vec![stable_root(stable_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let result = super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots);
-                let (lock, cvar) = &*pair;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                result
-            }));
-        }
-
-        // Thread B: Beta-only contender proposes distinct baseline B, but must wait until A has published.
-        {
-            let settings_path = settings_path.clone();
-            let models_path = models_path.clone();
-            let beta_roots = vec![beta_root(beta_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let (lock, cvar) = &*pair;
-                let mut published = lock.lock().unwrap();
-                while !*published {
-                    published = cvar.wait(published).unwrap();
-                }
-                drop(published);
-                super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
-            }));
-        }
-
-        let mut restored = 0;
-        for handle in handles {
-            if handle.join().unwrap().is_ok() {
-                restored += 1;
-            }
-        }
+        let (a_result, b_result) = run_overlapping_first_baseline(
+            {
+                let settings_path = settings_path.clone();
+                let models_path = models_path.clone();
+                let stable_roots = vec![stable_root(stable_backups.clone())];
+                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+            },
+            {
+                let settings_path = settings_path.clone();
+                let models_path = models_path.clone();
+                let beta_roots = vec![beta_root(beta_backups.clone())];
+                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+            },
+        );
 
         let baseline = super::read_rollback_baseline("pi").unwrap().unwrap();
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert_eq!(restored, 2);
+        assert!(
+            a_result.is_ok(),
+            "Stable contender A must succeed: {:?}",
+            a_result.err()
+        );
+        assert!(
+            b_result.is_ok(),
+            "Beta contender B must succeed: {:?}",
+            b_result.err()
+        );
         assert!(
             matches!(
                 baseline.files.get("settings.json"),
                 Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "first-published Stable settings baseline must remain immutable after Beta contender B re-reads"
+            "Stable settings baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
         assert!(
             matches!(
                 baseline.files.get("models.json"),
                 Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "first-published Stable models baseline must remain immutable after Beta contender B re-reads"
+            "Stable models baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
     }
 
@@ -12501,55 +12534,37 @@ mod tests {
         }
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let mut handles = Vec::new();
-
-        // Thread A: Stable-only contender publishes complete baseline A first.
-        {
-            let config_path = config_path.clone();
-            let stable_roots = vec![stable_root(stable_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let result = super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots);
-                let (lock, cvar) = &*pair;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                result
-            }));
-        }
-
-        // Thread B: Beta-only contender proposes distinct baseline B after A has published.
-        {
-            let config_path = config_path.clone();
-            let beta_roots = vec![beta_root(beta_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let (lock, cvar) = &*pair;
-                let mut published = lock.lock().unwrap();
-                while !*published {
-                    published = cvar.wait(published).unwrap();
-                }
-                drop(published);
-                super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
-            }));
-        }
-
-        let mut restored = 0;
-        for handle in handles {
-            if handle.join().unwrap().is_ok() {
-                restored += 1;
-            }
-        }
+        let (a_result, b_result) = run_overlapping_first_baseline(
+            {
+                let config_path = config_path.clone();
+                let stable_roots = vec![stable_root(stable_backups.clone())];
+                move || super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+            },
+            {
+                let config_path = config_path.clone();
+                let beta_roots = vec![beta_root(beta_backups.clone())];
+                move || super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
+            },
+        );
 
         let baseline = super::read_rollback_baseline("opencode").unwrap().unwrap();
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert_eq!(restored, 2);
+        assert!(
+            a_result.is_ok(),
+            "Stable contender A must succeed: {:?}",
+            a_result.err()
+        );
+        assert!(
+            b_result.is_ok(),
+            "Beta contender B must succeed: {:?}",
+            b_result.err()
+        );
         assert_eq!(
             baseline.files.get("opencode.json"),
             Some(&super::BaselineFile::Snapshot {
                 content: r#"{"model":"anthropic/claude-sonnet-4-stable"}"#.to_string()
             }),
-            "Stable baseline A must remain immutable after Beta contender B re-reads"
+            "Stable baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
     }
 
@@ -12612,64 +12627,46 @@ mod tests {
         }
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let mut handles = Vec::new();
-
-        // Thread A: Stable-only contender publishes complete baseline A first.
-        {
-            let settings_path = settings_path.clone();
-            let models_path = models_path.clone();
-            let stable_roots = vec![stable_root(stable_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let result = super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots);
-                let (lock, cvar) = &*pair;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                result
-            }));
-        }
-
-        // Thread B: Beta-only contender proposes distinct baseline B after A has published.
-        {
-            let settings_path = settings_path.clone();
-            let models_path = models_path.clone();
-            let beta_roots = vec![beta_root(beta_backups.clone())];
-            let pair = pair.clone();
-            handles.push(std::thread::spawn(move || {
-                let (lock, cvar) = &*pair;
-                let mut published = lock.lock().unwrap();
-                while !*published {
-                    published = cvar.wait(published).unwrap();
-                }
-                drop(published);
-                super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
-            }));
-        }
-
-        let mut restored = 0;
-        for handle in handles {
-            if handle.join().unwrap().is_ok() {
-                restored += 1;
-            }
-        }
+        let (a_result, b_result) = run_overlapping_first_baseline(
+            {
+                let settings_path = settings_path.clone();
+                let models_path = models_path.clone();
+                let stable_roots = vec![stable_root(stable_backups.clone())];
+                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+            },
+            {
+                let settings_path = settings_path.clone();
+                let models_path = models_path.clone();
+                let beta_roots = vec![beta_root(beta_backups.clone())];
+                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+            },
+        );
 
         let baseline = super::read_rollback_baseline("pi").unwrap().unwrap();
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert_eq!(restored, 2);
+        assert!(
+            a_result.is_ok(),
+            "Stable contender A must succeed: {:?}",
+            a_result.err()
+        );
+        assert!(
+            b_result.is_ok(),
+            "Beta contender B must succeed: {:?}",
+            b_result.err()
+        );
         assert!(
             matches!(
                 baseline.files.get("settings.json"),
                 Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "Stable baseline A must remain immutable after Beta contender B re-reads"
+            "Stable settings baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
         assert!(
             matches!(
                 baseline.files.get("models.json"),
                 Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "Stable models baseline A must remain immutable after Beta contender B re-reads"
+            "Stable models baseline A must remain immutable while Beta contender B overlaps at the lock seam"
         );
     }
 
