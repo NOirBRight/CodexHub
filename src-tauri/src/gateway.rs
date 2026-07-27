@@ -7197,24 +7197,34 @@ mod tests {
         B: Send + 'static,
     {
         let a_has_lock = std::sync::Arc::new(AtomicBool::new(false));
-        let b_is_waiting = std::sync::Arc::new(AtomicBool::new(false));
+        let b_blocked = std::sync::Arc::new(AtomicBool::new(false));
         let release_a = std::sync::Arc::new(AtomicBool::new(false));
 
-        let hook = {
+        // B signals from inside safe_file's actual lock-acquisition seam.
+        *crate::safe_file::TEST_LOCK_ACQUIRE_HOOK.lock().unwrap() = Some(Box::new({
+            let b_blocked = b_blocked.clone();
+            move |path: &std::path::Path, event: &str| {
+                if event == "blocked" && path.to_string_lossy().contains("baseline.json") {
+                    b_blocked.store(true, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        // A pauses after acquiring the baseline lock and confirming absence.
+        *super::TEST_BASELINE_WRITE_HOOK.lock().unwrap() = Some(Box::new({
             let a_has_lock = a_has_lock.clone();
-            let b_is_waiting = b_is_waiting.clone();
+            let b_blocked = b_blocked.clone();
             let release_a = release_a.clone();
             move || {
                 a_has_lock.store(true, Ordering::SeqCst);
-                while !b_is_waiting.load(Ordering::SeqCst) {
+                while !b_blocked.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
                 while !release_a.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
             }
-        };
-        *super::TEST_BASELINE_WRITE_HOOK.lock().unwrap() = Some(Box::new(hook));
+        }));
 
         let a_handle = std::thread::spawn(a_restore);
 
@@ -7223,21 +7233,19 @@ mod tests {
             std::thread::yield_now();
         }
 
-        let b_is_waiting_main = b_is_waiting.clone();
-        let b_handle = std::thread::spawn(move || {
-            b_is_waiting.store(true, Ordering::SeqCst);
-            b_restore()
-        });
+        let b_handle = std::thread::spawn(b_restore);
 
-        while !b_is_waiting_main.load(Ordering::SeqCst) {
+        // A already holds the lock; B is now entering the lock seam.
+        // Release A only after B has demonstrably blocked on the same lock.
+        let b_blocked_main = b_blocked.clone();
+        while !b_blocked_main.load(Ordering::SeqCst) {
             std::thread::yield_now();
         }
-        // Give B enough time to block on the lock that A already holds.
-        std::thread::sleep(Duration::from_millis(50));
         release_a.store(true, Ordering::SeqCst);
 
         let result = (a_handle.join().unwrap(), b_handle.join().unwrap());
         *super::TEST_BASELINE_WRITE_HOOK.lock().unwrap() = None;
+        *crate::safe_file::TEST_LOCK_ACQUIRE_HOOK.lock().unwrap() = None;
         result
     }
 

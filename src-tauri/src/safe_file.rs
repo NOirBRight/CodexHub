@@ -13,9 +13,18 @@ use std::cell::RefCell;
 type TestPreOpenHook = Box<dyn Fn(&Path)>;
 
 #[cfg(test)]
+type TestLockAcquireHook = Box<dyn Fn(&Path, &'static str) + Send + Sync>;
+
+#[cfg(test)]
 thread_local! {
     static TEST_PRE_OPEN_EXISTING_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
 }
+
+/// Test-only hook invoked from the lock-acquisition seam. The event argument is
+/// one of "blocked" or "acquired" so callers can observe genuine contention.
+#[cfg(test)]
+pub(crate) static TEST_LOCK_ACQUIRE_HOOK: std::sync::Mutex<Option<TestLockAcquireHook>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(test)]
 fn install_test_pre_open_hook(hook: impl Fn(&Path) + 'static) {
@@ -230,11 +239,23 @@ fn acquire_namespace_guard(path: &Path, started: &Instant, hook: Option<&dyn Fn(
                 if let Some(hook) = hook {
                     hook("acquired");
                 }
+                #[cfg(test)]
+                {
+                    if let Some(hook) = TEST_LOCK_ACQUIRE_HOOK.lock().unwrap().as_ref() {
+                        hook(path, "acquired");
+                    }
+                }
                 return Ok(file);
             }
             Ok(false) => {
                 if let Some(hook) = hook {
                     hook("blocked");
+                }
+                #[cfg(test)]
+                {
+                    if let Some(hook) = TEST_LOCK_ACQUIRE_HOOK.lock().unwrap().as_ref() {
+                        hook(path, "blocked");
+                    }
                 }
             }
             Err(()) => return Err("failed to acquire atomic write lock".to_owned()),
