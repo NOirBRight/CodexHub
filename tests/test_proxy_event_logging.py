@@ -10,7 +10,8 @@ import threading
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
-from urllib.error import URLError
+import io
+from urllib.error import HTTPError, URLError
 
 import codex_proxy
 from lock_fixtures import write_dead_legacy_lock
@@ -81,6 +82,71 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertEqual(retry["request_id"], "req-open-seam")
                     self.assertEqual(retry["upstream"], "official")
                     self.assertEqual(retry["failure_phase"], "tcp_connect")
+            finally:
+                importlib.reload(codex_proxy)
+
+    def test_non_official_http_error_emits_upstream_retry_suppressed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(codex_proxy)
+                    request = codex_proxy.Request(
+                        "https://example.test/v1/responses", data=b"{}", method="POST"
+                    )
+
+                    with (
+                        patch.dict(
+                            "os.environ",
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch(
+                            "codex_proxy._open_upstream_once",
+                            side_effect=HTTPError(
+                                "https://example.test/v1/responses",
+                                503,
+                                "Service Unavailable",
+                                {},
+                                io.BytesIO(b"upstream error"),
+                            ),
+                        ) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        with self.assertRaises(HTTPError):
+                            codex_proxy._open_upstream_response(
+                                request,
+                                upstream_name="volcengine",
+                                upstream_format="responses",
+                                timeout=1,
+                                event_context={
+                                    "request_id": "req-suppressed",
+                                    "model": "volc/glm-5.2",
+                                },
+                            )
+
+                    self.assertEqual(open_once.call_count, 1)
+                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    payloads = [
+                        json.loads(line)
+                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                        if line.strip()
+                    ]
+                    suppressed = next(
+                        payload
+                        for payload in payloads
+                        if payload["event"] == "upstream_retry_suppressed"
+                    )
+                    self.assertEqual(suppressed["request_id"], "req-suppressed")
+                    self.assertEqual(suppressed["upstream"], "volcengine")
+                    self.assertEqual(suppressed["failure_phase"], "response_headers")
+                    self.assertEqual(suppressed["retry_safety_class"], "suppressed_post_write")
+                    self.assertNotIn("upstream_retry", [p["event"] for p in payloads])
             finally:
                 importlib.reload(codex_proxy)
 

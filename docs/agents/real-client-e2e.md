@@ -8,7 +8,7 @@ canonical routes. HTTP/configuration preflight alone is never an E2E pass.
 
 Run on the authoritative machine-bound local dedicated Windows host
 environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
-login input, dedicated Volc credential, and no reused host user session or
+login input, dedicated Ollama Cloud credential, and no reused host user session or
 client configuration. A VM or named snapshot is not required. The runner
 verifies each native installed version against these compatibility floors
 before launching the candidate or a client:
@@ -77,15 +77,15 @@ Use a new output directory for every invocation. Before launch it contains:
       profile.json
       auth.json
     credentials/
-      volc.json
+      ollama.json
     config/
       gateway.json
       host-environment.json
     gui-seed/
       desktop-luna/
-      desktop-volc/
+      desktop-third-party/
       zcode-luna/
-      zcode-volc/
+      zcode-third-party/
 ```
 
 `isolated/work` must not exist before invocation. The runner verifies the
@@ -95,12 +95,16 @@ is empty before any executable probe or launch.
 
 `isolated/gui-seed` is the invocation-local staging location for an
 operator-controlled durable seed stored outside all run output directories.
-Before launch, copy each of the four named case directories from that durable
-seed into this location. Never copy a prior run's `isolated/work`. The runner
-accepts only canonical, non-reparse, independently copied seed files and
-normalizes or discards client runtime state before it creates the fresh case
-roots. Keep the durable seed private; it contains dedicated-account browser
-login state and is never uploaded.
+Before launch, copy each of the four named seed-slot directories from that
+durable seed into this location. The third-party slot names remain stable when
+the qualified Provider changes. For one compatibility migration, the runner
+also accepts `desktop-volc` or `zcode-volc` only when the corresponding
+`*-third-party` slot is absent; it independently copies from the legacy source
+without modifying or deleting it. Never copy a prior run's `isolated/work`.
+The runner accepts only canonical, non-reparse, independently copied seed files
+and normalizes or discards client runtime state before it creates the fresh
+case roots. Keep the durable seed private; it contains dedicated-account
+browser login state and is never uploaded.
 
 `profile.json` contains only readiness assertions and no account identifier:
 
@@ -117,8 +121,8 @@ login state and is never uploaded.
 `auth.json` is freshly materialized directly in this invocation's isolated
 root; it is never discovered or copied from the current user's Codex home. It
 must use `chatgpt` mode and contain non-empty access and refresh tokens.
-`volc.json` has schema
-`codexhub.real-client-volc.v1` and one non-empty `api_key`. `gateway.json` has
+`ollama.json` has schema
+`codexhub.real-client-ollama.v1` and one non-empty `api_key`. `gateway.json` has
 schema `codexhub.real-client-gateway.v1`, a loopback `listen_port` below the
 Windows dynamic client range (`1024`–`49151`), and a dedicated
 `gateway_client_key`. Preflight must also be able to bind that port
@@ -179,11 +183,11 @@ Operators must not seed this state by hand or hard-code a context limit.
 
 After `refresh-models` succeeds, the runner contract-probes the actual passed
 `-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
-Official and Volc selections. Each probe performs `preview`/`apply`/`readback`
+Official and Ollama Cloud selections. Each probe performs `preview`/`apply`/`readback`
 in the final case-local root, passing the explicit candidate runtime catalog
 via `--catalog-path` for every Official `gpt-5.6-luna` preview, apply, and
-readback probe. Volc continues to use the production provider configuration
-and its Chat Completions route without a catalog-path override. The verified roots
+readback probe. Ollama Cloud uses the production provider configuration
+and its Native Responses route without a catalog-path override. The verified roots
 are then reused for the corresponding client launch. Thus the probe detects
 candidate #194 CLI schema drift and verifies that the candidate-managed catalog
 drives Official model resolution without a second materialization or host-state
@@ -240,14 +244,15 @@ PIDs, credentials, or account data.
 Provider protocol selection comes only from #194 preview/apply/readback. The
 runner verifies those three results agree, then verifies the real Gateway
 diagnostics agree with the returned canonical route. Under the current
-production providers this yields Responses for Luna and Chat Completions for
-Volc; the runner contains no endpoint root, SDK, or protocol-format generator.
+production providers this yields Responses for the Official Luna leg and Native
+Responses for the Ollama Cloud leg; the runner contains no endpoint root, SDK, or
+protocol-format generator.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
 `TEMP`, and `TMP`. The candidate receives the production-consumed
 `CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, exact verified
-`CODEXHUB_CODEX_PATH`, Gateway key, and Volc environment values. The runner
+`CODEXHUB_CODEX_PATH`, Gateway key, and Ollama environment values. The runner
 never discovers, copies, or modifies host shared sessions. Isolated inputs
 must be regular files under the invocation's `isolated/` root; reparse points
 and hard links fail as host-session reuse.
@@ -256,20 +261,26 @@ and hard links fail as host-session reuse.
 
 The fixed case order and selectors are:
 
-| Case | Client | Client selector | Gateway canonical route | Finalization |
-|---|---|---|---|---|
-| `desktop-luna` | Codex Desktop | `gpt-5.6-luna` | `gpt-5.6-luna` | human GUI |
-| `desktop-volc` | Codex Desktop | `volc/glm-5.2` | `volc/glm-5.2` | human GUI |
-| `codex-cli-luna` | Codex CLI | `gpt-5.6-luna` | `gpt-5.6-luna` | automated |
-| `codex-cli-volc` | Codex CLI | `volc/glm-5.2` | `volc/glm-5.2` | automated |
-| `opencode-luna` | OpenCode | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
-| `opencode-volc` | OpenCode | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
-| `zcode-luna` | ZCode | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | human GUI |
-| `zcode-volc` | ZCode | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | human GUI |
-| `pi-luna` | Pi | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
-| `pi-volc` | Pi | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
-| `omp-luna` | OMP | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | automated |
-| `omp-volc` | OMP | `codexhub-volc/glm-5.2` | `volc/glm-5.2` | automated |
+| Case | Client | Provider | Client selector | Gateway canonical route | Protocol | Finalization |
+|---|---|---|---|---|---|---|
+| `desktop-luna` | Codex Desktop | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | human GUI |
+| `desktop-ollama-cloud` | Codex Desktop | Ollama Cloud | `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | human GUI |
+| `codex-cli-luna` | Codex CLI | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | automated |
+| `codex-cli-ollama-cloud` | Codex CLI | Ollama Cloud | `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `opencode-luna` | OpenCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
+| `opencode-ollama-cloud` | OpenCode | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `zcode-luna` | ZCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | human GUI |
+| `zcode-ollama-cloud` | ZCode | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | human GUI |
+| `pi-luna` | Pi | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
+| `pi-ollama-cloud` | Pi | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `omp-luna` | OMP | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
+| `omp-ollama-cloud` | OMP | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+
+The one full 12-case run is the Phase 0 / 0.1.7 release qualification and occurs
+only on the final frozen 0.1.7 candidate. Its third-party leg is the Ollama
+Cloud Native Responses path; the previous Volc Chat Completions
+path remains available as ordinary, non-release regression coverage and is not represented as
+Native Responses evidence in this matrix.
 
 Each case creates one disposable `sentinel.txt`. The client must use exactly
 one successful read-only read tool, emit the named sentinel once, and finish
@@ -368,7 +379,7 @@ maximum `3600`) and remains distinct from automated per-process timeouts. It is
 still contained by the overall runner deadline; it never disables or extends
 that outer deadline.
 
-The template uses schema `codexhub.real-client-manual-evidence.v2` and contains
+The template uses schema `codexhub.real-client-manual-evidence.v3` and contains
 the candidate SHA, managed-client-config candidate SHA, and a random
 `run_binding_sha256`. At the host console, the
 human confirms the dedicated login and GUI, performs both model cases in each
@@ -377,7 +388,7 @@ the template to `manual-evidence.json` and changes only the observed fields:
 
 ```json
 {
-  "schema": "codexhub.real-client-manual-evidence.v2",
+  "schema": "codexhub.real-client-manual-evidence.v3",
   "candidate_sha": "<candidate SHA>",
   "managed_client_config_sha": "<materializer candidate SHA>",
   "run_binding_sha256": "<unchanged template hash>",
@@ -387,7 +398,12 @@ the template to `manual-evidence.json` and changes only the observed fields:
     {
       "case_id": "desktop-luna",
       "client": "desktop",
+      "provider_id": "official",
+      "client_selector": "gpt-5.6-luna",
       "canonical_model": "gpt-5.6-luna",
+      "gateway_model": "gpt-5.6-luna",
+      "endpoint_binding": "/v1/responses",
+      "protocol": "responses",
       "sentinel_relative_path": "isolated/work/gui-desktop/desktop-luna/sentinel.txt",
       "human_finalized": true,
       "outcome": "passed",
@@ -418,7 +434,7 @@ absolute path, or request/session/task identifier.
    modify any current user's Codex, ZCode, OpenCode, Pi, OMP, or provider
    session/configuration.
 2. Create a fresh output root and directly materialize its machine-bound host
-   manifest and dedicated Codex/Volc inputs. Do not use links or copy an
+   manifest and dedicated Codex/Ollama Cloud inputs. Do not use links or copy an
    existing host session, and do not create `isolated/work`.
 3. Check out the candidate. Run the exact `build-windows-portable.ps1 -Flavor
    debug -RepoRoot <absolute-repo-root>` command above, select the resulting
@@ -438,15 +454,16 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -ManagedClientConfigBuild <candidate-portable-path> `
   -ManagedClientConfigSha <candidate-materializer-sha> `
   -LunaModel codexhub-openai/gpt-5.6-luna `
-  -VolcModel codexhub-volc/glm-5.2 `
+  -ThirdPartyModel codexhub-ollama-cloud/glm-5.2 `
   -OutputDirectory <path> `
   -HostEnvironmentManifest <path-to-host-environment.json> `
   -OverallTimeoutSeconds 5400 `
   -ManualEvidenceTimeoutSeconds 900
 ```
 
-6. Wait for the template and four case-local GUI launches (Desktop Luna/Volc
-   and ZCode Luna/Volc). Each launch consumes its own #194-applied root.
+6. Wait for the template and four case-local GUI launches (Desktop and ZCode,
+   each with Luna and Ollama Cloud). Each launch consumes its own #194-applied
+   root.
    Reusable Desktop GUI seeds preserve the browser profile and a normalized
    allowlist of completed-onboarding state. The normalized `.codex` state
    never copies project history, remote installation or host identity, session
@@ -487,17 +504,19 @@ completion. An outer timeout references only the fixed sanitized
 `runner-timeout.json` diagnostic. A complete matrix keeps one sanitized
 artifact per case and uses `failure_classification` `none` or `case_failure`.
 
-The success-summary top-level schema is exactly `schema`, `candidate_sha`,
+The success summary uses schema `codexhub.real-client-e2e-summary.v2`. Its
+top-level keys are exactly `schema`, `candidate_sha`,
 `managed_client_config_sha`, `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
 `pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
 The legacy-named `pinned_versions` object contains the actual normalized versions
 verified for this run, not the compatibility floors.
 Its `hashes` object contains exactly `debug_build` and
 `managed_client_config_build`; fingerprints of the host
-manifest, account profile/auth, Volc credential, Gateway configuration, and
+manifest, account profile/auth, Ollama credential, Gateway configuration, and
 manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
-and `hashes`. Summary/per-case content is otherwise limited to verified versions,
-canonical model IDs, bounded timings and counts, classifications, outcomes,
-and relative artifact names. It never contains credentials,
+and `hashes`. Every successful per-case entry binds the client, Provider,
+client selector, canonical model, Gateway model, endpoint binding, and
+`responses` wire protocol alongside bounded timings and counts,
+classifications, outcomes, and relative artifact names. It never contains credentials,
 authorization headers, prompts, non-sentinel model output, usernames, account
 identifiers, absolute paths, or private request/session/task IDs.

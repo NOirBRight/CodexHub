@@ -48,7 +48,7 @@ def selection(client: str, model: str, catalog_path: str | None) -> tuple[str, s
         return f"custom/{model}", "responses"
     provider, model_id = model.split("/", 1)
     selector = f"codexhub-{provider}/{model_id}"
-    protocol = "responses" if provider == "openai" else "chat_completions"
+    protocol = "responses"
     if model_id == "gpt-5.6-luna" and catalog_path is None:
         fail("openai/gpt-5.6-luna requires candidate catalog", 11)
     return selector, protocol
@@ -80,7 +80,7 @@ def write_zcode(root: Path) -> None:
     gateway = "http://127.0.0.1:19190"
     specs = {
         "codexhub-openai": ("openai", "gpt-5.6-luna", "openai", "openai-responses", "responses"),
-        "codexhub-volc": ("volc", "glm-5.2", "openai-compatible", "openai-chat-completions", "chat/completions"),
+        "codexhub-ollama-cloud": ("ollama-cloud", "glm-5.2", "openai", "openai-responses", "responses"),
     }
     catalog_providers = []
     cache_providers = []
@@ -229,7 +229,7 @@ def main() -> None:
         if state != {"client": client, "model": model}:
             fail("readback state mismatch", 8)
     if mode == "contradiction-zcode" and client == "zcode" and verb == "readback":
-        selector = "codexhub-volc/contradiction"
+        selector = "codexhub-ollama-cloud/contradiction"
     log_path = os.environ.get("CODEXHUB_E2E_MATERIALIZER_LOG")
     if log_path:
         with Path(log_path).open("a", encoding="utf-8") as stream:
@@ -239,6 +239,7 @@ def main() -> None:
                         "verb": verb,
                         "client": client,
                         "model": model,
+                        "route_protocol": protocol,
                         "root_role": root.name,
                         "flags": sorted(args),
                         "catalog_path": catalog_path,

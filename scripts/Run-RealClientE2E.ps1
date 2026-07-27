@@ -16,7 +16,7 @@ param(
     [string]$LunaModel,
 
     [Parameter(Mandatory = $true)]
-    [string]$VolcModel,
+    [string]$ThirdPartyModel,
 
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
@@ -328,13 +328,13 @@ function Get-ReportedClientVersions {
 function Get-FailureSummaryValue {
     param([string]$FailureClassification, [string[]]$Artifacts = @())
     return [ordered]@{
-        schema = 'codexhub.real-client-e2e-summary.v1'
+        schema = 'codexhub.real-client-e2e-summary.v2'
         candidate_sha = if ($CandidateSha -match '^[0-9a-fA-F]{40}$') { $CandidateSha.ToLowerInvariant() } else { $null }
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-fA-F]{40}$') { $ManagedClientConfigSha.ToLowerInvariant() } else { $null }
         outcome = 'failed'
         failure_classification = $FailureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
+        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-ollama-cloud/glm-5.2')
         counts = [ordered]@{
             case_count = 0
             passed_count = 0
@@ -382,7 +382,7 @@ function Invoke-RunnerSupervisor {
         ManagedClientConfigBuild = $ManagedClientConfigBuild
         ManagedClientConfigSha = $ManagedClientConfigSha
         LunaModel = $LunaModel
-        VolcModel = $VolcModel
+        ThirdPartyModel = $ThirdPartyModel
         OutputDirectory = $OutputDirectory
         HostEnvironmentManifest = $HostEnvironmentManifest
         TestWindowsInstallMetadataFixture = $TestWindowsInstallMetadataFixture
@@ -407,7 +407,7 @@ function Invoke-RunnerSupervisor {
   -ManagedClientConfigBuild '.' `
   -ManagedClientConfigSha '0000000000000000000000000000000000000000' `
   -LunaModel 'internal' `
-  -VolcModel 'internal' `
+  -ThirdPartyModel 'internal' `
   -OutputDirectory '.' `
   -HostEnvironmentManifest '.' `
   -TimeoutSeconds 1 `
@@ -1359,6 +1359,17 @@ function Read-CorrelatedGatewayEvents {
     if ($modelContradictionCount -gt 0) {
         [void]$events.Add([pscustomobject]@{ event = 'error' })
     }
+    $routeContradictionCount = @($nativeEvents | Where-Object {
+        if ([string](Get-JsonProperty $_ 'event' '') -cne 'request_complete') {
+            return $false
+        }
+        return [string](Get-JsonProperty $_ 'provider_id' '') -cne [string]$Case.diagnostic_provider_id -or
+            [string](Get-JsonProperty $_ 'upstream_format' '') -cne [string]$Case.protocol -or
+            [string](Get-JsonProperty $_ 'inbound_format' '') -cne [string]$Case.protocol
+    }).Count
+    if ($routeContradictionCount -gt 0) {
+        [void]$events.Add([pscustomobject]@{ event = 'error' })
+    }
     $starts = @($nativeEvents | Where-Object { [string](Get-JsonProperty $_ 'event' '') -eq 'request_start' })
     foreach ($start in $starts) {
         [void]$events.Add([pscustomobject]@{ event = 'gateway_request' })
@@ -1570,7 +1581,13 @@ function Invoke-AutomatedCase {
     $artifact = [ordered]@{
         case_id = $Case.case_id
         candidate_sha = $CandidateSha
+        client = $Case.client
+        provider_id = $Case.provider_id
+        client_selector = $Case.client_selector
         canonical_model = $Case.canonical_model
+        gateway_model = $Case.gateway_model
+        endpoint_binding = $Case.endpoint_binding
+        protocol = $Case.protocol
         outcome = if ($measurement.passed) { 'passed' } else { 'failed' }
         stdout_sha256 = Get-TextSha256 -Text $attempt.process.stdout
         stderr_sha256 = Get-TextSha256 -Text $attempt.process.stderr
@@ -1578,7 +1595,13 @@ function Invoke-AutomatedCase {
     Write-JsonFile -Path $artifactPath -Value $artifact
     return [ordered]@{
         case_id = $Case.case_id
+        client = $Case.client
+        provider_id = $Case.provider_id
+        client_selector = $Case.client_selector
         canonical_model = $Case.canonical_model
+        gateway_model = $Case.gateway_model
+        endpoint_binding = $Case.endpoint_binding
+        protocol = $Case.protocol
         outcome = $artifact.outcome
         duration_ms = $duration
         request_complete_count = $measurement.request_complete_count
@@ -1610,7 +1633,7 @@ function Get-ManualResults {
     if (($topLevelNames -join ',') -cne 'candidate_sha,cases,gui_confirmed,login_confirmed,managed_client_config_sha,run_binding_sha256,schema') {
         throw 'manual_evidence_schema_invalid'
     }
-    if ((Get-JsonProperty $evidence 'schema') -cne 'codexhub.real-client-manual-evidence.v2') {
+    if ((Get-JsonProperty $evidence 'schema') -cne 'codexhub.real-client-manual-evidence.v3') {
         throw 'manual_evidence_schema_invalid'
     }
     if ((Get-JsonProperty $evidence 'candidate_sha') -cne $CandidateSha) {
@@ -1640,9 +1663,10 @@ function Get-ManualResults {
         }
         $item = $matches[0]
         $expectedNames = @(
-            'canonical_model', 'case_id', 'client', 'duplicate_terminal_count',
-            'fallback_count', 'http_status', 'human_finalized', 'outcome',
-            'read_only_tool_call_count', 'reconnect_classification',
+            'canonical_model', 'case_id', 'client', 'client_selector',
+            'duplicate_terminal_count', 'endpoint_binding', 'fallback_count',
+            'gateway_model', 'http_status', 'human_finalized', 'outcome',
+            'protocol', 'provider_id', 'read_only_tool_call_count', 'reconnect_classification',
             'request_complete_count', 'sentinel_chunk_count', 'sentinel_relative_path',
             'streaming_request_count',
             'terminal_classification'
@@ -1652,7 +1676,12 @@ function Get-ManualResults {
             throw 'manual_evidence_schema_invalid'
         }
         $valid = (Get-JsonProperty $item 'client') -ceq $expected.client -and
+            (Get-JsonProperty $item 'provider_id') -ceq $expected.provider_id -and
+            (Get-JsonProperty $item 'client_selector') -ceq $expected.client_selector -and
             (Get-JsonProperty $item 'canonical_model') -ceq $expected.canonical_model -and
+            (Get-JsonProperty $item 'gateway_model') -ceq $expected.gateway_model -and
+            (Get-JsonProperty $item 'endpoint_binding') -ceq $expected.endpoint_binding -and
+            (Get-JsonProperty $item 'protocol') -ceq $expected.protocol -and
             (Get-JsonProperty $item 'sentinel_relative_path') -ceq "isolated/work/gui-$($expected.client)/$($expected.case_id)/sentinel.txt" -and
             (Get-JsonProperty $item 'human_finalized' $false) -eq $true -and
             (Get-JsonProperty $item 'outcome') -ceq 'passed' -and
@@ -1673,13 +1702,25 @@ function Get-ManualResults {
         Write-JsonFile -Path $artifactPath -Value ([ordered]@{
             case_id = $expected.case_id
             candidate_sha = $CandidateSha
+            client = $expected.client
+            provider_id = $expected.provider_id
+            client_selector = $expected.client_selector
             canonical_model = $expected.canonical_model
+            gateway_model = $expected.gateway_model
+            endpoint_binding = $expected.endpoint_binding
+            protocol = $expected.protocol
             outcome = 'passed'
             evidence_sha256 = Get-Sha256 -Path $EvidencePath
         })
         [void]$results.Add([ordered]@{
             case_id = $expected.case_id
+            client = $expected.client
+            provider_id = $expected.provider_id
+            client_selector = $expected.client_selector
             canonical_model = $expected.canonical_model
+            gateway_model = $expected.gateway_model
+            endpoint_binding = $expected.endpoint_binding
+            protocol = $expected.protocol
             outcome = 'passed'
             duration_ms = 0
             request_complete_count = 1
@@ -1712,7 +1753,12 @@ function Write-ManualEvidenceTemplate {
         [ordered]@{
             case_id = $_.case_id
             client = $_.client
+            provider_id = $_.provider_id
+            client_selector = $_.client_selector
             canonical_model = $_.canonical_model
+            gateway_model = $_.gateway_model
+            endpoint_binding = $_.endpoint_binding
+            protocol = $_.protocol
             sentinel_relative_path = "isolated/work/gui-$($_.client)/$($_.case_id)/sentinel.txt"
             human_finalized = $false
             outcome = 'pending'
@@ -1728,7 +1774,7 @@ function Write-ManualEvidenceTemplate {
         }
     })
     Write-JsonFile -Path $Path -Value ([ordered]@{
-        schema = 'codexhub.real-client-manual-evidence.v2'
+        schema = 'codexhub.real-client-manual-evidence.v3'
         candidate_sha = $CandidateSha
         managed_client_config_sha = $ManagedClientConfigSha
         run_binding_sha256 = $RunBinding
@@ -2589,6 +2635,9 @@ function Initialize-ClientConfiguration {
         (@(Get-JsonProperty $apply 'target_names' @()) -join ',') -cne (@(Get-JsonProperty $preview 'target_names' @()) -join ','))) {
         throw 'client_configuration_materializer_contradiction'
     }
+    if ($Model -like 'ollama-cloud/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
+        throw 'client_configuration_materializer_contradiction'
+    }
     $targetNames = @((Get-JsonProperty $preview 'target_names' @()) | ForEach-Object { [string]$_ })
     Publish-ManagedClientTargets -Client $managedClient -ApplyRoot $applyRoot -TargetNames $targetNames -CaseRoot $CaseRoot
     return [pscustomobject]@{
@@ -2612,24 +2661,24 @@ function Initialize-CandidateRuntime {
         gateway_client_key = [string]$script:GatewayConfig.gateway_client_key
         gateway_enable_models = $true
         gateway_enable_responses = $true
-        gateway_enable_chat_completions = $true
+        gateway_enable_chat_completions = $false
         proxy_port = [int]$script:GatewayConfig.listen_port
     })
     $providerText = @"
 [[providers]]
-id = "volc"
-name = "Volcengine"
-base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
-api_key = "{env:VOLCENGINE_API_KEY}"
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+api_key = "{env:OLLAMA_API_KEY}"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
   id = "glm-5.2"
-  display_name = "Volc GLM-5.2"
-  context_window = 1024000
-  max_output_tokens = 8192
+  display_name = "Ollama Cloud GLM-5.2"
+  context_window = 1000000
+  max_output_tokens = 131072
   enabled = true
 "@
     [System.IO.File]::WriteAllText((Join-Path $proxyRoot 'config\providers.toml'), $providerText, $script:Utf8NoBom)
@@ -2668,7 +2717,7 @@ try {
     $forwardedArguments = $forwardedJson | ConvertFrom-Json -ErrorAction Stop
     Assert-ExactJsonProperties -Value $forwardedArguments -Names @(
         'CandidateSha', 'DebugBuild', 'ManagedClientConfigBuild',
-        'ManagedClientConfigSha', 'LunaModel', 'VolcModel', 'OutputDirectory',
+        'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
         'PiPath', 'OmpPath', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
@@ -2679,7 +2728,7 @@ try {
     $ManagedClientConfigBuild = [string]$forwardedArguments.ManagedClientConfigBuild
     $ManagedClientConfigSha = [string]$forwardedArguments.ManagedClientConfigSha
     $LunaModel = [string]$forwardedArguments.LunaModel
-    $VolcModel = [string]$forwardedArguments.VolcModel
+    $ThirdPartyModel = [string]$forwardedArguments.ThirdPartyModel
     $OutputDirectory = [string]$forwardedArguments.OutputDirectory
     $HostEnvironmentManifest = [string]$forwardedArguments.HostEnvironmentManifest
     $TestWindowsInstallMetadataFixture = [string]$forwardedArguments.TestWindowsInstallMetadataFixture
@@ -2716,8 +2765,8 @@ if ($ManagedClientConfigSha -notmatch '^[0-9a-f]{40}$') {
 if ($LunaModel -cne 'codexhub-openai/gpt-5.6-luna') {
     throw 'preflight_luna_model_invalid'
 }
-if ($VolcModel -cne 'codexhub-volc/glm-5.2') {
-    throw 'preflight_volc_model_invalid'
+if ($ThirdPartyModel -cne 'codexhub-ollama-cloud/glm-5.2') {
+    throw 'preflight_third_party_model_invalid'
 }
 if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 900 -or
     $ManualEvidenceTimeoutSeconds -lt 1 -or $ManualEvidenceTimeoutSeconds -gt 3600 -or
@@ -2731,7 +2780,7 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $isolationRoot = Join-Path $OutputDirectory 'isolated'
 $accountPath = Join-Path $isolationRoot 'account\profile.json'
 $accountAuthPath = Join-Path $isolationRoot 'account\auth.json'
-$credentialPath = Join-Path $isolationRoot 'credentials\volc.json'
+$credentialPath = Join-Path $isolationRoot 'credentials\ollama.json'
 $configRoot = Join-Path $isolationRoot 'config'
 $guiSeedRoot = Join-Path $isolationRoot 'gui-seed'
 $workRoot = Join-Path $isolationRoot 'work'
@@ -2835,10 +2884,10 @@ if ([string](Get-JsonProperty $accountAuth 'auth_mode' '') -cne 'chatgpt' -or
     [string](Get-JsonProperty $authTokens 'refresh_token' '') -eq '') {
     throw 'preflight_codex_login_missing'
 }
-$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_volc_credential_invalid'
-Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_volc_credential_invalid'
-if ([string]$credential.schema -cne 'codexhub.real-client-volc.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
-    throw 'preflight_volc_credential_invalid'
+$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_ollama_credential_invalid'
+Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_ollama_credential_invalid'
+if ([string]$credential.schema -cne 'codexhub.real-client-ollama.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
+    throw 'preflight_ollama_credential_invalid'
 }
 $script:GatewayConfig = Read-JsonObject -Path $gatewayConfigPath -Failure 'preflight_gateway_config_invalid'
 Assert-ExactJsonProperties -Value $script:GatewayConfig -Names @('schema', 'listen_port', 'gateway_client_key') -Failure 'preflight_gateway_config_invalid'
@@ -2897,20 +2946,20 @@ $desktopLaunchExecutable = Copy-DesktopApplicationPayload `
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
 
 $manualCases = @(
-    [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'desktop-volc'; client = 'desktop'; canonical_model = 'volc/glm-5.2'; gateway_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'zcode-volc'; client = 'zcode'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' }
+    [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
+    [pscustomobject]@{ case_id = 'desktop-ollama-cloud'; client = 'desktop'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+    [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
+    [pscustomobject]@{ case_id = 'zcode-ollama-cloud'; client = 'zcode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
 )
 $automatedCases = @(
-    [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'codex-cli-volc'; client = 'codex-cli'; canonical_model = 'volc/glm-5.2'; gateway_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'opencode-volc'; client = 'opencode'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'pi-volc'; client = 'pi'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' },
-    [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna' },
-    [pscustomobject]@{ case_id = 'omp-volc'; client = 'omp'; canonical_model = $VolcModel; gateway_model = 'volc/glm-5.2' }
+    [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'codex-cli-ollama-cloud'; client = 'codex-cli'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'opencode-ollama-cloud'; client = 'opencode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'pi-ollama-cloud'; client = 'pi'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'omp-ollama-cloud'; client = 'omp'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' }
 )
 
 $runBinding = New-RunBinding
@@ -2948,7 +2997,7 @@ try {
         CODEX_HOME = $script:CandidateCodexRoot
         CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
-        VOLCENGINE_API_KEY = [string]$credential.api_key
+        OLLAMA_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
     }
     Set-RunnerPhase -Phase 'candidate_startup'
@@ -2979,12 +3028,27 @@ try {
         }
         [void](New-Item -ItemType Directory -Path $caseRoot -Force)
         if ($case.client -in @('desktop', 'zcode')) {
-            $seedCaseRoot = Join-Path $guiSeedRoot $case.case_id
+            $seedCaseRoot = Join-Path $guiSeedRoot $case.seed_slot
+            if (-not (Test-Path -LiteralPath $seedCaseRoot -PathType Container) -and
+                $case.legacy_seed_slot) {
+                $legacySeedCaseRoot = Join-Path $guiSeedRoot $case.legacy_seed_slot
+                if (Test-Path -LiteralPath $legacySeedCaseRoot -PathType Container) {
+                    $seedCaseRoot = $legacySeedCaseRoot
+                }
+            }
             if (Test-Path -LiteralPath $seedCaseRoot -PathType Container) {
                 Copy-GuiStateSeed -SeedCaseRoot $seedCaseRoot -CaseRoot $caseRoot -Client $case.client -IsolationRoot $isolationRoot
             }
         }
-        $caseConfigurations[$case.case_id] = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model -CatalogPath $candidateCatalogPath
+        $configuration = Initialize-ClientConfiguration -Client $case.client -CaseRoot $caseRoot -Model $case.gateway_model -CatalogPath $candidateCatalogPath
+        if (
+            [string]$configuration.launch_model -cne [string]$case.client_selector -or
+            [string]$configuration.canonical_model -cne [string]$case.gateway_model -or
+            [string]$configuration.route_protocol -cne [string]$case.protocol
+        ) {
+            throw 'client_configuration_materializer_contradiction'
+        }
+        $caseConfigurations[$case.case_id] = $configuration
     }
     [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
     $candidateStartupStopwatch.Stop()
@@ -3063,19 +3127,19 @@ try {
         $manualById[$result.case_id] = $result
     }
     $caseOrder = @(
-        'desktop-luna', 'desktop-volc',
-        'codex-cli-luna', 'codex-cli-volc',
-        'opencode-luna', 'opencode-volc',
-        'zcode-luna', 'zcode-volc',
-        'pi-luna', 'pi-volc',
-        'omp-luna', 'omp-volc'
+        'desktop-luna', 'desktop-ollama-cloud',
+        'codex-cli-luna', 'codex-cli-ollama-cloud',
+        'opencode-luna', 'opencode-ollama-cloud',
+        'zcode-luna', 'zcode-ollama-cloud',
+        'pi-luna', 'pi-ollama-cloud',
+        'omp-luna', 'omp-ollama-cloud'
     )
     $caseResults = @($caseOrder | ForEach-Object {
         if ($manualById.ContainsKey($_)) { $manualById[$_] } else { $automatedById[$_] }
     })
     $passedCount = @($caseResults | Where-Object { $_.outcome -ceq 'passed' }).Count
     $summary = [ordered]@{
-        schema = 'codexhub.real-client-e2e-summary.v1'
+        schema = 'codexhub.real-client-e2e-summary.v2'
         candidate_sha = $CandidateSha
         managed_client_config_sha = $ManagedClientConfigSha
         run_binding_sha256 = $runBinding
@@ -3086,7 +3150,7 @@ try {
             managed_client_config_build = Get-Sha256 -Path $ManagedClientConfigBuild
         }
         pinned_versions = $actualVersions
-        canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', $LunaModel, $VolcModel)
+        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', $LunaModel, $ThirdPartyModel)
         counts = [ordered]@{
             case_count = 12
             passed_count = $passedCount
@@ -3125,13 +3189,13 @@ catch {
         }
     }
     $failureSummary = [ordered]@{
-        schema = 'codexhub.real-client-e2e-summary.v1'
+        schema = 'codexhub.real-client-e2e-summary.v2'
         candidate_sha = if ($CandidateSha -match '^[0-9a-f]{40}$') { $CandidateSha } else { $null }
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-f]{40}$') { $ManagedClientConfigSha } else { $null }
         outcome = 'failed'
         failure_classification = $failureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'volc/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-volc/glm-5.2')
+        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-ollama-cloud/glm-5.2')
         counts = [ordered]@{
             case_count = 0
             passed_count = 0

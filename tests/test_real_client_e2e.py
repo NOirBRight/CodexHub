@@ -18,7 +18,7 @@ SCRIPT = ROOT / "scripts" / "Run-RealClientE2E.ps1"
 FIXTURES = ROOT / "tests" / "fixtures" / "real_client_e2e"
 CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
-VOLC_MODEL = "codexhub-volc/glm-5.2"
+THIRD_PARTY_MODEL = "codexhub-ollama-cloud/glm-5.2"
 MINIMUM_VERSIONS = {
     "desktop": "26.715.8383.0",
     "codex_cli": "0.144.5",
@@ -63,7 +63,13 @@ COUNT_KEYS = {
 }
 CASE_KEYS = {
     "case_id",
+    "client",
+    "provider_id",
+    "client_selector",
     "canonical_model",
+    "gateway_model",
+    "endpoint_binding",
+    "protocol",
     "outcome",
     "duration_ms",
     "request_complete_count",
@@ -83,6 +89,116 @@ AUTOMATED_CASE_KEYS = CASE_KEYS | {
     "gateway_request_count",
     "gateway_complete_count",
 }
+EXPECTED_CASE_BINDINGS = {
+    "desktop-luna": {
+        "client": "desktop",
+        "provider_id": "official",
+        "client_selector": "gpt-5.6-luna",
+        "canonical_model": "gpt-5.6-luna",
+        "gateway_model": "gpt-5.6-luna",
+        "endpoint_binding": "/v1/responses",
+        "protocol": "responses",
+    },
+    "desktop-ollama-cloud": {
+        "client": "desktop",
+        "provider_id": "ollama-cloud",
+        "client_selector": "ollama-cloud/glm-5.2",
+        "canonical_model": "ollama-cloud/glm-5.2",
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+    "codex-cli-luna": {
+        "client": "codex-cli",
+        "provider_id": "official",
+        "client_selector": "gpt-5.6-luna",
+        "canonical_model": "gpt-5.6-luna",
+        "gateway_model": "gpt-5.6-luna",
+        "endpoint_binding": "/v1/responses",
+        "protocol": "responses",
+    },
+    "codex-cli-ollama-cloud": {
+        "client": "codex-cli",
+        "provider_id": "ollama-cloud",
+        "client_selector": "ollama-cloud/glm-5.2",
+        "canonical_model": "ollama-cloud/glm-5.2",
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+    "opencode-luna": {
+        "client": "opencode",
+        "provider_id": "official",
+        "client_selector": LUNA_MODEL,
+        "canonical_model": LUNA_MODEL,
+        "gateway_model": "openai/gpt-5.6-luna",
+        "endpoint_binding": "/v1/providers/openai/responses",
+        "protocol": "responses",
+    },
+    "opencode-ollama-cloud": {
+        "client": "opencode",
+        "provider_id": "ollama-cloud",
+        "client_selector": THIRD_PARTY_MODEL,
+        "canonical_model": THIRD_PARTY_MODEL,
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+    "zcode-luna": {
+        "client": "zcode",
+        "provider_id": "official",
+        "client_selector": LUNA_MODEL,
+        "canonical_model": LUNA_MODEL,
+        "gateway_model": "openai/gpt-5.6-luna",
+        "endpoint_binding": "/v1/providers/openai/responses",
+        "protocol": "responses",
+    },
+    "zcode-ollama-cloud": {
+        "client": "zcode",
+        "provider_id": "ollama-cloud",
+        "client_selector": THIRD_PARTY_MODEL,
+        "canonical_model": THIRD_PARTY_MODEL,
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+    "pi-luna": {
+        "client": "pi",
+        "provider_id": "official",
+        "client_selector": LUNA_MODEL,
+        "canonical_model": LUNA_MODEL,
+        "gateway_model": "openai/gpt-5.6-luna",
+        "endpoint_binding": "/v1/providers/openai/responses",
+        "protocol": "responses",
+    },
+    "pi-ollama-cloud": {
+        "client": "pi",
+        "provider_id": "ollama-cloud",
+        "client_selector": THIRD_PARTY_MODEL,
+        "canonical_model": THIRD_PARTY_MODEL,
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+    "omp-luna": {
+        "client": "omp",
+        "provider_id": "official",
+        "client_selector": LUNA_MODEL,
+        "canonical_model": LUNA_MODEL,
+        "gateway_model": "openai/gpt-5.6-luna",
+        "endpoint_binding": "/v1/providers/openai/responses",
+        "protocol": "responses",
+    },
+    "omp-ollama-cloud": {
+        "client": "omp",
+        "provider_id": "ollama-cloud",
+        "client_selector": THIRD_PARTY_MODEL,
+        "canonical_model": THIRD_PARTY_MODEL,
+        "gateway_model": "ollama-cloud/glm-5.2",
+        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "protocol": "responses",
+    },
+}
 
 
 def _powershell() -> str:
@@ -92,11 +208,16 @@ def _powershell() -> str:
     return executable
 
 
-def _manual_case(case_id: str, client: str, model: str) -> dict:
+def _manual_case(case: dict) -> dict:
     return {
-        "case_id": case_id,
-        "client": client,
-        "canonical_model": model,
+        "case_id": case["case_id"],
+        "client": case["client"],
+        "provider_id": case["provider_id"],
+        "client_selector": case["client_selector"],
+        "canonical_model": case["canonical_model"],
+        "gateway_model": case["gateway_model"],
+        "endpoint_binding": case["endpoint_binding"],
+        "protocol": case["protocol"],
         "human_finalized": True,
         "outcome": "passed",
         "terminal_classification": "completed",
@@ -144,11 +265,11 @@ def _prepare_run(
         ),
         encoding="utf-8",
     )
-    (isolation / "credentials" / "volc.json").write_text(
+    (isolation / "credentials" / "ollama.json").write_text(
         json.dumps(
             {
-                "schema": "codexhub.real-client-volc.v1",
-                "api_key": "fixture-volc-private-token",
+                "schema": "codexhub.real-client-ollama.v1",
+                "api_key": "fixture-ollama-private-token",
             }
         ),
         encoding="utf-8",
@@ -238,9 +359,9 @@ def _finalize_manual_evidence(
                 (work / f"gui-{case_id}.launched").is_file()
                 for case_id in (
                     "desktop-luna",
-                    "desktop-volc",
+                    "desktop-ollama-cloud",
                     "zcode-luna",
-                    "zcode-volc",
+                    "zcode-ollama-cloud",
                 )
             )
         ):
@@ -248,7 +369,7 @@ def _finalize_manual_evidence(
             evidence["login_confirmed"] = True
             evidence["gui_confirmed"] = True
             for case in evidence["cases"]:
-                case.update(_manual_case(case["case_id"], case["client"], case["canonical_model"]))
+                case.update(_manual_case(case))
             if mutation is not None:
                 mutation(evidence)
             target = output / "manual-evidence.json"
@@ -377,8 +498,8 @@ def _run(
         materializer_sha,
         "-LunaModel",
         LUNA_MODEL,
-        "-VolcModel",
-        VOLC_MODEL,
+        "-ThirdPartyModel",
+        THIRD_PARTY_MODEL,
         "-OutputDirectory",
         str(output),
         "-HostEnvironmentManifest",
@@ -536,12 +657,16 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
         for client in {"codex", "opencode", "zcode", "pi", "omp"}
     }
     assert applied_models == {
-        "codex": {"gpt-5.6-luna", "volc/glm-5.2"},
-        "opencode": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
-        "zcode": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
-        "pi": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
-        "omp": {"openai/gpt-5.6-luna", "volc/glm-5.2"},
+        "codex": {"gpt-5.6-luna", "ollama-cloud/glm-5.2"},
+        "opencode": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
+        "zcode": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
+        "pi": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
+        "omp": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
     }
+    assert all(
+        item["route_protocol"] == "responses"
+        for item in invocations
+    )
     assert "managed-client-config" in SCRIPT.read_text(encoding="utf-8")
     assert "Get-ClientProviderMap" not in SCRIPT.read_text(encoding="utf-8")
 
@@ -746,7 +871,7 @@ def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
         case["case_id"]
         for case in summary["cases"]
         if case["outcome"] == "failed"
-    } == {"codex-cli-luna", "codex-cli-volc"}
+    } == {"codex-cli-luna", "codex-cli-ollama-cloud"}
     markers = list(
         (tmp_path / "output" / "isolated" / "work").glob(
             "codex-cli-*/opencodex-appdata-isolated.marker"
@@ -925,7 +1050,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     assert len(summaries) == 1
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
     _assert_exact_summary_schema(summary)
-    assert summary["schema"] == "codexhub.real-client-e2e-summary.v1"
+    assert summary["schema"] == "codexhub.real-client-e2e-summary.v2"
     assert summary["candidate_sha"] == CANDIDATE_SHA
     assert summary["pinned_versions"] == MINIMUM_VERSIONS
     assert summary["counts"] == {
@@ -937,18 +1062,37 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     }
     assert [case["case_id"] for case in summary["cases"]] == [
         "desktop-luna",
-        "desktop-volc",
+        "desktop-ollama-cloud",
         "codex-cli-luna",
-        "codex-cli-volc",
+        "codex-cli-ollama-cloud",
         "opencode-luna",
-        "opencode-volc",
+        "opencode-ollama-cloud",
         "zcode-luna",
-        "zcode-volc",
+        "zcode-ollama-cloud",
         "pi-luna",
-        "pi-volc",
+        "pi-ollama-cloud",
         "omp-luna",
-        "omp-volc",
+        "omp-ollama-cloud",
     ]
+    assert {
+        case["case_id"]: {
+            key: case[key]
+            for key in (
+                "client",
+                "provider_id",
+                "client_selector",
+                "canonical_model",
+                "gateway_model",
+                "endpoint_binding",
+                "protocol",
+            )
+        }
+        for case in summary["cases"]
+    } == EXPECTED_CASE_BINDINGS
+    assert [case["provider_id"] for case in summary["cases"]].count("official") == 6
+    assert [case["provider_id"] for case in summary["cases"]].count("ollama-cloud") == 6
+    assert all(case["protocol"] == "responses" for case in summary["cases"])
+    assert all("volc" not in case["case_id"] for case in summary["cases"])
     assert all(case["outcome"] == "passed" for case in summary["cases"])
     assert len(summary["artifacts"]) == 12
     assert all((tmp_path / "output" / artifact).is_file() for artifact in summary["artifacts"])
@@ -958,17 +1102,20 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     assert template["run_binding_sha256"] == summary["run_binding_sha256"]
     assert not list((tmp_path / "output" / "isolated" / "work").rglob("sentinel.txt"))
     serialized = json.dumps(summary, sort_keys=True)
+    assert "volc" not in serialized.lower()
+    assert "chat_completions" not in serialized
+    assert "localhost:11434" not in serialized
     for secret in (
         "fixture-codex-access-token",
         "fixture-codex-refresh-token",
-        "fixture-volc-private-token",
+        "fixture-ollama-private-token",
         "fixture-gateway-private-key",
     ):
         assert secret not in serialized
     for relative in (
         "isolated/account/profile.json",
         "isolated/account/auth.json",
-        "isolated/credentials/volc.json",
+        "isolated/credentials/ollama.json",
         "isolated/config/gateway.json",
         "isolated/config/host-environment.json",
         "manual-evidence.json",
@@ -1033,7 +1180,7 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
         case["canonical_model"]
         for case in automated
         if case["case_id"].startswith(("opencode", "pi", "omp"))
-    } == {LUNA_MODEL, VOLC_MODEL}
+    } == {LUNA_MODEL, THIRD_PARTY_MODEL}
     opencode = [case for case in automated if case["case_id"].startswith("opencode-")]
     assert [case["duplicate_terminal_count"] for case in opencode] == [0, 0]
     diagnostics = list((tmp_path / "output").rglob("codex-proxy-events.jsonl"))
@@ -1043,7 +1190,7 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert len(completes) == 16
     assert {event["model_canonical"] for event in completes} == {
         "gpt-5.6-luna",
-        "volc/glm-5.2",
+        "ollama-cloud/glm-5.2",
         "openai/gpt-5.6-luna",
     }
     production_fields = {
@@ -1071,7 +1218,7 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert all("sse_terminal_event_seen" not in event for event in completes)
 
 
-def test_volc_managed_client_probes_do_not_receive_catalog_path(tmp_path):
+def test_third_party_managed_client_probes_do_not_receive_catalog_path(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1088,7 +1235,7 @@ def test_volc_managed_client_probes_do_not_receive_catalog_path(tmp_path):
     assert all(
         "--catalog-path" not in item["flags"]
         for item in invocations
-        if item["model"] == "volc/glm-5.2"
+        if item["model"] == "ollama-cloud/glm-5.2"
     )
 
 
@@ -1124,12 +1271,31 @@ def test_final_client_message_with_nonstream_gateway_completions_fails(tmp_path)
 
 
 def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
-    result = _run(
-        tmp_path,
-        client_fakes={"ZCodePath": "fake-client-zcode-appdata.cmd"},
-    )
+    result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
+    case_root = (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "gui-zcode"
+        / "zcode-ollama-cloud"
+    )
+    catalog = (
+        case_root
+        / "appdata"
+        / "roaming"
+        / "ZCode"
+        / "model-providers"
+        / "codexhub.json"
+    )
+    assert catalog.is_file()
+    assert not (case_root / "appdata" / "ZCode" / "model-providers" / "codexhub.json").exists()
+    payload = json.loads(catalog.read_text(encoding="utf-8-sig"))
+    provider_ids = {provider["id"] for provider in payload.get("providers", [])}
+    assert provider_ids == {"codexhub-openai", "codexhub-ollama-cloud"}
+    assert "codexhub-volc" not in provider_ids
 
 
 def test_wrong_model_fallback_cannot_be_filtered_into_a_false_pass(tmp_path):
@@ -1216,7 +1382,7 @@ def test_pi_rejects_stop_with_contradictory_error_message(tmp_path):
 def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     def invalidate_identity(_output, isolation, _debug):
         (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")
-        (isolation / "credentials" / "volc.json").write_text(
+        (isolation / "credentials" / "ollama.json").write_text(
             '{"api_key":"arbitrary"}', encoding="utf-8"
         )
 
@@ -1231,7 +1397,7 @@ def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
     result = _run(
         tmp_path,
         mutate=lambda _output, isolation, _debug: (
-            isolation / "credentials" / "volc.json"
+            isolation / "credentials" / "ollama.json"
         ).unlink(),
     )
 
@@ -1751,7 +1917,7 @@ def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_pat
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
     observed = {}
-    for case_id in ("desktop-luna", "desktop-volc"):
+    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
         argument_log = work / f"gui-{case_id}.launched.argv"
         arguments = argument_log.read_text(encoding="ascii").strip()
         expected_profile = work / "gui-desktop" / case_id / "browser-profile"
@@ -1763,7 +1929,7 @@ def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_pat
             str(expected_workspace).casefold()
         )
         observed[case_id] = arguments
-    assert observed["desktop-luna"] != observed["desktop-volc"]
+    assert observed["desktop-luna"] != observed["desktop-ollama-cloud"]
 
 
 def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
@@ -1774,7 +1940,7 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("zcode-luna", "zcode-volc"):
+    for case_id in ("zcode-luna", "zcode-ollama-cloud"):
         arguments = (
             work / f"gui-{case_id}.launched.argv"
         ).read_text(encoding="ascii").strip()
@@ -1784,7 +1950,32 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
         )
 
 
-def test_candidate_runtime_declares_volc_native_responses_route(tmp_path):
+def test_candidate_runtime_declares_ollama_cloud_native_responses_route(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runtime_config = (
+        tmp_path
+        / "output"
+        / "isolated"
+        / "work"
+        / "candidate"
+        / "runtime"
+        / "proxy"
+        / "config"
+    )
+    providers = (runtime_config / "providers.toml").read_text(encoding="utf-8")
+    settings = json.loads((runtime_config.parent / "settings.json").read_text(encoding="utf-8-sig"))
+    assert 'id = "ollama-cloud"' in providers
+    assert 'base_url = "https://ollama.com/v1"' in providers
+    assert 'upstream_format = "responses"' in providers
+    assert 'available_upstream_formats = ["responses"]' in providers
+    assert "volc" not in providers.lower()
+    assert settings["gateway_enable_responses"] is True
+    assert settings["gateway_enable_chat_completions"] is False
+
+
+def test_release_matrix_uses_ollama_cloud_native_responses(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1799,22 +1990,72 @@ def test_candidate_runtime_declares_volc_native_responses_route(tmp_path):
         / "config"
         / "providers.toml"
     ).read_text(encoding="utf-8")
+    assert 'id = "ollama-cloud"' in providers
+    assert 'base_url = "https://ollama.com/v1"' in providers
     assert 'upstream_format = "responses"' in providers
-    assert 'available_upstream_formats = ["responses"]' in providers
+    assert "volc" not in providers.lower()
+    assert "localhost:11434" not in providers
+
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    canonical_models = summary["canonical_models"]
+    assert "ollama-cloud/glm-5.2" in canonical_models
+    assert "codexhub-ollama-cloud/glm-5.2" in canonical_models
+    assert "volc/glm-5.2" not in canonical_models
+    assert "codexhub-volc/glm-5.2" not in canonical_models
+
+    diagnostics = list((tmp_path / "output").rglob("codex-proxy-events.jsonl"))[0]
+    for line in diagnostics.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        if event.get("event") == "request_complete":
+            assert event["upstream_format"] == "responses"
+            assert event["inbound_format"] == "responses"
+            expected_provider = (
+                "ollama_cloud"
+                if event["model_canonical"] == "ollama-cloud/glm-5.2"
+                else "official"
+            )
+            assert event["provider_id"] == expected_provider
+
+
+def test_provider_or_wire_protocol_contradiction_cannot_pass_release_case(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-route-contradiction.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    pi_cases = [case for case in summary["cases"] if case["client"] == "pi"]
+    assert [case["outcome"] for case in pi_cases] == ["failed", "failed"]
+    assert all(case["error_event_count"] >= 1 for case in pi_cases)
 
 
 def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
-    seeded_files = {
-        "desktop-luna/browser-profile/Preferences": "desktop-luna-state",
-        "desktop-volc/browser-profile/Preferences": "desktop-volc-state",
-        "zcode-luna/.zcode/v2/telemetry-state.json": "zcode-luna-state",
-        "zcode-volc/.zcode/v2/telemetry-state.json": "zcode-volc-state",
-    }
+    seeded_files = [
+        ("desktop-luna", "desktop-luna", "browser-profile/Preferences", "desktop-luna-state"),
+        (
+            "desktop-third-party",
+            "desktop-ollama-cloud",
+            "browser-profile/Preferences",
+            "desktop-third-party-state",
+        ),
+        ("zcode-luna", "zcode-luna", ".zcode/v2/telemetry-state.json", "zcode-luna-state"),
+        (
+            "zcode-third-party",
+            "zcode-ollama-cloud",
+            ".zcode/v2/telemetry-state.json",
+            "zcode-third-party-state",
+        ),
+    ]
 
     def seed_gui_state(_output, isolation, _debug):
         seed_root = isolation / "gui-seed"
-        for relative, value in seeded_files.items():
-            path = seed_root / relative
+        for seed_slot, _case_id, relative, value in seeded_files:
+            path = seed_root / seed_slot / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value, encoding="utf-8")
 
@@ -1822,13 +2063,51 @@ def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for relative, value in seeded_files.items():
-        case_id, case_relative = relative.split("/", 1)
+    for seed_slot, case_id, relative, value in seeded_files:
         client = "desktop" if case_id.startswith("desktop-") else "zcode"
-        source = tmp_path / "output" / "isolated" / "gui-seed" / relative
-        copied = work / f"gui-{client}" / case_id / case_relative
+        source = tmp_path / "output" / "isolated" / "gui-seed" / seed_slot / relative
+        copied = work / f"gui-{client}" / case_id / relative
         assert copied.read_text(encoding="utf-8") == value
         assert copied.stat().st_ino != source.stat().st_ino
+
+
+def test_legacy_volc_gui_seed_falls_back_without_mutating_source(tmp_path):
+    seeded_files = [
+        (
+            "desktop-volc",
+            "desktop-ollama-cloud",
+            "browser-profile/Preferences",
+            "legacy-desktop-state",
+        ),
+        (
+            "zcode-volc",
+            "zcode-ollama-cloud",
+            ".zcode/v2/telemetry-state.json",
+            "legacy-zcode-state",
+        ),
+    ]
+
+    def seed_legacy_gui_state(_output, isolation, _debug):
+        seed_root = isolation / "gui-seed"
+        for seed_slot, _case_id, relative, value in seeded_files:
+            path = seed_root / seed_slot / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value, encoding="utf-8")
+
+    result = _run(tmp_path, mutate=seed_legacy_gui_state)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    isolation = tmp_path / "output" / "isolated"
+    work = isolation / "work"
+    for seed_slot, case_id, relative, value in seeded_files:
+        client = "desktop" if case_id.startswith("desktop-") else "zcode"
+        source = isolation / "gui-seed" / seed_slot / relative
+        copied = work / f"gui-{client}" / case_id / relative
+        assert source.read_text(encoding="utf-8") == value
+        assert copied.read_text(encoding="utf-8") == value
+        assert copied.stat().st_ino != source.stat().st_ino
+    assert not (isolation / "gui-seed" / "desktop-third-party").exists()
+    assert not (isolation / "gui-seed" / "zcode-third-party").exists()
 
 
 def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history(
@@ -1843,9 +2122,14 @@ def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history
         "2026-07-13-local-projects",
     ]
 
+    seed_cases = (
+        ("desktop-luna", "desktop-luna"),
+        ("desktop-third-party", "desktop-ollama-cloud"),
+    )
+
     def seed_gui_state(_output, isolation, _debug):
-        for case_id in ("desktop-luna", "desktop-volc"):
-            codex_root = isolation / "gui-seed" / case_id / ".codex"
+        for seed_slot, _case_id in seed_cases:
+            codex_root = isolation / "gui-seed" / seed_slot / ".codex"
             codex_root.mkdir(parents=True)
             (codex_root / ".codex-global-state.json").write_text(
                 json.dumps(
@@ -1885,13 +2169,13 @@ def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work" / "gui-desktop"
-    for case_id in ("desktop-luna", "desktop-volc"):
+    for seed_slot, case_id in seed_cases:
         source = (
             tmp_path
             / "output"
             / "isolated"
             / "gui-seed"
-            / case_id
+            / seed_slot
             / ".codex"
             / ".codex-global-state.json"
         )
@@ -2050,7 +2334,7 @@ def test_desktop_gui_preserves_windows_identity_for_sandbox_acl_setup(
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("desktop-luna", "desktop-volc"):
+    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
         identity = (work / f"gui-{case_id}.launched.identity").read_text(
             encoding="ascii"
         )
@@ -2071,7 +2355,7 @@ def test_desktop_gui_launches_from_invocation_local_manifest_payload(tmp_path):
     staged_executable = staged_root / source_executable.name
     assert staged_executable.read_bytes() == source_executable.read_bytes()
     assert staged_executable.stat().st_ino != source_executable.stat().st_ino
-    for case_id in ("desktop-luna", "desktop-volc"):
+    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
         launch_path = (
             work / f"gui-{case_id}.launched.executable"
         ).read_text(encoding="ascii")
@@ -2256,7 +2540,7 @@ def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):
 
 def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "volc.json").unlink()
+        (isolation / "credentials" / "ollama.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials, finalize_manual=False)
 
@@ -2270,13 +2554,13 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     assert summary["cases"] == []
     assert summary["artifacts"] == []
     serialized = json.dumps(summary, sort_keys=True)
-    assert "fixture-volc-private-token" not in serialized
+    assert "fixture-ollama-private-token" not in serialized
     assert str(tmp_path) not in serialized
 
 
 def test_supervisor_preserves_space_containing_authoritative_path_arguments(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "volc.json").unlink()
+        (isolation / "credentials" / "ollama.json").unlink()
 
     run_root = tmp_path / "Authoritative Host Run"
     result = _run(
@@ -2385,7 +2669,12 @@ def test_manual_evidence_merge_is_deterministic_for_reordered_input(tmp_path):
         for case in summary["cases"]
         if case["case_id"].startswith(("desktop", "zcode"))
     ]
-    assert manual_ids == ["desktop-luna", "desktop-volc", "zcode-luna", "zcode-volc"]
+    assert manual_ids == [
+        "desktop-luna",
+        "desktop-ollama-cloud",
+        "zcode-luna",
+        "zcode-ollama-cloud",
+    ]
 
 
 def test_missing_manual_evidence_and_early_gui_exit_are_classified(tmp_path):
@@ -2591,7 +2880,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     serialized = startup_path.read_text() + summaries[0].read_text()
     assert str(tmp_path) not in serialized
     assert "fixture-codex-access-token" not in serialized
-    assert "fixture-volc-private-token" not in serialized
+    assert "fixture-ollama-private-token" not in serialized
     assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
@@ -2799,9 +3088,18 @@ def test_operator_commands_have_explicit_outer_and_manual_deadlines():
     assert "manual window is finite" in documentation
 
 
+def test_matrix_documentation_declares_native_responses_release_gate():
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+
+    assert "Responses for the Official Luna leg and Native\nResponses for the Ollama Cloud leg" in documentation
+    assert "one full 12-case run is the Phase 0 / 0.1.7 release qualification" in documentation
+    assert "final frozen 0.1.7 candidate" in documentation
+    assert "previous Volc Chat Completions\npath remains available as ordinary, non-release regression coverage" in documentation
+
+
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "volc.json").unlink()
+        (isolation / "credentials" / "ollama.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials)
 
