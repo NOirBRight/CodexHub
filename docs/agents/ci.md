@@ -1,6 +1,11 @@
 # CI and manual verification
 
-GitHub Actions runs the required PR validation for branches targeting `dev` and `main`. Local candidate checks are selected by `docs/agents/verification-policy.md`; they do not duplicate every CI job by default.
+GitHub Actions runs the required PR validation for same-repository branches
+targeting `dev` and `main`. Final checks use the repository-dedicated
+self-hosted runners in `docs/agents/self-hosted-runner.md`; Actions still owns
+the trigger, exact-SHA logs, artifacts, Check status, and readback. Local
+candidate checks are selected by `docs/agents/verification-policy.md`; they do
+not duplicate every CI job by default.
 
 ## CI jobs
 
@@ -10,11 +15,52 @@ GitHub Actions runs the required PR validation for branches targeting `dev` and 
 - Rust tests (normal and debug flavors): `cargo test --locked` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
 - Release flavor contract: portable-build dry-run parity for the normal and debug flavors
-- Rust safe_file Linux compile and tests: standalone `rustc --test` compile of `src-tauri/src/safe_file.rs` on Ubuntu, a `clippy-driver -D warnings` lint of the same file, and the resulting cross-language test binary. This job exists because `safe_file.rs` contains `cfg(unix)` FFI that the Windows-only Rust jobs never compile; it must stay free of crate dependencies so the standalone compile keeps working.
+- Rust safe_file Linux compile and tests: standalone `rustc --test` compile of
+  `src-tauri/src/safe_file.rs` on Ubuntu WSL2, a `clippy-driver -D warnings`
+  lint of the same file, and the resulting cross-language test binary. The
+  self-hosted runner uses Rust's official
+  `x86_64-unknown-linux-musl` target with `rust-lld`, avoiding a host-wide C
+  toolchain while still compiling and executing real Linux `cfg(unix)` code.
+  This job exists because the Windows-only Rust jobs never compile that FFI;
+  `safe_file.rs` must stay free of crate dependencies so the standalone compile
+  keeps working.
 
 ### Triggers
 
-PRs to `dev` and `main` run both Python checks, the frontend job, Rust normal/debug tests, Rust clippy, release flavor contract, and Linux `safe_file`. Pushes to `dev` and `main` preserve the same job set. `workflow_dispatch` and a weekly Sunday 03:17 UTC `schedule` run the full validation, including the synthetic suite.
+Same-repository PRs to `dev` and `main` run both Python checks, the frontend
+job, Rust normal/debug tests, Rust clippy, release flavor contract, and Linux
+`safe_file`. Fork PRs are intentionally denied access to the trusted
+self-hosted runners by a host-owned pre-job hook outside the checkout; the
+workflow's matching job conditions are defence-in-depth, not the trust
+boundary. Pushes to `dev` and `main` preserve the same job set.
+`workflow_dispatch` defaults to the full validation and supports the bounded
+`runner-smoke` scope for runner provisioning. The weekly Sunday 03:17 UTC
+`schedule` runs the full validation, including the synthetic suite.
+
+The Windows jobs select
+`[self-hosted, Windows, X64, codexhub-ci-windows-x64]`. The Linux-only
+`safe_file` job selects
+`[self-hosted, Linux, X64, codexhub-ci-linux-x64]`, so its `cfg(unix)` code is
+still compiled and exercised on Linux.
+
+Windows jobs use the runner's pre-provisioned Python 3.13, Node.js 22, and Rust
+1.97.1 toolchains and fail closed on version drift. They do not call
+`actions/setup-python` or `actions/setup-node`: those setup actions can require
+machine-level cleanup permissions that a non-administrator runner correctly
+does not have. Python jobs create a checkout-local virtual environment before
+installing test dependencies.
+
+Every final job has an explicit timeout. These are safety bounds, not Worker
+budgets; record the first frozen-SHA self-hosted durations and tighten them in a
+separate reviewed change if the observed distribution supports it. Never move
+the complete suite into Worker or Repair rounds to consume the timeout budget
+earlier.
+
+An Actions checkout is not assumed to be a Paseo-managed Workspace. A test that
+requires a live Paseo Workspace must either remain a local verification gate or
+return a typed `not_applicable_unmanaged_checkout` result in CI. Missing Paseo
+state in an unmanaged checkout is not a product regression and must not be
+reported as one.
 
 ### Synthetic real-client contract relevant surface
 

@@ -378,3 +378,153 @@ def test_pr_rename_from_unrelated_to_relevant_runs_synthetic(plan):
     changed = ["src-python/codex_proxy.py", "tests/test_real_client_e2e.py"]
     p = plan.build_plan("pull_request", True, changed)
     assert p.synthetic_status == "run"
+
+
+def test_ci_yaml_routes_final_jobs_to_repo_dedicated_self_hosted_labels():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    windows_jobs = (
+        "python-core",
+        "python-synthetic",
+        "frontend",
+        "rust-tests",
+        "release-flavor-contract",
+        "rust-clippy",
+    )
+    for job_name in windows_jobs:
+        job = _workflow_job_text(workflow_text, job_name)
+        assert (
+            "runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]" in job
+        ), job_name
+
+    linux_job = _workflow_job_text(workflow_text, "rust-safe-file-linux")
+    assert "runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]" in linux_job
+
+
+def test_ci_yaml_preserves_final_check_names():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    expected_names = {
+        "python-core": "Python core",
+        "python-synthetic": "Synthetic real-client contract",
+        "frontend": "Frontend build and UI contract",
+        "rust-tests": "Rust tests (${{ matrix.flavor }})",
+        "rust-safe-file-linux": "Rust safe_file Linux compile and tests",
+        "release-flavor-contract": "Release flavor contract",
+        "rust-clippy": "Rust clippy",
+    }
+    for job_name, check_name in expected_names.items():
+        job = _workflow_job_text(workflow_text, job_name)
+        assert f"name: {check_name}" in job, job_name
+
+
+def test_ci_yaml_self_hosted_jobs_deny_fork_prs_and_smoke_only_dispatch():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    final_jobs = (
+        "python-core",
+        "python-synthetic",
+        "frontend",
+        "rust-tests",
+        "rust-safe-file-linux",
+        "release-flavor-contract",
+        "rust-clippy",
+    )
+    for job_name in final_jobs:
+        job = _workflow_job_text(workflow_text, job_name)
+        assert "github.event.pull_request.head.repo.full_name == github.repository" in job
+        assert "inputs.validation_scope != 'runner-smoke'" in job
+
+    runner_doc = (
+        ROOT / "docs" / "agents" / "self-hosted-runner.md"
+    ).read_text(encoding="utf-8")
+    assert "ACTIONS_RUNNER_HOOK_JOB_STARTED" in runner_doc
+    assert "host-owned pre-job guard" in runner_doc
+    assert "host hook is the authoritative boundary" in runner_doc
+    assert "additional readable assertion" in runner_doc
+    assert "head repositories both exactly" in runner_doc
+
+
+def test_ci_yaml_has_bounded_windows_and_linux_runner_smoke_jobs():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "validation_scope:" in workflow_text
+    assert "runner-smoke" in workflow_text
+
+    windows_smoke = _workflow_job_text(workflow_text, "runner-smoke-windows")
+    assert "name: Runner smoke (Windows)" in windows_smoke
+    assert "runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]" in windows_smoke
+    assert "timeout-minutes: 5" in windows_smoke
+    assert "inputs.validation_scope == 'runner-smoke'" in windows_smoke
+
+    linux_smoke = _workflow_job_text(workflow_text, "runner-smoke-linux")
+    assert "name: Runner smoke (Linux)" in linux_smoke
+    assert "runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]" in linux_smoke
+    assert "timeout-minutes: 5" in linux_smoke
+    assert "inputs.validation_scope == 'runner-smoke'" in linux_smoke
+    assert "Rust 1.97.1 is required." in linux_smoke
+    assert "clippy-x86_64-unknown-linux-gnu" in linux_smoke
+    assert "x86_64-unknown-linux-musl" in linux_smoke
+    assert "rust-lld" in linux_smoke
+
+    assert "clippy-x86_64-pc-windows-msvc" in windows_smoke
+
+
+def test_ci_yaml_linux_safe_file_uses_self_contained_linux_target():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    linux_job = _workflow_job_text(workflow_text, "rust-safe-file-linux")
+    assert "rustup target list --installed" in linux_job
+    assert "grep -qx 'x86_64-unknown-linux-musl'" in linux_job
+    assert linux_job.count("--target x86_64-unknown-linux-musl") == 2
+    assert linux_job.count("-C linker=rust-lld") == 2
+
+
+def test_ci_yaml_windows_jobs_use_verified_preinstalled_toolchains():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    windows_python_jobs = (
+        _workflow_job_text(workflow_text, "runner-smoke-windows"),
+        _workflow_job_text(workflow_text, "python-core"),
+        _workflow_job_text(workflow_text, "python-synthetic"),
+    )
+    for job in windows_python_jobs:
+        assert "actions/setup-python" not in job
+        assert "Python 3.13 is required." in job
+
+    frontend_job = _workflow_job_text(workflow_text, "frontend")
+    assert "actions/setup-node" not in frontend_job
+    assert "Node.js 22 is required." in frontend_job
+
+    for job_name in ("runner-smoke-windows", "rust-tests", "rust-clippy"):
+        job = _workflow_job_text(workflow_text, job_name)
+        assert "Rust 1.97.1 is required." in job
+
+
+def test_ci_yaml_final_jobs_have_explicit_safety_timeouts():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    for job_name in (
+        "python-core",
+        "python-synthetic",
+        "frontend",
+        "rust-tests",
+        "rust-safe-file-linux",
+        "release-flavor-contract",
+        "rust-clippy",
+    ):
+        job = _workflow_job_text(workflow_text, job_name)
+        assert re.search(r"(?m)^    timeout-minutes: \d+$", job), job_name
+
+
+def test_ci_docs_type_unmanaged_paseo_checkout_as_not_applicable():
+    ci_doc = (ROOT / "docs" / "agents" / "ci.md").read_text(encoding="utf-8")
+    assert "not_applicable_unmanaged_checkout" in ci_doc
+    assert "not a product regression" in ci_doc
