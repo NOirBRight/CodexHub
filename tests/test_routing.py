@@ -1446,6 +1446,14 @@ class RoutingTests(unittest.TestCase):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(open_response.call_args.kwargs.get("max_attempts"), codex_proxy.official_upstream_open_attempts())
+        self.assertIsInstance(open_response.call_args.kwargs.get("pre_response_deadline"), float)
+        self.assertEqual(
+            open_response.call_args.kwargs.get("open_attempt_budget"),
+            {
+                "max_attempts": codex_proxy.official_upstream_open_attempts(),
+                "attempts_started": 0,
+            },
+        )
         self.assertFalse(open_response.call_args.kwargs.get("retry_http_errors"))
         self.assertTrue(relayed[0]["defer_stream_errors"])
         self.assert_no_official_passthrough_gateway_events()
@@ -4978,9 +4986,71 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(retry_events[0]["failure_phase"], "tcp_connect")
         handler._relay_upstream_response.assert_called_once()
 
+    def test_official_passthrough_pre_response_budget_exhaustion_returns_one_504_completion(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5-fast",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "codex-app",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        budget_error_type = getattr(codex_proxy, "GatewayPreResponseBudgetExhausted", TimeoutError)
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._open_upstream_response", side_effect=budget_error_type()),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(fake.status, 504)
+        written = b"".join(fake.wfile.writes)
+        self.assertIn(b"gateway_pre_response_budget_exhausted", written)
+        self.assertNotIn(b"chatgpt.com", written)
+        response_payload = json.loads(written.decode("utf-8"))
+        self.assertEqual(
+            response_payload["codexhub_error"]["code"],
+            "gateway.pre_response_budget_exhausted",
+        )
+        self.assertFalse(response_payload["codexhub_error"]["retryable"])
+        request_errors = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_error"
+        ]
+        request_completions = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        ]
+        self.assertEqual(len(request_errors), 1)
+        self.assertEqual(request_errors[0]["status"], 504)
+        self.assertEqual(request_errors[0]["error"], "gateway_pre_response_budget_exhausted")
+        self.assertEqual(len(request_completions), 1)
+        self.assertEqual(request_completions[0]["status"], 504)
+        self.assertNotIn(
+            "upstream_retry",
+            [call.args[0] for call in self.write_proxy_event.call_args_list if call.args],
+        )
+
     def test_transport_failure_phase_classifies_ssl_eof(self):
         error = ssl.SSLEOFError("EOF occurred in violation of protocol")
         self.assertEqual(codex_proxy.transport_failure_phase(error), "tls_handshake")
+
     def test_gateway_auto_retry_settings_fall_back_to_runtime_settings_when_env_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = os.path.join(temp_dir, "settings.json")
@@ -5011,6 +5081,233 @@ class RoutingTests(unittest.TestCase):
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
             ):
                 self.assertEqual(upstream_timeout_seconds(), 45)
+
+    def test_official_upstream_open_attempts_are_hard_capped_at_two(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(codex_proxy.official_upstream_open_attempts(), 2)
+        with patch.dict(
+            os.environ,
+            {"CODEX_PROXY_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS": "99"},
+            clear=True,
+        ):
+            self.assertEqual(codex_proxy.official_upstream_open_attempts(), 2)
+        with patch.dict(
+            os.environ,
+            {"CODEX_PROXY_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS": "1"},
+            clear=True,
+        ):
+            self.assertEqual(codex_proxy.official_upstream_open_attempts(), 1)
+
+    def test_open_upstream_response_clamps_each_attempt_to_shared_pre_response_deadline(self):
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses",
+            data=b"{}",
+            method="POST",
+        )
+        now = [0.0]
+        observed_timeouts = []
+        observed_sleeps = []
+        success = FakeResponse(b'{"id":"resp_recovered"}')
+
+        def open_upstream(_request, *, timeout):
+            observed_timeouts.append(timeout)
+            if len(observed_timeouts) == 1:
+                now[0] += 170.0
+                raise TimeoutError("connect timed out")
+            return success
+
+        def sleep_for_retry(delay_seconds):
+            observed_sleeps.append(delay_seconds)
+            now[0] += delay_seconds
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=lambda: now[0]),
+            patch("codex_proxy._official_urlopen", side_effect=open_upstream),
+            patch(
+                "codex_proxy._sleep_for_retry_with_gateway_cancellation",
+                side_effect=sleep_for_retry,
+            ),
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=300,
+                event_context={"request_id": "req-shared-budget"},
+                request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                max_attempts=2,
+                pre_response_deadline=180.0,
+            )
+
+        self.assertIs(response, success)
+        self.assertEqual(observed_timeouts, [180.0, 8.0])
+        self.assertEqual(observed_sleeps, [2])
+
+    def test_ollama_cloud_safe_prewrite_retry_shares_pre_response_deadline(self):
+        request = codex_proxy.Request(
+            "https://ollama.com/v1/responses",
+            data=b"{}",
+            method="POST",
+        )
+        now = [175.0]
+        observed_timeouts = []
+        success = FakeResponse(b'{"id":"resp_ollama_recovered"}')
+
+        def open_upstream(_request, *, timeout):
+            observed_timeouts.append(timeout)
+            if len(observed_timeouts) == 1:
+                raise ConnectionRefusedError("connection refused")
+            return success
+
+        def sleep_for_retry(delay_seconds):
+            now[0] += delay_seconds
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=lambda: now[0]),
+            patch("codex_proxy.urlopen", side_effect=open_upstream),
+            patch(
+                "codex_proxy._sleep_for_retry_with_gateway_cancellation",
+                side_effect=sleep_for_retry,
+            ),
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="ollama-cloud",
+                upstream_format="responses",
+                timeout=300,
+                event_context={
+                    "request_id": "req-ollama-shared-budget",
+                    "model": "codexhub-ollama-cloud/glm-5.2",
+                },
+                request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                max_attempts=2,
+                pre_response_deadline=180.0,
+            )
+
+        self.assertIs(response, success)
+        self.assertEqual(observed_timeouts, [5.0, 3.0])
+
+    def test_open_upstream_response_does_not_sleep_or_retry_past_pre_response_deadline(self):
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses",
+            data=b"{}",
+            method="POST",
+        )
+        now = [179.0]
+        observed_timeouts = []
+        observed_sleeps = []
+        budget_error_type = getattr(codex_proxy, "GatewayPreResponseBudgetExhausted", TimeoutError)
+
+        def open_upstream(_request, *, timeout):
+            observed_timeouts.append(timeout)
+            now[0] += 0.5
+            raise TimeoutError("connect timed out")
+
+        def sleep_for_retry(delay_seconds):
+            observed_sleeps.append(delay_seconds)
+            now[0] += delay_seconds
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=lambda: now[0]),
+            patch("codex_proxy._official_urlopen", side_effect=open_upstream),
+            patch(
+                "codex_proxy._sleep_for_retry_with_gateway_cancellation",
+                side_effect=sleep_for_retry,
+            ),
+        ):
+            with self.assertRaises(budget_error_type):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="official",
+                    upstream_format="responses",
+                    timeout=300,
+                    event_context={"request_id": "req-no-budget-retry"},
+                    request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                    max_attempts=2,
+                    pre_response_deadline=180.0,
+                )
+
+        self.assertEqual(observed_timeouts, [1.0])
+        self.assertEqual(observed_sleeps, [])
+        retry_events = [
+            call
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry"
+        ]
+        self.assertEqual(retry_events, [])
+
+    def test_open_upstream_response_rejects_and_closes_response_returned_after_deadline(self):
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses",
+            data=b"{}",
+            method="POST",
+        )
+        now = [179.0]
+        late_response = FakeResponse(b'{"id":"resp_late"}')
+        late_response.close = Mock()
+
+        def open_upstream(_request, *, timeout):
+            self.assertEqual(timeout, 1.0)
+            now[0] = 180.1
+            return late_response
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=lambda: now[0]),
+            patch("codex_proxy._official_urlopen", side_effect=open_upstream),
+        ):
+            with self.assertRaises(codex_proxy.GatewayPreResponseBudgetExhausted):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="official",
+                    upstream_format="responses",
+                    timeout=300,
+                    event_context={"request_id": "req-late-headers"},
+                    request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                    max_attempts=2,
+                    pre_response_deadline=180.0,
+                )
+
+        late_response.close.assert_called_once_with()
+
+    def test_official_open_attempt_budget_is_shared_across_relay_reopens(self):
+        request = codex_proxy.Request(
+            "https://chatgpt.com/backend-api/codex/responses",
+            data=b"{}",
+            method="POST",
+        )
+        first_response = FakeResponse(b'{"id":"resp_first"}')
+        open_attempt_budget = {"max_attempts": 2, "attempts_started": 0}
+
+        with patch(
+            "codex_proxy._official_urlopen",
+            side_effect=[first_response, TimeoutError("second open failed"), AssertionError("third open")],
+        ) as open_upstream:
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=300,
+                event_context={"request_id": "req-shared-open-attempts"},
+                request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                max_attempts=2,
+                open_attempt_budget=open_attempt_budget,
+            )
+            self.assertIs(response, first_response)
+
+            with self.assertRaisesRegex(TimeoutError, "second open failed"):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="official",
+                    upstream_format="responses",
+                    timeout=300,
+                    event_context={"request_id": "req-shared-open-attempts"},
+                    request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                    max_attempts=2,
+                    open_attempt_budget=open_attempt_budget,
+                )
+
+        self.assertEqual(open_upstream.call_count, 2)
+        self.assertEqual(open_attempt_budget["attempts_started"], 2)
 
     def test_gateway_auto_retry_runtime_settings_override_stale_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
