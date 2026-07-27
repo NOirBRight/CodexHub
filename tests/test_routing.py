@@ -3,6 +3,7 @@ import os
 import gzip
 import io
 import json
+import socket
 import ssl
 import tempfile
 import threading
@@ -10,6 +11,7 @@ import time
 import unittest
 import weakref
 from dataclasses import replace
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -5107,7 +5109,1080 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
             self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
 
-    def test_open_upstream_response_retries_http_errors_for_any_provider(self):
+    def test_open_upstream_response_retries_pre_write_dns_tcp_refused_tls_cert_for_non_official_main_gen(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        cases = [
+            (URLError(socket.gaierror("[Errno 11001] getaddrinfo failed")), "dns"),
+            (URLError(ConnectionRefusedError("Connection refused")), "tcp_connect"),
+            (ConnectionRefusedError("Connection refused"), "tcp_connect"),
+            (URLError(ssl.SSLCertVerificationError("certificate verify failed")), "tls_handshake"),
+            (ssl.SSLCertVerificationError("certificate verify failed"), "tls_handshake"),
+        ]
+
+        for exc, expected_phase in cases:
+            with self.subTest(error=type(exc).__name__, phase=expected_phase):
+                self.write_proxy_event.reset_mock()
+                success = FakeResponse(b'{"id":"resp_retry"}')
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                        },
+                        clear=False,
+                    ),
+                    patch("codex_proxy.urlopen", side_effect=[exc, success]) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    response = codex_proxy._open_upstream_response(
+                        request,
+                        upstream_name="volcengine",
+                        upstream_format="responses",
+                        timeout=1,
+                        event_context={"request_id": "req-pre-write", "model": "volc/glm-5.2"},
+                    )
+
+                self.assertIs(response, success)
+                self.assertEqual(mock_urlopen.call_count, 2)
+                mock_sleep.assert_called_once()
+                retry_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry"
+                ]
+                self.assertEqual(len(retry_events), 1)
+                self.assertEqual(retry_events[0].kwargs["retry_safety_class"], "safe_prewrite")
+                self.assertEqual(retry_events[0].kwargs["failure_phase"], expected_phase)
+
+    def test_open_upstream_response_suppresses_ambiguous_open_failures_for_non_official_main_gen(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        cases = [
+            URLError(TimeoutError("connect timed out")),
+            URLError(TimeoutError("operation timed out")),
+            ssl.SSLEOFError("EOF occurred in violation of protocol"),
+            URLError(ssl.SSLError("some tls alert")),
+            OSError("connection reset by peer"),
+            URLError(OSError("connection reset by peer")),
+            BrokenPipeError("broken pipe"),
+        ]
+
+        for exc in cases:
+            with self.subTest(error=repr(exc)):
+                self.write_proxy_event.reset_mock()
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                        },
+                        clear=False,
+                    ),
+                    patch("codex_proxy.urlopen", side_effect=[exc, FakeResponse(b'{"id":"resp_retry"}')]) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    with self.assertRaises(type(exc)):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req-ambiguous", "model": "volc/glm-5.2"},
+                        )
+
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+                retry_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry"
+                ]
+                self.assertEqual(retry_events, [])
+                suppressed_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry_suppressed"
+                ]
+                self.assertEqual(len(suppressed_events), 1)
+                self.assertEqual(suppressed_events[0].kwargs["retry_safety_class"], "unknown")
+                self.assertEqual(suppressed_events[0].kwargs["failure_phase"], "unknown")
+                self.assertEqual(suppressed_events[0].kwargs["attempt"], 1)
+                self.assertGreater(suppressed_events[0].kwargs["max_attempts"], 0)
+
+    def test_dns_text_needles_are_not_structural_proof_and_stay_suppressed(self):
+        """OS-level DNS message strings must not bypass the structural DNS check.
+
+        Only a nested ``socket.gaierror`` instance is authoritative DNS proof.
+        Text needles that happen to mention name resolution can occur after the
+        request has been written, so they must remain unknown/suppressed.
+        """
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        text_needle_cases = [
+            URLError(OSError("temporary failure in name resolution")),
+            URLError(OSError("getaddrinfo failed")),
+            URLError(OSError("nodename nor servname provided, or not known")),
+            URLError(OSError("No address associated with hostname")),
+            OSError("temporary failure in name resolution"),
+        ]
+
+        for exc in text_needle_cases:
+            with self.subTest(error=repr(exc)):
+                self.write_proxy_event.reset_mock()
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                            "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                        },
+                        clear=False,
+                    ),
+                    patch(
+                        "codex_proxy.urlopen",
+                        side_effect=[exc, FakeResponse(b'{"id":"resp_retry"}')],
+                    ) as mock_urlopen,
+                    patch("codex_proxy.time.sleep") as mock_sleep,
+                ):
+                    with self.assertRaises(type(exc)):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req-dns-needle", "model": "volc/glm-5.2"},
+                        )
+
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+                suppressed_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry_suppressed"
+                ]
+                self.assertEqual(len(suppressed_events), 1)
+                self.assertEqual(suppressed_events[0].kwargs["retry_safety_class"], "unknown")
+                self.assertEqual(suppressed_events[0].kwargs["failure_phase"], "unknown")
+
+    def test_non_official_main_generation_retry_safety_regression(self):
+        """Deterministic coverage of every non-Official main-generation retry/fallback seam.
+
+        The contract requires: pre-write retries only for DNS (authoritative proof);
+        generic connect/TLS/write timeouts and HTTP errors are suppressed; stream
+        failures are suppressed post-write unless downstream content was exposed;
+        SSE error details are sanitized.
+        """
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        event_context = {"request_id": "req-regression", "model": "volc/glm-5.2"}
+
+        # 1. DNS open failure → safe_prewrite retry.
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1", "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2"},
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[
+                    URLError(socket.gaierror("[Errno 11001] getaddrinfo failed")),
+                    FakeResponse(b'{"id":"ok"}'),
+                ],
+            ) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            response = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="volcengine",
+                upstream_format="responses",
+                timeout=1,
+                event_context=event_context,
+            )
+        self.assertIsNotNone(response)
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+        # 2. Generic TimeoutError open failure → unknown/suppressed.
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1", "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2"},
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[URLError(TimeoutError("timed out"))]) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            with self.assertRaises(URLError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context=event_context,
+                )
+        self.assertEqual(mock_urlopen.call_count, 1)
+        suppressed = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertTrue(
+            any(
+                e["retry_safety_class"] == "unknown" and e["failure_phase"] == "unknown"
+                for e in suppressed
+            )
+        )
+
+        # 3. HTTPError open failure → suppressed_post_write.
+        self.write_proxy_event.reset_mock()
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":"overloaded"}'),
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1", "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2"},
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=[error]) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context=event_context,
+                )
+        self.assertEqual(mock_urlopen.call_count, 1)
+        suppressed = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed), 1)
+        self.assertEqual(suppressed[0]["retry_safety_class"], "suppressed_post_write")
+        self.assertEqual(suppressed[0]["failure_phase"], "response_headers")
+
+        # 4. Streaming empty completed response → suppressed_post_write.
+        self.write_proxy_event.reset_mock()
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        empty_stream = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"reg_empty","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"reg_empty","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
+                b"",
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "5",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", return_value=empty_stream),
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        mock_retry_wait.assert_not_called()
+        suppressed = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertTrue(
+            any(
+                e["error"] == "UpstreamEmptyCompletedResponseError"
+                and e["retry_safety_class"] == "suppressed_post_write"
+                for e in suppressed
+            )
+        )
+
+        # 5. Streaming incomplete after content exposed → suppressed_post_exposure.
+        self.write_proxy_event.reset_mock()
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        exposed_stream = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"reg_exposed","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+                b"",
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "5",
+                    "CODEX_PROXY_STREAM_RETRY_ELAPSED_LIMIT_SECONDS": "0",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", return_value=exposed_stream),
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        mock_retry_wait.assert_not_called()
+        suppressed = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertTrue(
+            any(
+                e["error"] == "UpstreamStreamIncompleteError"
+                and e["retry_safety_class"] == "suppressed_post_exposure"
+                for e in suppressed
+            )
+        )
+
+    def test_stable_retry_identity_redacted_when_exception_echoes_header(self):
+        """A stable attempt identity must never leak outside the upstream header.
+
+        When the upstream transport exception embeds the idempotency header value,
+        retry telemetry and error detail must contain the redacted placeholder, not
+        the raw identity. The identity header itself must be stable across the
+        permitted attempts.
+        """
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        event_context: dict[str, Any] = {"request_id": "req-identity", "model": "volc/glm-5.2"}
+
+        def guaranteed(_model_access_path: tuple[str, ...]) -> bool:
+            return True
+
+        def urlopen_with_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            if not identity:
+                raise AssertionError("idempotency header missing")
+            raise URLError(ConnectionRefusedError(f"Connection refused {identity}"))
+
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1", "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2"},
+                clear=False,
+            ),
+            patch(
+                "codex_proxy._model_access_path_idempotency_guaranteed",
+                side_effect=guaranteed,
+            ) as guarantee_mock,
+            patch("codex_proxy.urlopen", side_effect=urlopen_with_identity_echo) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+            patch("codex_proxy._write_adapter_event") as write_adapter,
+        ):
+            with self.assertRaises(URLError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context=event_context,
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        guarantee_mock.assert_called()
+        first_identity = mock_urlopen.call_args_list[0].args[0].headers.get("X-CodexHub-Retry-Attempt-Identity")
+        second_identity = mock_urlopen.call_args_list[1].args[0].headers.get("X-CodexHub-Retry-Attempt-Identity")
+        self.assertTrue(first_identity)
+        self.assertEqual(first_identity, second_identity)
+        self.assertEqual(len(first_identity), 32)
+
+        # The raw identity must not appear in any telemetry payload; the redacted
+        # placeholder must be present in the retry detail.
+        retry_details = []
+        for call in write_adapter.call_args_list:
+            args, kwargs = call
+            payload = dict(kwargs)
+            payload_str = json.dumps(payload, default=str)
+            self.assertNotIn(first_identity, payload_str)
+            if kwargs.get("detail"):
+                retry_details.append(kwargs["detail"])
+        self.assertTrue(
+            any("[retry_identity_redacted]" in d for d in retry_details),
+            retry_details,
+        )
+
+        # The public event context must not expose the private identity key or value.
+        public = codex_proxy._public_event_context(event_context)
+        self.assertNotIn("_retry_attempt_identity", public)
+        self.assertNotIn(first_identity, json.dumps(public, default=str))
+
+    def test_guaranteed_path_redacts_retry_identity_from_downstream_error(self):
+        """Full handler path: raw identity must not reach downstream error surfaces."""
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        def guaranteed(_model_access_path: tuple[str, ...]) -> bool:
+            return True
+
+        captured_identities: list[str | None] = []
+
+        def urlopen_with_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            raise URLError(ConnectionRefusedError(f"Connection refused {identity}"))
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", side_effect=guaranteed),
+            patch("codex_proxy.urlopen", side_effect=urlopen_with_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        # Header stable across permitted attempts.
+        self.assertEqual(len(captured_identities), 2)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+
+        # Downstream response must not contain raw identity; detail should be redacted.
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        self.assertIn(b"[retry_identity_redacted]", raw_response)
+
+        # Telemetry must not contain raw identity.
+        for call in self.write_proxy_event.call_args_list:
+            args, kwargs = call
+            payload_str = json.dumps(dict(kwargs), default=str)
+            self.assertNotIn(identity, payload_str)
+
+    def test_streaming_identity_echo_redacted_in_retry_notice_downstream_telemetry_and_logs(self):
+        """Upstream SSE error that echoes the stable identity must never leak it.
+
+        A guaranteed Model Access Path produces a stable ``X-CodexHub-Retry-Attempt-Identity``
+        header.  When the upstream first fails with a safe-prewrite error that embeds the
+        header value, a downstream retry notice is emitted.  The second attempt returns an
+        upstream SSE error event that also embeds the same identity.  The raw identity must
+        be absent from the retry notice, downstream SSE frames, telemetry, and logs.
+        """
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        captured_identities: list[str | None] = []
+
+        def urlopen_with_retry_then_sse_error(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if len(captured_identities) == 1:
+                raise URLError(ConnectionRefusedError(f"Connection refused {identity}"))
+            error_event = json.dumps(
+                {
+                    "type": "error",
+                    "error": {
+                        "message": f"upstream internal error {identity}",
+                        "type": "internal_error",
+                        "code": "internal_error",
+                    },
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            return FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"stream_err","status":"in_progress"}}\n\n',
+                    f"data: {error_event}\n\n".encode("utf-8"),
+                    b"",
+                ]
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_DOWNSTREAM_RETRY_NOTICE_ENABLED": "1",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.urlopen", side_effect=urlopen_with_retry_then_sse_error),
+            patch("codex_proxy.time.sleep"),
+            self.assertLogs("codex_proxy", level="ERROR") as log_ctx,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(len(captured_identities), 2)
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        self.assertIn(b"[retry_identity_redacted]", raw_response)
+
+        # Retry notice detail and SSE error detail are redacted, not raw.
+        self.assertIn(b"codexhub.retry", raw_response)
+
+        telemetry = [
+            json.dumps(dict(kwargs), default=str)
+            for call in self.write_proxy_event.call_args_list
+            for args, kwargs in [call]
+        ]
+        for payload_str in telemetry:
+            self.assertNotIn(identity, payload_str)
+
+        log_text = "\n".join(log_ctx.output)
+        self.assertNotIn(identity, log_text)
+
+    def test_transparent_responses_stream_interruption_redacts_identity_in_synthetic_terminal(self):
+        """Transparent Responses stream failure must not leak the stable retry identity.
+
+        The synthetic ``response.failed`` event, ``transparent_stream_closed`` telemetry,
+        and any downstream SSE frame must contain the redacted placeholder, not the raw
+        identity echoed by the upstream transport exception.
+        """
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        captured_identities: list[str | None] = []
+
+        def official_urlopen_with_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            return FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"transparent_interrupt","status":"in_progress"}}\n\n',
+                    URLError(OSError(f"stream interrupted {identity}")),
+                ]
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                    "CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", side_effect=official_urlopen_with_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        self.assertIn(b"[retry_identity_redacted]", raw_response)
+        self.assertIn(b"response.failed", raw_response)
+
+        telemetry = [
+            json.dumps(dict(kwargs), default=str)
+            for call in self.write_proxy_event.call_args_list
+            for args, kwargs in [call]
+        ]
+        for payload_str in telemetry:
+            self.assertNotIn(identity, payload_str)
+
+    def test_guaranteed_non_stream_transparent_http_error_redacts_identity_in_body(self):
+        """A guaranteed transparent HTTP error body must not echo the stable retry identity.
+
+        The provider response body contains the idempotency header value; the Gateway
+        must redact it from the downstream body and telemetry while preserving
+        transparent byte identity for ordinary (non-guaranteed, non-error) routes.
+        """
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        captured_identities: list[str | None] = []
+
+        def official_urlopen_with_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            error_body = json.dumps(
+                {"error": f"provider error {identity}"},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            raise HTTPError(
+                "https://api.openai.com/v1/responses",
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(error_body),
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", side_effect=official_urlopen_with_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(len(captured_identities), 2)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        self.assertIn(b"[retry_identity_redacted]", raw_response)
+
+        # Response must be a single parseable JSON body (no duplicate terminal/fallback).
+        response_payload = json.loads(raw_response)
+        self.assertEqual(response_payload["error"], "provider error [retry_identity_redacted]")
+        self.assertEqual(fake.status, 503)
+        self.assertTrue(fake.headers_ended)
+
+        # Content-Length must reflect the redacted downstream body, not the upstream body.
+        content_length_values = [
+            value for key, value in fake.headers if key.lower() == "content-length"
+        ]
+        self.assertEqual(content_length_values, [str(len(raw_response))])
+
+        telemetry = [
+            json.dumps(dict(kwargs), default=str)
+            for call in self.write_proxy_event.call_args_list
+            for args, kwargs in [call]
+        ]
+        for payload_str in telemetry:
+            self.assertNotIn(identity, payload_str)
+
+    def test_guaranteed_non_stream_transparent_gzip_error_redacts_identity_and_drops_encoding(self):
+        """A gzip-encoded guaranteed transparent HTTP error body must be decoded,
+        redacted, and returned without Content-Encoding so the client does not
+        decompress a body that already contains the raw retry identity.
+        """
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        captured_identities: list[str | None] = []
+
+        def official_urlopen_with_gzip_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            error_body = json.dumps(
+                {"error": f"provider error {identity}"},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            gzipped = gzip.compress(error_body)
+            raise HTTPError(
+                "https://api.openai.com/v1/responses",
+                503,
+                "Service Unavailable",
+                {"Content-Encoding": "gzip"},
+                io.BytesIO(gzipped),
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", side_effect=official_urlopen_with_gzip_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(len(captured_identities), 2)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        self.assertIn(b"[retry_identity_redacted]", raw_response)
+
+        response_payload = json.loads(raw_response)
+        self.assertEqual(response_payload["error"], "provider error [retry_identity_redacted]")
+        self.assertEqual(fake.status, 503)
+        self.assertTrue(fake.headers_ended)
+
+        header_names = {key.lower() for key, _ in fake.headers}
+        self.assertNotIn("content-encoding", header_names)
+        content_length_values = [
+            value for key, value in fake.headers if key.lower() == "content-length"
+        ]
+        self.assertEqual(content_length_values, [str(len(raw_response))])
+
+        telemetry = [
+            json.dumps(dict(kwargs), default=str)
+            for call in self.write_proxy_event.call_args_list
+            for args, kwargs in [call]
+        ]
+        for payload_str in telemetry:
+            self.assertNotIn(identity, payload_str)
+
+    def test_transparent_non_stream_body_read_interruption_emits_terminal_response(self):
+        """A non-stream transparent body read failure must emit exactly one
+        sanitized target-protocol terminal response, not just telemetry.
+        """
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+
+        class InterruptingResponse:
+            status = 200
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": "100",
+            }
+
+            def read(self, size=-1):
+                raise IncompleteRead(b"")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return None
+
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1", "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2"},
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=False),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", return_value=InterruptingResponse()),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        raw_response = b"".join(fake.wfile.writes)
+        response_payload = json.loads(raw_response)
+        self.assertEqual(fake.status, 502)
+        self.assertTrue(fake.headers_ended)
+        self.assertIn("error", response_payload)
+
+        telemetry_event_types = [
+            call.args[0] for call in self.write_proxy_event.call_args_list if call.args
+        ]
+        self.assertIn("transparent_body_read_failed", telemetry_event_types)
+
+    def _guaranteed_transparent_non_stream_handler_setup(self):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler.path = "/v1/responses"
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "X-Codex-Client-Id": "opencode",
+        }
+        handler.rfile = io.BytesIO(body)
+        handler.close_connection = False
+        fake = FakeHandler()
+        handler.send_response = fake.send_response
+        handler.send_header = fake.send_header
+        handler.end_headers = fake.end_headers
+        handler.wfile = fake.wfile
+        return handler, fake
+
+    def test_guaranteed_non_stream_transparent_unsupported_encoding_fails_closed(self):
+        """An unsupported Content-Encoding on a guaranteed error body must fail
+        closed with a sanitized terminal response, not forward encoded bytes that
+        could leak the stable retry identity after downstream decoding.
+        """
+        handler, fake = self._guaranteed_transparent_non_stream_handler_setup()
+        captured_identities: list[str | None] = []
+
+        def official_urlopen_with_br_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            error_body = json.dumps(
+                {"error": f"provider error {identity}"},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            raise HTTPError(
+                "https://api.openai.com/v1/responses",
+                503,
+                "Service Unavailable",
+                {"Content-Encoding": "br"},
+                io.BytesIO(error_body),
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", side_effect=official_urlopen_with_br_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(len(captured_identities), 2)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        response_payload = json.loads(raw_response)
+        self.assertIn("error", response_payload)
+        self.assertEqual(fake.status, 502)
+        self.assertTrue(fake.headers_ended)
+
+        header_names = {key.lower() for key, _ in fake.headers}
+        self.assertNotIn("content-encoding", header_names)
+        content_length_values = [
+            value for key, value in fake.headers if key.lower() == "content-length"
+        ]
+        self.assertEqual(content_length_values, [str(len(raw_response))])
+
+        telemetry_event_types = [
+            call.args[0] for call in self.write_proxy_event.call_args_list if call.args
+        ]
+        self.assertIn("transparent_body_decode_failed", telemetry_event_types)
+
+    def test_guaranteed_non_stream_transparent_malformed_gzip_fails_closed(self):
+        """A malformed gzip body on a guaranteed error must fail closed rather
+        than forward bytes that downstream would decompress and expose.
+        """
+        handler, fake = self._guaranteed_transparent_non_stream_handler_setup()
+        captured_identities: list[str | None] = []
+
+        def official_urlopen_with_bad_gzip_identity_echo(req, timeout=None):
+            identity = req.headers.get("X-CodexHub-Retry-Attempt-Identity")
+            captured_identities.append(identity)
+            if identity is None:
+                raise AssertionError("idempotency header missing")
+            raise HTTPError(
+                "https://api.openai.com/v1/responses",
+                503,
+                "Service Unavailable",
+                {"Content-Encoding": "gzip"},
+                io.BytesIO(b"this is not gzip"),
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy._official_urlopen", side_effect=official_urlopen_with_bad_gzip_identity_echo),
+            patch("codex_proxy.time.sleep"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        identity = captured_identities[0]
+        self.assertTrue(identity)
+        self.assertEqual(len(captured_identities), 2)
+        self.assertEqual(captured_identities[0], captured_identities[1])
+
+        raw_response = b"".join(fake.wfile.writes)
+        self.assertNotIn(identity.encode(), raw_response)
+        response_payload = json.loads(raw_response)
+        self.assertIn("error", response_payload)
+        self.assertEqual(fake.status, 502)
+        self.assertTrue(fake.headers_ended)
+
+        header_names = {key.lower() for key, _ in fake.headers}
+        self.assertNotIn("content-encoding", header_names)
+        content_length_values = [
+            value for key, value in fake.headers if key.lower() == "content-length"
+        ]
+        self.assertEqual(content_length_values, [str(len(raw_response))])
+
+        telemetry_event_types = [
+            call.args[0] for call in self.write_proxy_event.call_args_list if call.args
+        ]
+        self.assertIn("transparent_body_decode_failed", telemetry_event_types)
+
+    def test_open_upstream_response_suppresses_http_errors_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         error = HTTPError(
             "https://ark.example.test/v1/responses",
@@ -5130,33 +6205,122 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req_retry", "model": "volc/glm-5.2"},
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        suppressed_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        fields = suppressed_events[0].kwargs
+        self.assertEqual(fields["request_id"], "req_retry")
+        self.assertEqual(fields["model"], "volc/glm-5.2")
+        self.assertEqual(fields["upstream"], "volcengine")
+        self.assertEqual(fields["status"], 429)
+        self.assertEqual(fields["error"], "HTTPError")
+        self.assertEqual(fields["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE)
+        self.assertEqual(fields["retry_safety_class"], "suppressed_post_write")
+        self.assertFalse(fields["retryable"])
+
+    def test_open_upstream_response_uses_stable_identity_for_guaranteed_path(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":"overloaded"}'),
+        )
+        success = FakeResponse(b'{"id":"resp_retry"}')
+        event_context: dict[str, Any] = {"request_id": "req-guaranteed", "model": "volc/glm-5.2"}
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch(
+                "codex_proxy._model_access_path_idempotency_guaranteed",
+                return_value=True,
+            ) as guarantee_check,
+            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.time.sleep"),
+        ):
             response = codex_proxy._open_upstream_response(
                 request,
                 upstream_name="volcengine",
                 upstream_format="responses",
                 timeout=1,
-                event_context={"request_id": "req_retry", "model": "volc/glm-5.2"},
+                event_context=event_context,
             )
 
         self.assertIs(response, success)
         self.assertEqual(mock_urlopen.call_count, 2)
-        mock_sleep.assert_called_once_with(10)
+        guarantee_check.assert_called()
+        identity = event_context.get("_retry_attempt_identity")
+        self.assertIsInstance(identity, str)
+        self.assertEqual(len(identity), 32)
+        for call in mock_urlopen.call_args_list:
+            sent_request = call.args[0]
+            self.assertEqual(
+                sent_request.headers.get("X-CodexHub-Retry-Attempt-Identity"),
+                identity,
+            )
         retry_events = [
             call for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
         self.assertEqual(len(retry_events), 1)
-        fields = retry_events[0].kwargs
-        self.assertEqual(fields["request_id"], "req_retry")
-        self.assertEqual(fields["model"], "volc/glm-5.2")
-        self.assertEqual(fields["upstream"], "volcengine")
-        self.assertEqual(fields["provider_id"], "volcengine")
-        self.assertEqual(fields["status"], 429)
-        self.assertEqual(fields["error"], "HTTPError")
-        self.assertEqual(fields["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE)
-        self.assertEqual(fields["attempt"], 1)
-        self.assertEqual(fields["max_attempts"], 3)
-        self.assertEqual(fields["delay_ms"], 10000)
+        self.assertEqual(retry_events[0].kwargs["retry_safety_class"], "guaranteed_idempotent")
+
+    def test_open_upstream_response_suppresses_after_downstream_exposure(self):
+        request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
+        error = URLError(TimeoutError("connect timed out"))
+        exposed = True
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                    "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                },
+                clear=False,
+            ),
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
+            patch("codex_proxy.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(URLError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req-exposed", "model": "volc/glm-5.2"},
+                    downstream_exposed=lambda: exposed,
+                )
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        suppressed_events = [
+            call for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0].kwargs["retry_safety_class"], "suppressed_post_exposure")
 
     def test_official_open_uses_gateway_owned_pooled_transport(self):
         request = codex_proxy.Request("https://chatgpt.com/backend-api/codex/responses", data=b"{}", method="POST")
@@ -5502,9 +6666,12 @@ class RoutingTests(unittest.TestCase):
         raw_response.release_conn.assert_called_once()
         raw_response.close.assert_not_called()
 
-    def test_transparent_retry_retries_open_failure_without_downstream_notice(self):
+    def test_transparent_retry_retries_dns_open_failure_without_downstream_notice(self):
+        # Only a specifically verified DNS failure carries authoritative
+        # pre-write proof; generic connect/TLS timeouts are ambiguous because
+        # urlopen spans write and response-header wait.
         request = codex_proxy.Request("https://example.test/v1/chat/completions", data=b"{}", method="POST")
-        error = URLError(TimeoutError("connect timed out"))
+        error = URLError(socket.gaierror("[Errno 11001] getaddrinfo failed"))
         success = FakeResponse(b'{"id":"ok","choices":[{"message":{"content":"done"}}]}')
         downstream_retry = Mock()
 
@@ -5578,7 +6745,7 @@ class RoutingTests(unittest.TestCase):
                 ]
                 self.assertEqual(retry_events, [])
 
-    def test_open_upstream_response_retries_transient_http_errors(self):
+    def test_open_upstream_response_suppresses_transient_http_errors_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         for status in (408, 409, 421, 425, 429, 500, 502, 503, 504, 520):
             with self.subTest(status=status):
@@ -5604,21 +6771,27 @@ class RoutingTests(unittest.TestCase):
                     patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
                     patch("codex_proxy.time.sleep") as mock_sleep,
                 ):
-                    response = codex_proxy._open_upstream_response(
-                        request,
-                        upstream_name="volcengine",
-                        upstream_format="responses",
-                        timeout=1,
-                        event_context={"request_id": "req_transient", "model": "volc/glm-5.2"},
-                        request_kind="main_generation",
-                    )
+                    with self.assertRaises(HTTPError):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req_transient", "model": "volc/glm-5.2"},
+                            request_kind="main_generation",
+                        )
 
-                self.assertIs(response, success)
-                self.assertEqual(mock_urlopen.call_count, 2)
-                expected_delay = 10 if status == 429 else 2
-                mock_sleep.assert_called_once_with(expected_delay)
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+                suppressed_events = [
+                    call for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "upstream_retry_suppressed"
+                ]
+                self.assertEqual(len(suppressed_events), 1)
+                self.assertEqual(suppressed_events[0].kwargs["retry_safety_class"], "suppressed_post_write")
+                self.assertEqual(suppressed_events[0].kwargs["status"], status)
 
-    def test_open_upstream_response_classifies_provider_capacity_codes(self):
+    def test_open_upstream_response_suppresses_provider_capacity_codes_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         cases = [
             (
@@ -5653,28 +6826,29 @@ class RoutingTests(unittest.TestCase):
                         },
                         clear=False,
                     ),
-                    patch("codex_proxy.urlopen", side_effect=[error, success]),
+                    patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
                     patch("codex_proxy.time.sleep") as mock_sleep,
                 ):
-                    response = codex_proxy._open_upstream_response(
-                        request,
-                        upstream_name="volcengine",
-                        upstream_format="responses",
-                        timeout=1,
-                        event_context={"request_id": "req_capacity", "model": "volc/glm-5.2"},
-                        request_kind="main_generation",
-                    )
+                    with self.assertRaises(HTTPError):
+                        codex_proxy._open_upstream_response(
+                            request,
+                            upstream_name="volcengine",
+                            upstream_format="responses",
+                            timeout=1,
+                            event_context={"request_id": "req_capacity", "model": "volc/glm-5.2"},
+                            request_kind="main_generation",
+                        )
 
-                self.assertIs(response, success)
-                expected_delay = 10 if expected_class == codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE else 2
-                mock_sleep.assert_called_once_with(expected_delay)
-                retry_events = [
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+                suppressed_events = [
                     call.kwargs for call in self.write_proxy_event.call_args_list
-                    if call.args and call.args[0] == "upstream_retry"
+                    if call.args and call.args[0] == "upstream_retry_suppressed"
                 ]
-                self.assertEqual(len(retry_events), 1)
-                self.assertEqual(retry_events[0]["failure_class"], expected_class)
-                self.assertEqual(retry_events[0]["delay_ms"], expected_delay * 1000)
+                self.assertEqual(len(suppressed_events), 1)
+                self.assertEqual(suppressed_events[0]["failure_class"], expected_class)
+                self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
+                self.assertFalse(suppressed_events[0]["retryable"])
 
     def test_stream_error_event_classifies_common_provider_error_values(self):
         cases = [
@@ -5856,19 +7030,15 @@ class RoutingTests(unittest.TestCase):
         ]
         self.assertEqual(retry_events, [])
 
-    def test_open_upstream_response_capacity_retry_uses_global_attempts_without_request_kind_override(self):
+    def test_open_upstream_response_suppresses_capacity_retry_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
-        errors = [
-            HTTPError(
-                "https://ark.example.test/v1/responses",
-                429,
-                "Too Many Requests",
-                {},
-                io.BytesIO(b'{"error":{"code":"11210","message":"tpm exceeded"}}'),
-            )
-            for _ in range(4)
-        ]
-        success = FakeResponse(b'{"id":"resp_retry"}')
+        error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"error":{"code":"11210","message":"tpm exceeded"}}'),
+        )
 
         with (
             patch.dict(
@@ -5879,26 +7049,28 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[*errors, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
             patch("codex_proxy.time.sleep") as mock_sleep,
         ):
-            response = codex_proxy._open_upstream_response(
-                request,
-                upstream_name="volcengine",
-                upstream_format="responses",
-                timeout=1,
-                event_context={"request_id": "req_capacity_global", "model": "volc/glm-5.2"},
-                request_kind="main_generation",
-            )
+            with self.assertRaises(HTTPError):
+                codex_proxy._open_upstream_response(
+                    request,
+                    upstream_name="volcengine",
+                    upstream_format="responses",
+                    timeout=1,
+                    event_context={"request_id": "req_capacity_global", "model": "volc/glm-5.2"},
+                    request_kind="main_generation",
+                )
 
-        self.assertIs(response, success)
-        self.assertEqual(mock_urlopen.call_count, 5)
-        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [10, 20, 30, 60])
-        retry_events = [
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+        suppressed_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "upstream_retry"
+            if call.args and call.args[0] == "upstream_retry_suppressed"
         ]
-        self.assertEqual([event["max_attempts"] for event in retry_events], [5, 5, 5, 5])
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE)
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
     def test_stream_quick_transient_retry_uses_global_attempts_without_request_kind_override(self):
         with patch.dict(
@@ -5932,7 +7104,7 @@ class RoutingTests(unittest.TestCase):
                 5,
             )
 
-    def test_open_upstream_response_respects_x_should_retry_headers(self):
+    def test_open_upstream_response_x_should_retry_headers_cannot_override_unsafe_phase_for_non_official(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         forced_retry = HTTPError(
             "https://ark.example.test/v1/responses",
@@ -5960,19 +7132,18 @@ class RoutingTests(unittest.TestCase):
                 clear=False,
             ),
             patch("codex_proxy.urlopen", side_effect=[forced_retry, success]) as mock_urlopen,
-            patch("codex_proxy.time.sleep"),
+            patch("codex_proxy.time.sleep") as mock_sleep,
         ):
-            self.assertIs(
+            with self.assertRaises(HTTPError):
                 codex_proxy._open_upstream_response(
                     request,
                     upstream_name="volcengine",
                     upstream_format="responses",
                     timeout=1,
                     request_kind="main_generation",
-                ),
-                success,
-            )
-        self.assertEqual(mock_urlopen.call_count, 2)
+                )
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
 
         with (
             patch.dict(
@@ -6098,14 +7269,6 @@ class RoutingTests(unittest.TestCase):
             {},
             io.BytesIO(b'{"error":{"type":"server_error","message":"try later"}}'),
         )
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6116,25 +7279,29 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[error, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
-        self.assertEqual(fake.status, 200)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         written = b"".join(fake.wfile.writes)
         self.assertNotIn(b"event: codexhub.retry\n", written)
         self.assertNotIn(b'"type":"codexhub.retry"', written)
-        self.assertIn(b"response.output_text.delta", written)
         notice_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "sse_retry_notice"
         ]
         self.assertEqual(notice_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
-    def test_post_responses_streaming_retries_read_error_before_first_upstream_event(self):
+    def test_post_responses_streaming_suppresses_read_error_for_non_official_main_gen(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6156,14 +7323,6 @@ class RoutingTests(unittest.TestCase):
         handler.end_headers = fake.end_headers
         handler.wfile = fake.wfile
         failed_stream = FakeSseResponse([TimeoutError("read timed out")])
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6175,27 +7334,32 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=failed_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertNotIn(b"event: codexhub.retry\n", written)
         self.assertNotIn(b'"type":"codexhub.retry"', written)
-        self.assertIn(b"response.output_text.delta", written)
-        self.assertNotIn(b"upstream_stream_error", written)
+        self.assertIn(b"upstream_stream_error", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["error"], "TimeoutError")
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "TimeoutError")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
-    def test_transparent_provider_responses_retries_sse_error_event_before_downstream_headers(self):
+    def test_transparent_provider_responses_suppresses_sse_error_event_for_non_official_main_gen(self):
         body = json.dumps(
             {
                 "model": "glm-5.2",
@@ -6227,14 +7391,6 @@ class RoutingTests(unittest.TestCase):
                 b"",
             ]
         )
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_transparent_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_transparent_retry","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6246,28 +7402,31 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=failed_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
-        self.assertEqual(fake.status, 200)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         written = b"".join(fake.wfile.writes)
-        self.assertIn(b"resp_transparent_retry", written)
-        self.assertIn(b"response.output_text.delta", written)
-        self.assertNotIn(b"The system is busy", written)
         self.assertNotIn(b"event: codexhub.retry\n", written)
+        self.assertNotIn(b'"type":"codexhub.retry"', written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED)
-        self.assertEqual(retry_events[0]["upstream"], "volcengine")
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["failure_class"], codex_proxy.RETRY_FAILURE_PROVIDER_OVERLOADED)
+        self.assertEqual(suppressed_events[0]["upstream"], "volcengine")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
-    def test_post_responses_streaming_retries_reset_after_buffered_reasoning_start(self):
+    def test_post_responses_streaming_suppresses_reset_after_buffered_reasoning_start_for_non_official(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6298,14 +7457,6 @@ class RoutingTests(unittest.TestCase):
                 ConnectionResetError("socket reset"),
             ]
         )
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_retry","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6317,28 +7468,35 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=failed_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
-        self.assertIn(b"resp_retry", written)
-        self.assertIn(b"response.output_text.delta", written)
         self.assertNotIn(b"resp_reset", written)
         self.assertNotIn(b"rs_1", written)
-        self.assertNotIn(b"upstream_stream_error", written)
+        self.assertIn(b"upstream_stream_error", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["error"], "ConnectionResetError")
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "ConnectionResetError")
+        self.assertIn(
+            suppressed_events[0]["retry_safety_class"],
+            {"suppressed_post_write", "suppressed_post_exposure"},
+        )
 
-    def test_post_responses_streaming_retries_incomplete_after_buffered_text_delta(self):
+    def test_post_responses_streaming_suppresses_incomplete_after_downstream_exposure_for_non_official(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6366,14 +7524,6 @@ class RoutingTests(unittest.TestCase):
                 b"",
             ]
         )
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_text_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_text_retry","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6385,28 +7535,31 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=failed_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
-        self.assertIn(b"resp_text_retry", written)
-        self.assertIn(b"response.output_text.delta", written)
-        self.assertIn(b'"delta":"ok"', written)
         self.assertNotIn(b"resp_text_reset", written)
-        self.assertNotIn(b"partial", written)
+        self.assertIn(b"upstream_stream_error", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["error"], "UpstreamStreamIncompleteError")
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "UpstreamStreamIncompleteError")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_exposure")
 
-    def test_post_responses_streaming_uses_global_attempts_for_buffered_stream_incomplete(self):
+    def test_post_responses_streaming_suppresses_buffered_stream_incomplete_for_non_official(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6427,21 +7580,10 @@ class RoutingTests(unittest.TestCase):
         handler.send_header = fake.send_header
         handler.end_headers = fake.end_headers
         handler.wfile = fake.wfile
-        failed_streams = [
-            FakeSseResponse(
-                [
-                    f'data: {{"type":"response.created","response":{{"id":"resp_text_reset_{index}","status":"in_progress"}}}}\n\n'.encode("utf-8"),
-                    f'data: {{"type":"response.output_text.delta","delta":"partial {index}"}}\n\n'.encode("utf-8"),
-                    b"",
-                ]
-            )
-            for index in range(4)
-        ]
-        success = FakeSseResponse(
+        failed_stream = FakeSseResponse(
             [
-                b'data: {"type":"response.created","response":{"id":"resp_text_retry","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_text_retry","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+                b'data: {"type":"response.created","response":{"id":"resp_text_reset_0","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_text.delta","delta":"partial 0"}\n\n',
                 b"",
             ]
         )
@@ -6457,26 +7599,31 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[*failed_streams, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=failed_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 5)
-        self.assertEqual([call.args[0] for call in mock_retry_wait.call_args_list], [2, 2, 4, 6])
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
-        self.assertIn(b"resp_text_retry", written)
-        self.assertIn(b'"delta":"ok"', written)
         self.assertNotIn(b"partial", written)
+        self.assertIn(b"upstream_stream_error", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 4)
-        self.assertEqual([event["max_attempts"] for event in retry_events], [5, 5, 5, 5])
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "UpstreamStreamIncompleteError")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_exposure")
 
-    def test_post_responses_streaming_retries_empty_completed_once_then_relays_visible_success(self):
+    def test_post_responses_streaming_suppresses_empty_completed_for_non_official_main_gen(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6504,14 +7651,6 @@ class RoutingTests(unittest.TestCase):
                 b"",
             ]
         )
-        success = FakeSseResponse(
-            [
-                b'data: {"type":"response.created","response":{"id":"resp_visible","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_visible","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}\n\n',
-                b"",
-            ]
-        )
 
         with (
             patch.dict(
@@ -6523,28 +7662,31 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[empty_stream, success]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=empty_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
-        self.assertIn(b"resp_visible", written)
-        self.assertIn(b'"delta":"ok"', written)
         self.assertNotIn(b"resp_empty", written)
-        self.assertNotIn(b"upstream_empty_completed_response", written)
+        self.assertIn(b"upstream_empty_completed_response", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["error"], "UpstreamEmptyCompletedResponseError")
-        self.assertEqual(retry_events[0]["max_attempts"], 2)
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "UpstreamEmptyCompletedResponseError")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
-    def test_post_responses_streaming_empty_completed_retry_is_bounded_to_one_extra_attempt(self):
+    def test_post_responses_streaming_empty_completed_is_suppressed_without_retry_for_non_official(self):
         body = json.dumps(
             {
                 "model": "volc/glm-5.2",
@@ -6565,21 +7707,10 @@ class RoutingTests(unittest.TestCase):
         handler.send_header = fake.send_header
         handler.end_headers = fake.end_headers
         handler.wfile = fake.wfile
-        empty_streams = [
-            FakeSseResponse(
-                [
-                    f'data: {{"type":"response.created","response":{{"id":"resp_empty_{index}","status":"in_progress"}}}}\n\n'.encode("utf-8"),
-                    f'data: {{"type":"response.completed","response":{{"id":"resp_empty_{index}","status":"completed","output":[],"usage":{{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}}}}\n\n'.encode("utf-8"),
-                    b"",
-                ]
-            )
-            for index in range(2)
-        ]
-        should_not_be_used = FakeSseResponse(
+        empty_stream = FakeSseResponse(
             [
-                b'data: {"type":"response.created","response":{"id":"resp_unwanted_success","status":"in_progress"}}\n\n',
-                b'data: {"type":"response.output_text.delta","delta":"late ok"}\n\n',
-                b'data: {"type":"response.completed","response":{"id":"resp_unwanted_success","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"late ok"}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}\n\n',
+                b'data: {"type":"response.created","response":{"id":"resp_empty_0","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_empty_0","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}\n\n',
                 b"",
             ]
         )
@@ -6594,27 +7725,30 @@ class RoutingTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[*empty_streams, should_not_be_used]) as mock_urlopen,
+            patch("codex_proxy.urlopen", return_value=empty_stream) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_retry_wait,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        mock_retry_wait.assert_called_once_with(2)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_retry_wait.assert_not_called()
         self.assertEqual(fake.status, 200)
         written = b"".join(fake.wfile.writes)
         self.assertIn(b"upstream_empty_completed_response", written)
         self.assertNotIn(b'"type":"response.completed"', written)
         self.assertNotIn(b"resp_empty_0", written)
-        self.assertNotIn(b"resp_empty_1", written)
-        self.assertNotIn(b"resp_unwanted_success", written)
         retry_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "upstream_retry"
         ]
-        self.assertEqual(len(retry_events), 1)
-        self.assertEqual(retry_events[0]["error"], "UpstreamEmptyCompletedResponseError")
-        self.assertEqual(retry_events[0]["max_attempts"], 2)
+        self.assertEqual(retry_events, [])
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["error"], "UpstreamEmptyCompletedResponseError")
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
     def test_post_responses_streaming_synthesizes_terminal_after_buffered_tool_call_done(self):
         body = json.dumps(
@@ -21719,7 +22853,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(downstream_event["client_id"], "omp")
         self.assertEqual(downstream_event["status"], 499)
 
-    def test_retry_notice_commit_failure_aborts_new_upstream_attempt(self):
+    def test_retry_notice_is_not_emitted_when_non_official_stream_retry_is_suppressed(self):
         body = json.dumps({
             "model": "volc/glm-5.2",
             "input": [{"type": "message", "role": "user", "content": "hi"}],
@@ -21737,12 +22871,6 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
             {"Content-Type": "application/json"},
             io.BytesIO(b'{"error":{"type":"server_error","message":"try later"}}'),
         )
-        # fail when the retry notice event is written
-        failing_wfile = FakeWFile(
-            fail_on_write=lambda data, _index: b"codexhub.retry" in data
-        )
-        fake.wfile = failing_wfile
-        handler.wfile = failing_wfile
 
         with (
             patch.dict(
@@ -21754,7 +22882,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 },
                 clear=False,
             ),
-            patch("codex_proxy.urlopen", side_effect=[error, error]) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=error) as mock_urlopen,
             patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -21764,13 +22892,19 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         mock_sleep.assert_not_called()
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertNotIn("sse_retry_notice", event_names)
-        self.assertIn("downstream_stream_closed", event_names)
+        self.assertNotIn("downstream_stream_closed", event_names)
         complete_events = [
             call.kwargs for call in self.write_proxy_event.call_args_list
             if call.args and call.args[0] == "request_complete"
         ]
         self.assertEqual(len(complete_events), 1)
-        self.assertEqual(complete_events[0]["status"], 499)
+        self.assertEqual(complete_events[0]["status"], 503)
+        suppressed_events = [
+            call.kwargs for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_write")
 
     def test_error_event_write_failure_overrides_upstream_status_to_499(self):
         body = json.dumps({
