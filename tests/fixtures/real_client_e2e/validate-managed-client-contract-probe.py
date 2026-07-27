@@ -7,9 +7,9 @@ EXPECTED = {
     (client, model)
     for client in ("codex", "opencode", "zcode", "pi", "omp")
     for model in (
-        ("gpt-5.6-luna", "volc/glm-5.2")
+        ("gpt-5.6-luna", "ollama-cloud/glm-5.2")
         if client == "codex"
-        else ("openai/gpt-5.6-luna", "volc/glm-5.2")
+        else ("openai/gpt-5.6-luna", "ollama-cloud/glm-5.2")
     )
 }
 
@@ -27,7 +27,7 @@ def main(path: Path) -> None:
     for row in rows:
         if row["model"] in ("gpt-5.6-luna", "openai/gpt-5.6-luna"):
             assert "--catalog-path" in row["flags"], row
-        elif row["model"] == "volc/glm-5.2":
+        elif row["model"] == "ollama-cloud/glm-5.2":
             assert "--catalog-path" not in row["flags"], row
 
 

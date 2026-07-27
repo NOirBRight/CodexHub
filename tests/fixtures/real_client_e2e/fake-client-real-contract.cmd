@@ -12,14 +12,17 @@ if not defined CODEXHUB_E2E_CLIENT exit /b 12
 if not defined CODEXHUB_E2E_DIAGNOSTICS_PATH exit /b 13
 set "GATEWAY_MODEL=%CODEXHUB_E2E_MODEL%"
 if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-openai/gpt-5.6-luna" set "GATEWAY_MODEL=openai/gpt-5.6-luna"
-if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-volc/glm-5.2" set "GATEWAY_MODEL=volc/glm-5.2"
+if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-ollama-cloud/glm-5.2" set "GATEWAY_MODEL=ollama-cloud/glm-5.2"
 if /I not "%GATEWAY_MODEL%"=="%CODEXHUB_E2E_GATEWAY_MODEL%" exit /b 17
-set "PROVIDER_ID=openai"
+set "PROVIDER_ID=official"
 set "UPSTREAM_FORMAT=responses"
 set "INBOUND_FORMAT=responses"
-if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "PROVIDER_ID=volc"
-if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "UPSTREAM_FORMAT=chat_completions"
-if /I "%GATEWAY_MODEL%"=="volc/glm-5.2" set "INBOUND_FORMAT=chat_completions"
+if /I "%GATEWAY_MODEL%"=="ollama-cloud/glm-5.2" set "PROVIDER_ID=ollama_cloud"
+if defined CODEXHUB_E2E_FORCE_ROUTE_CONTRADICTION (
+  set "PROVIDER_ID=wrong-provider"
+  set "UPSTREAM_FORMAT=chat_completions"
+  set "INBOUND_FORMAT=chat_completions"
+)
 set "IS_STREAM=true"
 if defined CODEXHUB_E2E_FORCE_NONSTREAM set "IS_STREAM=false"
 if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" set "CLIENT_CONFIG=%CD%\.codex\config.toml"
