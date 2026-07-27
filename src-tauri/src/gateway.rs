@@ -3914,34 +3914,52 @@ fn client_backup_root_for_owner(client_id: &str, owner: RoutingOwner) -> PathBuf
     client_backup_root_at(&owner_home, client_id)
 }
 
-fn client_backup_roots_for_restore(client_id: &str, owner: RoutingOwner) -> Vec<PathBuf> {
+fn owner_to_backup_channel(owner: RoutingOwner) -> BackupChannel {
+    match owner {
+        RoutingOwner::Beta => BackupChannel::Beta,
+        _ => BackupChannel::Stable,
+    }
+}
+
+fn client_backup_roots_for_restore(
+    client_id: &str,
+    owner: RoutingOwner,
+) -> Vec<(PathBuf, BackupChannel)> {
     let candidates = [
-        client_backup_root_for_owner(client_id, owner),
-        client_backup_root_for_owner(client_id, RoutingOwner::Release),
-        client_backup_root_for_owner(client_id, RoutingOwner::Beta),
-        client_backup_root(client_id),
+        (RoutingOwner::Release, BackupChannel::Stable),
+        (RoutingOwner::Beta, BackupChannel::Beta),
     ];
-    let mut roots = Vec::new();
-    for candidate in candidates {
-        if !roots.contains(&candidate) {
-            roots.push(candidate);
+    let mut roots: Vec<(PathBuf, BackupChannel)> = Vec::new();
+    let primary_root = client_backup_root_for_owner(client_id, owner);
+    let primary_channel = owner_to_backup_channel(owner);
+    roots.push((primary_root, primary_channel));
+    for (candidate_owner, channel) in candidates {
+        let root = client_backup_root_for_owner(client_id, candidate_owner);
+        if !roots.iter().any(|(existing, _)| existing == &root) {
+            roots.push((root, channel));
         }
     }
-    roots.sort_by_key(|root| !backup_root_has_entries(root));
+    let legacy_root = client_backup_root(client_id);
+    if !roots.iter().any(|(existing, _)| existing == &legacy_root) {
+        roots.push((legacy_root, BackupChannel::Stable));
+    }
+    roots.sort_by_key(|(root, _)| !backup_root_has_entries(root));
     roots
 }
 
 /// Backup roots used during apply. The first root is the current channel's
 /// backup directory (used for the pre-managed snapshot); the remainder are
 /// the cross-channel Stable/Beta roots considered for legacy baseline adoption.
-fn client_backup_roots_for_apply(client_id: &str) -> Vec<PathBuf> {
+fn client_backup_roots_for_apply(client_id: &str) -> Vec<(PathBuf, BackupChannel)> {
     let current_owner = crate::app_flavor::current().routing_owner();
-    let mut roots = Vec::new();
-    roots.push(client_backup_root_for_owner(client_id, current_owner));
-    for owner in [RoutingOwner::Release, RoutingOwner::Beta] {
+    let mut roots: Vec<(PathBuf, BackupChannel)> = Vec::new();
+    let primary_root = client_backup_root_for_owner(client_id, current_owner);
+    let primary_channel = owner_to_backup_channel(current_owner);
+    roots.push((primary_root, primary_channel));
+    for (owner, channel) in [(RoutingOwner::Release, BackupChannel::Stable), (RoutingOwner::Beta, BackupChannel::Beta)] {
         let root = client_backup_root_for_owner(client_id, owner);
-        if !roots.contains(&root) {
-            roots.push(root);
+        if !roots.iter().any(|(existing, _)| existing == &root) {
+            roots.push((root, channel));
         }
     }
     roots
@@ -3973,21 +3991,18 @@ enum BaselineFile {
     Absent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BackupChannel {
+    Beta,
+    Stable,
+}
+
 #[derive(Debug, Clone)]
 struct LegacySnapshotCandidate {
     modified: SystemTime,
-    channel: &'static str,
+    channel: BackupChannel,
     name: String,
     files: HashMap<String, BaselineFile>,
-}
-
-fn channel_label_for_backup_root(root: &Path) -> &'static str {
-    let lower = root.to_string_lossy().to_lowercase();
-    if lower.contains("beta") {
-        "beta"
-    } else {
-        "stable"
-    }
 }
 
 thread_local! {
@@ -4123,13 +4138,13 @@ fn is_valid_pi_models_legacy_shape(text: &str) -> bool {
 
 fn adopt_legacy_opencode_snapshot_files(
     backup_root: &Path,
+    channel: BackupChannel,
 ) -> Result<Vec<LegacySnapshotCandidate>, String> {
     let entries = match fs::read_dir(backup_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => return Err("failed to read legacy OpenCode backup directory".to_string()),
     };
-    let channel = channel_label_for_backup_root(backup_root);
     let mut candidates = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| "failed to read legacy OpenCode backup entry".to_string())?;
@@ -4171,13 +4186,13 @@ fn adopt_legacy_opencode_snapshot_files(
 
 fn adopt_legacy_pi_snapshot_files(
     backup_root: &Path,
+    channel: BackupChannel,
 ) -> Result<Vec<LegacySnapshotCandidate>, String> {
     let entries = match fs::read_dir(backup_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => return Err("failed to read legacy Pi backup directory".to_string()),
     };
-    let channel = channel_label_for_backup_root(backup_root);
     let mut candidates = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| "failed to read legacy Pi backup entry".to_string())?;
@@ -4236,11 +4251,12 @@ fn adopt_legacy_pi_snapshot_files(
 
 fn adopt_legacy_snapshot_files(
     client_id: &str,
-    backup_root: &Path,
+    backup_root: &(PathBuf, BackupChannel),
 ) -> Result<Vec<LegacySnapshotCandidate>, String> {
+    let (path, channel) = backup_root;
     match client_id {
-        "opencode" => adopt_legacy_opencode_snapshot_files(backup_root),
-        "pi" => adopt_legacy_pi_snapshot_files(backup_root),
+        "opencode" => adopt_legacy_opencode_snapshot_files(path, *channel),
+        "pi" => adopt_legacy_pi_snapshot_files(path, *channel),
         _ => Ok(Vec::new()),
     }
 }
@@ -4252,7 +4268,7 @@ fn adopt_legacy_snapshot_files(
 /// and Beta callers therefore choose the same winner for equal mtimes.
 fn adopt_latest_legacy_snapshot_files(
     client_id: &str,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<Option<HashMap<String, BaselineFile>>, String> {
     let mut candidates: Vec<LegacySnapshotCandidate> = Vec::new();
     for backup_root in backup_roots {
@@ -4261,7 +4277,7 @@ fn adopt_latest_legacy_snapshot_files(
     candidates.sort_by(|a, b| {
         a.modified
             .cmp(&b.modified)
-            .then_with(|| a.channel.cmp(b.channel))
+            .then_with(|| a.channel.cmp(&b.channel))
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(candidates.pop().map(|candidate| candidate.files))
@@ -4273,7 +4289,7 @@ fn adopt_latest_legacy_snapshot_files(
 /// legacy snapshot is available.
 fn adopt_legacy_baseline_locked(
     client_id: &str,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<Option<RollbackBaseline>, String> {
     let baseline_path = create_baseline_dir(client_id)?;
     let lock = safe_file::FileLock::acquire(&baseline_path)?;
@@ -4304,7 +4320,7 @@ fn adopt_legacy_baseline_locked(
 /// falling back to an Absent tombstone.
 fn ensure_rollback_baseline(
     client_id: &str,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
     files: &[(&str, &Path)],
     is_managed: impl Fn(&str, &str) -> bool,
 ) -> Result<(), String> {
@@ -4352,7 +4368,7 @@ fn ensure_rollback_baseline(
 
 fn record_opencode_rollback_baseline(
     config_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<(), String> {
     ensure_rollback_baseline(
         "opencode",
@@ -4365,7 +4381,7 @@ fn record_opencode_rollback_baseline(
 fn record_pi_rollback_baseline(
     settings_path: &Path,
     models_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<(), String> {
     ensure_rollback_baseline(
         "pi",
@@ -5041,7 +5057,7 @@ fn preview_zcode_config_with_targets(
 
 fn apply_opencode_config_with_paths(
     config_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
     settings: &Settings,
     providers: &[Provider],
     model: &str,
@@ -5056,7 +5072,7 @@ fn apply_opencode_config_with_paths(
             message: "OpenCode config was not found; refusing managed overwrite without an official config backup.".to_string(),
         });
     }
-    let backup_root = backup_roots.first().ok_or_else(|| {
+    let (backup_root, _) = backup_roots.first().ok_or_else(|| {
         "OpenCode apply requires at least one backup root".to_string()
     })?;
     fs::create_dir_all(backup_root)
@@ -5087,13 +5103,13 @@ fn apply_opencode_config_with_paths(
 fn apply_pi_config_with_paths(
     settings_path: &Path,
     models_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let backup_root = backup_roots.first().ok_or_else(|| {
+    let (backup_root, _) = backup_roots.first().ok_or_else(|| {
         "Pi apply requires at least one backup root".to_string()
     })?;
     let current_settings = fs::read_to_string(settings_path).unwrap_or_default();
@@ -5239,7 +5255,7 @@ fn restore_latest_backup(
 
 fn restore_opencode_config_with_backup_roots(
     config_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<GatewayClientApplyResult, String> {
     if let Some(baseline) = read_rollback_baseline("opencode")? {
         return match baseline.files.get("opencode.json") {
@@ -5263,14 +5279,14 @@ fn restore_opencode_config_with_backup_roots(
 }
 
 fn restore_with_backup_roots<F>(
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
     mut restore: F,
 ) -> Result<GatewayClientApplyResult, String>
 where
     F: FnMut(&Path) -> Result<GatewayClientApplyResult, String>,
 {
     let mut errors = Vec::new();
-    for backup_root in backup_roots {
+    for (backup_root, _channel) in backup_roots {
         match restore(backup_root) {
             Ok(result) => return Ok(result),
             Err(error) => errors.push(error),
@@ -5286,7 +5302,7 @@ where
 fn restore_pi_config_with_paths(
     settings_path: &Path,
     models_path: &Path,
-    backup_roots: &[PathBuf],
+    backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<GatewayClientApplyResult, String> {
     if let Some(baseline) = read_rollback_baseline("pi")? {
         return restore_pi_from_baseline(settings_path, models_path, &baseline);
@@ -6969,6 +6985,7 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         GatewayClientApplyResult,
         String,
     > {
+        let labeled_backup_root = (backup_root.clone(), BackupChannel::Stable);
         match client_id.as_str() {
             "opencode" => {
                 let path = &targets.writable_paths[0];
@@ -6982,7 +6999,7 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
                 }
                 apply_opencode_config_with_paths(
                     path,
-                    std::slice::from_ref(&backup_root),
+                    std::slice::from_ref(&labeled_backup_root),
                     &input.settings,
                     &input.providers,
                     &model,
@@ -6991,7 +7008,7 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
             "pi" => apply_pi_config_with_paths(
                 &targets.writable_paths[0],
                 &targets.writable_paths[1],
-                std::slice::from_ref(&backup_root),
+                std::slice::from_ref(&labeled_backup_root),
                 &input.settings,
                 &input.providers,
                 &model,
@@ -7145,6 +7162,14 @@ mod tests {
             .iter()
             .map(|(id, context_window)| ((*id).to_string(), *context_window))
             .collect()
+    }
+
+    fn stable_root(path: PathBuf) -> (PathBuf, super::BackupChannel) {
+        (path, super::BackupChannel::Stable)
+    }
+
+    fn beta_root(path: PathBuf) -> (PathBuf, super::BackupChannel) {
+        (path, super::BackupChannel::Beta)
     }
 
     #[test]
@@ -9891,7 +9916,7 @@ mod tests {
 
         let result = apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -9922,7 +9947,7 @@ mod tests {
 
         let result = apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.4",
@@ -9953,7 +9978,7 @@ mod tests {
 
         let error = apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &providers,
             "minimax-cn/MINIMAX-M3",
@@ -9980,7 +10005,7 @@ mod tests {
 
         let result = apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10043,7 +10068,7 @@ mod tests {
 
         apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&stable_backups),
+            &[stable_root(stable_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10051,7 +10076,7 @@ mod tests {
         .unwrap();
         apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&beta_backups),
+            &[beta_root(beta_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.4",
@@ -10060,7 +10085,7 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[beta_backups, stable_backups],
+            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
         )
         .unwrap();
 
@@ -10101,7 +10126,7 @@ mod tests {
 
         apply_opencode_config_with_paths(
             &config_path,
-            &[stable_backups.clone(), beta_backups.clone()],
+            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10118,7 +10143,7 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[stable_backups, beta_backups],
+            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
         )
         .unwrap();
 
@@ -10159,7 +10184,7 @@ mod tests {
 
         apply_opencode_config_with_paths(
             &config_path,
-            &[beta_backups.clone(), stable_backups.clone()],
+            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10176,7 +10201,7 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[beta_backups, stable_backups],
+            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
         )
         .unwrap();
 
@@ -10209,7 +10234,7 @@ mod tests {
         let result = super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10293,7 +10318,7 @@ mod tests {
         let error = super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &providers,
             "minimax-cn/MINIMAX-M3",
@@ -10355,7 +10380,7 @@ mod tests {
         .unwrap();
 
         let result =
-            super::restore_pi_config_with_paths(&settings_path, &models_path, std::slice::from_ref(&backup_root))
+            super::restore_pi_config_with_paths(&settings_path, &models_path, &[stable_root(backup_root.clone())])
                 .unwrap();
 
         assert!(result.applied);
@@ -10400,7 +10425,7 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10438,7 +10463,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("nonexistent-backups")],
+            &[stable_root(root.join("nonexistent-backups"))],
         )
         .unwrap();
 
@@ -10500,7 +10525,7 @@ mod tests {
         super::write_rollback_baseline_atomic("opencode", &baseline).unwrap();
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10560,7 +10585,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("nonexistent-backups")],
+            &[stable_root(root.join("nonexistent-backups"))],
         )
         .unwrap();
 
@@ -10598,7 +10623,7 @@ mod tests {
 
         super::apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10606,7 +10631,7 @@ mod tests {
         .unwrap();
         super::apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.4",
@@ -10614,7 +10639,7 @@ mod tests {
         .unwrap();
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10652,7 +10677,7 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10661,7 +10686,7 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.4",
@@ -10671,7 +10696,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[backup_root],
+            &[stable_root(backup_root.clone())],
         )
         .unwrap();
 
@@ -10718,7 +10743,7 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10769,7 +10794,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[backup_root],
+            &[stable_root(backup_root.clone())],
         )
         .unwrap();
 
@@ -10840,7 +10865,7 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[stable_backups.clone(), beta_backups.clone()],
+            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10859,7 +10884,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[stable_backups, beta_backups],
+            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
         )
         .unwrap();
 
@@ -10921,7 +10946,7 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[beta_backups.clone(), stable_backups.clone()],
+            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10940,7 +10965,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[beta_backups, stable_backups],
+            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
         )
         .unwrap();
 
@@ -10986,8 +11011,8 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         for caller_roots in [
-            vec![stable_backups.clone(), beta_backups.clone()],
-            vec![beta_backups.clone(), stable_backups.clone()],
+            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -11079,8 +11104,8 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         for caller_roots in [
-            vec![stable_backups.clone(), beta_backups.clone()],
-            vec![beta_backups.clone(), stable_backups.clone()],
+            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -11109,6 +11134,172 @@ mod tests {
                     Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
                 ),
                 "Stable must win for equal mtimes regardless of caller order"
+            );
+        }
+
+        restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
+    }
+
+    #[test]
+    fn opencode_equal_mtime_adoption_ignores_parent_path_channel_names() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
+        let root = unique_temp_dir("codexhub-opencode-misleading-parent");
+        let config_path = root.join("opencode.json");
+        // Stable root nested under a path containing "beta"; Beta root nested under a path containing "stable".
+        let stable_backups = root.join("beta-channel").join("stable-snapshots");
+        let beta_backups = root.join("stable-channel").join("beta-snapshots");
+        fs::create_dir_all(&stable_backups).unwrap();
+        fs::create_dir_all(&beta_backups).unwrap();
+        fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
+        // Identical snapshot names so name cannot break the tie.
+        fs::write(
+            stable_backups.join("opencode.json"),
+            r#"{"model":"anthropic/claude-sonnet-4-stable"}"#,
+        )
+        .unwrap();
+        fs::write(
+            beta_backups.join("opencode.json"),
+            r#"{"model":"anthropic/claude-sonnet-4-beta"}"#,
+        )
+        .unwrap();
+        let shared_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        for path in [
+            stable_backups.join("opencode.json"),
+            beta_backups.join("opencode.json"),
+        ] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(shared_mtime))
+                .unwrap();
+        }
+
+        for caller_roots in [
+            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+        ] {
+            let provenance_dir = root.join(format!(
+                "provenance-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
+            let result = super::apply_opencode_config_with_paths(
+                &config_path,
+                &caller_roots,
+                &Settings::default(),
+                &[],
+                "openai/gpt-5.5",
+            )
+            .unwrap();
+            assert!(result.applied);
+            let baseline = super::read_rollback_baseline("opencode").unwrap().unwrap();
+            assert_eq!(
+                baseline.files.get("opencode.json"),
+                Some(&super::BaselineFile::Snapshot {
+                    content: r#"{"model":"anthropic/claude-sonnet-4-stable"}"#.to_string()
+                }),
+                "Stable must win for equal mtimes/snapshot names regardless of parent path or caller order"
+            );
+        }
+
+        restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
+    }
+
+    #[test]
+    fn pi_equal_mtime_adoption_ignores_parent_path_channel_names() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
+        let root = unique_temp_dir("codexhub-pi-misleading-parent");
+        let settings_path = root.join("settings.json");
+        let models_path = root.join("models.json");
+        // Stable root nested under a path containing "beta"; Beta root nested under a path containing "stable".
+        let stable_backups = root.join("beta-channel").join("stable-snapshots");
+        let beta_backups = root.join("stable-channel").join("beta-snapshots");
+        let stable_backup = stable_backups.join("pi");
+        let beta_backup = beta_backups.join("pi");
+        fs::create_dir_all(&stable_backup).unwrap();
+        fs::create_dir_all(&beta_backup).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &models_path,
+            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+        )
+        .unwrap();
+        // Identical snapshot names so name cannot break the tie.
+        fs::write(
+            stable_backup.join("settings.json"),
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4-stable"}"#,
+        )
+        .unwrap();
+        fs::write(
+            stable_backup.join("models.json"),
+            r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4-stable"}]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            beta_backup.join("settings.json"),
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4-beta"}"#,
+        )
+        .unwrap();
+        fs::write(
+            beta_backup.join("models.json"),
+            r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4-beta"}]}}}"#,
+        )
+        .unwrap();
+        let shared_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        for backup in [&stable_backup, &beta_backup] {
+            for file in ["settings.json", "models.json"] {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(backup.join(file))
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(shared_mtime))
+                    .unwrap();
+            }
+        }
+
+        for caller_roots in [
+            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+        ] {
+            let provenance_dir = root.join(format!(
+                "provenance-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
+            let result = super::apply_pi_config_with_paths(
+                &settings_path,
+                &models_path,
+                &caller_roots,
+                &Settings::default(),
+                &[],
+                "openai/gpt-5.5",
+            )
+            .unwrap();
+            assert!(result.applied);
+            let baseline = super::read_rollback_baseline("pi").unwrap().unwrap();
+            assert!(
+                matches!(
+                    baseline.files.get("settings.json"),
+                    Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
+                ),
+                "Stable must win for equal mtimes/snapshot names regardless of parent path or caller order"
             );
         }
 
@@ -11150,7 +11341,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         )
         .unwrap();
 
@@ -11175,7 +11366,7 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[root.join("backups")]);
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(root.join("backups"))]);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11201,7 +11392,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11227,7 +11418,7 @@ mod tests {
 
         let result = super::apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -11260,7 +11451,7 @@ mod tests {
         let result = super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -11304,7 +11495,7 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11344,7 +11535,7 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11387,7 +11578,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11430,7 +11621,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11481,7 +11672,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11527,7 +11718,7 @@ mod tests {
         super::write_rollback_baseline_atomic("opencode", &baseline).unwrap();
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -11561,7 +11752,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         )
         .unwrap();
 
@@ -11602,7 +11793,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11632,7 +11823,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[root.join("backups")],
+            &[stable_root(root.join("backups"))],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11876,7 +12067,7 @@ mod tests {
         fs::write(backup_root.join("opencode-official.json"), "not json").unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]);
+        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11920,7 +12111,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[backup_root],
+            &[stable_root(backup_root.clone())],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -11950,7 +12141,7 @@ mod tests {
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]);
+        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11994,7 +12185,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[backup_root],
+            &[stable_root(backup_root.clone())],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -12039,7 +12230,7 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[backup_root],
+            &[stable_root(backup_root.clone())],
         );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
@@ -12062,7 +12253,7 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         let json = serde_json::to_string(&result).unwrap();
@@ -12089,9 +12280,10 @@ mod tests {
         fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         let stable_file = stable_backups.join("opencode-stable.json");
         let beta_file = beta_backups.join("opencode-beta.json");
+        // Baseline A from Stable, baseline B from Beta; both are complete and eligible.
         fs::write(&stable_file, r#"{"model":"anthropic/claude-sonnet-4-stable"}"#).unwrap();
         fs::write(&beta_file, r#"{"model":"anthropic/claude-sonnet-4-beta"}"#).unwrap();
-        // Beta candidate is strictly newer so selection is deterministic.
+        // Beta candidate is strictly newer, but the first publisher still wins.
         let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         std::fs::OpenOptions::new()
             .write(true)
@@ -12101,18 +12293,39 @@ mod tests {
             .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let mut handles = Vec::new();
-        let backup_roots = vec![stable_backups.clone(), beta_backups.clone()];
-        for _ in 0..2 {
+
+        // Thread A: Stable-only contender proposes baseline A.
+        {
             let config_path = config_path.clone();
-            let backup_roots = backup_roots.clone();
-            let barrier = barrier.clone();
+            let stable_roots = vec![stable_root(stable_backups.clone())];
+            let pair = pair.clone();
             handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                super::restore_opencode_config_with_backup_roots(&config_path, &backup_roots)
+                let result = super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots);
+                let (lock, cvar) = &*pair;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+                result
             }));
         }
+
+        // Thread B: Beta-only contender proposes distinct baseline B, but must wait until A has published.
+        {
+            let config_path = config_path.clone();
+            let beta_roots = vec![beta_root(beta_backups.clone())];
+            let pair = pair.clone();
+            handles.push(std::thread::spawn(move || {
+                let (lock, cvar) = &*pair;
+                let mut published = lock.lock().unwrap();
+                while !*published {
+                    published = cvar.wait(published).unwrap();
+                }
+                drop(published);
+                super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
+            }));
+        }
+
         let mut restored = 0;
         for handle in handles {
             if handle.join().unwrap().is_ok() {
@@ -12126,9 +12339,9 @@ mod tests {
         assert_eq!(
             baseline.files.get("opencode.json"),
             Some(&super::BaselineFile::Snapshot {
-                content: r#"{"model":"anthropic/claude-sonnet-4-beta"}"#.to_string()
+                content: r#"{"model":"anthropic/claude-sonnet-4-stable"}"#.to_string()
             }),
-            "latest eligible Beta baseline must win and remain immutable"
+            "first-published Stable baseline A must remain immutable after Beta contender B re-reads"
         );
     }
 
@@ -12157,6 +12370,7 @@ mod tests {
             r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
+        // Baseline A from Stable, baseline B from Beta; both are complete and eligible.
         fs::write(
             stable_backup.join("settings.json"),
             r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4-stable"}"#,
@@ -12177,7 +12391,7 @@ mod tests {
             r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4-beta"}]}}}"#,
         )
         .unwrap();
-        // Beta candidate is strictly newer so selection is deterministic.
+        // Beta candidate is strictly newer, but the first publisher still wins.
         let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         std::fs::OpenOptions::new()
             .write(true)
@@ -12193,19 +12407,41 @@ mod tests {
             .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let mut handles = Vec::new();
-        let backup_roots = vec![stable_backups.clone(), beta_backups.clone()];
-        for _ in 0..2 {
+
+        // Thread A: Stable-only contender proposes baseline A.
+        {
             let settings_path = settings_path.clone();
             let models_path = models_path.clone();
-            let backup_roots = backup_roots.clone();
-            let barrier = barrier.clone();
+            let stable_roots = vec![stable_root(stable_backups.clone())];
+            let pair = pair.clone();
             handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                super::restore_pi_config_with_paths(&settings_path, &models_path, &backup_roots)
+                let result = super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots);
+                let (lock, cvar) = &*pair;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+                result
             }));
         }
+
+        // Thread B: Beta-only contender proposes distinct baseline B, but must wait until A has published.
+        {
+            let settings_path = settings_path.clone();
+            let models_path = models_path.clone();
+            let beta_roots = vec![beta_root(beta_backups.clone())];
+            let pair = pair.clone();
+            handles.push(std::thread::spawn(move || {
+                let (lock, cvar) = &*pair;
+                let mut published = lock.lock().unwrap();
+                while !*published {
+                    published = cvar.wait(published).unwrap();
+                }
+                drop(published);
+                super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+            }));
+        }
+
         let mut restored = 0;
         for handle in handles {
             if handle.join().unwrap().is_ok() {
@@ -12219,22 +12455,16 @@ mod tests {
         assert!(
             matches!(
                 baseline.files.get("settings.json"),
-                Some(super::BaselineFile::Snapshot {
-                    content,
-                    ..
-                }) if content.contains("claude-sonnet-4-beta")
+                Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "latest eligible Beta baseline must win and remain immutable"
+            "first-published Stable settings baseline must remain immutable after Beta contender B re-reads"
         );
         assert!(
             matches!(
                 baseline.files.get("models.json"),
-                Some(super::BaselineFile::Snapshot {
-                    content,
-                    ..
-                }) if content.contains("claude-sonnet-4-beta")
+                Some(super::BaselineFile::Snapshot { content, .. }) if content.contains("claude-sonnet-4-stable")
             ),
-            "latest eligible Beta models baseline must win and remain immutable"
+            "first-published Stable models baseline must remain immutable after Beta contender B re-reads"
         );
     }
 
@@ -12253,14 +12483,13 @@ mod tests {
         fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         let stable_file = stable_backups.join("opencode-stable.json");
         let beta_file = beta_backups.join("opencode-beta.json");
+        // Baseline A from Stable, baseline B from Beta; equal mtimes so channel breaks the tie.
         fs::write(
             &stable_file,
             r#"{"model":"anthropic/claude-sonnet-4-stable"}"#,
         )
         .unwrap();
         fs::write(&beta_file, r#"{"model":"anthropic/claude-sonnet-4-beta"}"#).unwrap();
-        // Equal mtimes: Stable channel ranks higher, so the first complete baseline
-        // (Stable content A) must survive even if Beta contender B enters the lock later.
         let shared_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         for path in [&stable_file, &beta_file] {
             std::fs::OpenOptions::new()
@@ -12272,18 +12501,39 @@ mod tests {
         }
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let mut handles = Vec::new();
-        let backup_roots = vec![stable_backups.clone(), beta_backups.clone()];
-        for _ in 0..2 {
+
+        // Thread A: Stable-only contender publishes complete baseline A first.
+        {
             let config_path = config_path.clone();
-            let backup_roots = backup_roots.clone();
-            let barrier = barrier.clone();
+            let stable_roots = vec![stable_root(stable_backups.clone())];
+            let pair = pair.clone();
             handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                super::restore_opencode_config_with_backup_roots(&config_path, &backup_roots)
+                let result = super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots);
+                let (lock, cvar) = &*pair;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+                result
             }));
         }
+
+        // Thread B: Beta-only contender proposes distinct baseline B after A has published.
+        {
+            let config_path = config_path.clone();
+            let beta_roots = vec![beta_root(beta_backups.clone())];
+            let pair = pair.clone();
+            handles.push(std::thread::spawn(move || {
+                let (lock, cvar) = &*pair;
+                let mut published = lock.lock().unwrap();
+                while !*published {
+                    published = cvar.wait(published).unwrap();
+                }
+                drop(published);
+                super::restore_opencode_config_with_backup_roots(&config_path, &beta_roots)
+            }));
+        }
+
         let mut restored = 0;
         for handle in handles {
             if handle.join().unwrap().is_ok() {
@@ -12328,6 +12578,7 @@ mod tests {
             r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
+        // Baseline A from Stable, baseline B from Beta; equal mtimes so channel breaks the tie.
         fs::write(
             stable_backup.join("settings.json"),
             r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4-stable"}"#,
@@ -12361,19 +12612,41 @@ mod tests {
         }
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let mut handles = Vec::new();
-        let backup_roots = vec![stable_backups.clone(), beta_backups.clone()];
-        for _ in 0..2 {
+
+        // Thread A: Stable-only contender publishes complete baseline A first.
+        {
             let settings_path = settings_path.clone();
             let models_path = models_path.clone();
-            let backup_roots = backup_roots.clone();
-            let barrier = barrier.clone();
+            let stable_roots = vec![stable_root(stable_backups.clone())];
+            let pair = pair.clone();
             handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                super::restore_pi_config_with_paths(&settings_path, &models_path, &backup_roots)
+                let result = super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots);
+                let (lock, cvar) = &*pair;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+                result
             }));
         }
+
+        // Thread B: Beta-only contender proposes distinct baseline B after A has published.
+        {
+            let settings_path = settings_path.clone();
+            let models_path = models_path.clone();
+            let beta_roots = vec![beta_root(beta_backups.clone())];
+            let pair = pair.clone();
+            handles.push(std::thread::spawn(move || {
+                let (lock, cvar) = &*pair;
+                let mut published = lock.lock().unwrap();
+                while !*published {
+                    published = cvar.wait(published).unwrap();
+                }
+                drop(published);
+                super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+            }));
+        }
+
         let mut restored = 0;
         for handle in handles {
             if handle.join().unwrap().is_ok() {
@@ -12459,7 +12732,7 @@ mod tests {
                 barrier.wait();
                 super::apply_opencode_config_with_paths(
                     &config_path,
-                    std::slice::from_ref(&backup_root),
+                    &[stable_root(backup_root.clone())],
                     &settings,
                     &[],
                     model,
@@ -12515,7 +12788,7 @@ mod tests {
                 super::apply_pi_config_with_paths(
                     &settings_path,
                     &models_path,
-                    std::slice::from_ref(&backup_root),
+                    &[stable_root(backup_root.clone())],
                     &settings,
                     &[],
                     model,
@@ -12562,7 +12835,7 @@ mod tests {
 
         let result = super::apply_opencode_config_with_paths(
             &config_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -12605,7 +12878,7 @@ mod tests {
         let result = super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            std::slice::from_ref(&backup_root),
+            &[stable_root(backup_root.clone())],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -12653,7 +12926,7 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[backup_root]).unwrap();
+            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
