@@ -199,6 +199,7 @@ $script:MinimumVersions = [ordered]@{
 }
 $script:ObservedVersions = [ordered]@{}
 $script:MaximumCapturedCharacters = 65536
+$script:MaximumClientEventCharacters = 1048576
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:ProcessJobHandle = [IntPtr]::Zero
 $script:ProcessJobAvailable = $null -ne ('CodexHubE2EJob' -as [type])
@@ -761,7 +762,8 @@ function Invoke-IsolatedProcess {
         [string]$CaseRoot,
         [hashtable]$Environment,
         [string]$StandardInput,
-        [int]$ProcessTimeoutSeconds
+        [int]$ProcessTimeoutSeconds,
+        [int]$MaximumCapturedCharacters = $script:MaximumCapturedCharacters
     )
     foreach ($relative in @('.codex', '.config', 'appdata\roaming', 'appdata\local', 'temp')) {
         [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
@@ -809,11 +811,13 @@ function Invoke-IsolatedProcess {
     $stderr = if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stderrTask.GetAwaiter().GetResult() } else { '' }
     $startedAt.Stop()
     $exitCode = if ($completed) { $process.ExitCode } else { -1 }
-    if ($stdout.Length -gt $script:MaximumCapturedCharacters) {
-        $stdout = $stdout.Substring(0, $script:MaximumCapturedCharacters)
+    $stdoutTruncated = $stdout.Length -gt $MaximumCapturedCharacters
+    $stderrTruncated = $stderr.Length -gt $MaximumCapturedCharacters
+    if ($stdoutTruncated) {
+        $stdout = $stdout.Substring(0, $MaximumCapturedCharacters)
     }
-    if ($stderr.Length -gt $script:MaximumCapturedCharacters) {
-        $stderr = $stderr.Substring(0, $script:MaximumCapturedCharacters)
+    if ($stderrTruncated) {
+        $stderr = $stderr.Substring(0, $MaximumCapturedCharacters)
     }
     return [pscustomobject]@{
         timed_out = -not $completed
@@ -821,6 +825,8 @@ function Invoke-IsolatedProcess {
         duration_ms = [Math]::Min([int]$startedAt.ElapsedMilliseconds, $ProcessTimeoutSeconds * 1000)
         stdout = $stdout
         stderr = $stderr
+        stdout_truncated = $stdoutTruncated
+        stderr_truncated = $stderrTruncated
     }
 }
 
@@ -1491,7 +1497,7 @@ function Invoke-ClientAttempt {
         CODEXHUB_E2E_DIAGNOSTICS_PATH = $script:DiagnosticsPath
     }
     $diagnosticStartLine = Get-DiagnosticLineCount
-    $processResult = Invoke-IsolatedProcess -Executable $Executable -Arguments $arguments -CaseRoot $CaseRoot -Environment $environment -StandardInput $prompt -ProcessTimeoutSeconds $TimeoutSeconds
+    $processResult = Invoke-IsolatedProcess -Executable $Executable -Arguments $arguments -CaseRoot $CaseRoot -Environment $environment -StandardInput $prompt -ProcessTimeoutSeconds $TimeoutSeconds -MaximumCapturedCharacters $script:MaximumClientEventCharacters
     Remove-Item -LiteralPath $sentinelPath -Force -ErrorAction SilentlyContinue
     $parsed = ConvertFrom-ClientEvents -Client $Case.client -Text $processResult.stdout
     $expectedRequestCount = @($parsed.events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'tool_call' }).Count + 1
@@ -1499,7 +1505,7 @@ function Invoke-ClientAttempt {
     return [pscustomobject]@{
         process = $processResult
         events = @($parsed.events) + $gatewayEvents
-        malformed_count = $parsed.malformed_count
+        malformed_count = $parsed.malformed_count + [int][bool]$processResult.stdout_truncated
     }
 }
 

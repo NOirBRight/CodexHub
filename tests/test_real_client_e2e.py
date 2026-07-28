@@ -1164,6 +1164,43 @@ def test_pi_batch_launch_preserves_the_prompt_as_one_positional_message(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_pi_large_structured_event_stream_preserves_terminal_evidence(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-large-jsonl.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    pi_cases = [
+        case for case in summary["cases"] if case["case_id"].startswith("pi-")
+    ]
+    assert [case["outcome"] for case in pi_cases] == ["passed", "passed"]
+    assert [case["terminal_classification"] for case in pi_cases] == [
+        "completed",
+        "completed",
+    ]
+
+
+def test_oversize_structured_event_stream_fails_closed(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-oversize-jsonl.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    pi_cases = [
+        case for case in summary["cases"] if case["case_id"].startswith("pi-")
+    ]
+    assert [case["outcome"] for case in pi_cases] == ["failed", "passed"]
+    assert pi_cases[0]["retry_classification"] == "not_eligible"
+
+
 def test_codex_cli_accepts_the_official_canonical_diagnostic_alias(tmp_path):
     result = _run(
         tmp_path,

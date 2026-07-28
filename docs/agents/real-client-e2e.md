@@ -342,7 +342,11 @@ model, missing/duplicate Gateway request completion, duplicate client terminal,
 error, or malformed output fails the case. Actual contradictory models and
 private request IDs are not copied into uploadable artifacts.
 
-Raw client output and diagnostics remain in bounded memory. Per-case files
+Raw client output and diagnostics are not persisted. Before parsing and
+hashing, ordinary process probes retain at most 64 KiB per stream. Automated
+client JSONL retains at most 1 MiB per stream so long native reasoning updates
+cannot hide the later assistant terminal evidence; reaching that client limit
+fails the case closed instead of accepting a truncated prefix. Per-case files
 contain only capture hashes and approved fields.
 
 ## Wall-clock supervision
