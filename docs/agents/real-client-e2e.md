@@ -372,7 +372,9 @@ Completed GUI evidence must not exist when the runner starts. After all
 preflight checks, the runner emits `manual-evidence.template.json`, starts the
 isolated candidate, launches Codex Desktop and ZCode, and waits up to
 `-ManualEvidenceTimeoutSeconds` for a new `manual-evidence.json`. A native GUI
-that exits before finalization fails immediately. The runner also probes the
+launch explicitly enables visible windows even though automated clients and
+probes remain headless. A native GUI that exits before finalization fails
+immediately. The runner also probes the
 candidate Gateway throughout the wait and fails as
 `candidate_gateway_unavailable_during_manual_evidence` after two consecutive
 misses instead of leaving native clients to retry a dead local listener.

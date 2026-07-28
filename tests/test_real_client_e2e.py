@@ -1908,6 +1908,21 @@ def test_desktop_executable_must_match_appx_manifest_entry(tmp_path):
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
+def test_native_gui_launch_explicitly_enables_visible_windows():
+    source = SCRIPT.read_text(encoding="utf-8")
+    shared_start_info = source[
+        source.index("function New-IsolatedStartInfo"):
+        source.index("function Invoke-IsolatedProcess")
+    ]
+    gui_launch = source[
+        source.index("function Start-IsolatedProcess"):
+        source.index("function Wait-DesktopInitialInstanceSettled")
+    ]
+
+    assert "$startInfo.CreateNoWindow = $true" in shared_start_info
+    assert "$startInfo.CreateNoWindow = $false" in gui_launch
+
+
 def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     result = _run(
         tmp_path,

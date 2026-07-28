@@ -839,6 +839,7 @@ function Start-IsolatedProcess {
     $startInfo.RedirectStandardInput = $false
     $startInfo.RedirectStandardOutput = $false
     $startInfo.RedirectStandardError = $false
+    $startInfo.CreateNoWindow = $false
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     [void]$process.Start()
