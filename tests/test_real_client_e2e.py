@@ -1155,6 +1155,32 @@ def test_automated_clients_bind_fresh_workspace_and_minimal_read_only_context(tm
     assert [case["outcome"] for case in automated] == ["passed"] * 8
 
 
+def test_pi_batch_launch_preserves_the_prompt_as_one_positional_message(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-single-prompt.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_codex_cli_accepts_the_official_canonical_diagnostic_alias(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexCliPath": "fake-client-codex-official-alias.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    codex_luna = next(
+        case for case in summary["cases"] if case["case_id"] == "codex-cli-luna"
+    )
+    assert codex_luna["outcome"] == "passed"
+    assert codex_luna["gateway_model"] == "gpt-5.6-luna"
+
+
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
     result = _run(tmp_path, fake="fake-client-isolation.cmd")
 

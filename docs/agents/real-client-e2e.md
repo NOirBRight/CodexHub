@@ -293,8 +293,10 @@ contracts; accepting a newer version never relaxes these shapes:
   `-C`;
 - OpenCode binds the case root with `--dir`, uses a fixed title, and runs
   `--pure`;
-- Pi enables only the built-in `read` tool and disables context files,
-  extensions, skills, and prompt templates;
+- Pi receives the complete prompt as one quoted positional message, enables
+  only the built-in `read` tool, and disables context files, extensions,
+  skills, and prompt templates. Windows batch launch must preserve that single
+  argument instead of splitting it into queued follow-up messages;
 - OMP binds the case root with `--cwd`, enables only `read`, disables title
   generation, extensions, skills, and rules, and does not persist a session.
 
@@ -320,6 +322,11 @@ not relabeled as stream deltas. Streaming is proven separately from correlated
 production Gateway `request_complete.is_stream = true` evidence for both the
 tool request and final continuation; the sanitized case records
 `streaming_request_count = 2`.
+
+Official Codex diagnostics may canonicalize `gpt-5.6-luna` as
+`openai/gpt-5.6-luna`. The runner treats those two spellings as the same
+qualified route in both contradiction detection and the final pass decision;
+no other model alias is accepted.
 
 Client output does not prove routing. For each attempt, the runner reads only
 new lines from the isolated Debug Gateway's

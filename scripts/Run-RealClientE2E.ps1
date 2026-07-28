@@ -704,11 +704,10 @@ function New-IsolatedStartInfo {
     if ($extension -iin @('.cmd', '.bat')) {
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
         $commandLine = @(
-            'call'
             (ConvertTo-ProcessArgument $Executable)
             ($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
         ) -join ' '
-        $startInfo.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $commandLine)"
+        $startInfo.Arguments = '/d /s /c "' + $commandLine + '"'
     }
     elseif ($extension -ieq '.ps1') {
         $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -1567,7 +1566,7 @@ function Measure-AutomatedAttempt {
         $Attempt.process.exit_code -eq 0 -and
         $Attempt.malformed_count -eq 0 -and
         $modelEvents.Count -eq 1 -and
-        (Get-JsonProperty $modelEvents[0] 'model') -ceq $Case.gateway_model -and
+        (Test-CanonicalModelMatch -Actual ([string](Get-JsonProperty $modelEvents[0] 'model')) -Expected $Case.gateway_model) -and
         $allToolEvents.Count -eq 1 -and $toolEvents.Count -eq 1 -and
         $gatewayRequestEvents.Count -eq ($allToolEvents.Count + 1) -and
         $gatewayCompleteEvents.Count -eq ($allToolEvents.Count + 1) -and
