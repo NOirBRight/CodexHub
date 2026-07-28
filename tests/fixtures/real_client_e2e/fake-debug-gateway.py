@@ -3,11 +3,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import threading
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
 parser.add_argument("--bad-health", action="store_true")
+parser.add_argument("--exit-after-seconds", type=float)
 args = parser.parse_args()
 settings = json.loads(
     (Path(os.environ["CODEXHUB_RUNTIME_HOME"]) / "proxy" / "settings.json").read_text()
@@ -37,4 +39,9 @@ class Server(ThreadingHTTPServer):
 
 if args.port != int(settings["proxy_port"]):
     raise SystemExit(2)
-Server(("127.0.0.1", args.port), Handler).serve_forever()
+server = Server(("127.0.0.1", args.port), Handler)
+if args.exit_after_seconds is not None:
+    timer = threading.Timer(args.exit_after_seconds, server.shutdown)
+    timer.daemon = True
+    timer.start()
+server.serve_forever()

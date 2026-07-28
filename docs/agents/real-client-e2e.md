@@ -293,8 +293,10 @@ contracts; accepting a newer version never relaxes these shapes:
   `-C`;
 - OpenCode binds the case root with `--dir`, uses a fixed title, and runs
   `--pure`;
-- Pi enables only the built-in `read` tool and disables context files,
-  extensions, skills, and prompt templates;
+- Pi receives the complete prompt as one quoted positional message, enables
+  only the built-in `read` tool, and disables context files, extensions,
+  skills, and prompt templates. Windows batch launch must preserve that single
+  argument instead of splitting it into queued follow-up messages;
 - OMP binds the case root with `--cwd`, enables only `read`, disables title
   generation, extensions, skills, and rules, and does not persist a session.
 
@@ -321,6 +323,11 @@ production Gateway `request_complete.is_stream = true` evidence for both the
 tool request and final continuation; the sanitized case records
 `streaming_request_count = 2`.
 
+Official Codex diagnostics may canonicalize `gpt-5.6-luna` as
+`openai/gpt-5.6-luna`. The runner treats those two spellings as the same
+qualified route in both contradiction detection and the final pass decision;
+no other model alias is accepted.
+
 Client output does not prove routing. For each attempt, the runner reads only
 new lines from the isolated Debug Gateway's
 `proxy/codex-proxy-events.jsonl`, correlates all new client events and their
@@ -335,7 +342,11 @@ model, missing/duplicate Gateway request completion, duplicate client terminal,
 error, or malformed output fails the case. Actual contradictory models and
 private request IDs are not copied into uploadable artifacts.
 
-Raw client output and diagnostics remain in bounded memory. Per-case files
+Raw client output and diagnostics are not persisted. Before parsing and
+hashing, ordinary process probes retain at most 64 KiB per stream. Automated
+client JSONL retains at most 1 MiB per stream so long native reasoning updates
+cannot hide the later assistant terminal evidence; reaching that client limit
+fails the case closed instead of accepting a truncated prefix. Per-case files
 contain only capture hashes and approved fields.
 
 ## Wall-clock supervision
@@ -372,7 +383,12 @@ Completed GUI evidence must not exist when the runner starts. After all
 preflight checks, the runner emits `manual-evidence.template.json`, starts the
 isolated candidate, launches Codex Desktop and ZCode, and waits up to
 `-ManualEvidenceTimeoutSeconds` for a new `manual-evidence.json`. A native GUI
-that exits before finalization fails immediately.
+launch explicitly enables visible windows even though automated clients and
+probes remain headless. A native GUI that exits before finalization fails
+immediately. The runner also probes the
+candidate Gateway throughout the wait and fails as
+`candidate_gateway_unavailable_during_manual_evidence` after two consecutive
+misses instead of leaving native clients to retry a dead local listener.
 
 The `-ManualEvidenceTimeoutSeconds` manual window is finite (default `900`,
 maximum `3600`) and remains distinct from automated per-process timeouts. It is
@@ -475,6 +491,10 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
    `recentProjects` and `lastWorkspaceSession` to the fresh case root. This
    prevents a copied task from silently resolving relative tools against an
    older run while retaining the operator's completed setup.
+   Keep the candidate CodexHub window open (minimizing it is safe) until the
+   runner exits. Closing that window intentionally stops the current-session
+   Gateway before hiding CodexHub to the tray, so the manual matrix can no
+   longer produce valid evidence.
    Complete and finalize the four GUI cases as described above while the
    runner is waiting.
 7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the

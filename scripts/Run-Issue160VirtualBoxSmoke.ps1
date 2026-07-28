@@ -12,9 +12,9 @@ if ($KeepAppRunning) { throw "Issue #160 smoke cannot leave the app running." }
 $debugFlag = Join-Path $root "artifacts\issue160-debug.flag"
 $flavor = if (Test-Path -LiteralPath $debugFlag) { "debug" } else { "normal" }
 $installerName = if ($flavor -eq "debug") {
-    "CodexHub_0.1.6_debug_x64-setup.exe"
+    "CodexHub_0.1.7_debug_x64-setup.exe"
 } else {
-    "CodexHub_0.1.6_x64-setup.exe"
+    "CodexHub_0.1.7_x64-setup.exe"
 }
 $installer = Join-Path $root "artifacts\$installerName"
 $deadline = [DateTime]::UtcNow.AddSeconds($LaunchTimeoutSeconds)

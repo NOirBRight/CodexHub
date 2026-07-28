@@ -4,6 +4,9 @@ if defined CODEXHUB_E2E_VERSION_PROBE (
   exit /b 0
 )
 if defined CODEXHUB_E2E_GUI_CLIENT (
+  set "OPEN_PROJECT="
+  for %%A in (%*) do if /I "%%~A"=="--open-project" set "OPEN_PROJECT=1"
+  if /I "%CODEXHUB_E2E_GUI_CLIENT%"=="desktop" if defined OPEN_PROJECT exit /b 0
   echo launched>"%CODEXHUB_E2E_GUI_LAUNCH_MARKER%"
   ping.exe 127.0.0.1 -t >nul
 )

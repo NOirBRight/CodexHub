@@ -199,6 +199,7 @@ $script:MinimumVersions = [ordered]@{
 }
 $script:ObservedVersions = [ordered]@{}
 $script:MaximumCapturedCharacters = 65536
+$script:MaximumClientEventCharacters = 1048576
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:ProcessJobHandle = [IntPtr]::Zero
 $script:ProcessJobAvailable = $null -ne ('CodexHubE2EJob' -as [type])
@@ -704,11 +705,10 @@ function New-IsolatedStartInfo {
     if ($extension -iin @('.cmd', '.bat')) {
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
         $commandLine = @(
-            'call'
             (ConvertTo-ProcessArgument $Executable)
             ($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
         ) -join ' '
-        $startInfo.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $commandLine)"
+        $startInfo.Arguments = '/d /s /c "' + $commandLine + '"'
     }
     elseif ($extension -ieq '.ps1') {
         $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -762,7 +762,8 @@ function Invoke-IsolatedProcess {
         [string]$CaseRoot,
         [hashtable]$Environment,
         [string]$StandardInput,
-        [int]$ProcessTimeoutSeconds
+        [int]$ProcessTimeoutSeconds,
+        [int]$MaximumCapturedCharacters = $script:MaximumCapturedCharacters
     )
     foreach ($relative in @('.codex', '.config', 'appdata\roaming', 'appdata\local', 'temp')) {
         [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
@@ -810,11 +811,13 @@ function Invoke-IsolatedProcess {
     $stderr = if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $stderrTask.GetAwaiter().GetResult() } else { '' }
     $startedAt.Stop()
     $exitCode = if ($completed) { $process.ExitCode } else { -1 }
-    if ($stdout.Length -gt $script:MaximumCapturedCharacters) {
-        $stdout = $stdout.Substring(0, $script:MaximumCapturedCharacters)
+    $stdoutTruncated = $stdout.Length -gt $MaximumCapturedCharacters
+    $stderrTruncated = $stderr.Length -gt $MaximumCapturedCharacters
+    if ($stdoutTruncated) {
+        $stdout = $stdout.Substring(0, $MaximumCapturedCharacters)
     }
-    if ($stderr.Length -gt $script:MaximumCapturedCharacters) {
-        $stderr = $stderr.Substring(0, $script:MaximumCapturedCharacters)
+    if ($stderrTruncated) {
+        $stderr = $stderr.Substring(0, $MaximumCapturedCharacters)
     }
     return [pscustomobject]@{
         timed_out = -not $completed
@@ -822,6 +825,8 @@ function Invoke-IsolatedProcess {
         duration_ms = [Math]::Min([int]$startedAt.ElapsedMilliseconds, $ProcessTimeoutSeconds * 1000)
         stdout = $stdout
         stderr = $stderr
+        stdout_truncated = $stdoutTruncated
+        stderr_truncated = $stderrTruncated
     }
 }
 
@@ -839,6 +844,7 @@ function Start-IsolatedProcess {
     $startInfo.RedirectStandardInput = $false
     $startInfo.RedirectStandardOutput = $false
     $startInfo.RedirectStandardError = $false
+    $startInfo.CreateNoWindow = $false
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     [void]$process.Start()
@@ -850,6 +856,54 @@ function Start-IsolatedProcess {
         [void]$script:UnassignedProcessIds.Add($process.Id)
     }
     return $process
+}
+
+function Wait-DesktopInitialInstanceSettled {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$LaunchMarker,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $minimumSettleMilliseconds = 2500
+    while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+        if ($Process.HasExited) {
+            $stopwatch.Stop()
+            throw 'manual_gui_exited_before_project_open'
+        }
+        if ((Test-Path -LiteralPath $LaunchMarker -PathType Leaf) -or
+            $stopwatch.ElapsedMilliseconds -ge $minimumSettleMilliseconds) {
+            $stopwatch.Stop()
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $stopwatch.Stop()
+    throw 'manual_desktop_initial_instance_timeout'
+}
+
+function Invoke-DesktopProjectOpen {
+    param(
+        [string]$Executable,
+        [string]$CaseRoot,
+        [string]$UserDataRoot,
+        [hashtable]$Environment
+    )
+    $result = Invoke-IsolatedProcess `
+        -Executable $Executable `
+        -Arguments @(
+            "--user-data-dir=$UserDataRoot",
+            '--no-first-run',
+            '--open-project',
+            $CaseRoot
+        ) `
+        -CaseRoot $CaseRoot `
+        -Environment $Environment `
+        -StandardInput '' `
+        -ProcessTimeoutSeconds 10
+    if ($result.timed_out -or $result.exit_code -ne 0) {
+        throw 'manual_desktop_project_open_failed'
+    }
 }
 
 function Test-DebugPortableBuildResources {
@@ -1443,7 +1497,7 @@ function Invoke-ClientAttempt {
         CODEXHUB_E2E_DIAGNOSTICS_PATH = $script:DiagnosticsPath
     }
     $diagnosticStartLine = Get-DiagnosticLineCount
-    $processResult = Invoke-IsolatedProcess -Executable $Executable -Arguments $arguments -CaseRoot $CaseRoot -Environment $environment -StandardInput $prompt -ProcessTimeoutSeconds $TimeoutSeconds
+    $processResult = Invoke-IsolatedProcess -Executable $Executable -Arguments $arguments -CaseRoot $CaseRoot -Environment $environment -StandardInput $prompt -ProcessTimeoutSeconds $TimeoutSeconds -MaximumCapturedCharacters $script:MaximumClientEventCharacters
     Remove-Item -LiteralPath $sentinelPath -Force -ErrorAction SilentlyContinue
     $parsed = ConvertFrom-ClientEvents -Client $Case.client -Text $processResult.stdout
     $expectedRequestCount = @($parsed.events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'tool_call' }).Count + 1
@@ -1451,7 +1505,7 @@ function Invoke-ClientAttempt {
     return [pscustomobject]@{
         process = $processResult
         events = @($parsed.events) + $gatewayEvents
-        malformed_count = $parsed.malformed_count
+        malformed_count = $parsed.malformed_count + [int][bool]$processResult.stdout_truncated
     }
 }
 
@@ -1518,7 +1572,7 @@ function Measure-AutomatedAttempt {
         $Attempt.process.exit_code -eq 0 -and
         $Attempt.malformed_count -eq 0 -and
         $modelEvents.Count -eq 1 -and
-        (Get-JsonProperty $modelEvents[0] 'model') -ceq $Case.gateway_model -and
+        (Test-CanonicalModelMatch -Actual ([string](Get-JsonProperty $modelEvents[0] 'model')) -Expected $Case.gateway_model) -and
         $allToolEvents.Count -eq 1 -and $toolEvents.Count -eq 1 -and
         $gatewayRequestEvents.Count -eq ($allToolEvents.Count + 1) -and
         $gatewayCompleteEvents.Count -eq ($allToolEvents.Count + 1) -and
@@ -3082,33 +3136,63 @@ try {
         $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
         [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
         [void]$manualSentinelPaths.Add($guiSentinelPath)
+        $guiLaunchMarker = Join-Path $workRoot "gui-$($guiCase.case_id).launched"
         $guiArguments = if ($guiClient -ceq 'desktop') {
             $desktopUserDataRoot = Join-Path $guiCaseRoot 'browser-profile'
             [void](New-Item -ItemType Directory -Force -Path $desktopUserDataRoot)
-            @("--user-data-dir=$desktopUserDataRoot", '--no-first-run', $guiCaseRoot)
+            @(
+                "--user-data-dir=$desktopUserDataRoot",
+                '--no-first-run'
+            )
         }
         else {
             @($guiCaseRoot)
         }
         $guiExecutable = if ($guiClient -ceq 'desktop') { $desktopLaunchExecutable } else { $executables[$guiClient] }
-        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment @{
+        $guiEnvironment = @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
             CODEXHUB_E2E_MODELS = $guiCase.canonical_model
             CODEXHUB_E2E_MANUAL_TEMPLATE = $manualTemplatePath
             CODEXHUB_E2E_MANUAL_EVIDENCE = $manualEvidencePath
-            CODEXHUB_E2E_GUI_LAUNCH_MARKER = (Join-Path $workRoot "gui-$($guiCase.case_id).launched")
+            CODEXHUB_E2E_GUI_LAUNCH_MARKER = $guiLaunchMarker
         }
+        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment
         [void]$trackedProcesses.Add($guiProcess)
         [void]$nativeGuiProcesses.Add($guiProcess)
+        if ($guiClient -ceq 'desktop') {
+            Wait-DesktopInitialInstanceSettled -Process $guiProcess -LaunchMarker $guiLaunchMarker
+            Invoke-DesktopProjectOpen `
+                -Executable $guiExecutable `
+                -CaseRoot $guiCaseRoot `
+                -UserDataRoot $desktopUserDataRoot `
+                -Environment $guiEnvironment
+        }
     }
 
     $manualDeadline = [DateTime]::UtcNow.AddSeconds($ManualEvidenceTimeoutSeconds)
+    $gatewayHealthFailureCount = 0
+    $nextGatewayHealthCheck = [DateTime]::UtcNow
     while (-not (Test-Path -LiteralPath $manualEvidencePath -PathType Leaf)) {
         foreach ($guiProcess in $nativeGuiProcesses) {
             if ($guiProcess.HasExited) {
                 throw 'manual_gui_exited_before_finalization'
             }
+        }
+        if ($candidateProcess.HasExited) {
+            throw 'candidate_debug_build_exited_during_manual_evidence'
+        }
+        if ([DateTime]::UtcNow -ge $nextGatewayHealthCheck) {
+            if (Test-GatewayHealth -Port ([int]$script:GatewayConfig.listen_port)) {
+                $gatewayHealthFailureCount = 0
+            }
+            else {
+                $gatewayHealthFailureCount += 1
+                if ($gatewayHealthFailureCount -ge 2) {
+                    throw 'candidate_gateway_unavailable_during_manual_evidence'
+                }
+            }
+            $nextGatewayHealthCheck = [DateTime]::UtcNow.AddMilliseconds(1000)
         }
         if ([DateTime]::UtcNow -ge $manualDeadline) {
             throw 'manual_evidence_timeout'

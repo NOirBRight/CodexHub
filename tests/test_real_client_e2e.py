@@ -1155,6 +1155,69 @@ def test_automated_clients_bind_fresh_workspace_and_minimal_read_only_context(tm
     assert [case["outcome"] for case in automated] == ["passed"] * 8
 
 
+def test_pi_batch_launch_preserves_the_prompt_as_one_positional_message(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-single-prompt.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_pi_large_structured_event_stream_preserves_terminal_evidence(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-large-jsonl.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    pi_cases = [
+        case for case in summary["cases"] if case["case_id"].startswith("pi-")
+    ]
+    assert [case["outcome"] for case in pi_cases] == ["passed", "passed"]
+    assert [case["terminal_classification"] for case in pi_cases] == [
+        "completed",
+        "completed",
+    ]
+
+
+def test_oversize_structured_event_stream_fails_closed(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"PiPath": "fake-client-pi-oversize-jsonl.cmd"},
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    pi_cases = [
+        case for case in summary["cases"] if case["case_id"].startswith("pi-")
+    ]
+    assert [case["outcome"] for case in pi_cases] == ["failed", "passed"]
+    assert pi_cases[0]["retry_classification"] == "not_eligible"
+
+
+def test_codex_cli_accepts_the_official_canonical_diagnostic_alias(tmp_path):
+    result = _run(
+        tmp_path,
+        client_fakes={"CodexCliPath": "fake-client-codex-official-alias.cmd"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    codex_luna = next(
+        case for case in summary["cases"] if case["case_id"] == "codex-cli-luna"
+    )
+    assert codex_luna["outcome"] == "passed"
+    assert codex_luna["gateway_model"] == "gpt-5.6-luna"
+
+
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
     result = _run(tmp_path, fake="fake-client-isolation.cmd")
 
@@ -1908,7 +1971,22 @@ def test_desktop_executable_must_match_appx_manifest_entry(tmp_path):
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
-def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_path):
+def test_native_gui_launch_explicitly_enables_visible_windows():
+    source = SCRIPT.read_text(encoding="utf-8")
+    shared_start_info = source[
+        source.index("function New-IsolatedStartInfo"):
+        source.index("function Invoke-IsolatedProcess")
+    ]
+    gui_launch = source[
+        source.index("function Start-IsolatedProcess"):
+        source.index("function Wait-DesktopInitialInstanceSettled")
+    ]
+
+    assert "$startInfo.CreateNoWindow = $true" in shared_start_info
+    assert "$startInfo.CreateNoWindow = $false" in gui_launch
+
+
+def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     result = _run(
         tmp_path,
         client_fakes={"CodexDesktopPath": "fake-client-desktop-argv.cmd"},
@@ -1918,18 +1996,45 @@ def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_pat
     work = tmp_path / "output" / "isolated" / "work"
     observed = {}
     for case_id in ("desktop-luna", "desktop-ollama-cloud"):
-        argument_log = work / f"gui-{case_id}.launched.argv"
-        arguments = argument_log.read_text(encoding="ascii").strip()
+        initial_log = work / f"gui-{case_id}.launched.argv"
+        initial_arguments = initial_log.read_text(encoding="ascii").strip()
+        project_log = work / f"gui-{case_id}.launched.project.argv"
+        project_arguments = project_log.read_text(encoding="ascii").strip()
         expected_profile = work / "gui-desktop" / case_id / "browser-profile"
-        assert arguments.count("--user-data-dir=") == 1
-        assert str(expected_profile).casefold() in arguments.casefold()
-        assert "--no-first-run" in arguments
+        assert initial_arguments.count("--user-data-dir=") == 1
+        assert str(expected_profile).casefold() in initial_arguments.casefold()
+        assert "--no-first-run" in initial_arguments
+        assert "--open-project" not in initial_arguments
+        assert project_arguments.count("--user-data-dir=") == 1
+        assert str(expected_profile).casefold() in project_arguments.casefold()
+        assert "--no-first-run" in project_arguments
+        assert project_arguments.count("--open-project") == 1
         expected_workspace = work / "gui-desktop" / case_id
-        assert arguments.rstrip('"').casefold().endswith(
+        assert project_arguments.rstrip('"').casefold().endswith(
             str(expected_workspace).casefold()
         )
-        observed[case_id] = arguments
+        observed[case_id] = (initial_arguments, project_arguments)
     assert observed["desktop-luna"] != observed["desktop-ollama-cloud"]
+
+
+def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-gateway-exits.cmd",
+        finalize_manual=False,
+        manual_timeout_seconds=30,
+        overall_timeout_seconds=60,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output" / "summary.json").read_text())
+    assert (
+        summary["failure_classification"]
+        == "candidate_gateway_unavailable_during_manual_evidence"
+    )
+    assert elapsed < 25
 
 
 def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
@@ -2697,7 +2802,7 @@ def test_missing_manual_evidence_and_early_gui_exit_are_classified(tmp_path):
         (tmp_path / "exited" / "output" / "summary.json").read_text(encoding="utf-8-sig")
     )
     assert missing_summary["failure_classification"] == "manual_evidence_timeout"
-    assert exited_summary["failure_classification"] == "manual_gui_exited_before_finalization"
+    assert exited_summary["failure_classification"] == "manual_gui_exited_before_project_open"
 
 
 def test_candidate_startup_failure_emits_one_summary_without_partial_artifacts(tmp_path):
