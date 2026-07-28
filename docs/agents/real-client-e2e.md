@@ -372,7 +372,10 @@ Completed GUI evidence must not exist when the runner starts. After all
 preflight checks, the runner emits `manual-evidence.template.json`, starts the
 isolated candidate, launches Codex Desktop and ZCode, and waits up to
 `-ManualEvidenceTimeoutSeconds` for a new `manual-evidence.json`. A native GUI
-that exits before finalization fails immediately.
+that exits before finalization fails immediately. The runner also probes the
+candidate Gateway throughout the wait and fails as
+`candidate_gateway_unavailable_during_manual_evidence` after two consecutive
+misses instead of leaving native clients to retry a dead local listener.
 
 The `-ManualEvidenceTimeoutSeconds` manual window is finite (default `900`,
 maximum `3600`) and remains distinct from automated per-process timeouts. It is
@@ -475,6 +478,10 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
    `recentProjects` and `lastWorkspaceSession` to the fresh case root. This
    prevents a copied task from silently resolving relative tools against an
    older run while retaining the operator's completed setup.
+   Keep the candidate CodexHub window open (minimizing it is safe) until the
+   runner exits. Closing that window intentionally stops the current-session
+   Gateway before hiding CodexHub to the tray, so the manual matrix can no
+   longer produce valid evidence.
    Complete and finalize the four GUI cases as described above while the
    runner is waiting.
 7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the

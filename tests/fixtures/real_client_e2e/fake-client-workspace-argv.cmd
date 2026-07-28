@@ -35,5 +35,5 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
 )
 
 :delegate
-call "%~dp0fake-client-real-contract.cmd"
+call "%~dp0fake-client-real-contract.cmd" %*
 exit /b %errorlevel%

@@ -852,6 +852,54 @@ function Start-IsolatedProcess {
     return $process
 }
 
+function Wait-DesktopInitialInstanceSettled {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$LaunchMarker,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $minimumSettleMilliseconds = 2500
+    while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+        if ($Process.HasExited) {
+            $stopwatch.Stop()
+            throw 'manual_gui_exited_before_project_open'
+        }
+        if ((Test-Path -LiteralPath $LaunchMarker -PathType Leaf) -or
+            $stopwatch.ElapsedMilliseconds -ge $minimumSettleMilliseconds) {
+            $stopwatch.Stop()
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $stopwatch.Stop()
+    throw 'manual_desktop_initial_instance_timeout'
+}
+
+function Invoke-DesktopProjectOpen {
+    param(
+        [string]$Executable,
+        [string]$CaseRoot,
+        [string]$UserDataRoot,
+        [hashtable]$Environment
+    )
+    $result = Invoke-IsolatedProcess `
+        -Executable $Executable `
+        -Arguments @(
+            "--user-data-dir=$UserDataRoot",
+            '--no-first-run',
+            '--open-project',
+            $CaseRoot
+        ) `
+        -CaseRoot $CaseRoot `
+        -Environment $Environment `
+        -StandardInput '' `
+        -ProcessTimeoutSeconds 10
+    if ($result.timed_out -or $result.exit_code -ne 0) {
+        throw 'manual_desktop_project_open_failed'
+    }
+}
+
 function Test-DebugPortableBuildResources {
     param([string]$Executable)
     $root = Split-Path -Parent $Executable
@@ -3082,38 +3130,63 @@ try {
         $guiSentinelPath = Join-Path $guiCaseRoot 'sentinel.txt'
         [System.IO.File]::WriteAllText($guiSentinelPath, "SENTINEL:codexhub-real-client-e2e:$($guiCase.case_id)", $script:Utf8NoBom)
         [void]$manualSentinelPaths.Add($guiSentinelPath)
+        $guiLaunchMarker = Join-Path $workRoot "gui-$($guiCase.case_id).launched"
         $guiArguments = if ($guiClient -ceq 'desktop') {
             $desktopUserDataRoot = Join-Path $guiCaseRoot 'browser-profile'
             [void](New-Item -ItemType Directory -Force -Path $desktopUserDataRoot)
             @(
                 "--user-data-dir=$desktopUserDataRoot",
-                '--no-first-run',
-                '--open-project',
-                $guiCaseRoot
+                '--no-first-run'
             )
         }
         else {
             @($guiCaseRoot)
         }
         $guiExecutable = if ($guiClient -ceq 'desktop') { $desktopLaunchExecutable } else { $executables[$guiClient] }
-        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment @{
+        $guiEnvironment = @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
             CODEXHUB_E2E_MODELS = $guiCase.canonical_model
             CODEXHUB_E2E_MANUAL_TEMPLATE = $manualTemplatePath
             CODEXHUB_E2E_MANUAL_EVIDENCE = $manualEvidencePath
-            CODEXHUB_E2E_GUI_LAUNCH_MARKER = (Join-Path $workRoot "gui-$($guiCase.case_id).launched")
+            CODEXHUB_E2E_GUI_LAUNCH_MARKER = $guiLaunchMarker
         }
+        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment
         [void]$trackedProcesses.Add($guiProcess)
         [void]$nativeGuiProcesses.Add($guiProcess)
+        if ($guiClient -ceq 'desktop') {
+            Wait-DesktopInitialInstanceSettled -Process $guiProcess -LaunchMarker $guiLaunchMarker
+            Invoke-DesktopProjectOpen `
+                -Executable $guiExecutable `
+                -CaseRoot $guiCaseRoot `
+                -UserDataRoot $desktopUserDataRoot `
+                -Environment $guiEnvironment
+        }
     }
 
     $manualDeadline = [DateTime]::UtcNow.AddSeconds($ManualEvidenceTimeoutSeconds)
+    $gatewayHealthFailureCount = 0
+    $nextGatewayHealthCheck = [DateTime]::UtcNow
     while (-not (Test-Path -LiteralPath $manualEvidencePath -PathType Leaf)) {
         foreach ($guiProcess in $nativeGuiProcesses) {
             if ($guiProcess.HasExited) {
                 throw 'manual_gui_exited_before_finalization'
             }
+        }
+        if ($candidateProcess.HasExited) {
+            throw 'candidate_debug_build_exited_during_manual_evidence'
+        }
+        if ([DateTime]::UtcNow -ge $nextGatewayHealthCheck) {
+            if (Test-GatewayHealth -Port ([int]$script:GatewayConfig.listen_port)) {
+                $gatewayHealthFailureCount = 0
+            }
+            else {
+                $gatewayHealthFailureCount += 1
+                if ($gatewayHealthFailureCount -ge 2) {
+                    throw 'candidate_gateway_unavailable_during_manual_evidence'
+                }
+            }
+            $nextGatewayHealthCheck = [DateTime]::UtcNow.AddMilliseconds(1000)
         }
         if ([DateTime]::UtcNow -ge $manualDeadline) {
             throw 'manual_evidence_timeout'
