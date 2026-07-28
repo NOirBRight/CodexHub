@@ -1924,6 +1924,7 @@ def test_desktop_gui_cases_use_distinct_case_local_user_data_directories(tmp_pat
         assert arguments.count("--user-data-dir=") == 1
         assert str(expected_profile).casefold() in arguments.casefold()
         assert "--no-first-run" in arguments
+        assert arguments.count("--open-project") == 1
         expected_workspace = work / "gui-desktop" / case_id
         assert arguments.rstrip('"').casefold().endswith(
             str(expected_workspace).casefold()

@@ -3085,7 +3085,12 @@ try {
         $guiArguments = if ($guiClient -ceq 'desktop') {
             $desktopUserDataRoot = Join-Path $guiCaseRoot 'browser-profile'
             [void](New-Item -ItemType Directory -Force -Path $desktopUserDataRoot)
-            @("--user-data-dir=$desktopUserDataRoot", '--no-first-run', $guiCaseRoot)
+            @(
+                "--user-data-dir=$desktopUserDataRoot",
+                '--no-first-run',
+                '--open-project',
+                $guiCaseRoot
+            )
         }
         else {
             @($guiCaseRoot)
