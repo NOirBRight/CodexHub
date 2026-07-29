@@ -23,6 +23,13 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_bundled_volc_declares_responses_as_its_only_upstream_format(self):
+        providers = load_providers(DEFAULT_PROVIDERS_PATH)
+        volc = next(provider for provider in providers if provider.id == "volc")
+
+        self.assertEqual(volc.upstream_format, "responses")
+        self.assertEqual(volc.available_upstream_formats, ("responses",))
+
     def test_bundled_ollama_glm_uses_the_only_deferred_core_model_override(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         ollama = next(provider for provider in providers if provider.id == "ollama-cloud")

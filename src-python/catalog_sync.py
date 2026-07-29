@@ -1231,6 +1231,7 @@ def build_official_proxy_model(
         apply_official_model_defaults(model, slug)
     normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
+    normalize_official_upgrade_for_codex(model)
     limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
     if limits is not None and limits.max_output_tokens is not None:
         model.setdefault("max_output_tokens", limits.max_output_tokens)
@@ -1269,6 +1270,28 @@ def build_official_proxy_model(
     )
     model["codex_proxy_metadata"] = proxy_metadata
     return model
+
+
+def normalize_official_upgrade_for_codex(model: dict[str, Any]) -> None:
+    upgrade = model.get("upgrade")
+    if not isinstance(upgrade, str) or not upgrade:
+        return
+
+    upgrade_info = model.get("upgradeInfo")
+    if not isinstance(upgrade_info, dict):
+        upgrade_info = model.get("upgrade_info")
+    migration_markdown = ""
+    if isinstance(upgrade_info, dict):
+        raw_markdown = upgrade_info.get("migrationMarkdown")
+        if not isinstance(raw_markdown, str):
+            raw_markdown = upgrade_info.get("migration_markdown")
+        if isinstance(raw_markdown, str):
+            migration_markdown = raw_markdown
+
+    model["upgrade"] = {
+        "model": upgrade,
+        "migration_markdown": migration_markdown,
+    }
 
 
 def official_model_index(official_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:

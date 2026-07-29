@@ -1,0 +1,5 @@
+{
+  "schema": "codexhub.real-client-host-environment.v1",
+  "environment": "codexhub-real-client-e2e",
+  "machine_binding_sha256": "__MACHINE_BINDING_SHA256__"
+}

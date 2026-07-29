@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from config_overlay import (
     MARKER_BEGIN,
+    _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
     inject_unified_history_config,
@@ -364,6 +365,220 @@ class ConfigOverlayTests(unittest.TestCase):
                     ("ordinary_generation", 45_514),
                 ],
             )
+
+    def test_selected_official_context_budget_prefers_active_model_over_unrelated_default(self):
+        """Active task-model budget wins; do not fall back to an unrelated Official default.
+
+        Regression for #157: the resolver must match the selected model exactly
+        and must not fall back to the first persisted Official budget when the
+        active model is a non-gpt task export or when no model is selected.
+        """
+
+        def make_budget(
+            *,
+            context_window: int,
+            effective_context_window: int,
+            auto_compact_token_limit: int,
+            source: str = "current_direct_official",
+            freshness: str = "fresh",
+        ) -> dict[str, object]:
+            return {
+                "source": source,
+                "freshness": freshness,
+                "model_context_window": context_window,
+                "effective_context_window_percent": (
+                    effective_context_window * 100 // context_window
+                ),
+                "effective_context_window": effective_context_window,
+                "model_auto_compact_token_limit": auto_compact_token_limit,
+            }
+
+        official_budget = make_budget(
+            context_window=272_000,
+            effective_context_window=258_400,
+            auto_compact_token_limit=244_800,
+        )
+        task_budget = make_budget(
+            context_window=1_000_000,
+            effective_context_window=950_000,
+            auto_compact_token_limit=900_000,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            catalog_path = tmp / "catalog.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": official_budget,
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": task_budget,
+                                },
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cases = [
+                {
+                    "selected": "volc/glm-5.2",
+                    "expected": (1_000_000, 900_000),
+                    "description": "task model exports 950k effective",
+                },
+                {
+                    "selected": "gpt-5.6-terra",
+                    "expected": (272_000, 244_800),
+                    "description": "active Official remains 258400 effective",
+                },
+                {
+                    "selected": "openai/gpt-5.6-terra",
+                    "expected": (272_000, 244_800),
+                    "description": "openai/ prefix normalizes to Official budget",
+                },
+                {
+                    "selected": "unknown/model",
+                    "expected": None,
+                    "description": "unknown model returns None instead of arbitrary default",
+                },
+                {
+                    "selected": None,
+                    "expected": (272_000, 244_800),
+                    "description": "no selection falls back to first persisted Official budget",
+                },
+            ]
+
+            for case in cases:
+                with self.subTest(selected=case["selected"], msg=case["description"]):
+                    self.assertEqual(
+                        _selected_official_context_budget(catalog_path, case["selected"]),
+                        case["expected"],
+                    )
+
+    def test_overlay_uses_active_task_model_budget_over_unrelated_official_default(self):
+        """End-to-end overlay writes the active task-model budget, not an unrelated Official default."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                        "model_auto_compact_token_limit": 244_800,
+                                    },
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 1_000_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 950_000,
+                                        "model_auto_compact_token_limit": 900_000,
+                                    },
+                                },
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            activated = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_context_window = 1000000", activated)
+            self.assertIn("model_auto_compact_token_limit = 900000", activated)
+            self.assertEqual(activated.count("model_context_window"), 1)
+            self.assertEqual(activated.count("model_auto_compact_token_limit"), 1)
+
+    def test_overlay_uses_active_official_budget_when_official_model_selected(self):
+        """Active Official model keeps its own budget when a task model is also in the catalog."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-terra",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 272_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 258_400,
+                                        "model_auto_compact_token_limit": 244_800,
+                                    },
+                                },
+                            },
+                            {
+                                "slug": "volc/glm-5.2",
+                                "codex_proxy_metadata": {
+                                    "provider": "openai",
+                                    "upstream_name": "official",
+                                    "official_context_budget": {
+                                        "source": "current_direct_official",
+                                        "freshness": "fresh",
+                                        "model_context_window": 1_000_000,
+                                        "effective_context_window_percent": 95,
+                                        "effective_context_window": 950_000,
+                                        "model_auto_compact_token_limit": 900_000,
+                                    },
+                                },
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            activated = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_context_window = 272000", activated)
+            self.assertIn("model_auto_compact_token_limit = 244800", activated)
+            self.assertEqual(activated.count("model_context_window"), 1)
+            self.assertEqual(activated.count("model_auto_compact_token_limit"), 1)
 
     def test_overlay_adopts_a_larger_budget_only_from_a_fresh_direct_catalog_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:

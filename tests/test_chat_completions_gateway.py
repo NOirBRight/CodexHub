@@ -525,7 +525,10 @@ class ResponseBodyToChatTests(unittest.TestCase):
         self.assertEqual(choice["message"]["role"], "assistant")
         self.assertEqual(choice["message"]["content"], "Hello!")
         self.assertEqual(choice["finish_reason"], "stop")
-        self.assertEqual(result["usage"]["input_tokens"], 10)
+        self.assertEqual(
+            result["usage"],
+            {"prompt_tokens": 10, "completion_tokens": 2},
+        )
 
     def test_function_call_response(self):
         body = json.dumps({
@@ -2808,7 +2811,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         written = b"".join(handler.wfile.writes)
         self.assertIn(b"response.output_text.delta", written)
         self.assertIn(b"Hi", written)
-        self.assertIn(b"data: [DONE]", written)
+        self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_does_not_retry_after_headers(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2890,6 +2893,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertNotIn("upstream_retry", event_names)
         self.assertNotIn("sse_retry_notice", event_names)
+        self.assertIn("upstream_retry_suppressed", event_names)
+        suppressed_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertEqual(len(suppressed_events), 1)
+        self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_exposure")
 
     def test_provider_scoped_chat_to_responses_streaming_fallback_emits_chat_delta_incrementally(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -3107,7 +3118,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b'"call_id":"call_tool"', written)
         self.assertIn(b'"name":"lookup"', written)
         self.assertIn(b'"arguments":"{\\"q\\":\\"codex\\"}"', written)
-        self.assertIn(b"data: [DONE]", written)
+        self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_converts_chat_error_payload(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -4270,7 +4281,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         result = json.loads(b"".join(handler.wfile.writes))
         self.assertEqual(result["choices"][0]["message"]["content"], "Responses OK")
 
-    def test_auto_upstream_format_falls_back_to_chat_for_protocol_http_error(self):
+    def test_auto_upstream_format_suppresses_chat_fallback_for_protocol_http_error(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
@@ -4294,16 +4305,6 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": False,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
-        chat_body = json.dumps({
-            "id": "chatcmpl_auto",
-            "object": "chat.completion",
-            "model": "glm-5.2",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "Chat fallback OK"},
-                "finish_reason": "stop",
-            }],
-        }).encode("utf-8")
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
@@ -4312,19 +4313,31 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=[_http_error(404), _FakeJsonResponse(chat_body)]) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        self.assertTrue(mock_urlopen.call_args_list[0].args[0].full_url.endswith("/responses"))
-        self.assertTrue(mock_urlopen.call_args_list[1].args[0].full_url.endswith("/chat/completions"))
-        chat_payload = json.loads(mock_urlopen.call_args_list[1].args[0].data)
-        self.assertIn("messages", chat_payload)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        self.assertTrue(mock_urlopen.call_args.args[0].full_url.endswith("/responses"))
+        suppressed_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertGreaterEqual(len(suppressed_events), 1)
+        self.assertTrue(
+            any(
+                e["error"] == "HTTPError"
+                and e["retry_safety_class"] == "suppressed_post_write"
+                and e["failure_phase"] == "response_headers"
+                and e["upstream_format"] == "responses"
+                for e in suppressed_events
+            )
+        )
         result = json.loads(b"".join(handler.wfile.writes))
-        self.assertEqual(result["choices"][0]["message"]["content"], "Chat fallback OK")
+        self.assertEqual(result["error"]["type"], "upstream_error")
 
-    def test_auto_handler_preserves_completed_tool_lifecycle_through_chat_fallback(self):
+    def test_auto_handler_suppresses_chat_fallback_for_tool_protocol_http_error(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
@@ -4372,16 +4385,6 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "stream": False,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
-        chat_body = json.dumps({
-            "id": "chatcmpl_auto_tools",
-            "object": "chat.completion",
-            "model": "glm-5.2",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "Done after one tool result."},
-                "finish_reason": "stop",
-            }],
-        }).encode("utf-8")
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
@@ -4390,20 +4393,29 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=[_http_error(404), _FakeJsonResponse(chat_body)]) as mock_urlopen,
+            patch("codex_proxy.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(mock_urlopen.call_count, 2)
-        responses_payload = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        responses_payload = json.loads(mock_urlopen.call_args.args[0].data)
         self.assertEqual(responses_payload["input"][1]["type"], "function_call")
         self.assertEqual(responses_payload["input"][2]["type"], "function_call_output")
-        chat_payload = json.loads(mock_urlopen.call_args_list[1].args[0].data)
-        self.assertEqual(chat_payload["messages"][1]["tool_calls"][0]["id"], "call_list_skills")
-        self.assertEqual(chat_payload["messages"][2]["role"], "tool")
-        self.assertEqual(chat_payload["messages"][2]["tool_call_id"], "call_list_skills")
+        suppressed_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_retry_suppressed"
+        ]
+        self.assertGreaterEqual(len(suppressed_events), 1)
+        self.assertTrue(
+            any(
+                e["error"] == "HTTPError"
+                and e["retry_safety_class"] == "suppressed_post_write"
+                for e in suppressed_events
+            )
+        )
         result = json.loads(b"".join(handler.wfile.writes))
-        self.assertEqual(result["choices"][0]["message"]["content"], "Done after one tool result.")
+        self.assertEqual(result["error"]["type"], "upstream_error")
 
     def test_auto_upstream_format_does_not_fallback_after_responses_stream_starts(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
