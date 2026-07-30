@@ -2881,6 +2881,27 @@ test("provider discovery preserves a prior model tool surface strategy", async (
   );
 });
 
+test("provider discovery preserves reviewed profiles and strips untrusted profiles from new models", async () => {
+  const formatSource = await readFile(new URL("../src/lib/format.ts", import.meta.url), "utf8");
+
+  assert.match(
+    formatSource,
+    /capability_profiles: previous\?\.capability_profiles \?\? \[\],/,
+  );
+  assert.match(
+    formatSource,
+    /capability_binding: previous\?\.capability_binding \?\? null,/,
+  );
+  assert.doesNotMatch(
+    formatSource,
+    /capability_profiles: previous\?\.capability_profiles \?\? model\.capability_profiles/,
+  );
+  assert.doesNotMatch(
+    formatSource,
+    /capability_binding: previous\?\.capability_binding \?\? model\.capability_binding/,
+  );
+});
+
 test("provider discovery preserves missing API key environment variable names", async () => {
   const providersSource = await readProviderContractSource();
 
@@ -3318,6 +3339,18 @@ test("persistent state changes follow the project toast and restart-disclosure s
   assert.match(standardSource, /Every user-initiated persistent state change/);
   assert.match(standardSource, /update that same Toast/);
   assert.match(standardSource, /name the exact client or runtime the user must restart/);
+});
+
+test("provider catalog persistence has one terminal toast per save attempt", async () => {
+  const actionsSource = await readFile(providerCatalogActionsPath, "utf8");
+  const saveProviders =
+    actionsSource.match(/async function saveProviders[\s\S]*?async function refreshProviderModels/)?.[0] ?? "";
+  const persistProbe =
+    actionsSource.match(/async function persistProviderProbeResult[\s\S]*?function providerProbeModel/)?.[0] ?? "";
+
+  assert.match(saveProviders, /updateToast\(activeToastId,/);
+  assert.doesNotMatch(saveProviders, /setError\(/);
+  assert.doesNotMatch(persistProbe, /setError\(/);
 });
 
 test("gateway takeover is direct and does not add a confirmation surface", async () => {

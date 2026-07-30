@@ -19,6 +19,7 @@ type TestLockAcquireHook = Box<dyn Fn(&Path, &'static str) + Send + Sync>;
 thread_local! {
     static TEST_PRE_OPEN_EXISTING_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
     static TEST_PRE_PRIVATE_PUBLISH_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
+    static TEST_PRE_PRIVATE_QUARANTINE_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
 }
 
 /// Test-only hook invoked from the lock-acquisition seam. The event argument is
@@ -65,6 +66,25 @@ fn invoke_test_pre_private_publish_hook(path: &Path) {
     });
 }
 
+#[cfg(test)]
+fn install_test_pre_private_quarantine_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_PRE_PRIVATE_QUARANTINE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn clear_test_pre_private_quarantine_hook() {
+    TEST_PRE_PRIVATE_QUARANTINE_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn invoke_test_pre_private_quarantine_hook(path: &Path) {
+    TEST_PRE_PRIVATE_QUARANTINE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 // Versioned lock record. Anything else is fail-closed:
@@ -102,12 +122,18 @@ mod flock_op {
 
 #[cfg(target_os = "linux")]
 mod unix_private_io {
+    pub(crate) const O_RDONLY: i32 = 0;
     pub(crate) const O_WRONLY: i32 = 0x0001;
     pub(crate) const O_CREAT: i32 = 0x0040;
     pub(crate) const O_EXCL: i32 = 0x0080;
     pub(crate) const O_DIRECTORY: i32 = 0x1_0000;
     pub(crate) const O_NOFOLLOW: i32 = 0x2_0000;
     pub(crate) const O_CLOEXEC: i32 = 0x8_0000;
+    pub(crate) const RENAME_NOREPLACE: u32 = 1;
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) const SYS_RENAMEAT2: isize = 316;
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) const SYS_RENAMEAT2: isize = 276;
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -139,6 +165,94 @@ pub(crate) fn write_private_text_atomic(
     let pinned_parent = PinnedPrivateParent::open(path, boundary)?;
     let lock = FileLock::acquire(path)?;
     write_text_locked_impl(path, text, &lock, Some(&pinned_parent))
+}
+
+/// Move a private text file to a quarantine name without releasing the
+/// validated parent directory. Both the read and rename are relative to the
+/// retained parent handle/dirfd, so a pathname swap cannot redirect either
+/// operation to another directory.
+pub(crate) fn quarantine_private_text(
+    source: &Path,
+    quarantine: &Path,
+    boundary: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String, String> {
+    if source.parent() != quarantine.parent() {
+        return Err("private quarantine paths must share one parent".to_string());
+    }
+    validate_confined_path(source, boundary, false)?;
+    validate_confined_path(quarantine, boundary, true)?;
+    if quarantine.exists() {
+        return Err(format!(
+            "private quarantine destination already exists: {}",
+            quarantine.display()
+        ));
+    }
+    let parent = PinnedPrivateParent::open(source, boundary)?;
+    #[cfg(test)]
+    invoke_test_pre_private_quarantine_hook(source);
+    let mut opened = parent.open_existing(source).map_err(|error| {
+        format!("failed to open {label} through its pinned parent: {error}")
+    })?;
+    let text = read_opened_single_link_text(&mut opened, source, max_bytes, label)?;
+    let opened_identity = lock_file_identity(&opened)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+    parent.rename_existing(&mut opened, source, quarantine)?;
+    let quarantined = parent.open_existing(quarantine).map_err(|error| {
+        format!("failed to read back quarantined {label} through its pinned parent: {error}")
+    })?;
+    let quarantined_identity = lock_file_identity(&quarantined)
+        .map_err(|_| format!("quarantined {label} is not a stable regular single-link file"))?;
+    if quarantined_identity != opened_identity {
+        return Err(format!(
+            "quarantined {label} identity did not match the opened source"
+        ));
+    }
+    Ok(text)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn read_private_text(
+    path: &Path,
+    boundary: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String, String> {
+    validate_confined_path(path, boundary, false)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let mut opened = parent
+        .open_existing(path)
+        .map_err(|error| format!("failed to open {label} through its pinned parent: {error}"))?;
+    read_opened_single_link_text(&mut opened, path, max_bytes, label)
+}
+
+fn read_opened_single_link_text(
+    file: &mut File,
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {label}: {error}"))?;
+    validate_regular_single_link(&metadata, path)?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "{label} exceeds the size limit of {max_bytes} bytes"
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {label}: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "{label} exceeds the size limit of {max_bytes} bytes"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))
 }
 
 /// Write `text` to `path` using a temp file and atomic rename while already
@@ -292,6 +406,99 @@ impl PinnedPrivateParent {
         }
     }
 
+    fn open_existing(&self, path: &Path) -> std::io::Result<File> {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let fd = unsafe {
+            openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                unix_private_io::O_RDONLY | unix_private_io::O_NOFOLLOW,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn rename_existing(
+        &self,
+        _opened: &mut File,
+        source_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source_name = CString::new(
+            source_path
+                .file_name()
+                .ok_or_else(|| "private quarantine source has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private quarantine source name contains a NUL byte".to_string())?;
+        let target_name = CString::new(
+            target_path
+                .file_name()
+                .ok_or_else(|| "private quarantine target has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private quarantine target name contains a NUL byte".to_string())?;
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let rename_result = unsafe {
+            syscall(
+                unix_private_io::SYS_RENAMEAT2,
+                self.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                self.directory.as_raw_fd(),
+                target_name.as_ptr(),
+                unix_private_io::RENAME_NOREPLACE,
+            ) as i32
+        };
+        #[cfg(any(
+            not(target_os = "linux"),
+            all(
+                target_os = "linux",
+                not(any(target_arch = "x86_64", target_arch = "aarch64"))
+            )
+        ))]
+        let rename_result = unsafe {
+            renameat(
+                self.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                self.directory.as_raw_fd(),
+                target_name.as_ptr(),
+            )
+        };
+        if rename_result != 0
+        {
+            return Err(format!(
+                "failed to quarantine private file in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.directory.sync_all().map_err(|error| {
+            format!(
+                "failed to flush private file parent {}: {error}",
+                self.parent_path.display()
+            )
+        })
+    }
+
     fn publish(
         &self,
         _temp_file: &mut File,
@@ -388,11 +595,33 @@ impl PinnedPrivateParent {
         create_private_temp_file_windows(temp_path)
     }
 
+    fn open_existing(&self, path: &Path) -> std::io::Result<File> {
+        open_existing_private_file_windows(path)
+    }
+
+    fn rename_existing(
+        &self,
+        opened: &mut File,
+        _source_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), String> {
+        self.rename_opened_file(opened, target_path, false)
+    }
+
     fn publish(
         &self,
         temp_file: &mut File,
         _temp_path: &Path,
         target_path: &Path,
+    ) -> Result<(), String> {
+        self.rename_opened_file(temp_file, target_path, true)
+    }
+
+    fn rename_opened_file(
+        &self,
+        file: &mut File,
+        target_path: &Path,
+        replace_existing: bool,
     ) -> Result<(), String> {
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::AsRawHandle;
@@ -408,7 +637,7 @@ impl PinnedPrivateParent {
         let mut storage = vec![0_usize; words];
         let information = storage.as_mut_ptr().cast::<FileRenameInformation>();
         unsafe {
-            (*information).flags = 1;
+            (*information).flags = u32::from(replace_existing);
             (*information).root_directory = self.directory.as_raw_handle();
             (*information).file_name_length =
                 u32::try_from(target_name.len() * std::mem::size_of::<u16>())
@@ -422,7 +651,7 @@ impl PinnedPrivateParent {
         let mut io_status = IoStatusBlock::default();
         let status = unsafe {
             NtSetInformationFile(
-                temp_file.as_raw_handle(),
+                file.as_raw_handle(),
                 &mut io_status,
                 information.cast(),
                 u32::try_from(total_bytes)
@@ -516,6 +745,33 @@ fn create_private_temp_file_windows(path: &Path) -> std::io::Result<File> {
     }
     if let Some(error) = creation_error {
         return Err(error);
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn open_existing_private_file_windows(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::io::FromRawHandle;
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+
+    let wide_path = windows_wide_path(path)?;
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_READ | DELETE,
+            win32::SHARE_READ_WRITE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_handle(handle) })
 }
@@ -1480,7 +1736,7 @@ unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 unsafe extern "C" {
     fn openat(directory_fd: i32, path: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
     fn renameat(
@@ -1489,6 +1745,14 @@ unsafe extern "C" {
         new_directory_fd: i32,
         new_path: *const std::ffi::c_char,
     ) -> i32;
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+unsafe extern "C" {
+    fn syscall(number: isize, ...) -> isize;
 }
 
 #[cfg(windows)]
@@ -1635,9 +1899,11 @@ unsafe extern "system" {
 mod tests {
     use super::{
         clear_test_pre_open_hook, clear_test_pre_private_publish_hook,
-        install_test_pre_open_hook, install_test_pre_private_publish_hook, lock_state,
-        parse_legacy_pid, read_single_link_text, write_private_text_atomic, write_text_atomic,
-        write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
+        clear_test_pre_private_quarantine_hook, install_test_pre_open_hook,
+        install_test_pre_private_publish_hook, install_test_pre_private_quarantine_hook,
+        lock_state, parse_legacy_pid, quarantine_private_text, read_single_link_text,
+        write_private_text_atomic, write_text_atomic, write_text_locked, FileLock, LockState,
+        LOCK_PROTOCOL,
     };
     use std::{
         fs,
@@ -1721,6 +1987,210 @@ mod tests {
             assert!(!parent.join("secret.backup").exists());
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_quarantine_renames_and_reads_back_only_through_the_pinned_parent() {
+        let root = test_root("private-quarantine-parent-race");
+        let parent = root.join("owned");
+        let moved_parent = root.join("owned-moved");
+        let victim = root.join("victim");
+        let source = parent.join("catalog.json");
+        let quarantine = parent.join("catalog.json.recovery.quarantine");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(&source, "transaction-owned-catalog").unwrap();
+        fs::write(victim.join("catalog.json"), "victim-catalog").unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let parent_for_attacker = parent.clone();
+        let moved_for_attacker = moved_parent.clone();
+        let victim_for_attacker = victim.clone();
+        let attacker = thread::spawn(move || {
+            start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let rename_result = fs::rename(&parent_for_attacker, &moved_for_attacker);
+            if rename_result.is_ok() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&victim_for_attacker, &parent_for_attacker).unwrap();
+                #[cfg(windows)]
+                {
+                    let status = Command::new("cmd")
+                        .args([
+                            "/C",
+                            "mklink",
+                            "/J",
+                            &parent_for_attacker.to_string_lossy(),
+                            &victim_for_attacker.to_string_lossy(),
+                        ])
+                        .status()
+                        .unwrap();
+                    assert!(status.success(), "junction swap fixture must be created");
+                }
+            }
+            done_tx.send(rename_result).unwrap();
+        });
+        install_test_pre_private_quarantine_hook(move |_| {
+            start_tx.send(()).unwrap();
+            let result = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            #[cfg(windows)]
+            assert!(
+                result.is_err(),
+                "the retained Windows parent handle must deny a junction swap"
+            );
+            #[cfg(unix)]
+            assert!(
+                result.is_ok(),
+                "the Unix fixture must replace the pathname after validation"
+            );
+        });
+
+        let readback = quarantine_private_text(
+            &source,
+            &quarantine,
+            &root,
+            1024,
+            "generated catalog quarantine",
+        );
+        clear_test_pre_private_quarantine_hook();
+        let readback = readback.unwrap();
+        attacker.join().unwrap();
+
+        assert_eq!(readback, "transaction-owned-catalog");
+        assert_eq!(
+            fs::read_to_string(victim.join("catalog.json")).unwrap(),
+            "victim-catalog"
+        );
+        assert!(!victim.join("catalog.json.recovery.quarantine").exists());
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "transaction-owned-catalog"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("catalog.json.recovery.quarantine")).unwrap(),
+            "transaction-owned-catalog"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_quarantine_rejects_collision_oversize_and_link_sources_without_mutation() {
+        let collision_root = test_root("private-quarantine-collision");
+        fs::create_dir_all(&collision_root).unwrap();
+        let collision_source = collision_root.join("catalog.json");
+        let collision_target = collision_root.join("catalog.json.quarantine");
+        fs::write(&collision_source, "source").unwrap();
+        fs::write(&collision_target, "existing-evidence").unwrap();
+
+        let collision = quarantine_private_text(
+            &collision_source,
+            &collision_target,
+            &collision_root,
+            1024,
+            "collision source",
+        )
+        .expect_err("an existing quarantine must never be replaced");
+
+        assert!(collision.contains("already exists"));
+        assert_eq!(fs::read_to_string(&collision_source).unwrap(), "source");
+        assert_eq!(
+            fs::read_to_string(&collision_target).unwrap(),
+            "existing-evidence"
+        );
+
+        let collision_race_root = test_root("private-quarantine-collision-race");
+        fs::create_dir_all(&collision_race_root).unwrap();
+        let collision_race_source = collision_race_root.join("catalog.json");
+        let collision_race_target = collision_race_root.join("catalog.json.quarantine");
+        fs::write(&collision_race_source, "race-source").unwrap();
+        let collision_race_target_for_hook = collision_race_target.clone();
+        install_test_pre_private_quarantine_hook(move |_| {
+            fs::write(&collision_race_target_for_hook, "racing-evidence").unwrap();
+        });
+
+        let collision_race = quarantine_private_text(
+            &collision_race_source,
+            &collision_race_target,
+            &collision_race_root,
+            1024,
+            "collision race source",
+        )
+        .expect_err("a quarantine created after validation must never be replaced");
+        clear_test_pre_private_quarantine_hook();
+
+        assert!(collision_race.contains("quarantine"));
+        assert_eq!(
+            fs::read_to_string(&collision_race_source).unwrap(),
+            "race-source"
+        );
+        assert_eq!(
+            fs::read_to_string(&collision_race_target).unwrap(),
+            "racing-evidence"
+        );
+
+        let oversize_root = test_root("private-quarantine-oversize");
+        let oversize_parent = oversize_root.join("owned");
+        let oversize_moved = oversize_root.join("owned-after-error");
+        fs::create_dir_all(&oversize_parent).unwrap();
+        let oversize_source = oversize_parent.join("catalog.json");
+        fs::write(&oversize_source, "too-large").unwrap();
+        let oversize = quarantine_private_text(
+            &oversize_source,
+            &oversize_parent.join("catalog.json.quarantine"),
+            &oversize_root,
+            3,
+            "oversize source",
+        )
+        .expect_err("oversized source must remain in place");
+
+        assert!(oversize.contains("size limit"));
+        assert_eq!(fs::read_to_string(&oversize_source).unwrap(), "too-large");
+        fs::rename(&oversize_parent, &oversize_moved)
+            .expect("the retained parent handle must be released on an error path");
+
+        let link_root = test_root("private-quarantine-link-source");
+        fs::create_dir_all(&link_root).unwrap();
+        let victim = link_root.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("catalog.json"), "victim").unwrap();
+        let link_source = link_root.join("catalog-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(victim.join("catalog.json"), &link_source).unwrap();
+        #[cfg(windows)]
+        {
+            let status = Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link_source.to_string_lossy(),
+                    &victim.to_string_lossy(),
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success(), "junction source fixture must be created");
+        }
+
+        let link_error = quarantine_private_text(
+            &link_source,
+            &link_root.join("catalog-link.quarantine"),
+            &link_root,
+            1024,
+            "linked source",
+        )
+        .expect_err("symlink or reparse source must fail closed");
+
+        assert!(link_error.contains("symlink") || link_error.contains("reparse"));
+        assert_eq!(
+            fs::read_to_string(victim.join("catalog.json")).unwrap(),
+            "victim"
+        );
+        assert!(!link_root.join("catalog-link.quarantine").exists());
+        let _ = fs::remove_dir_all(collision_root);
+        let _ = fs::remove_dir_all(collision_race_root);
+        let _ = fs::remove_dir_all(oversize_root);
+        let _ = fs::remove_dir_all(link_root);
     }
 
     #[cfg(windows)]

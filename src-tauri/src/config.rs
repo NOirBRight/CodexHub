@@ -48,9 +48,11 @@ pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, Strin
 }
 
 pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus, String> {
-    let paths = ConfigPaths::runtime()?;
-    let python = find_python();
-    set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = ConfigPaths::runtime()?;
+        let python = find_python();
+        set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
+    })
 }
 
 /// Reapply only the CodexHub-managed runtime context projection after a new
@@ -697,6 +699,17 @@ fn get_codex_context_guard_status_with_paths(
 }
 
 fn set_codex_context_guard_with_paths(
+    enabled: bool,
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<CodexContextGuardStatus, String> {
+    crate::provider_catalog_transaction::with_transaction_guard_for_paths(paths, || {
+        set_codex_context_guard_locked(enabled, paths, python, runner)
+    })
+}
+
+fn set_codex_context_guard_locked(
     enabled: bool,
     paths: &ConfigPaths,
     python: &Path,
@@ -1520,6 +1533,9 @@ mod tests {
     use std::cell::RefCell;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2774,6 +2790,79 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             &get_runner.commands.borrow()[0].args,
             &["context-guard-status", "--config"],
         );
+    }
+
+    #[test]
+    fn context_guard_projection_holds_the_reentrant_catalog_guard_until_commit() {
+        struct GuardObservingRunner {
+            paths: ConfigPaths,
+            contender: RefCell<Option<(Receiver<()>, JoinHandle<()>)>>,
+        }
+
+        impl CommandRunner for GuardObservingRunner {
+            fn run(
+                &self,
+                _program: &Path,
+                _args: &[String],
+            ) -> Result<CommandOutcome, String> {
+                crate::provider_catalog_transaction::with_transaction_guard_for_paths(
+                    &self.paths,
+                    || Ok(()),
+                )
+                .expect("same-thread projection must reenter the transaction guard");
+
+                let contender_paths = self.paths.clone();
+                let (started_tx, started_rx) = mpsc::channel();
+                let (entered_tx, entered_rx) = mpsc::channel();
+                let contender = thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    crate::provider_catalog_transaction::with_transaction_guard_for_paths(
+                        &contender_paths,
+                        || {
+                            entered_tx.send(()).unwrap();
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                });
+                started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert!(
+                    entered_rx
+                        .recv_timeout(Duration::from_millis(250))
+                        .is_err(),
+                    "a provider/catalog writer entered while context projection was running"
+                );
+                *self.contender.borrow_mut() = Some((entered_rx, contender));
+
+                Ok(CommandOutcome {
+                    code: Some(0),
+                    stdout: r#"{"enabled":true,"model_context_window":272000,"model_auto_compact_token_limit":240000}"#.to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = temp_root("context-guard-continuous-transaction-guard");
+        let paths = test_paths(&root);
+        let runner = GuardObservingRunner {
+            paths: paths.clone(),
+            contender: RefCell::new(None),
+        };
+
+        set_codex_context_guard_with_paths(
+            true,
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("context guard projection");
+
+        let (entered_rx, contender) = runner.contender.borrow_mut().take().unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the competing writer must enter after projection commits");
+        contender.join().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -793,7 +793,17 @@ fn get_autostart_status() -> Result<autostart::AutostartStatus, String> {
 
 #[tauri::command]
 fn open_codex_app() -> Result<String, String> {
-    launch_codex_app()
+    provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = config::ConfigPaths::runtime()?;
+        open_codex_app_with_paths(&paths, launch_codex_app)
+    })
+}
+
+fn open_codex_app_with_paths<T>(
+    paths: &config::ConfigPaths,
+    launch: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    provider_catalog_transaction::with_transaction_guard_for_paths(paths, launch)
 }
 
 #[tauri::command]
@@ -1278,10 +1288,13 @@ fn main() {
 mod tests {
     use super::{
         gateway_retirement_warning_for_locale, run_app_lifecycle_action,
-        start_gateway_after_startup, tray_loading_toast, tray_retiring_gateway_loading_toast,
-        tray_toast_for, AppLifecycleAction, AppStatus,
+        open_codex_app_with_paths, start_gateway_after_startup, tray_loading_toast,
+        tray_retiring_gateway_loading_toast, tray_toast_for, AppLifecycleAction, AppStatus,
     };
     use std::cell::{Cell, RefCell};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn auto_start_propagates_coordinated_precondition_failure_once() {
@@ -1324,6 +1337,64 @@ mod tests {
         assert_eq!(failure.id, loading.id);
         assert_eq!(failure.tone, "error");
         assert!(failure.text.contains("safe snapshot unavailable"));
+    }
+
+    #[test]
+    fn codex_app_launch_holds_the_reentrant_catalog_guard_until_spawn() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codexhub-open-codex-guard-{}-{nonce}",
+            std::process::id()
+        ));
+        let paths = crate::config::ConfigPaths::new(
+            root.join("runtime"),
+            root.join("repo"),
+        );
+        let mut contender = None;
+
+        let result = open_codex_app_with_paths(&paths, || {
+            crate::provider_catalog_transaction::with_transaction_guard_for_paths(
+                &paths,
+                || Ok(()),
+            )
+            .expect("launch projection must reenter the same transaction guard");
+
+            let contender_paths = paths.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                crate::provider_catalog_transaction::with_transaction_guard_for_paths(
+                    &contender_paths,
+                    || {
+                        entered_tx.send(()).unwrap();
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                entered_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_err(),
+                "a provider/catalog writer entered before Codex App launch completed"
+            );
+            contender = Some((entered_rx, handle));
+            Ok("launched")
+        })
+        .expect("guarded Codex App launch");
+
+        assert_eq!(result, "launched");
+        let (entered_rx, handle) = contender.unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the competing writer must enter after launch completes");
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

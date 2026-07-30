@@ -161,6 +161,38 @@
         "advanced_capabilities_enabled": false,
         "rejection_reason": "unsupported_upstream_protocol_scope"
       }
+    },
+    {
+      "name": "mixed_case_identifiers_preserve_canonical_case",
+      "provider": "Acme-Provider",
+      "model": "Kimi-K2.7-Code",
+      "upstream_protocol": "responses",
+      "profiles": [
+        {
+          "schema_version": 1,
+          "upstream_protocol": "responses",
+          "tool_profile": "MixedCaseTools",
+          "collaboration_backend": "codex_client",
+          "collaboration_version": "V2",
+          "capability_manifest_version": "Manifest-Beta",
+          "capability_manifest_hash": "sha256:946062e841b74fed325db60ab7de61e7cd1d555d66fb3a32cb47b8f84d040565",
+          "qualification_state": "unqualified"
+        }
+      ],
+      "expected": {
+        "schema_version": 1,
+        "provider": "Acme-Provider",
+        "model": "Kimi-K2.7-Code",
+        "upstream_protocol": "responses",
+        "tool_profile": "MixedCaseTools",
+        "collaboration_backend": "codex_client",
+        "collaboration_version": "V2",
+        "capability_manifest_version": "Manifest-Beta",
+        "capability_manifest_hash": "sha256:946062e841b74fed325db60ab7de61e7cd1d555d66fb3a32cb47b8f84d040565",
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": false,
+        "rejection_reason": "qualification_state_unqualified"
+      }
     }
   ]
 }

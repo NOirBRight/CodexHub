@@ -220,7 +220,6 @@ export function useProviderCatalogActions({
           text: feedback.text,
           tone: feedback.tone,
         });
-        setError(feedback.text);
         throw new ProviderCatalogTransactionHandledError(feedback.text, saved);
       }
       transactionCommitted = true;
@@ -256,7 +255,6 @@ export function useProviderCatalogActions({
           text: committedMessage,
           tone: "error",
         });
-        setError(committedMessage);
         return saved;
       }
       const completedMessage = protocolCommitted
@@ -278,7 +276,6 @@ export function useProviderCatalogActions({
           text: toastMessage ?? t("providers.providerCatalogUpdated"),
           tone: "success",
         });
-        setError(null);
       }
       return saved;
     } catch (err) {
@@ -300,7 +297,6 @@ export function useProviderCatalogActions({
           text: message,
           tone: "error",
         });
-        setError(message);
         throw new ProviderCatalogTransactionHandledError(message, null);
       }
       updateToastWithError(activeToastId, err);
@@ -486,9 +482,9 @@ export function useProviderCatalogActions({
           : t("providers.probeNoSupportedEndpoint"),
         toastId,
       );
-      setError(null);
-    } catch (err) {
-      setError(messageFromError(err));
+    } catch {
+      // saveProviders owns the persistent Toast lifecycle, including failures.
+      return;
     }
   }
 
