@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 from pathlib import Path
+import threading
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -121,6 +122,59 @@ class ConfigOverlayTests(unittest.TestCase):
             encoding="utf-8",
         )
         return catalog_path
+
+    def _apply_interrupted_takeover(
+        self,
+        config_path: Path,
+        backup_path: Path,
+        catalog_path: Path,
+        *,
+        owner: str,
+        base_url: str,
+    ) -> None:
+        real_atomic_write = config_overlay.atomic_write_text
+
+        def interrupt_live_config_write(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+            if path == config_path:
+                raise OSError(f"simulated interrupted {owner} config update")
+            real_atomic_write(path, text, encoding=encoding)
+
+        with patch("config_overlay.atomic_write_text", interrupt_live_config_write):
+            with self.assertRaisesRegex(OSError, f"interrupted {owner} config update"):
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    catalog_path,
+                    base_url,
+                    owner=owner,
+                    takeover=True,
+                )
+
+    def _stable_with_interrupted_beta_takeover(
+        self,
+        root: Path,
+    ) -> tuple[Path, Path, Path, bytes]:
+        config_path = root / "config.toml"
+        stable_backup_path = root / "stable.backup.toml"
+        beta_backup_path = root / "beta.backup.toml"
+        catalog_path = root / "catalog.json"
+        config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+        apply_overlay(
+            config_path,
+            stable_backup_path,
+            catalog_path,
+            "http://127.0.0.1:9099",
+            owner="release",
+        )
+        stable_active = config_path.read_bytes()
+        self._apply_interrupted_takeover(
+            config_path,
+            beta_backup_path,
+            catalog_path,
+            owner="beta",
+            base_url="http://127.0.0.1:9109",
+        )
+        return config_path, beta_backup_path, catalog_path, stable_active
 
     def test_strip_top_level_keys_does_not_touch_provider_sections(self):
         text = "\n".join(
@@ -894,6 +948,261 @@ class ConfigOverlayTests(unittest.TestCase):
             restore_overlay(config_path, stable_backup_path)
             self.assertEqual(config_path.read_bytes(), original)
 
+    def test_interrupted_takeover_with_missing_live_config_retains_recovery_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "beta.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            original = RUST_0_145_AGENTS_CONFIG.encode()
+            config_path.write_bytes(original)
+            self._apply_interrupted_takeover(
+                config_path,
+                backup_path,
+                catalog_path,
+                owner="beta",
+                base_url="http://127.0.0.1:9109",
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            config_path.unlink()
+
+            with self.assertRaisesRegex(RuntimeError, "live config is missing or diverged"):
+                restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertFalse(config_path.exists())
+            self.assertEqual(backup_path.read_bytes(), original)
+            self.assertTrue(metadata_path.exists())
+
+    def test_interrupted_takeover_with_same_owner_diverged_live_bytes_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, beta_backup_path, _, stable_active_bytes = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+            stable_active = stable_active_bytes.decode()
+
+            diverged = stable_active + "# user edit after interrupted takeover\n"
+            config_path.write_text(diverged, encoding="utf-8")
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+
+            with self.assertRaisesRegex(RuntimeError, "live config is missing or diverged"):
+                restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), diverged)
+            self.assertEqual(beta_backup_path.read_text(encoding="utf-8"), stable_active)
+            self.assertTrue(metadata_path.exists())
+
+    def test_interrupted_restore_serializes_against_concurrent_takeover_retry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, beta_backup_path, catalog_path, _ = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+
+            restore_classified = threading.Event()
+            release_restore = threading.Event()
+            retry_attempted = threading.Event()
+            retry_entered_transaction = threading.Event()
+            thread_errors: list[BaseException] = []
+            real_read_takeover_metadata = config_overlay.read_takeover_metadata
+            real_apply_overlay_locked = config_overlay._apply_overlay_locked
+
+            def pause_after_metadata_read(backup_path: Path) -> config_overlay.TakeoverMetadata | None:
+                result = real_read_takeover_metadata(backup_path)
+                restore_classified.set()
+                if not release_restore.wait(timeout=5):
+                    raise TimeoutError("test did not release restore classification")
+                return result
+
+            def record_retry_transaction_entry(*args: object, **kwargs: object) -> None:
+                retry_entered_transaction.set()
+                real_apply_overlay_locked(*args, **kwargs)
+
+            def run_restore() -> None:
+                try:
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+                except BaseException as exc:
+                    thread_errors.append(exc)
+
+            def retry_takeover() -> None:
+                try:
+                    retry_attempted.set()
+                    apply_overlay(
+                        config_path,
+                        beta_backup_path,
+                        catalog_path,
+                        "http://127.0.0.1:9109",
+                        owner="beta",
+                        takeover=True,
+                    )
+                except BaseException as exc:
+                    thread_errors.append(exc)
+
+            with (
+                patch("config_overlay.read_takeover_metadata", pause_after_metadata_read),
+                patch("config_overlay._apply_overlay_locked", record_retry_transaction_entry),
+            ):
+                restore_thread = threading.Thread(target=run_restore)
+                retry_thread = threading.Thread(target=retry_takeover)
+                restore_thread.start()
+                self.assertTrue(restore_classified.wait(timeout=5))
+                retry_thread.start()
+                try:
+                    self.assertTrue(retry_attempted.wait(timeout=5))
+                    self.assertFalse(
+                        retry_entered_transaction.wait(timeout=0.25),
+                        "takeover retry entered while restore held the lifecycle transaction",
+                    )
+                finally:
+                    release_restore.set()
+                    restore_thread.join(timeout=5)
+                    retry_thread.join(timeout=5)
+
+            self.assertFalse(restore_thread.is_alive())
+            self.assertFalse(retry_thread.is_alive())
+            self.assertEqual(thread_errors, [])
+            self.assertEqual(config_overlay.overlay_owner(config_path.read_text(encoding="utf-8")), "beta")
+            self.assertTrue(beta_backup_path.exists())
+            self.assertTrue(config_overlay.takeover_metadata_path(beta_backup_path).exists())
+
+    def test_interrupted_takeover_sidecar_delete_failure_resumes_without_rewriting_live_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, beta_backup_path, _, stable_active = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            real_unlink = Path.unlink
+
+            def fail_sidecar_delete(path: Path, *args: object, **kwargs: object) -> None:
+                if path == metadata_path:
+                    raise OSError("simulated sidecar delete failure")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_sidecar_delete):
+                with self.assertRaisesRegex(OSError, "sidecar delete failure"):
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertTrue(metadata_path.exists())
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(status, "interrupted_takeover_discarded")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(metadata_path.exists())
+
+    def test_interrupted_takeover_backup_delete_failure_retains_artifacts_for_retry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, beta_backup_path, _, stable_active = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            real_unlink = Path.unlink
+
+            def fail_backup_delete(path: Path, *args: object, **kwargs: object) -> None:
+                if path == beta_backup_path:
+                    raise OSError("simulated backup delete failure")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_backup_delete):
+                with self.assertRaisesRegex(OSError, "backup delete failure"):
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertTrue(beta_backup_path.exists())
+            self.assertTrue(metadata_path.exists())
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(status, "interrupted_takeover_discarded")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertFalse(metadata_path.exists())
+
+    def test_interrupted_takeover_cleanup_journal_write_failure_retains_original_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, beta_backup_path, _, stable_active = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+            real_atomic_write = config_overlay.atomic_write_text
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+
+            def fail_cleanup_journal_write(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+                if path == metadata_path:
+                    raise OSError("simulated cleanup journal write failure")
+                real_atomic_write(path, text, encoding=encoding)
+
+            with patch("config_overlay.atomic_write_text", fail_cleanup_journal_write):
+                with self.assertRaisesRegex(OSError, "cleanup journal write failure"):
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertTrue(beta_backup_path.exists())
+            self.assertTrue(metadata_path.exists())
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(status, "interrupted_takeover_discarded")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertFalse(metadata_path.exists())
+
+    def test_completed_takeover_sidecar_delete_failure_resumes_original_owner_restore(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            stable_active = config_path.read_bytes()
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            real_unlink = Path.unlink
+
+            def fail_sidecar_delete(path: Path, *args: object, **kwargs: object) -> None:
+                if path == metadata_path:
+                    raise OSError("simulated sidecar delete failure")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_sidecar_delete):
+                with self.assertRaisesRegex(OSError, "sidecar delete failure"):
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertTrue(metadata_path.exists())
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(metadata_path.exists())
+
     def test_agents_config_survives_connect_restart_readback_and_restore_for_supported_shapes(self):
         legacy_enabled = RUST_0_145_AGENTS_CONFIG.replace(
             "max_concurrent_threads_per_session = 7",
@@ -964,6 +1273,49 @@ class ConfigOverlayTests(unittest.TestCase):
                 restore_overlay(config_path, backup_path)
                 self.assertEqual(config_path.read_bytes(), original_bytes)
 
+    def test_explicit_multi_agent_v2_table_survives_connect_restart_and_restore(self):
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 5, tool_namespace = "team_tools" }\n',
+            "",
+        ) + (
+            "\n[features.multi_agent_v2]\n"
+            "enabled = false\n"
+            "max_concurrent_threads_per_session = 5\n"
+            'tool_namespace = "team_tools"\n'
+        )
+        expected = tomllib.loads(original)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            original_bytes = original.encode()
+            config_path.write_bytes(original_bytes)
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+            )
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+            )
+
+            readback = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(readback["agents"], expected["agents"])
+            self.assertEqual(
+                readback["features"]["multi_agent_v2"],
+                expected["features"]["multi_agent_v2"],
+            )
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_bytes(), original_bytes)
+
     def test_successful_stable_beta_takeover_preserves_one_agents_tree_and_each_owner_restore(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1016,6 +1368,56 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), stable_active)
 
             restore_overlay(config_path, stable_backup_path)
+            self.assertEqual(config_path.read_bytes(), original)
+
+    def test_successful_beta_release_takeover_preserves_agents_and_each_owner_restore(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            release_backup_path = tmp / "release.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            original = RUST_0_145_AGENTS_CONFIG.encode()
+            expected = tomllib.loads(RUST_0_145_AGENTS_CONFIG)
+            config_path.write_bytes(original)
+
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+            )
+            beta_active = config_path.read_bytes()
+
+            apply_overlay(
+                config_path,
+                release_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                owner="release",
+                takeover=True,
+            )
+            apply_overlay(
+                config_path,
+                release_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+
+            release_readback = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(release_readback["agents"], expected["agents"])
+            self.assertEqual(
+                release_readback["features"]["multi_agent_v2"],
+                expected["features"]["multi_agent_v2"],
+            )
+
+            status = restore_overlay(config_path, release_backup_path, unified_history=True)
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_path.read_bytes(), beta_active)
+
+            restore_overlay(config_path, beta_backup_path)
             self.assertEqual(config_path.read_bytes(), original)
 
     def test_connect_without_agents_or_multi_agent_v2_does_not_invent_user_choices(self):

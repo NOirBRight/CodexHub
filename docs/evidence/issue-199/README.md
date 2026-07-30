@@ -1,6 +1,8 @@
 # Issue #199 agents configuration preservation
 
 Candidate base: `ae927c687390017903435cd9bf4314610b6da229` (`origin/dev`)
+Independent-review repair fixed point:
+`ed3e4afa642dd8ba2b806cdd990cf111444f961a`
 
 ## Proven lifecycle
 
@@ -17,13 +19,33 @@ The regression fixture follows Codex `rust-v0.145.0` agent configuration:
 - an unknown future agent value proving open-set preservation.
 
 Tests exercise Stable connect, same-owner restart/reapply and readback,
-Developer takeover, interrupted takeover cleanup, each owner restore, and exact
-final restoration of the pre-owned bytes. The interrupted-takeover fixture
-exposed a defect: after the takeover backup and sidecar were durable but before
-the live config write completed, restore rewrote the still-active Stable
-configuration as unified Official history. Cleanup now recognizes that pending
-state, removes only the incomplete Developer takeover artifacts, and leaves the
-prior owner's live configuration byte-for-byte unchanged.
+takeover in both Stable/Developer directions, interrupted takeover cleanup,
+each owner restore, and exact final restoration of the pre-owned bytes. Both
+inline structured `features.multi_agent_v2` and explicit
+`[features.multi_agent_v2]` table syntax are covered.
+
+The interrupted-takeover fixture exposed a defect: after the takeover backup
+and sidecar were durable but before the live config write completed, restore
+rewrote the still-active Stable configuration as unified Official history.
+Independent review then identified that owner markers alone were insufficient:
+a missing or same-owner-but-diverged live file could lose its only backup, and
+a concurrent takeover retry could invalidate restore's snapshot before
+cleanup.
+
+Apply and restore now hold one shared per-config lifecycle lock from the first
+read through final publication and cleanup. Under that lock, interrupted
+cleanup requires an existing live config byte-identical to the recovery
+backup. Missing or diverged state fails closed without deleting either
+recovery artifact. A deterministic thread test proves a retry cannot publish
+while restore holds this transaction.
+
+Cleanup is a resumable two-phase operation. Before deleting recovery bytes,
+CodexHub atomically records the exact final-config SHA-256 and terminal status
+in the takeover sidecar. A retry removes remaining artifacts only after the
+live config, original owner, digest, and any remaining backup all revalidate.
+Journal publication, backup deletion, and sidecar deletion failures are
+covered, including completed owner restoration as well as interrupted
+takeover cleanup.
 
 CodexHub continues to own only its existing provider/catalog/context overlay
 and websocket feature flags. It does not parse, normalize, enable, or supply
@@ -32,9 +54,9 @@ defaults for agent or collaboration V2 configuration.
 ## Local verification
 
 - `python -m pytest -q tests/test_config_overlay.py`
-  - `49 passed, 8 subtests passed in 2.60s`
+  - `58 passed, 8 subtests passed in 3.36s`
 - `python -m pytest -q --ignore=tests/test_real_client_e2e.py`
-  - `1462 passed, 1 skipped, 420 subtests passed in 114.73s`
+  - `1471 passed, 1 skipped, 420 subtests passed in 106.86s`
 - `git diff --check`
   - passed
 - `python scripts/report_quality_gates.py`
