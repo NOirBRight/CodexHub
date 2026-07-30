@@ -111,6 +111,8 @@ fn validate_provider_catalog_revision(
 thread_local! {
     static TRANSACTION_FAULT_PHASE: std::cell::RefCell<Option<&'static str>> =
         const { std::cell::RefCell::new(None) };
+    static TEST_PRE_RESTORE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
 }
 
 thread_local! {
@@ -147,6 +149,25 @@ fn transaction_fault(phase: &'static str) -> Result<(), String> {
     }
     let _ = phase;
     Ok(())
+}
+
+#[cfg(test)]
+fn install_test_pre_restore_publish_hook(hook: impl Fn() + 'static) {
+    TEST_PRE_RESTORE_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn clear_test_pre_restore_publish_hook() {
+    TEST_PRE_RESTORE_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn invoke_test_pre_restore_publish_hook() {
+    TEST_PRE_RESTORE_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook();
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +235,7 @@ fn persist_provider_catalog_state_with_paths(
     expected_revision: ProviderCatalogRevision,
 ) -> Result<ProviderCatalogTransactionResult, String> {
     with_transaction_guard_for_paths(paths, || {
-        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        let mut store = RuntimeProviderCatalogStore::new_guarded(paths.clone())?;
         if let Err(detail) = validate_provider_catalog_revision(paths, &expected_revision) {
             let current = store.current_providers().unwrap_or_default();
             let mut result = conflict_result(current, detail);
@@ -278,7 +299,7 @@ fn recover_before_gateway_start_with_paths<T>(
     STARTUP_RECOVERY_STATE.store(STARTUP_BLOCKED, Ordering::Release);
     let mut recovery_completed = false;
     let result = with_transaction_guard_for_paths(paths, || {
-        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        let mut store = RuntimeProviderCatalogStore::new_guarded(paths.clone())?;
         recover_before_gateway_with_store(&mut store)?;
         recovery_completed = true;
         STARTUP_RECOVERY_STATE.store(STARTUP_READY, Ordering::Release);
@@ -733,6 +754,27 @@ impl RuntimeProviderCatalogStore {
         Self { paths }
     }
 
+    /// Production construction is deliberately coupled to the shared
+    /// provider/catalog transaction guard. The store and its mutation trait
+    /// are private to this module; direct construction remains available only
+    /// to the crash-prefix tests below.
+    fn new_guarded(paths: config::ConfigPaths) -> Result<Self, String> {
+        let transaction_lock_path = paths.proxy_dir().join("provider-catalog-transaction-guard");
+        let held = HELD_TRANSACTION_GUARDS.with(|guards| {
+            guards
+                .borrow()
+                .iter()
+                .any(|path| path == &transaction_lock_path)
+        });
+        if !held {
+            return Err(
+                "provider/catalog runtime writer requires the cross-process transaction guard"
+                    .to_string(),
+            );
+        }
+        Ok(Self::new(paths))
+    }
+
     fn recovery_path(&self) -> PathBuf {
         self.paths.provider_catalog_recovery_path()
     }
@@ -1020,39 +1062,59 @@ impl RuntimeProviderCatalogStore {
         }
 
         let catalog_path = self.paths.generated_catalog_path();
-        if self.confined_file_matches_snapshot(
-            &catalog_path,
-            &record.catalog,
-            MAX_CATALOG_SNAPSHOT_BYTES,
-            "catalog-disabled authorized catalog",
-        )? {
-            return Ok(());
-        }
-        let current = safe_file::read_private_text(
-            &catalog_path,
-            self.paths.runtime_root(),
-            MAX_CATALOG_SNAPSHOT_BYTES,
-            "catalog-disabled generated catalog",
-        )?;
-        if current != DISABLED_CATALOG {
+        let quarantine = self.catalog_quarantine_path(&record.transaction_id)?;
+        let read_optional = |path: &Path, label: &str| -> Result<Option<String>, String> {
+            let exists = path.try_exists().map_err(|error| {
+                format!(
+                    "failed to inspect catalog-disabled {label} {}: {error}",
+                    path.display()
+                )
+            })?;
+            if !exists {
+                return Ok(None);
+            }
+            safe_file::read_private_text(
+                path,
+                self.paths.runtime_root(),
+                MAX_CATALOG_SNAPSHOT_BYTES,
+                label,
+            )
+            .map(Some)
+        };
+        let live = read_optional(&catalog_path, "generated catalog")?;
+        let quarantined = read_optional(&quarantine, "quarantine evidence")?;
+        let matches_snapshot = |contents: &str| {
+            record.catalog.existed
+                && record.catalog.bytes == Some(contents.len() as u64)
+                && record.catalog.sha256.as_deref()
+                    == Some(hash_bytes(contents.as_bytes()).as_str())
+        };
+
+        let legal_prefix = if !record.catalog.existed {
+            matches!(
+                (live.as_deref(), quarantined.as_deref()),
+                (None, None) | (Some(DISABLED_CATALOG), None)
+            )
+        } else {
+            match (live.as_deref(), quarantined.as_deref()) {
+                // Initial state.
+                (Some(current), None) => matches_snapshot(current),
+                // Linux pre-exchange crash: exact source plus the exact sentinel placeholder.
+                (Some(current), Some(placeholder)) => {
+                    (matches_snapshot(current) && placeholder == DISABLED_CATALOG)
+                        // Linux post-exchange crash: exact sentinel plus exact source evidence.
+                        || (current == DISABLED_CATALOG && matches_snapshot(placeholder))
+                }
+                // Windows handle-bound rename completed before sentinel publication.
+                (None, Some(evidence)) => matches_snapshot(evidence),
+                _ => false,
+            }
+        };
+        if !legal_prefix {
             return Err(
-                "generated catalog is neither the durably authorized source nor disabled sentinel"
+                "catalog-disabled live/quarantine bytes do not match any authorized crash prefix; recovery remains fail-closed"
                     .to_string(),
             );
-        }
-        if record.catalog.existed {
-            let quarantine = self.catalog_quarantine_path(&record.transaction_id)?;
-            if !self.confined_file_matches_snapshot(
-                &quarantine,
-                &record.catalog,
-                MAX_CATALOG_SNAPSHOT_BYTES,
-                "catalog-disabled quarantine evidence",
-            )? {
-                return Err(
-                    "catalog-disabled quarantine does not match the durably authorized source"
-                        .to_string(),
-                );
-            }
         }
         Ok(())
     }
@@ -1068,7 +1130,8 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             }
             return Ok(());
         };
-        match record.state.classify().action {
+        let recovery_action = record.state.classify().action;
+        match recovery_action {
             RecoveryAction::VerifyCommitted => {
                 verify_file_identity(
                     &self.paths.runtime_providers_path(),
@@ -1255,7 +1318,8 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
         if record.state == RecoveryState::Committed {
             return Ok(());
         }
-        match record.state.classify().action {
+        let recovery_action = record.state.classify().action;
+        match recovery_action {
             RecoveryAction::ClearPrepared => {
                 verify_snapshot_target(
                     &self.paths.runtime_providers_path(),
@@ -1283,28 +1347,50 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 );
             }
         }
-        validate_snapshot_backup(
+        let provider_backup = load_snapshot_backup(
             &self.paths.provider_catalog_providers_backup_path(),
             &record.providers,
             MAX_PROVIDER_SNAPSHOT_BYTES,
             "provider configuration",
         )?;
-        validate_snapshot_backup(
+        let catalog_backup = load_snapshot_backup(
             &self.paths.provider_catalog_catalog_backup_path(),
             &record.catalog,
             MAX_CATALOG_SNAPSHOT_BYTES,
             "generated catalog",
         )?;
+        #[cfg(test)]
+        invoke_test_pre_restore_publish_hook();
+        let provider_absent_owner = match recovery_action {
+            RecoveryAction::RestoreProviderPrefix | RecoveryAction::RestoreCatalogPrefix => record
+                .candidate_providers_sha256
+                .as_deref()
+                .zip(record.candidate_providers_bytes)
+                .map(|(hash, bytes)| (hash, bytes, MAX_PROVIDER_SNAPSHOT_BYTES)),
+            _ => None,
+        };
+        let catalog_absent_owner = match recovery_action {
+            RecoveryAction::RestoreCatalogPrefix => record
+                .candidate_catalog_sha256
+                .as_deref()
+                .zip(record.candidate_catalog_bytes)
+                .map(|(hash, bytes)| (hash, bytes, MAX_CATALOG_SNAPSHOT_BYTES)),
+            _ => None,
+        };
         restore_file(
             &self.paths.runtime_providers_path(),
             &self.paths.provider_catalog_providers_backup_path(),
             &record.providers,
+            provider_backup.as_deref(),
+            provider_absent_owner,
             "provider configuration",
         )?;
         restore_file(
             &self.paths.generated_catalog_path(),
             &self.paths.provider_catalog_catalog_backup_path(),
             &record.catalog,
+            catalog_backup.as_deref(),
+            catalog_absent_owner,
             "generated catalog",
         )?;
         verify_snapshot_target(
@@ -1439,6 +1525,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 "catalog invalidation requires a durable catalog-disabled marker".to_string(),
             );
         }
+        self.verify_disabled_prefix(&record)?;
         let quarantine = self.catalog_quarantine_path(&record.transaction_id)?;
         safe_file::validate_confined_path(&quarantine, self.paths.runtime_root(), true)?;
         if path.exists() {
@@ -1448,19 +1535,24 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 MAX_CATALOG_SNAPSHOT_BYTES,
                 "catalog requiring fail-closed quarantine",
             )?;
-            if current == DISABLED_CATALOG && quarantine.exists() {
+            let quarantine_is_snapshot = quarantine.exists()
+                && self.confined_file_matches_snapshot(
+                    &quarantine,
+                    &record.catalog,
+                    MAX_CATALOG_SNAPSHOT_BYTES,
+                    "completed catalog quarantine evidence",
+                )?;
+            if current == DISABLED_CATALOG
+                && ((!record.catalog.existed && !quarantine.exists())
+                    || (record.catalog.existed && quarantine_is_snapshot))
+            {
                 return Ok(());
-            }
-            if quarantine.exists() {
-                return Err(format!(
-                    "catalog recovery quarantine already exists: {}",
-                    quarantine.display()
-                ));
             }
             let quarantined = safe_file::quarantine_private_text(
                 &path,
                 &quarantine,
                 self.paths.runtime_root(),
+                DISABLED_CATALOG,
                 MAX_CATALOG_SNAPSHOT_BYTES,
                 "catalog requiring fail-closed quarantine",
             )?;
@@ -1470,6 +1562,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                         .to_string(),
                 );
             }
+            transaction_fault("after-catalog-quarantine")?;
         }
         safe_file::write_private_text_atomic(&path, DISABLED_CATALOG, self.paths.runtime_root())
             .map_err(|error| {
@@ -1594,24 +1687,44 @@ fn restore_file(
     path: &Path,
     backup_path: &Path,
     snapshot: &FileSnapshot,
+    validated_backup: Option<&str>,
+    absent_snapshot_owner: Option<(&str, u64, u64)>,
     label: &str,
 ) -> Result<(), String> {
     if snapshot.existed {
-        let max_bytes = if label.contains("provider") {
-            MAX_PROVIDER_SNAPSHOT_BYTES
-        } else {
-            MAX_CATALOG_SNAPSHOT_BYTES
-        };
-        let contents = read_bounded(backup_path, max_bytes, &format!("{label} recovery backup"))?;
+        let contents = validated_backup.ok_or_else(|| {
+            format!("validated {label} recovery backup was not loaded before restore")
+        })?;
         let boundary = common_ancestor(path, backup_path)
             .ok_or_else(|| format!("failed to resolve trusted boundary for restored {label}"))?;
-        safe_file::write_private_text_atomic(path, &contents, boundary)
+        safe_file::write_private_text_atomic(path, contents, boundary)
             .map_err(|error| format!("failed to restore {label}: {error}"))?;
         return Ok(());
     }
-    if !path.exists() {
+    if validated_backup.is_some() {
+        return Err(format!(
+            "validated {label} recovery backup exists for an absent snapshot"
+        ));
+    }
+    if !path.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect newly created {label} before rollback: {error}"
+        )
+    })? {
         return Ok(());
     }
+    let (expected_hash, expected_bytes, max_bytes) = absent_snapshot_owner.ok_or_else(|| {
+        format!(
+            "refused to delete newly created {label} without an exact journaled candidate owner"
+        )
+    })?;
+    verify_file_identity(
+        path,
+        Some(expected_hash),
+        Some(expected_bytes),
+        max_bytes,
+        &format!("newly created {label} candidate before rollback deletion"),
+    )?;
     fs::remove_file(path)
         .map_err(|error| format!("failed to remove newly created {label}: {error}"))
 }
@@ -1819,32 +1932,38 @@ fn validate_sha256(value: Option<&str>, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_snapshot_backup(
+fn load_snapshot_backup(
     backup_path: &Path,
     snapshot: &FileSnapshot,
     max_bytes: u64,
     label: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if !snapshot.existed {
-        if backup_path.exists() {
+        if backup_path.try_exists().map_err(|error| {
+            format!(
+                "failed to inspect {label} recovery backup {}: {error}",
+                backup_path.display()
+            )
+        })? {
             return Err(format!(
                 "unexpected {label} recovery backup exists for an absent snapshot"
             ));
         }
-        return Ok(());
+        return Ok(None);
     }
-    if !file_matches_identity(
+    let contents = read_bounded(
         backup_path,
-        snapshot.sha256.as_deref(),
-        snapshot.bytes,
         max_bytes,
         &format!("{label} recovery backup"),
-    )? {
+    )?;
+    if snapshot.bytes != Some(contents.len() as u64)
+        || snapshot.sha256.as_deref() != Some(hash_bytes(contents.as_bytes()).as_str())
+    {
         return Err(format!(
             "{label} recovery backup identity did not match the journal"
         ));
     }
-    Ok(())
+    Ok(Some(contents))
 }
 
 fn verify_snapshot_target(
@@ -2297,7 +2416,7 @@ mod tests {
         validate_provider_catalog_revision, verify_catalog_for_providers, ProviderCatalogStore,
         ProviderCatalogRevision, ProviderCatalogTransactionOutcome, RecoveryAction,
         RecoveryRecordShape, RecoveryState, RecoveryTransition, RuntimeProviderCatalogStore,
-        RECOVERY_SCHEMA_VERSION,
+        DISABLED_CATALOG, RECOVERY_SCHEMA_VERSION,
     };
     use crate::{
         config, CapabilityBinding, CapabilityProfile, Model, Provider, QualificationState,
@@ -2459,6 +2578,24 @@ mod tests {
         assert_eq!(fs::read(paths.runtime_providers_path()).unwrap(), provider_bytes);
         assert_eq!(fs::read(paths.generated_catalog_path()).unwrap(), catalog_bytes);
         assert!(!paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_runtime_store_constructor_requires_the_shared_transaction_guard() {
+        let root = temp_root("runtime-store-construction-guard");
+        let paths = isolated_paths(&root);
+        let error = RuntimeProviderCatalogStore::new_guarded(paths.clone())
+            .err()
+            .expect("unguarded production construction must be rejected");
+        assert!(error.contains("cross-process transaction guard"));
+
+        super::with_transaction_guard_for_paths(&paths, || {
+            RuntimeProviderCatalogStore::new_guarded(paths.clone())
+                .map(|_| ())
+                .map_err(|error| format!("guarded construction failed: {error}"))
+        })
+        .unwrap();
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2935,6 +3072,97 @@ mod tests {
     }
 
     #[test]
+    fn rollback_publishes_only_backup_bytes_loaded_before_the_restore_boundary() {
+        let root = temp_root("rollback-immutable-backups");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_provider_bytes = fs::read(paths.runtime_providers_path()).unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &base_catalog);
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().expect("capture both base snapshots");
+        let candidate = provider(UpstreamFormat::ChatCompletions);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        let provider_backup = paths.provider_catalog_providers_backup_path();
+        let catalog_backup = paths.provider_catalog_catalog_backup_path();
+        super::install_test_pre_restore_publish_hook(move || {
+            fs::write(&provider_backup, "attacker-provider-backup").unwrap();
+            fs::write(&catalog_backup, "attacker-catalog-backup").unwrap();
+        });
+
+        let result = store.restore_pending();
+        super::clear_test_pre_restore_publish_hook();
+        result.expect("validated immutable backups must survive pathname replacement");
+
+        assert_eq!(
+            fs::read(paths.runtime_providers_path()).unwrap(),
+            base_provider_bytes,
+            "rollback must publish only the provider bytes validated before the hook"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+            base_catalog,
+            "rollback must publish only the catalog bytes validated before the hook"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_never_deletes_unjournaled_bytes_for_an_absent_base_snapshot() {
+        let root = temp_root("rollback-absent-snapshot-owner-cas");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a repository parent")
+            .to_path_buf();
+        let paths = config::ConfigPaths::new_isolated(
+            root.join("runtime"),
+            root.join("codex-target"),
+            repo_root,
+        );
+        assert!(!paths.runtime_providers_path().exists());
+        assert!(!paths.generated_catalog_path().exists());
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store
+            .prepare_recovery()
+            .expect("capture absent runtime provider and catalog snapshots");
+        let candidate = provider(UpstreamFormat::Responses);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        let live_provider = paths.runtime_providers_path();
+        super::install_test_pre_restore_publish_hook({
+            let live_provider = live_provider.clone();
+            move || {
+                fs::write(&live_provider, "unjournaled-external-provider-bytes").unwrap();
+            }
+        });
+
+        let error = store
+            .restore_pending()
+            .expect_err("an absent snapshot may delete only its exact journaled candidate");
+        super::clear_test_pre_restore_publish_hook();
+
+        assert!(error.contains("candidate") || error.contains("journal"));
+        assert_eq!(
+            fs::read_to_string(&live_provider).unwrap(),
+            "unjournaled-external-provider-bytes",
+            "rollback must not delete a replacement it does not own"
+        );
+        assert!(paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_transient_recovery_failure_durably_authorizes_the_disabled_catalog_before_retry() {
         let root = temp_root("runtime-disabled-retry");
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3023,6 +3251,280 @@ mod tests {
             candidate_provider_bytes
         );
         assert!(!paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_disabled_recovery_completes_after_crash_between_quarantine_and_sentinel() {
+        let root = temp_root("disabled-after-quarantine-crash");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a repository parent")
+            .to_path_buf();
+        let paths = config::ConfigPaths::new_isolated(
+            root.join("runtime"),
+            root.join("codex-target"),
+            repo_root,
+        );
+        let configured = provider(UpstreamFormat::Responses);
+        config::save_providers_with_paths(vec![configured], &paths).unwrap();
+        let original_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &original_catalog);
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store
+            .ensure_recovery_required()
+            .expect("publish durable catalog-disabled marker");
+        let record = store
+            .read_recovery()
+            .unwrap()
+            .expect("catalog-disabled marker");
+        let quarantine = store
+            .catalog_quarantine_path(&record.transaction_id)
+            .expect("transaction-owned quarantine path");
+
+        super::install_transaction_fault("after-catalog-quarantine");
+        let error = store
+            .invalidate_catalog()
+            .expect_err("fault must interrupt sentinel publication");
+        super::clear_transaction_fault();
+        assert!(error.contains("after-catalog-quarantine"));
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        assert!(
+            !paths.generated_catalog_path().exists(),
+            "the handle-bound rename crash prefix must leave the live catalog name absent"
+        );
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        assert_eq!(
+            fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+            DISABLED_CATALOG,
+            "the Linux exchange crash prefix must already expose the exact sentinel"
+        );
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            original_catalog,
+            "the exact authorized catalog must already be durable in quarantine"
+        );
+        drop(store);
+
+        let mut restarted = RuntimeProviderCatalogStore::new(paths.clone());
+        restarted
+            .recover_pending()
+            .expect("restart must complete sentinel publication and regeneration");
+        let providers = restarted.current_providers().unwrap();
+        let models = restarted.current_catalog().unwrap();
+        verify_catalog_for_providers(&models, &providers).unwrap();
+        assert!(!paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_disabled_prefix_accepts_an_originally_absent_catalog_without_quarantine() {
+        let root = temp_root("disabled-originally-absent");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        fs::create_dir_all(
+            paths
+                .generated_catalog_path()
+                .parent()
+                .expect("catalog parent"),
+        )
+        .unwrap();
+        assert!(!paths.generated_catalog_path().exists());
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store
+            .ensure_recovery_required()
+            .expect("authorize an absent catalog");
+        let record = store
+            .read_recovery()
+            .unwrap()
+            .expect("catalog-disabled marker");
+        assert!(!record.catalog.existed);
+        store
+            .verify_disabled_prefix(&record)
+            .expect("the initial absent prefix is legal");
+        store
+            .invalidate_catalog()
+            .expect("an absent catalog publishes only the sentinel");
+        let record = store
+            .read_recovery()
+            .unwrap()
+            .expect("marker remains until regeneration");
+        store
+            .verify_disabled_prefix(&record)
+            .expect("the completed absent prefix is legal");
+        assert_eq!(
+            fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+            DISABLED_CATALOG
+        );
+        let quarantine = store
+            .catalog_quarantine_path(&record.transaction_id)
+            .unwrap();
+        assert!(!quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_disabled_prefix_rejects_mismatched_quarantine_without_clearing_the_marker() {
+        let root = temp_root("disabled-mismatched-quarantine");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let original_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &original_catalog);
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store
+            .ensure_recovery_required()
+            .expect("publish catalog-disabled marker");
+        let record = store.read_recovery().unwrap().expect("marker");
+        let quarantine = store
+            .catalog_quarantine_path(&record.transaction_id)
+            .unwrap();
+        write_fixture(&paths.generated_catalog_path(), DISABLED_CATALOG);
+        write_fixture(&quarantine, "unjournaled-replacement-evidence");
+
+        let error = store
+            .recover_pending()
+            .expect_err("mismatched quarantine evidence must fail closed");
+
+        assert!(error.contains("authorized crash prefix"));
+        assert!(paths.provider_catalog_recovery_path().exists());
+        assert_eq!(
+            fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+            DISABLED_CATALOG
+        );
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "unjournaled-replacement-evidence"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn catalog_disabled_exchange_crash_prefixes_recover_to_a_generated_catalog() {
+        for phase in [
+            "placeholder-publish",
+            "after-placeholder",
+            "before-exchange",
+            "exchange",
+            "after-exchange",
+        ] {
+            let root = temp_root(&format!("disabled-linux-{phase}"));
+            let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("src-tauri has a repository parent")
+                .to_path_buf();
+            let paths = config::ConfigPaths::new_isolated(
+                root.join("runtime"),
+                root.join("codex-target"),
+                repo_root,
+            );
+            config::save_providers_with_paths(
+                vec![provider(UpstreamFormat::Responses)],
+                &paths,
+            )
+            .unwrap();
+            let original_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+            write_fixture(&paths.generated_catalog_path(), &original_catalog);
+            let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+            store.ensure_recovery_required().unwrap();
+
+            crate::safe_file::install_test_private_quarantine_fault(phase);
+            let error = store
+                .invalidate_catalog()
+                .expect_err("the injected Linux exchange fault must interrupt invalidation");
+            crate::safe_file::clear_test_private_quarantine_fault();
+            assert!(error.contains(phase));
+            drop(store);
+
+            let mut restarted = RuntimeProviderCatalogStore::new(paths.clone());
+            restarted
+                .recover_pending()
+                .unwrap_or_else(|error| panic!("phase {phase} failed recovery: {error}"));
+            let providers = restarted.current_providers().unwrap();
+            let models = restarted.current_catalog().unwrap();
+            verify_catalog_for_providers(&models, &providers).unwrap();
+            assert!(!paths.provider_catalog_recovery_path().exists());
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn catalog_disabled_inode_mismatch_preserves_evidence_and_blocks_recovery() {
+        let root = temp_root("disabled-linux-inode-mismatch");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let original_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        let catalog = paths.generated_catalog_path();
+        write_fixture(&catalog, &original_catalog);
+        let displaced = catalog.with_file_name("catalog.original");
+        let replacement = catalog.with_file_name("catalog.replacement");
+        fs::write(&replacement, "one-shot-replacement").unwrap();
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.ensure_recovery_required().unwrap();
+        let record = store.read_recovery().unwrap().expect("marker");
+        let quarantine = store
+            .catalog_quarantine_path(&record.transaction_id)
+            .unwrap();
+        crate::safe_file::install_test_pre_private_quarantine_rename_hook({
+            let catalog = catalog.clone();
+            let displaced = displaced.clone();
+            let replacement = replacement.clone();
+            move |_| {
+                fs::rename(&catalog, &displaced).unwrap();
+                fs::rename(&replacement, &catalog).unwrap();
+            }
+        });
+
+        let error = store
+            .invalidate_catalog()
+            .expect_err("a losing source inode must never report success");
+        crate::safe_file::clear_test_pre_private_quarantine_rename_hook();
+        assert!(error.contains("identity"));
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), DISABLED_CATALOG);
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "one-shot-replacement"
+        );
+        assert_eq!(fs::read_to_string(&displaced).unwrap(), original_catalog);
+        assert!(paths.provider_catalog_recovery_path().exists());
+
+        let recovery_error = store
+            .recover_pending()
+            .expect_err("mismatched evidence must block regeneration");
+        assert!(recovery_error.contains("authorized crash prefix"));
+        assert!(paths.provider_catalog_recovery_path().exists());
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), DISABLED_CATALOG);
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "one-shot-replacement"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

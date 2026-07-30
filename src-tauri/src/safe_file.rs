@@ -20,6 +20,12 @@ thread_local! {
     static TEST_PRE_OPEN_EXISTING_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
     static TEST_PRE_PRIVATE_PUBLISH_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
     static TEST_PRE_PRIVATE_QUARANTINE_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
+    #[cfg(target_os = "linux")]
+    static TEST_PRE_PRIVATE_QUARANTINE_RENAME_HOOK: RefCell<Option<TestPreOpenHook>> =
+        RefCell::new(None);
+    #[cfg(target_os = "linux")]
+    static TEST_PRIVATE_QUARANTINE_FAULT_PHASE: RefCell<Option<&'static str>> =
+        const { RefCell::new(None) };
 }
 
 /// Test-only hook invoked from the lock-acquisition seam. The event argument is
@@ -85,8 +91,55 @@ fn invoke_test_pre_private_quarantine_hook(path: &Path) {
     });
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn install_test_pre_private_quarantine_rename_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_PRE_PRIVATE_QUARANTINE_RENAME_HOOK
+        .with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn clear_test_pre_private_quarantine_rename_hook() {
+    TEST_PRE_PRIVATE_QUARANTINE_RENAME_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn invoke_test_pre_private_quarantine_rename_hook(path: &Path) {
+    TEST_PRE_PRIVATE_QUARANTINE_RENAME_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn install_test_private_quarantine_fault(phase: &'static str) {
+    TEST_PRIVATE_QUARANTINE_FAULT_PHASE.with(|slot| *slot.borrow_mut() = Some(phase));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn clear_test_private_quarantine_fault() {
+    TEST_PRIVATE_QUARANTINE_FAULT_PHASE.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn private_quarantine_fault(phase: &'static str) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_PRIVATE_QUARANTINE_FAULT_PHASE
+        .with(|slot| slot.borrow().as_ref() == Some(&phase))
+    {
+        return Err(format!("injected private quarantine fault at {phase}"));
+    }
+    let _ = phase;
+    Ok(())
+}
+
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+static NEXT_TEMP_NONCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 // Versioned lock record. Anything else is fail-closed:
 // - unknown/future versions -> never recovered (fail closed);
 // - legacy pid/timestamp records -> recovered only when the PID is provably
@@ -130,6 +183,7 @@ mod unix_private_io {
     pub(crate) const O_NOFOLLOW: i32 = 0x2_0000;
     pub(crate) const O_CLOEXEC: i32 = 0x8_0000;
     pub(crate) const RENAME_NOREPLACE: u32 = 1;
+    pub(crate) const RENAME_EXCHANGE: u32 = 2;
     #[cfg(target_arch = "x86_64")]
     pub(crate) const SYS_RENAMEAT2: isize = 316;
     #[cfg(target_arch = "aarch64")]
@@ -167,14 +221,25 @@ pub(crate) fn write_private_text_atomic(
     write_text_locked_impl(path, text, &lock, Some(&pinned_parent))
 }
 
-/// Move a private text file to a quarantine name without releasing the
-/// validated parent directory. Both the read and rename are relative to the
-/// retained parent handle/dirfd, so a pathname swap cannot redirect either
-/// operation to another directory.
+/// Quarantine a private text file while retaining the original bytes under a
+/// transaction-owned name. Supported Linux targets atomically replace the
+/// live entry with the supplied exact sentinel; other targets complete the
+/// sentinel publication in the guarded caller immediately afterward.
+///
+/// The retained parent handle/dirfd prevents parent-path substitution from
+/// escaping the validated directory. Production callers additionally hold the
+/// shared provider/catalog transaction guard, which serializes cooperative
+/// CodexHub writers. On supported Linux targets, an atomic exchange plus inode
+/// readback detects a one-shot source-entry substitution and preserves the
+/// substituted bytes as evidence. This is not an atomic conditional rename
+/// against an arbitrary same-principal process that can continuously rewrite
+/// entries in the directory; that stronger broker/ownership boundary is
+/// intentionally outside this contract.
 pub(crate) fn quarantine_private_text(
     source: &Path,
     quarantine: &Path,
     boundary: &Path,
+    replacement: &str,
     max_bytes: u64,
     label: &str,
 ) -> Result<String, String> {
@@ -183,10 +248,9 @@ pub(crate) fn quarantine_private_text(
     }
     validate_confined_path(source, boundary, false)?;
     validate_confined_path(quarantine, boundary, true)?;
-    if quarantine.exists() {
+    if replacement.len() as u64 > max_bytes {
         return Err(format!(
-            "private quarantine destination already exists: {}",
-            quarantine.display()
+            "{label} replacement exceeds the size limit of {max_bytes} bytes"
         ));
     }
     let parent = PinnedPrivateParent::open(source, boundary)?;
@@ -198,18 +262,135 @@ pub(crate) fn quarantine_private_text(
     let text = read_opened_single_link_text(&mut opened, source, max_bytes, label)?;
     let opened_identity = lock_file_identity(&opened)
         .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
-    parent.rename_existing(&mut opened, source, quarantine)?;
-    let quarantined = parent.open_existing(quarantine).map_err(|error| {
-        format!("failed to read back quarantined {label} through its pinned parent: {error}")
-    })?;
-    let quarantined_identity = lock_file_identity(&quarantined)
-        .map_err(|_| format!("quarantined {label} is not a stable regular single-link file"))?;
-    if quarantined_identity != opened_identity {
-        return Err(format!(
-            "quarantined {label} identity did not match the opened source"
-        ));
+    #[cfg(all(test, target_os = "linux"))]
+    invoke_test_pre_private_quarantine_rename_hook(source);
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        let placeholder = match parent.open_existing(quarantine) {
+            Ok(mut placeholder) => {
+                let contents = read_opened_single_link_text(
+                    &mut placeholder,
+                    quarantine,
+                    max_bytes,
+                    "private quarantine replacement placeholder",
+                )?;
+                if contents != replacement {
+                    return Err(format!(
+                        "private quarantine destination already exists with bytes other than the exact replacement sentinel: {}",
+                        quarantine.display()
+                    ));
+                }
+                placeholder
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let placeholder_temp = unique_temp_path(quarantine);
+                let mut placeholder = parent.create_temp(&placeholder_temp).map_err(|error| {
+                    format!(
+                        "failed to create private quarantine replacement placeholder temp {}: {error}",
+                        placeholder_temp.display()
+                    )
+                })?;
+                placeholder
+                    .write_all(replacement.as_bytes())
+                    .and_then(|_| placeholder.sync_all())
+                    .map_err(|error| {
+                        format!(
+                            "failed to persist private quarantine replacement placeholder temp {}: {error}",
+                            placeholder_temp.display()
+                        )
+                    })?;
+                let metadata = placeholder.metadata().map_err(|error| {
+                    format!(
+                        "failed to inspect private quarantine replacement placeholder temp {}: {error}",
+                        placeholder_temp.display()
+                    )
+                })?;
+                validate_regular_single_link(&metadata, &placeholder_temp)?;
+                parent.publish_new(&placeholder_temp, quarantine)?;
+                placeholder
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect private quarantine destination {} through its pinned parent: {error}",
+                    quarantine.display()
+                ));
+            }
+        };
+        let placeholder_identity = lock_file_identity(&placeholder).map_err(|_| {
+            "private quarantine replacement placeholder is not a stable regular single-link file"
+                .to_string()
+        })?;
+        private_quarantine_fault("after-placeholder")?;
+        private_quarantine_fault("before-exchange")?;
+        parent.exchange_existing(source, quarantine)?;
+        private_quarantine_fault("after-exchange")?;
+
+        let mut live = parent.open_existing(source).map_err(|error| {
+            format!(
+                "failed to read back private replacement sentinel through its pinned parent: {error}"
+            )
+        })?;
+        let live_text = read_opened_single_link_text(
+            &mut live,
+            source,
+            max_bytes,
+            "private replacement sentinel",
+        )?;
+        let live_identity = lock_file_identity(&live).map_err(|_| {
+            "private replacement sentinel is not a stable regular single-link file".to_string()
+        })?;
+        if live_text != replacement || live_identity != placeholder_identity {
+            return Err(format!(
+                "private replacement sentinel identity or bytes changed after atomic exchange; quarantine evidence was preserved at {}",
+                quarantine.display()
+            ));
+        }
+
+        let quarantined = parent.open_existing(quarantine).map_err(|error| {
+            format!(
+                "failed to read back quarantined {label} through its pinned parent: {error}"
+            )
+        })?;
+        let quarantined_identity = lock_file_identity(&quarantined)
+            .map_err(|_| format!("quarantined {label} is not a stable regular single-link file"))?;
+        if quarantined_identity != opened_identity {
+            return Err(format!(
+                "quarantined {label} identity did not match the opened source; replacement evidence was preserved at {}",
+                quarantine.display()
+            ));
+        }
+        return Ok(text);
     }
-    Ok(text)
+
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        let _ = replacement;
+        if quarantine.exists() {
+            return Err(format!(
+                "private quarantine destination already exists: {}",
+                quarantine.display()
+            ));
+        }
+        parent.rename_existing(&mut opened, source, quarantine)?;
+        let quarantined = parent.open_existing(quarantine).map_err(|error| {
+            format!("failed to read back quarantined {label} through its pinned parent: {error}")
+        })?;
+        let quarantined_identity = lock_file_identity(&quarantined)
+            .map_err(|_| format!("quarantined {label} is not a stable regular single-link file"))?;
+        if quarantined_identity != opened_identity {
+            return Err(format!(
+                "quarantined {label} identity did not match the opened source"
+            ));
+        }
+        Ok(text)
+    }
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -430,6 +611,10 @@ impl PinnedPrivateParent {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     fn rename_existing(
         &self,
         _opened: &mut File,
@@ -454,27 +639,6 @@ impl PinnedPrivateParent {
                 .as_bytes(),
         )
         .map_err(|_| "private quarantine target name contains a NUL byte".to_string())?;
-        #[cfg(all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ))]
-        let rename_result = unsafe {
-            syscall(
-                unix_private_io::SYS_RENAMEAT2,
-                self.directory.as_raw_fd(),
-                source_name.as_ptr(),
-                self.directory.as_raw_fd(),
-                target_name.as_ptr(),
-                unix_private_io::RENAME_NOREPLACE,
-            ) as i32
-        };
-        #[cfg(any(
-            not(target_os = "linux"),
-            all(
-                target_os = "linux",
-                not(any(target_arch = "x86_64", target_arch = "aarch64"))
-            )
-        ))]
         let rename_result = unsafe {
             renameat(
                 self.directory.as_raw_fd(),
@@ -494,6 +658,104 @@ impl PinnedPrivateParent {
         self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to flush private file parent {}: {error}",
+                self.parent_path.display()
+            )
+        })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn exchange_existing(&self, source_path: &Path, target_path: &Path) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        private_quarantine_fault("exchange")?;
+        let source_name = CString::new(
+            source_path
+                .file_name()
+                .ok_or_else(|| "private exchange source has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private exchange source name contains a NUL byte".to_string())?;
+        let target_name = CString::new(
+            target_path
+                .file_name()
+                .ok_or_else(|| "private exchange target has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private exchange target name contains a NUL byte".to_string())?;
+        let exchange_result = unsafe {
+            syscall(
+                unix_private_io::SYS_RENAMEAT2,
+                self.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                self.directory.as_raw_fd(),
+                target_name.as_ptr(),
+                unix_private_io::RENAME_EXCHANGE,
+            ) as i32
+        };
+        if exchange_result != 0 {
+            return Err(format!(
+                "failed to atomically exchange private file with its replacement in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.directory.sync_all().map_err(|error| {
+            format!(
+                "failed to flush private exchange parent {}: {error}",
+                self.parent_path.display()
+            )
+        })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn publish_new(&self, source_path: &Path, target_path: &Path) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        private_quarantine_fault("placeholder-publish")?;
+        let source_name = CString::new(
+            source_path
+                .file_name()
+                .ok_or_else(|| "private placeholder temp has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private placeholder temp name contains a NUL byte".to_string())?;
+        let target_name = CString::new(
+            target_path
+                .file_name()
+                .ok_or_else(|| "private placeholder target has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private placeholder target name contains a NUL byte".to_string())?;
+        let publish_result = unsafe {
+            syscall(
+                unix_private_io::SYS_RENAMEAT2,
+                self.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                self.directory.as_raw_fd(),
+                target_name.as_ptr(),
+                unix_private_io::RENAME_NOREPLACE,
+            ) as i32
+        };
+        if publish_result != 0 {
+            return Err(format!(
+                "failed to publish private replacement placeholder without replacing evidence in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.directory.sync_all().map_err(|error| {
+            format!(
+                "failed to flush private placeholder parent {}: {error}",
                 self.parent_path.display()
             )
         })
@@ -1117,12 +1379,13 @@ pub(crate) fn security_descriptor_sddl(path: &Path) -> Result<String, String> {
 
 fn unique_temp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
-        ".{}.{}.{}.tmp-codexhub",
+        ".{}.{}.{}.{}.tmp-codexhub",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("file"),
         std::process::id(),
-        timestamp_millis()
+        timestamp_millis(),
+        NEXT_TEMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
 }
 
@@ -1905,6 +2168,11 @@ mod tests {
         write_private_text_atomic, write_text_atomic, write_text_locked, FileLock, LockState,
         LOCK_PROTOCOL,
     };
+    #[cfg(target_os = "linux")]
+    use super::{
+        clear_test_pre_private_quarantine_rename_hook, clear_test_private_quarantine_fault,
+        install_test_pre_private_quarantine_rename_hook, install_test_private_quarantine_fault,
+    };
     use std::{
         fs,
         io::{BufRead, Read, Write},
@@ -2048,6 +2316,7 @@ mod tests {
             &source,
             &quarantine,
             &root,
+            "disabled-sentinel",
             1024,
             "generated catalog quarantine",
         );
@@ -2071,6 +2340,193 @@ mod tests {
             fs::read_to_string(moved_parent.join("catalog.json.recovery.quarantine")).unwrap(),
             "transaction-owned-catalog"
         );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("catalog.json")).unwrap(),
+            "disabled-sentinel"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn private_quarantine_installs_sentinel_and_preserves_replacement_evidence_on_inode_mismatch() {
+        let root = test_root("private-quarantine-source-inode-race");
+        let parent = root.join("owned");
+        let source = parent.join("catalog.json");
+        let displaced = parent.join("catalog.original");
+        let replacement = parent.join("catalog.replacement");
+        let quarantine = parent.join("catalog.quarantine");
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(&source, "transaction-owned-catalog").unwrap();
+        fs::write(&replacement, "attacker-replacement").unwrap();
+        let source_for_hook = source.clone();
+        let displaced_for_hook = displaced.clone();
+        let replacement_for_hook = replacement.clone();
+        install_test_pre_private_quarantine_rename_hook(move |_| {
+            fs::rename(&source_for_hook, &displaced_for_hook).unwrap();
+            fs::rename(&replacement_for_hook, &source_for_hook).unwrap();
+        });
+
+        let error = quarantine_private_text(
+            &source,
+            &quarantine,
+            &root,
+            "disabled-sentinel",
+            1024,
+            "source inode race",
+        )
+        .expect_err("a replacement source inode must never be quarantined");
+        clear_test_pre_private_quarantine_rename_hook();
+
+        assert!(error.contains("identity"));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "disabled-sentinel");
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "attacker-replacement",
+            "the losing source entry must remain byte-for-byte as transaction evidence"
+        );
+        assert_eq!(
+            fs::read_to_string(&displaced).unwrap(),
+            "transaction-owned-catalog"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn private_quarantine_placeholder_publish_failure_keeps_the_initial_prefix_retryable() {
+        let root = test_root("private-quarantine-placeholder-publish");
+        let source = root.join("catalog.json");
+        let quarantine = root.join("catalog.quarantine");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, "transaction-owned-catalog").unwrap();
+
+        install_test_private_quarantine_fault("placeholder-publish");
+        let error = quarantine_private_text(
+            &source,
+            &quarantine,
+            &root,
+            "disabled-sentinel",
+            1024,
+            "placeholder publication failure",
+        )
+        .expect_err("the injected no-replace publication fault must interrupt invalidation");
+        clear_test_private_quarantine_fault();
+        assert!(error.contains("placeholder-publish"));
+        assert_eq!(
+            fs::read_to_string(&source).unwrap(),
+            "transaction-owned-catalog"
+        );
+        assert!(!quarantine.exists());
+
+        let readback = quarantine_private_text(
+            &source,
+            &quarantine,
+            &root,
+            "disabled-sentinel",
+            1024,
+            "placeholder publication failure",
+        )
+        .expect("the untouched initial prefix must retry");
+        assert_eq!(readback, "transaction-owned-catalog");
+        assert_eq!(fs::read_to_string(&source).unwrap(), "disabled-sentinel");
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "transaction-owned-catalog"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn private_quarantine_resumes_exact_pre_exchange_placeholder_prefixes() {
+        for phase in ["after-placeholder", "before-exchange", "exchange"] {
+            let root = test_root(&format!("private-quarantine-{phase}"));
+            let source = root.join("catalog.json");
+            let quarantine = root.join("catalog.quarantine");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(&source, "transaction-owned-catalog").unwrap();
+
+            install_test_private_quarantine_fault(phase);
+            let error = quarantine_private_text(
+                &source,
+                &quarantine,
+                &root,
+                "disabled-sentinel",
+                1024,
+                "pre-exchange crash prefix",
+            )
+            .expect_err("the injected pre-exchange fault must interrupt publication");
+            clear_test_private_quarantine_fault();
+            assert!(error.contains(phase));
+            assert_eq!(
+                fs::read_to_string(&source).unwrap(),
+                "transaction-owned-catalog"
+            );
+            assert_eq!(
+                fs::read_to_string(&quarantine).unwrap(),
+                "disabled-sentinel"
+            );
+
+            let readback = quarantine_private_text(
+                &source,
+                &quarantine,
+                &root,
+                "disabled-sentinel",
+                1024,
+                "pre-exchange crash prefix",
+            )
+            .expect("an exact placeholder prefix must resume");
+            assert_eq!(readback, "transaction-owned-catalog");
+            assert_eq!(fs::read_to_string(&source).unwrap(), "disabled-sentinel");
+            assert_eq!(
+                fs::read_to_string(&quarantine).unwrap(),
+                "transaction-owned-catalog"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn private_quarantine_post_exchange_fault_preserves_the_completed_prefix() {
+        let root = test_root("private-quarantine-after-exchange");
+        let source = root.join("catalog.json");
+        let quarantine = root.join("catalog.quarantine");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, "transaction-owned-catalog").unwrap();
+
+        install_test_private_quarantine_fault("after-exchange");
+        let error = quarantine_private_text(
+            &source,
+            &quarantine,
+            &root,
+            "disabled-sentinel",
+            1024,
+            "post-exchange crash prefix",
+        )
+        .expect_err("the injected post-exchange fault must interrupt readback");
+        clear_test_private_quarantine_fault();
+
+        assert!(error.contains("after-exchange"));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "disabled-sentinel");
+        assert_eq!(
+            fs::read_to_string(&quarantine).unwrap(),
+            "transaction-owned-catalog"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2087,6 +2543,7 @@ mod tests {
             &collision_source,
             &collision_target,
             &collision_root,
+            "disabled-sentinel",
             1024,
             "collision source",
         )
@@ -2113,6 +2570,7 @@ mod tests {
             &collision_race_source,
             &collision_race_target,
             &collision_race_root,
+            "disabled-sentinel",
             1024,
             "collision race source",
         )
@@ -2139,6 +2597,7 @@ mod tests {
             &oversize_source,
             &oversize_parent.join("catalog.json.quarantine"),
             &oversize_root,
+            "disabled-sentinel",
             3,
             "oversize source",
         )
@@ -2176,6 +2635,7 @@ mod tests {
             &link_source,
             &link_root.join("catalog-link.quarantine"),
             &link_root,
+            "disabled-sentinel",
             1024,
             "linked source",
         )
