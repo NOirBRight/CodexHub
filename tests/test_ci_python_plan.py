@@ -507,21 +507,21 @@ def test_ci_yaml_windows_jobs_use_verified_preinstalled_toolchains():
         assert "Rust 1.97.1 is required." in job
 
 
-def test_ci_yaml_rust_caches_exclude_build_outputs():
+def test_ci_yaml_rust_jobs_do_not_use_remote_cargo_caches():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    expected_key_prefixes = {
-        "rust-tests": "cargo-deps-v2-test-",
-        "rust-clippy": "cargo-deps-v2-clippy-",
-    }
-    for job_name, key_prefix in expected_key_prefixes.items():
+    rust_tests = _workflow_job_text(workflow_text, "rust-tests")
+    assert "- normal" in rust_tests
+    assert "- debug" in rust_tests
+
+    for job_name in ("rust-tests", "rust-clippy"):
         job = _workflow_job_text(workflow_text, job_name)
-        assert "uses: actions/cache@v4" in job
-        assert "~/.cargo/registry" in job
-        assert "~/.cargo/git" in job
-        assert key_prefix in job
-        assert "src-tauri/target" not in job
+        assert "actions/cache" not in job, job_name
+        assert "Cache cargo artifacts" not in job, job_name
+        assert "~/.cargo/registry" not in job, job_name
+        assert "~/.cargo/git" not in job, job_name
+        assert "src-tauri/target" not in job, job_name
 
 
 def test_ci_yaml_final_jobs_have_explicit_safety_timeouts():

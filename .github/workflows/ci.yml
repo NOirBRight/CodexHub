@@ -277,16 +277,6 @@ jobs:
           if ($version -notlike "rustc 1.97.1 *") { throw "Rust 1.97.1 is required." }
           cargo --version
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-deps-v2-test-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-deps-v2-test-
-
       - name: Prepare Tauri resource placeholder
         run: |
           New-Item -ItemType Directory -Force resources/python | Out-Null
@@ -415,16 +405,6 @@ jobs:
             throw "The clippy component is required."
           }
           cargo --version
-
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-deps-v2-clippy-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-deps-v2-clippy-
 
       - name: Prepare Tauri resource placeholder
         run: |
