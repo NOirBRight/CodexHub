@@ -339,6 +339,109 @@ class ConfigOverlayTests(unittest.TestCase):
             config_overlay.takeover_metadata_path(backup_path),
         )
 
+    def _active_takeover_reanchor_journal(
+        self,
+        root: Path,
+        recovery_phase: str,
+    ) -> dict[str, Path]:
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'model = "ollama-cloud/glm-5.2"\n',
+            "",
+        )
+        config_path = root / "config.toml"
+        stable_backup_path = root / "stable.backup.toml"
+        beta_backup_path = root / "beta.backup.toml"
+        metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+        completion_path = config_overlay.takeover_completion_path(beta_backup_path)
+        state_path = root / "context-guard-state.json"
+        config_path.write_text(original, encoding="utf-8")
+        catalog_path = self._official_budget_catalog(root)
+        apply_overlay(
+            config_path,
+            stable_backup_path,
+            None,
+            "http://127.0.0.1:9099",
+            owner="release",
+        )
+        apply_overlay(
+            config_path,
+            beta_backup_path,
+            None,
+            "http://127.0.0.1:9109",
+            owner="beta",
+            takeover=True,
+        )
+        recovery_base = beta_backup_path.read_bytes()
+        real_atomic_write = config_overlay.atomic_write_text
+
+        def stop_at_reanchor_phase(
+            path: Path,
+            text: str,
+            *,
+            encoding: str = "utf-8",
+        ) -> None:
+            real_atomic_write(path, text, encoding=encoding)
+            journal_published = (
+                path == metadata_path
+                and '"reanchor_recovery_sha256"' in text
+            )
+            candidate_published = (
+                recovery_phase == "candidate"
+                and path == beta_backup_path
+            )
+            if (
+                recovery_phase == "base"
+                and journal_published
+            ) or candidate_published:
+                raise OSError(f"simulated durable {recovery_phase} recovery")
+
+        with patch(
+            "config_overlay.atomic_write_text",
+            stop_at_reanchor_phase,
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                f"durable {recovery_phase} recovery",
+            ):
+                set_context_guard(
+                    config_path,
+                    beta_backup_path,
+                    state_path,
+                    enabled=True,
+                    catalog_path=catalog_path,
+                )
+
+        if recovery_phase == "base":
+            self.assertEqual(beta_backup_path.read_bytes(), recovery_base)
+        else:
+            self.assertNotEqual(beta_backup_path.read_bytes(), recovery_base)
+        journal_read = config_overlay.read_takeover_metadata(beta_backup_path)
+        self.assertIs(
+            journal_read.state,
+            config_overlay.TakeoverRecordState.VALID,
+        )
+        self.assertIsNotNone(
+            journal_read.metadata.reanchor_recovery_sha256
+            if journal_read.metadata is not None
+            else None
+        )
+        return {
+            "config": config_path,
+            "stable_backup": stable_backup_path,
+            "backup": beta_backup_path,
+            "metadata": metadata_path,
+            "completion": completion_path,
+            "state": state_path,
+            "catalog": catalog_path,
+        }
+
+    @staticmethod
+    def _artifact_bytes(paths: tuple[Path, ...]) -> dict[Path, bytes | None]:
+        return {
+            path: path.read_bytes() if path.exists() else None
+            for path in paths
+        }
+
     def _unowned_with_pending_unified_cleanup(
         self,
         root: Path,
@@ -3105,6 +3208,7 @@ class ConfigOverlayTests(unittest.TestCase):
         valid_reanchor = {
             **valid_active,
             "reanchor_recovery_sha256": "2" * 64,
+            "reanchor_live_sha256": "3" * 64,
         }
 
         def changed(payload: dict[str, object], **updates: object) -> str:
@@ -3178,9 +3282,33 @@ class ConfigOverlayTests(unittest.TestCase):
                 valid_reanchor,
                 reanchor_recovery_sha256="not-a-digest",
             ),
+            "malformed_reanchor_live_digest": changed(
+                valid_reanchor,
+                reanchor_live_sha256="not-a-digest",
+            ),
             "uppercase_reanchor_digest": changed(
                 valid_reanchor,
                 reanchor_recovery_sha256="A" * 64,
+            ),
+            "uppercase_reanchor_live_digest": changed(
+                valid_reanchor,
+                reanchor_live_sha256="A" * 64,
+            ),
+            "missing_reanchor_recovery_digest": json.dumps(
+                {
+                    key: value
+                    for key, value in valid_reanchor.items()
+                    if key != "reanchor_recovery_sha256"
+                },
+                sort_keys=True,
+            ),
+            "missing_reanchor_live_digest": json.dumps(
+                {
+                    key: value
+                    for key, value in valid_reanchor.items()
+                    if key != "reanchor_live_sha256"
+                },
+                sort_keys=True,
             ),
             "future_reanchor_version": changed(
                 valid_reanchor,
@@ -3218,7 +3346,10 @@ class ConfigOverlayTests(unittest.TestCase):
                     ),
                     (
                         valid_reanchor,
-                        ("reanchor_recovery_sha256",),
+                        (
+                            "reanchor_recovery_sha256",
+                            "reanchor_live_sha256",
+                        ),
                     ),
                 )
                 for key in keys
@@ -3432,6 +3563,159 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(metadata_path.read_bytes(), metadata_before)
             self.assertEqual(state_path.read_bytes(), state_before)
             self.assertFalse(completion_path.exists())
+
+    def test_fresh_process_reanchor_preflight_rejects_live_drift_without_mutation(self):
+        cases = (
+            ("restore", "base", "raw"),
+            ("restore", "base", "owner"),
+            ("restore", "candidate", "raw"),
+            ("restore", "candidate", "owner"),
+            ("managed_apply", "base", "raw"),
+            ("managed_apply", "base", "owner"),
+            ("managed_apply", "candidate", "raw"),
+            ("managed_apply", "candidate", "owner"),
+        )
+
+        for operation, recovery_phase, live_drift in cases:
+            with (
+                self.subTest(
+                    operation=operation,
+                    recovery_phase=recovery_phase,
+                    live_drift=live_drift,
+                ),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                paths = self._active_takeover_reanchor_journal(
+                    Path(tmpdir),
+                    recovery_phase,
+                )
+                live = paths["config"].read_bytes()
+                if live_drift == "raw":
+                    paths["config"].write_bytes(live + b"# unknown live drift\n")
+                else:
+                    self.assertIn(b"# owner = beta", live)
+                    paths["config"].write_bytes(
+                        live.replace(
+                            b"# owner = beta",
+                            b"# owner = release",
+                            1,
+                        )
+                    )
+                artifact_paths = (
+                    paths["config"],
+                    paths["stable_backup"],
+                    paths["backup"],
+                    paths["metadata"],
+                    paths["completion"],
+                    paths["state"],
+                )
+                before = self._artifact_bytes(artifact_paths)
+                command = [
+                    sys.executable,
+                    "-m",
+                    "config_overlay",
+                    operation.replace("managed_", ""),
+                    "--config",
+                    str(paths["config"]),
+                    "--backup",
+                    str(paths["backup"]),
+                ]
+                if operation == "restore":
+                    command.append("--unified-history")
+                else:
+                    command.extend(
+                        [
+                            "--base-url",
+                            "http://127.0.0.1:9109",
+                            "--owner",
+                            "beta",
+                        ]
+                    )
+
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=self._subprocess_env(),
+                    timeout=10,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "live config is missing or diverged",
+                    result.stderr,
+                )
+                self.assertEqual(self._artifact_bytes(artifact_paths), before)
+
+    def test_fresh_process_reanchor_preflight_rejects_completion_without_mutation(self):
+        for operation in ("restore", "managed_apply"):
+            for recovery_phase in ("base", "candidate"):
+                with (
+                    self.subTest(
+                        operation=operation,
+                        recovery_phase=recovery_phase,
+                    ),
+                    tempfile.TemporaryDirectory() as tmpdir,
+                ):
+                    paths = self._active_takeover_reanchor_journal(
+                        Path(tmpdir),
+                        recovery_phase,
+                    )
+                    config_overlay.write_takeover_completion_receipt(
+                        paths["backup"],
+                        config_overlay.TakeoverCompletionReceipt(
+                            takeover_owner="beta",
+                            original_owner="release",
+                            final_sha256="0" * 64,
+                            same_owner_backup_sha256="1" * 64,
+                            status="restored_takeover_backup",
+                        ),
+                    )
+                    artifact_paths = (
+                        paths["config"],
+                        paths["stable_backup"],
+                        paths["backup"],
+                        paths["metadata"],
+                        paths["completion"],
+                        paths["state"],
+                    )
+                    before = self._artifact_bytes(artifact_paths)
+                    command = [
+                        sys.executable,
+                        "-m",
+                        "config_overlay",
+                        operation.replace("managed_", ""),
+                        "--config",
+                        str(paths["config"]),
+                        "--backup",
+                        str(paths["backup"]),
+                    ]
+                    if operation == "restore":
+                        command.append("--unified-history")
+                    else:
+                        command.extend(
+                            [
+                                "--base-url",
+                                "http://127.0.0.1:9109",
+                                "--owner",
+                                "beta",
+                            ]
+                        )
+
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        env=self._subprocess_env(),
+                        timeout=10,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        "takeover re-anchor completion is inconsistent",
+                        result.stderr,
+                    )
+                    self.assertEqual(self._artifact_bytes(artifact_paths), before)
 
     def test_interrupted_takeover_rejects_raw_newline_backup_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4983,11 +5267,14 @@ class ConfigOverlayTests(unittest.TestCase):
                                 "original_owner",
                                 "recovery_sha256",
                                 "reanchor_recovery_sha256",
+                                "reanchor_live_sha256",
                             },
                         )
-                        self.assertLess(len(raw_journal.encode("utf-8")), 320)
+                        self.assertLess(len(raw_journal.encode("utf-8")), 420)
                         self.assertNotIn("researcher.toml", raw_journal)
                         self.assertNotIn("team_tools", raw_journal)
+                        self.assertNotIn("codexhub-proxy", raw_journal)
+                        self.assertNotIn("127.0.0.1", raw_journal)
 
                     retry = subprocess.run(
                         [

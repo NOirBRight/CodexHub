@@ -118,13 +118,18 @@ The update reported success, while the next restore failed closed with
 Context-guard backup updates now use the existing takeover metadata and
 lifecycle phase model under the same canonical per-config lock. The active
 anchor remains the base authority while a bounded
-`RECOVERY_REANCHOR_JOURNAL` records only the candidate recovery SHA-256.
+`RECOVERY_REANCHOR_JOURNAL` records only the candidate recovery SHA-256 and
+the exact pre-operation live-config SHA-256.
 Journal readback is durable before the candidate backup is published; exact
 backup readback is durable before ordinary active metadata promotes the
-candidate digest. Resume accepts only the exact base or candidate bytes with
-the recorded original owner. Base bytes roll the journal back to the base
-anchor, candidate bytes promote the candidate anchor, and any third bytes or
-owner mismatch fail closed without changing or deleting recovery evidence.
+candidate digest. One typed preflight shared by restore and every managed
+writer requires the exact journaled live bytes and takeover owner, the exact
+base or candidate backup bytes and original owner, valid metadata, and no
+coexisting completion receipt before any journal promotion or rollback.
+Base bytes roll the journal back to the base anchor, candidate bytes promote
+the candidate anchor, and live drift, owner mismatch, third recovery bytes,
+or completion-state mismatch fail closed without changing or deleting any
+config, backup, metadata, completion, or context-state evidence.
 
 The context-guard state is durable before an enabled active-takeover update so
 a fresh retry retains the distinct prior live and backup values. The recovery
@@ -136,13 +141,16 @@ settings while preserving provider, model, agents, comments, and unknown TOML.
 
 Tests cover before- and after-commit errors at journal publication, recovery
 backup publication, and candidate-anchor publication for both enable and
-disable (`12` crash-prefix subtests). Duplicate, future, unknown, malformed,
-mixed-phase, and same-owner re-anchor records fail before mutation. A valid
-journal with unknown third recovery bytes retains the live config, backup,
-metadata, and context state. Re-anchor metadata contains exactly version,
-owners, and the two fixed SHA-256 fields; bounded-size assertions prove it
-contains no agent config, collaboration setting, provider credential, or
-Gateway key.
+disable (`12` crash-prefix subtests). Another `12` fresh-process subtests cover
+restore and managed-write preparation with base/candidate recovery bytes,
+same-owner raw live drift, owner mismatch, and an inconsistent completion
+receipt; every managed artifact remains byte-for-byte unchanged. Duplicate,
+future, unknown, malformed, missing-field, mixed-phase, and same-owner
+re-anchor records fail before mutation. A valid journal with unknown third
+recovery bytes retains the live config, backup, metadata, and context state.
+Re-anchor metadata contains exactly version, owners, and three fixed SHA-256
+fields; bounded-size assertions prove it contains no agent config,
+collaboration setting, provider credential, or Gateway key.
 
 Completion receipts use the same strict absent/valid/invalid classification.
 Legacy or missing fields, truncated or unreadable JSON, duplicate keys,
@@ -198,6 +206,12 @@ defaults for agent or collaboration V2 configuration.
     stale recovery anchor; both are green after the typed re-anchor repair;
   - committed-backup-error fresh-process retry was red before the journal and
     green afterward;
+  - same-owner raw live drift after a durable re-anchor journal was red on
+    `7154a7dffe10b7c528ba217e0c8b64b48311b6aa`: fresh restore exited
+    successfully and consumed recovery evidence; it is green after the exact
+    live-byte anchor and complete preflight;
+  - final affected overlay/parser matrix:
+    `9 passed, 145 subtests passed in 31.50s`;
   - `py -3.13 -m pytest -q tests/test_config_overlay.py`
     - `110 passed, 202 subtests passed in 94.01s`;
   - subsequent parser-only delta:
