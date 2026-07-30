@@ -7,6 +7,8 @@ Second-review repair fixed point:
 `c9a7a09cd7e88c640cf3d71fd69c862f23e3dd5f`
 Completion-receipt review fixed point:
 `5e9e7e9416f4cecbeef421fc71e20542e2c1a5bf`
+Digest-anchor and status-legality review fixed point:
+`b7b8e46595f924203a5bd9eb17d1acce81d66282`
 
 ## Proven lifecycle
 
@@ -86,10 +88,59 @@ duplicate keys, partial/null journals, malformed digests, unsupported statuses,
 and inconsistent owner/digest/status/artifact combinations all fail closed
 while retaining the live config, recovery backup, and sidecar.
 
+Active takeover metadata now binds the exact recovery backup bytes with a
+lowercase SHA-256 in addition to both owner identities. Takeover apply reads
+back the durable backup and sidecar before publishing the new live config.
+Apply, context guard, restart, and restore share one typed lifecycle snapshot;
+active, interrupted, cleanup-journal, and completion-receipt paths validate the
+same owner/digest anchor before any restore or cleanup mutation. Same-marker
+drift in unknown agent keys, model/provider fields, comments, or raw newline
+bytes therefore fails closed across owned and unowned takeovers, both channel
+directions, interrupted takeover, and a fresh-process retry.
+
+Cleanup journal and completion receipt status legality also uses one typed
+phase validator. Unified-history transformation statuses are legal only when
+the original config was unowned. `interrupted_takeover_discarded` and
+`restored_takeover_backup` are the only identity statuses legal with an owned
+original. The full original-owner × status × active/journal/receipt matrix is
+tested independently from the implementation. A forged owned journal with
+otherwise coherent source/recovery/final digests is rejected during sidecar
+read, before live publication or receipt creation.
+
 Completion receipts use the same strict absent/valid/invalid classification.
 Legacy or missing fields, truncated or unreadable JSON, duplicate keys,
 future/non-integral versions, unknown fields/owners/statuses, malformed
 digests, and owner/status inconsistencies all fail closed without mutation.
+
+### 0.1.7 active-sidecar recovery boundary
+
+An active 0.1.7 takeover sidecar has `version`, `takeover_owner`, and
+`original_owner`, but no durable recovery digest. The current reader reports
+the typed `MISSING_RECOVERY_ANCHOR` reason and refuses Stable/Developer
+reapply or restore before changing the live config, backup, sidecar, or
+completion receipt. It never silently strips the legacy sidecar or computes a
+new digest from the untrusted backup, because either action would bless bytes
+whose identity was never recorded.
+
+Safe recovery is therefore an explicit offline operation:
+
+1. Stop Stable, Developer, and the Gateway so no config writer remains.
+2. Copy the live config, takeover backup, takeover sidecar, and any completion
+   receipt to a separate quarantine location. Do not delete either recovery
+   artifact.
+3. Compare the backup with an independent known-good pre-takeover copy or have
+   the user verify the intended owner/config bytes. The legacy sidecar alone
+   cannot establish that identity. If no independent evidence exists, retain
+   all artifacts and escalate instead of auto-restoring.
+4. With all writers still stopped, restore only the independently verified
+   backup bytes to the live config. Move the legacy backup and sidecar together
+   to quarantine rather than deleting them, then restart the verified original
+   owner channel. Retain the quarantine until normal connect/restore behavior
+   is confirmed.
+
+This path deliberately avoids logging or embedding config, provider
+credentials, Gateway keys, or agent config contents. New sidecars contain only
+fixed owner/version fields and the bounded recovery digest.
 
 Managed-path validation now covers the config, backup, metadata, completion
 receipt, context state, lifecycle target, and every corresponding
@@ -104,13 +155,26 @@ defaults for agent or collaboration V2 configuration.
 
 ## Local verification
 
-- `py -3.13 -m pytest -q tests/test_config_overlay.py`
-  - `97 passed, 85 subtests passed in 41.05s`
-- `py -3.13 -m pytest -q --ignore=tests/test_real_client_e2e.py`
-  - corrected-toolchain run: `1509 passed, 1 skipped, 495 subtests passed in
-    130.11s`
-- final completion/rotation delta after the Python core run
-  - `12 passed, 85 deselected, 31 subtests passed in 13.13s`
+- `Python313\python.exe -m pytest -q tests/test_config_overlay.py`
+  - `106 passed, 186 subtests passed in 43.83s`
+- `Python313\python.exe -m pytest -q --ignore=tests/test_real_client_e2e.py`
+  with the Python 3.13 directory first on `PATH`
+  - authoritative corrected-toolchain run: `1519 passed, 1 skipped, 598
+    subtests passed in 133.56s`
+  - the first run inherited the Hermes Python 3.11 executable in child-process
+    `PATH`: `1517 passed, 1 skipped, 598 subtests passed`, with only the two
+    issue #108 PowerShell evidence replays failing
+  - sanitized failure artifacts identified Python 3.11 parsing the repository's
+    PEP 695 syntax and `evidence_validator_execution_failed`; placing Python
+    3.13 first on `PATH` made those isolated two tests pass before the
+    authoritative full run
+- repair-specific TDD evidence
+  - same-owner-marker agent-key backup drift: red because restore accepted the
+    bytes; green after durable recovery anchoring
+  - owner × status × phase matrix: 12 owned/unowned-only journal combinations
+    red; all `81` matrix subtests green after the shared legality validator
+  - durable backup/sidecar readback replacement: 2 red subtests; both green
+    after pre-live-publication validation
 - `py -3.13 -m compileall -q src-python tests/test_config_overlay.py`
   - passed
 - `git diff --check`
@@ -119,11 +183,8 @@ defaults for agent or collaboration V2 configuration.
   - report-only exit `0`, `parse_errors: 0`
   - repository baseline: 2 unused imports, 83 dead-function reports, and 146
     duplicate-name reports; no changed-file finding was identified
-- local Standards/Spec self-review
-  - receipt retirement, same-owner staged-backup, second no-op restore,
-    duplicate-key, path/lock-alias, and ambiguous-commit edge cases found
-    during review were repaired; the final delta has no remaining actionable
-    finding
+- Worker delta inspection does not claim review acceptance; the pushed exact
+  SHA remains subject to a fresh Orchestrator-owned Standards/Spec review.
 
 The issue's literal unpartitioned `python -m pytest -q` command was also
 attempted once. It exceeded a 1,200-second local outer bound while including

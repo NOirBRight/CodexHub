@@ -2416,6 +2416,14 @@ class ConfigOverlayTests(unittest.TestCase):
                 payload.update(updates)
                 return json.dumps(payload, sort_keys=True)
 
+            def duplicated(key: str) -> str:
+                fields = [
+                    f"{json.dumps(field)}:{json.dumps(value)}"
+                    for field, value in valid.items()
+                ]
+                fields.append(f"{json.dumps(key)}:{json.dumps(valid[key])}")
+                return "{" + ",".join(fields) + "}"
+
             invalid_payloads = {
                 "truncated": "{",
                 "non_object": "[]",
@@ -2428,16 +2436,6 @@ class ConfigOverlayTests(unittest.TestCase):
                 ),
                 "future_version": changed(version=2),
                 "boolean_version": changed(version=True),
-                "duplicate_version": (
-                    '{"version":2,"version":1,"takeover_owner":"beta",'
-                    f'"original_owner":null,"final_sha256":"{valid["final_sha256"]}",'
-                    '"status":"injected"}'
-                ),
-                "duplicate_owner": (
-                    '{"version":1,"takeover_owner":"release",'
-                    '"takeover_owner":"beta","original_owner":null,'
-                    f'"final_sha256":"{valid["final_sha256"]}","status":"injected"}}'
-                ),
                 "same_owner": changed(original_owner="beta"),
                 "unknown_owner": changed(takeover_owner="future-owner"),
                 "non_scalar_owner": changed(takeover_owner=[]),
@@ -2457,6 +2455,19 @@ class ConfigOverlayTests(unittest.TestCase):
                 "unknown_status": changed(status="future_status"),
                 "non_string_status": changed(status=[]),
             }
+            invalid_payloads.update(
+                {
+                    f"duplicate_{key}": duplicated(key)
+                    for key in (
+                        "version",
+                        "takeover_owner",
+                        "original_owner",
+                        "final_sha256",
+                        "same_owner_backup_sha256",
+                        "status",
+                    )
+                }
+            )
             completed = config_path.read_bytes()
 
             for name, payload in invalid_payloads.items():
@@ -3078,102 +3089,106 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertFalse(state_path.exists())
 
     def test_existing_malformed_or_future_takeover_metadata_fails_closed(self):
+        valid_active = {
+            "version": 1,
+            "takeover_owner": "beta",
+            "original_owner": None,
+            "recovery_sha256": "1" * 64,
+        }
+        valid_journal = {
+            **valid_active,
+            "cleanup_source_sha256": "0" * 64,
+            "cleanup_recovery_sha256": valid_active["recovery_sha256"],
+            "cleanup_final_sha256": "2" * 64,
+            "cleanup_status": "injected",
+        }
+
+        def changed(payload: dict[str, object], **updates: object) -> str:
+            candidate = dict(payload)
+            candidate.update(updates)
+            return json.dumps(candidate, sort_keys=True)
+
+        def duplicated(payload: dict[str, object], key: str) -> str:
+            fields = [
+                f"{json.dumps(field)}:{json.dumps(value)}"
+                for field, value in payload.items()
+            ]
+            fields.append(f"{json.dumps(key)}:{json.dumps(payload[key])}")
+            return "{" + ",".join(fields) + "}"
+
         invalid_payloads = {
             "truncated": "{",
             "non_object": "[]",
-            "future_version": json.dumps(
-                {
-                    "version": 2,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                }
-            ),
-            "boolean_version": json.dumps(
-                {
-                    "version": True,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                }
-            ),
-            "duplicate_version": (
-                '{"version":2,"version":1,"takeover_owner":"beta",'
-                '"original_owner":null}'
-            ),
-            "duplicate_owner": (
-                '{"version":1,"takeover_owner":"release",'
-                '"takeover_owner":"beta","original_owner":null}'
-            ),
-            "same_owner": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": "beta",
-                }
-            ),
-            "unknown_owner": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": "future-owner",
-                    "original_owner": None,
-                }
-            ),
-            "non_scalar_owner": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": [],
-                    "original_owner": None,
-                }
-            ),
+            "future_version": changed(valid_active, version=2),
+            "boolean_version": changed(valid_active, version=True),
+            "same_owner": changed(valid_active, original_owner="beta"),
+            "unknown_owner": changed(valid_active, takeover_owner="future-owner"),
+            "non_scalar_owner": changed(valid_active, takeover_owner=[]),
             "unknown_field": json.dumps(
+                {**valid_active, "future_field": True},
+                sort_keys=True,
+            ),
+            "legacy_missing_recovery_anchor": json.dumps(
                 {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                    "future_field": True,
-                }
+                    key: value
+                    for key, value in valid_active.items()
+                    if key != "recovery_sha256"
+                },
+                sort_keys=True,
+            ),
+            "malformed_recovery_anchor": changed(
+                valid_active,
+                recovery_sha256="not-a-digest",
+            ),
+            "uppercase_recovery_anchor": changed(
+                valid_active,
+                recovery_sha256="A" * 64,
             ),
             "partial_journal": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                    "cleanup_source_sha256": "0" * 64,
-                }
+                {**valid_active, "cleanup_source_sha256": "0" * 64},
+                sort_keys=True,
             ),
             "null_journal": json.dumps(
                 {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
+                    **valid_active,
                     "cleanup_source_sha256": None,
                     "cleanup_recovery_sha256": None,
                     "cleanup_final_sha256": None,
                     "cleanup_status": None,
-                }
+                },
+                sort_keys=True,
             ),
-            "unknown_status": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                    "cleanup_source_sha256": "0" * 64,
-                    "cleanup_recovery_sha256": "1" * 64,
-                    "cleanup_final_sha256": "2" * 64,
-                    "cleanup_status": "future_status",
-                }
+            "unknown_status": changed(
+                valid_journal,
+                cleanup_status="future_status",
             ),
-            "malformed_digest": json.dumps(
-                {
-                    "version": 1,
-                    "takeover_owner": "beta",
-                    "original_owner": None,
-                    "cleanup_source_sha256": "not-a-digest",
-                    "cleanup_recovery_sha256": "1" * 64,
-                    "cleanup_final_sha256": "2" * 64,
-                    "cleanup_status": "injected",
-                }
+            "malformed_cleanup_digest": changed(
+                valid_journal,
+                cleanup_source_sha256="not-a-digest",
+            ),
+            "cleanup_recovery_anchor_mismatch": changed(
+                valid_journal,
+                cleanup_recovery_sha256="3" * 64,
             ),
         }
+        invalid_payloads.update(
+            {
+                f"duplicate_{key}": duplicated(payload, key)
+                for payload, keys in (
+                    (valid_active, tuple(valid_active)),
+                    (
+                        valid_journal,
+                        (
+                            "cleanup_source_sha256",
+                            "cleanup_recovery_sha256",
+                            "cleanup_final_sha256",
+                            "cleanup_status",
+                        ),
+                    ),
+                )
+                for key in keys
+            }
+        )
 
         for name, payload in invalid_payloads.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
@@ -3229,16 +3244,538 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(backup_path.read_bytes(), original)
             self.assertEqual(metadata_path.read_bytes(), metadata_before)
 
+    def test_active_owned_takeover_rejects_same_owner_backup_content_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            tampered_backup = beta_backup_path.read_text(encoding="utf-8").replace(
+                'future_scheduler = { strategy = "breadth", burst_limit = 11 }',
+                'future_scheduler = { strategy = "breadth", burst_limit = 12 }',
+            )
+            self.assertIn("# owner = release", tampered_backup)
+            beta_backup_path.write_text(tampered_backup, encoding="utf-8")
+            live_before = config_path.read_bytes()
+            backup_before = beta_backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "recovery backup is missing or diverged",
+            ):
+                restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(beta_backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+
+    def test_active_unowned_takeover_rejects_comment_only_backup_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path, backup_path, _, _, metadata_path = (
+                self._unowned_with_active_beta_takeover(Path(tmpdir))
+            )
+            backup_path.write_bytes(
+                backup_path.read_bytes() + b"# comment-only recovery drift\n"
+            )
+            self.assertIsNone(
+                config_overlay.overlay_owner(
+                    backup_path.read_text(encoding="utf-8")
+                )
+            )
+            live_before = config_path.read_bytes()
+            backup_before = backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "recovery backup is missing or diverged",
+            ):
+                restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+
+    def test_interrupted_takeover_rejects_raw_newline_backup_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path, backup_path, _, _ = (
+                self._stable_with_interrupted_beta_takeover(Path(tmpdir))
+            )
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            recovery = backup_path.read_bytes()
+            self.assertIn(b"# owner = release", recovery)
+            backup_path.write_bytes(recovery.replace(b"\n", b"\r\n", 1))
+            self.assertEqual(
+                config_overlay.overlay_owner(
+                    backup_path.read_text(encoding="utf-8")
+                ),
+                "release",
+            )
+            live_before = config_path.read_bytes()
+            backup_before = backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "recovery backup is missing or diverged",
+            ):
+                restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+
+    def test_release_takeover_rejects_model_provider_drift_after_fresh_process_restart(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            release_backup_path = tmp / "release.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+            )
+            apply_overlay(
+                config_path,
+                release_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+                takeover=True,
+            )
+            metadata_path = config_overlay.takeover_metadata_path(release_backup_path)
+            tampered_backup = release_backup_path.read_text(encoding="utf-8").replace(
+                'model = "ollama-cloud/glm-5.2"',
+                'model = "gpt-5.6-terra"',
+            ).replace(
+                'model_provider = "custom"',
+                'model_provider = "openai"',
+                1,
+            )
+            self.assertIn("# owner = beta", tampered_backup)
+            self.assertIn('model = "gpt-5.6-terra"', tampered_backup)
+            self.assertIn('model_provider = "openai"', tampered_backup)
+            release_backup_path.write_text(tampered_backup, encoding="utf-8")
+            live_before = config_path.read_bytes()
+            backup_before = release_backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+            restore_script = "\n".join(
+                [
+                    "import sys",
+                    "from pathlib import Path",
+                    "from config_overlay import restore_overlay",
+                    "restore_overlay(",
+                    "    Path(sys.argv[1]),",
+                    "    Path(sys.argv[2]),",
+                    "    unified_history=True,",
+                    ")",
+                ]
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    restore_script,
+                    str(config_path),
+                    str(release_backup_path),
+                ],
+                capture_output=True,
+                text=True,
+                env=self._subprocess_env(),
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("recovery backup is missing or diverged", result.stderr)
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(release_backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+
+    def test_takeover_recovery_anchor_is_bounded_and_contains_no_config_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "beta.backup.toml"
+            sensitive_marker = "anchor-must-never-copy-this-config-content"
+            config_path.write_text(
+                RUST_0_145_AGENTS_CONFIG
+                + f'# {sensitive_marker}\nsecret_future_agent_key = "private"\n',
+                encoding="utf-8",
+            )
+            apply_overlay(
+                config_path,
+                backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+                gateway_key="anchor-must-never-copy-this-gateway-key",
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            raw_metadata = metadata_path.read_text(encoding="utf-8")
+            metadata = json.loads(raw_metadata)
+
+            self.assertEqual(
+                set(metadata),
+                {
+                    "version",
+                    "takeover_owner",
+                    "original_owner",
+                    "recovery_sha256",
+                },
+            )
+            self.assertEqual(
+                metadata["recovery_sha256"],
+                config_overlay.takeover_text_sha256(
+                    config_overlay.read_text_preserving_newlines(backup_path)
+                ),
+            )
+            self.assertLess(len(raw_metadata.encode("utf-8")), 256)
+            self.assertNotIn(sensitive_marker, raw_metadata)
+            self.assertNotIn("anchor-must-never-copy-this-gateway-key", raw_metadata)
+            self.assertNotIn("secret_future_agent_key", raw_metadata)
+
+    def test_takeover_anchor_publication_is_verified_before_live_config_write(self):
+        cases = (
+            (
+                "backup",
+                "recovery backup publication diverged",
+                False,
+            ),
+            (
+                "metadata",
+                "takeover ownership evidence is inconsistent",
+                True,
+            ),
+        )
+        for artifact, expected_error, expect_metadata in cases:
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path = tmp / "config.toml"
+                stable_backup_path = tmp / "stable.backup.toml"
+                beta_backup_path = tmp / "beta.backup.toml"
+                config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+                apply_overlay(
+                    config_path,
+                    stable_backup_path,
+                    None,
+                    "http://127.0.0.1:9099",
+                    owner="release",
+                )
+                stable_active = config_path.read_bytes()
+                metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+                real_atomic_write = config_overlay.atomic_write_text
+
+                def corrupt_publication(
+                    path: Path,
+                    text: str,
+                    *,
+                    encoding: str = "utf-8",
+                ) -> None:
+                    real_atomic_write(path, text, encoding=encoding)
+                    if artifact == "backup" and path == beta_backup_path:
+                        path.write_bytes(path.read_bytes() + b"# publication drift\n")
+                    elif artifact == "metadata" and path == metadata_path:
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                        payload["recovery_sha256"] = "0" * 64
+                        path.write_text(
+                            json.dumps(payload, sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+
+                with patch("config_overlay.atomic_write_text", corrupt_publication):
+                    with self.assertRaisesRegex(RuntimeError, expected_error):
+                        apply_overlay(
+                            config_path,
+                            beta_backup_path,
+                            None,
+                            "http://127.0.0.1:9109",
+                            owner="beta",
+                            takeover=True,
+                        )
+
+                self.assertEqual(config_path.read_bytes(), stable_active)
+                self.assertTrue(beta_backup_path.exists())
+                self.assertEqual(metadata_path.exists(), expect_metadata)
+                self.assertFalse(
+                    config_overlay.takeover_completion_path(
+                        beta_backup_path
+                    ).exists()
+                )
+
+    def test_legacy_unanchored_takeover_metadata_fails_closed_for_both_channels(self):
+        directions = (
+            ("stable_to_developer", "release", "beta"),
+            ("developer_to_stable", "beta", "release"),
+        )
+        for name, original_owner, takeover_owner in directions:
+            for operation in ("reapply", "restore"):
+                with (
+                    self.subTest(name=name, operation=operation),
+                    tempfile.TemporaryDirectory() as tmpdir,
+                ):
+                    tmp = Path(tmpdir)
+                    config_path = tmp / "config.toml"
+                    original_backup_path = tmp / f"{original_owner}.backup.toml"
+                    takeover_backup_path = tmp / f"{takeover_owner}.backup.toml"
+                    config_path.write_text(
+                        RUST_0_145_AGENTS_CONFIG,
+                        encoding="utf-8",
+                    )
+                    apply_overlay(
+                        config_path,
+                        original_backup_path,
+                        None,
+                        "http://127.0.0.1:9099",
+                        owner=original_owner,
+                    )
+                    apply_overlay(
+                        config_path,
+                        takeover_backup_path,
+                        None,
+                        "http://127.0.0.1:9109",
+                        owner=takeover_owner,
+                        takeover=True,
+                    )
+
+                    metadata_path = config_overlay.takeover_metadata_path(
+                        takeover_backup_path
+                    )
+                    completion_path = config_overlay.takeover_completion_path(
+                        takeover_backup_path
+                    )
+                    legacy_metadata = json.loads(
+                        metadata_path.read_text(encoding="utf-8")
+                    )
+                    legacy_metadata.pop("recovery_sha256")
+                    metadata_path.write_text(
+                        json.dumps(legacy_metadata, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    metadata_read = config_overlay.read_takeover_metadata(
+                        takeover_backup_path
+                    )
+                    self.assertEqual(metadata_read.state.value, "invalid")
+                    self.assertEqual(
+                        metadata_read.error.value,
+                        "missing_recovery_anchor",
+                    )
+                    live_before = config_path.read_bytes()
+                    backup_before = takeover_backup_path.read_bytes()
+                    metadata_before = metadata_path.read_bytes()
+
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "missing durable recovery anchor.*preserve config, backup, and sidecar",
+                    ):
+                        if operation == "reapply":
+                            apply_overlay(
+                                config_path,
+                                takeover_backup_path,
+                                None,
+                                "http://127.0.0.1:9109",
+                                owner=takeover_owner,
+                            )
+                        else:
+                            restore_overlay(
+                                config_path,
+                                takeover_backup_path,
+                                unified_history=True,
+                            )
+
+                    self.assertEqual(config_path.read_bytes(), live_before)
+                    self.assertEqual(takeover_backup_path.read_bytes(), backup_before)
+                    self.assertEqual(metadata_path.read_bytes(), metadata_before)
+                    self.assertFalse(completion_path.exists())
+
+    def test_takeover_status_owner_phase_legality_matrix(self):
+        statuses = (
+            None,
+            "already_unified",
+            "conflicting_custom_provider",
+            "explicit_model_provider",
+            "injected",
+            "interrupted_takeover_discarded",
+            "repaired_unified",
+            "replaced_managed_gateway",
+            "restored_takeover_backup",
+        )
+        identity_statuses = {
+            "interrupted_takeover_discarded",
+            "restored_takeover_backup",
+        }
+
+        for phase in ("active_metadata", "cleanup_journal", "completion_receipt"):
+            for original_owner in (None, "release", "beta"):
+                for status in statuses:
+                    with (
+                        self.subTest(
+                            phase=phase,
+                            original_owner=original_owner,
+                            status=status,
+                        ),
+                        tempfile.TemporaryDirectory() as tmpdir,
+                    ):
+                        backup_path = Path(tmpdir) / "takeover.backup.toml"
+                        takeover_owner = "release" if original_owner == "beta" else "beta"
+                        recovery_sha256 = "1" * 64
+                        if phase == "completion_receipt":
+                            payload = {
+                                "version": 1,
+                                "takeover_owner": takeover_owner,
+                                "original_owner": original_owner,
+                                "final_sha256": "2" * 64,
+                                "same_owner_backup_sha256": "3" * 64,
+                                "status": status,
+                            }
+                            config_overlay.takeover_completion_path(
+                                backup_path
+                            ).write_text(json.dumps(payload), encoding="utf-8")
+                            state = config_overlay.read_takeover_completion(
+                                backup_path
+                            ).state
+                            expected_valid = (
+                                status is not None
+                                and (
+                                    original_owner is None
+                                    or status in identity_statuses
+                                )
+                            )
+                        else:
+                            payload = {
+                                "version": 1,
+                                "takeover_owner": takeover_owner,
+                                "original_owner": original_owner,
+                                "recovery_sha256": recovery_sha256,
+                            }
+                            if phase == "cleanup_journal":
+                                payload.update(
+                                    {
+                                        "cleanup_source_sha256": "0" * 64,
+                                        "cleanup_recovery_sha256": recovery_sha256,
+                                        "cleanup_final_sha256": "2" * 64,
+                                        "cleanup_status": status,
+                                    }
+                                )
+                                expected_valid = (
+                                    status is not None
+                                    and (
+                                        original_owner is None
+                                        or status in identity_statuses
+                                    )
+                                )
+                            else:
+                                if status is not None:
+                                    payload["cleanup_status"] = status
+                                expected_valid = status is None
+                            config_overlay.takeover_metadata_path(
+                                backup_path
+                            ).write_text(json.dumps(payload), encoding="utf-8")
+                            state = config_overlay.read_takeover_metadata(
+                                backup_path
+                            ).state
+
+                        self.assertEqual(
+                            state.value,
+                            "valid" if expected_valid else "invalid",
+                        )
+
+    def test_owned_takeover_rejects_unowned_cleanup_journal_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            completion_path = config_overlay.takeover_completion_path(beta_backup_path)
+            current = config_path.read_text(encoding="utf-8")
+            recovery = beta_backup_path.read_text(encoding="utf-8")
+            final, status = inject_unified_history_config(recovery)
+            self.assertEqual(status, "replaced_managed_gateway")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata.update(
+                {
+                    "cleanup_source_sha256": config_overlay.takeover_text_sha256(
+                        current
+                    ),
+                    "cleanup_recovery_sha256": config_overlay.takeover_text_sha256(
+                        recovery
+                    ),
+                    "cleanup_final_sha256": config_overlay.takeover_text_sha256(final),
+                    "cleanup_status": status,
+                }
+            )
+            metadata_path.write_text(
+                json.dumps(metadata, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            live_before = config_path.read_bytes()
+            backup_before = beta_backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "takeover metadata is invalid",
+            ):
+                restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(beta_backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+            self.assertFalse(completion_path.exists())
+
     def test_pending_unified_cleanup_rejects_inconsistent_artifacts_and_journal(self):
         cases = (
             ("live_artifact", "live config is missing or diverged"),
             ("recovery_artifact", "recovery backup is missing or diverged"),
             ("source_digest", "live config is missing or diverged"),
-            ("recovery_digest", "recovery backup is missing or diverged"),
+            ("recovery_digest", "takeover metadata is invalid"),
             ("final_digest", "intended final config is inconsistent"),
             ("terminal_status", "terminal status is inconsistent"),
             ("takeover_owner", "live config is missing or diverged"),
-            ("original_owner", "recovery backup is missing or diverged"),
+            ("original_owner", "takeover metadata is invalid"),
         )
 
         for case, expected_error in cases:

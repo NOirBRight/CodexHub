@@ -54,6 +54,42 @@ UNOWNED_TAKEOVER_CLEANUP_STATUSES = TAKEOVER_CLEANUP_STATUSES - {
 }
 
 
+class TakeoverLifecyclePhase(Enum):
+    ABSENT = "absent"
+    ACTIVE = "active"
+    CLEANUP_JOURNAL = "cleanup_journal"
+    COMPLETION_RECEIPT = "completion_receipt"
+
+
+class TakeoverPreparedState(Enum):
+    ABSENT = "absent"
+    ACTIVE = "active"
+    INTERRUPTED = "interrupted"
+    CLEANUP_RESUMED = "cleanup_resumed"
+
+
+def _is_legal_takeover_status(
+    original_owner: str | None,
+    status: object,
+    phase: TakeoverLifecyclePhase,
+) -> bool:
+    if phase is TakeoverLifecyclePhase.ACTIVE:
+        return status is None
+    if phase not in {
+        TakeoverLifecyclePhase.CLEANUP_JOURNAL,
+        TakeoverLifecyclePhase.COMPLETION_RECEIPT,
+    }:
+        return False
+    return (
+        isinstance(status, str)
+        and status in TAKEOVER_CLEANUP_STATUSES
+        and (
+            original_owner is None
+            or status not in UNOWNED_TAKEOVER_CLEANUP_STATUSES
+        )
+    )
+
+
 def toml_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -293,7 +329,7 @@ def _set_context_guard_locked(
         backup_path,
         operation="context guard update",
     )
-    if takeover_state == "interrupted":
+    if takeover_state is TakeoverPreparedState.INTERRUPTED:
         raise RuntimeError(
             "refusing context guard update: interrupted takeover recovery is pending"
         )
@@ -374,10 +410,11 @@ def _set_context_guard_locked(
                 atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
         state_path.unlink(missing_ok=True)
 
-    completion_read = read_takeover_completion(backup_path)
-    if completion_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError("refusing context guard update: takeover completion is invalid")
-    if completion_read.receipt is not None:
+    lifecycle = _read_takeover_lifecycle(
+        backup_path,
+        operation="context guard update",
+    )
+    if lifecycle.completion is not None:
         completion_text_path = backup_path if backup_path.exists() else config_path
         if not completion_text_path.exists():
             raise RuntimeError(
@@ -385,7 +422,7 @@ def _set_context_guard_locked(
             )
         _rebase_takeover_completion(
             backup_path,
-            completion_read.receipt,
+            lifecycle.completion,
             read_text_preserving_newlines(completion_text_path),
         )
 
@@ -724,22 +761,28 @@ def takeover_completion_path(backup_path: Path) -> Path:
 class TakeoverMetadata:
     takeover_owner: str
     original_owner: str | None
+    recovery_sha256: str
     cleanup_source_sha256: str | None
     cleanup_recovery_sha256: str | None
     cleanup_final_sha256: str | None
     cleanup_status: str | None
 
 
-class TakeoverMetadataState(Enum):
+class TakeoverRecordState(Enum):
     ABSENT = "absent"
     VALID = "valid"
     INVALID = "invalid"
 
 
+class TakeoverRecordError(Enum):
+    MISSING_RECOVERY_ANCHOR = "missing_recovery_anchor"
+
+
 @dataclass(frozen=True)
 class TakeoverMetadataRead:
-    state: TakeoverMetadataState
+    state: TakeoverRecordState
     metadata: TakeoverMetadata | None = None
+    error: TakeoverRecordError | None = None
 
 
 @dataclass(frozen=True)
@@ -753,8 +796,15 @@ class TakeoverCompletionReceipt:
 
 @dataclass(frozen=True)
 class TakeoverCompletionRead:
-    state: TakeoverMetadataState
+    state: TakeoverRecordState
     receipt: TakeoverCompletionReceipt | None = None
+
+
+@dataclass(frozen=True)
+class TakeoverLifecycleSnapshot:
+    phase: TakeoverLifecyclePhase
+    metadata: TakeoverMetadata | None
+    completion: TakeoverCompletionReceipt | None
 
 
 def takeover_text_sha256(text: str) -> str:
@@ -775,6 +825,7 @@ def write_takeover_metadata(
     takeover_owner: str,
     original_owner: str | None,
     *,
+    recovery_sha256: str,
     cleanup_source_sha256: str | None = None,
     cleanup_recovery_sha256: str | None = None,
     cleanup_final_sha256: str | None = None,
@@ -790,12 +841,25 @@ def write_takeover_metadata(
         value is not None for value in cleanup_values
     ):
         raise ValueError("takeover cleanup digests and status must be written together")
-    if cleanup_status is not None and cleanup_status not in TAKEOVER_CLEANUP_STATUSES:
-        raise ValueError("unsupported takeover cleanup status")
+    phase = (
+        TakeoverLifecyclePhase.ACTIVE
+        if cleanup_status is None
+        else TakeoverLifecyclePhase.CLEANUP_JOURNAL
+    )
+    if not _is_legal_takeover_status(original_owner, cleanup_status, phase):
+        raise ValueError("unsupported takeover cleanup status for original owner")
+    if (
+        cleanup_recovery_sha256 is not None
+        and cleanup_recovery_sha256 != recovery_sha256
+    ):
+        raise ValueError("takeover cleanup recovery digest must match its durable anchor")
+    if re.fullmatch(r"[0-9a-f]{64}", recovery_sha256) is None:
+        raise ValueError("takeover recovery digest must be a lowercase SHA-256")
     metadata = {
         "version": 1,
         "takeover_owner": takeover_owner,
         "original_owner": original_owner,
+        "recovery_sha256": recovery_sha256,
     }
     if cleanup_source_sha256 is not None:
         metadata["cleanup_source_sha256"] = cleanup_source_sha256
@@ -817,12 +881,12 @@ def read_takeover_metadata(backup_path: Path) -> TakeoverMetadataRead:
             object_pairs_hook=_reject_duplicate_json_keys,
         )
     except FileNotFoundError:
-        return TakeoverMetadataRead(TakeoverMetadataState.ABSENT)
+        return TakeoverMetadataRead(TakeoverRecordState.ABSENT)
     except (OSError, ValueError, TypeError, RecursionError):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     if not isinstance(metadata, dict):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
-    base_keys = {"version", "takeover_owner", "original_owner"}
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
+    base_keys = {"version", "takeover_owner", "original_owner", "recovery_sha256"}
     cleanup_keys = {
         "cleanup_source_sha256",
         "cleanup_recovery_sha256",
@@ -830,22 +894,42 @@ def read_takeover_metadata(backup_path: Path) -> TakeoverMetadataRead:
         "cleanup_status",
     }
     metadata_keys = frozenset(metadata)
+    legacy_base_keys = base_keys - {"recovery_sha256"}
+    if (
+        type(metadata.get("version")) is int
+        and metadata["version"] == 1
+        and metadata_keys
+        in {
+            frozenset(legacy_base_keys),
+            frozenset(legacy_base_keys | cleanup_keys),
+        }
+    ):
+        return TakeoverMetadataRead(
+            TakeoverRecordState.INVALID,
+            error=TakeoverRecordError.MISSING_RECOVERY_ANCHOR,
+        )
     if metadata_keys not in {frozenset(base_keys), frozenset(base_keys | cleanup_keys)}:
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     version = metadata.get("version")
     if type(version) is not int or version != 1:
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     takeover_owner = metadata.get("takeover_owner")
     original_owner = metadata.get("original_owner")
+    recovery_sha256 = metadata.get("recovery_sha256")
     if not isinstance(takeover_owner, str) or takeover_owner not in {"release", "beta"}:
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     if original_owner is not None and (
         not isinstance(original_owner, str)
         or original_owner not in {"release", "beta"}
     ):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     if original_owner == takeover_owner:
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
+    if (
+        not isinstance(recovery_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", recovery_sha256) is None
+    ):
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     cleanup_source_sha256 = metadata.get("cleanup_source_sha256")
     cleanup_recovery_sha256 = metadata.get("cleanup_recovery_sha256")
     cleanup_final_sha256 = metadata.get("cleanup_final_sha256")
@@ -858,9 +942,9 @@ def read_takeover_metadata(backup_path: Path) -> TakeoverMetadataRead:
     )
     has_cleanup_fields = metadata_keys == frozenset(base_keys | cleanup_keys)
     if has_cleanup_fields and any(value is None for value in cleanup_values):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     if not has_cleanup_fields and any(value is not None for value in cleanup_values):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     digests = (
         cleanup_source_sha256,
         cleanup_recovery_sha256,
@@ -871,15 +955,20 @@ def read_takeover_metadata(backup_path: Path) -> TakeoverMetadataRead:
             not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
             for digest in digests
         )
-        or not isinstance(cleanup_status, str)
-        or cleanup_status not in TAKEOVER_CLEANUP_STATUSES
+        or cleanup_recovery_sha256 != recovery_sha256
+        or not _is_legal_takeover_status(
+            original_owner,
+            cleanup_status,
+            TakeoverLifecyclePhase.CLEANUP_JOURNAL,
+        )
     ):
-        return TakeoverMetadataRead(TakeoverMetadataState.INVALID)
+        return TakeoverMetadataRead(TakeoverRecordState.INVALID)
     return TakeoverMetadataRead(
-        TakeoverMetadataState.VALID,
+        TakeoverRecordState.VALID,
         TakeoverMetadata(
             takeover_owner=takeover_owner,
             original_owner=original_owner,
+            recovery_sha256=recovery_sha256,
             cleanup_source_sha256=cleanup_source_sha256,
             cleanup_recovery_sha256=cleanup_recovery_sha256,
             cleanup_final_sha256=cleanup_final_sha256,
@@ -892,6 +981,12 @@ def write_takeover_completion_receipt(
     backup_path: Path,
     receipt: TakeoverCompletionReceipt,
 ) -> None:
+    if not _is_legal_takeover_status(
+        receipt.original_owner,
+        receipt.status,
+        TakeoverLifecyclePhase.COMPLETION_RECEIPT,
+    ):
+        raise ValueError("unsupported takeover completion status for original owner")
     payload = {
         "version": 1,
         "takeover_owner": receipt.takeover_owner,
@@ -914,9 +1009,9 @@ def read_takeover_completion(backup_path: Path) -> TakeoverCompletionRead:
             object_pairs_hook=_reject_duplicate_json_keys,
         )
     except FileNotFoundError:
-        return TakeoverCompletionRead(TakeoverMetadataState.ABSENT)
+        return TakeoverCompletionRead(TakeoverRecordState.ABSENT)
     except (OSError, ValueError, TypeError, RecursionError):
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     expected_keys = {
         "version",
         "takeover_owner",
@@ -926,38 +1021,37 @@ def read_takeover_completion(backup_path: Path) -> TakeoverCompletionRead:
         "status",
     }
     if not isinstance(receipt, dict) or set(receipt) != expected_keys:
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     if type(receipt.get("version")) is not int or receipt["version"] != 1:
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     takeover_owner = receipt.get("takeover_owner")
     original_owner = receipt.get("original_owner")
     final_sha256 = receipt.get("final_sha256")
     same_owner_backup_sha256 = receipt.get("same_owner_backup_sha256")
     status = receipt.get("status")
     if not isinstance(takeover_owner, str) or takeover_owner not in {"release", "beta"}:
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     if original_owner is not None and (
         not isinstance(original_owner, str)
         or original_owner not in {"release", "beta"}
     ):
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     if original_owner == takeover_owner:
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     if (
         not isinstance(final_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", final_sha256) is None
         or not isinstance(same_owner_backup_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", same_owner_backup_sha256) is None
-        or not isinstance(status, str)
-        or status not in TAKEOVER_CLEANUP_STATUSES
-        or (
-            status in UNOWNED_TAKEOVER_CLEANUP_STATUSES
-            and original_owner is not None
+        or not _is_legal_takeover_status(
+            original_owner,
+            status,
+            TakeoverLifecyclePhase.COMPLETION_RECEIPT,
         )
     ):
-        return TakeoverCompletionRead(TakeoverMetadataState.INVALID)
+        return TakeoverCompletionRead(TakeoverRecordState.INVALID)
     return TakeoverCompletionRead(
-        TakeoverMetadataState.VALID,
+        TakeoverRecordState.VALID,
         TakeoverCompletionReceipt(
             takeover_owner=takeover_owner,
             original_owner=original_owner,
@@ -965,6 +1059,49 @@ def read_takeover_completion(backup_path: Path) -> TakeoverCompletionRead:
             same_owner_backup_sha256=same_owner_backup_sha256,
             status=status,
         ),
+    )
+
+
+def _read_takeover_lifecycle(
+    backup_path: Path,
+    *,
+    operation: str,
+) -> TakeoverLifecycleSnapshot:
+    metadata_read = read_takeover_metadata(backup_path)
+    if metadata_read.state is TakeoverRecordState.INVALID:
+        if metadata_read.error is TakeoverRecordError.MISSING_RECOVERY_ANCHOR:
+            raise RuntimeError(
+                f"refusing {operation}: takeover metadata is invalid "
+                "(missing durable recovery anchor; preserve config, backup, "
+                "and sidecar for safe recovery)"
+            )
+        raise RuntimeError(f"refusing {operation}: takeover metadata is invalid")
+    completion_read = read_takeover_completion(backup_path)
+    if completion_read.state is TakeoverRecordState.INVALID:
+        raise RuntimeError(f"refusing {operation}: takeover completion is invalid")
+
+    metadata = metadata_read.metadata
+    completion = completion_read.receipt
+    if (
+        metadata is not None
+        and completion is not None
+        and completion.original_owner != metadata.original_owner
+    ):
+        raise RuntimeError(f"refusing {operation}: completion ownership is inconsistent")
+    if metadata is not None:
+        phase = (
+            TakeoverLifecyclePhase.CLEANUP_JOURNAL
+            if metadata.cleanup_source_sha256 is not None
+            else TakeoverLifecyclePhase.ACTIVE
+        )
+    elif completion is not None:
+        phase = TakeoverLifecyclePhase.COMPLETION_RECEIPT
+    else:
+        phase = TakeoverLifecyclePhase.ABSENT
+    return TakeoverLifecycleSnapshot(
+        phase=phase,
+        metadata=metadata,
+        completion=completion,
     )
 
 
@@ -991,7 +1128,7 @@ def _rebase_takeover_completion(
     write_takeover_completion_receipt(backup_path, rebased)
     readback = read_takeover_completion(backup_path)
     if (
-        readback.state is not TakeoverMetadataState.VALID
+        readback.state is not TakeoverRecordState.VALID
         or readback.receipt != rebased
     ):
         raise RuntimeError(
@@ -1025,8 +1162,44 @@ def _matches_takeover_completion_backup(
     )
 
 
+def _require_takeover_completion_recovery(
+    text: str,
+    receipt: TakeoverCompletionReceipt,
+    *,
+    operation: str,
+) -> None:
+    if not _matches_takeover_completion_backup(text, receipt):
+        raise RuntimeError(f"refusing {operation}: completion recovery is inconsistent")
+
+
 def _retire_takeover_completion(backup_path: Path) -> None:
     takeover_completion_path(backup_path).unlink()
+
+
+def _matches_takeover_recovery(
+    backup_text: str,
+    metadata: TakeoverMetadata,
+) -> bool:
+    return (
+        overlay_owner(backup_text) == metadata.original_owner
+        and takeover_text_sha256(backup_text) == metadata.recovery_sha256
+    )
+
+
+def _matches_active_takeover_metadata(
+    metadata: TakeoverMetadata | None,
+    *,
+    takeover_owner: str,
+    original_owner: str | None,
+    recovery_sha256: str,
+) -> bool:
+    return (
+        metadata is not None
+        and metadata.takeover_owner == takeover_owner
+        and metadata.original_owner == original_owner
+        and metadata.recovery_sha256 == recovery_sha256
+        and metadata.cleanup_source_sha256 is None
+    )
 
 
 def is_active_takeover_backup(
@@ -1037,7 +1210,7 @@ def is_active_takeover_backup(
     return (
         metadata is not None
         and overlay_owner(config_text) == metadata.takeover_owner
-        and overlay_owner(backup_text) == metadata.original_owner
+        and _matches_takeover_recovery(backup_text, metadata)
     )
 
 
@@ -1049,7 +1222,7 @@ def is_interrupted_takeover(
     return (
         metadata is not None
         and overlay_owner(config_text) == metadata.original_owner
-        and overlay_owner(backup_text) == metadata.original_owner
+        and _matches_takeover_recovery(backup_text, metadata)
     )
 
 
@@ -1139,7 +1312,7 @@ def _prepare_managed_config_write(
     backup_path: Path,
     *,
     operation: str,
-) -> tuple[TakeoverMetadata | None, str]:
+) -> tuple[TakeoverMetadata | None, TakeoverPreparedState]:
     """Validate or finish takeover recovery before another managed write.
 
     Callers already hold the lifecycle lock. A terminal cleanup journal is
@@ -1148,22 +1321,18 @@ def _prepare_managed_config_write(
     byte-bound journal yet. Interrupted takeover state is returned to the
     caller, which may allow only the exact takeover retry.
     """
-    metadata_read = read_takeover_metadata(backup_path)
-    if metadata_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError(f"refusing {operation}: takeover metadata is invalid")
-    completion_read = read_takeover_completion(backup_path)
-    if completion_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError(f"refusing {operation}: takeover completion is invalid")
-    metadata = metadata_read.metadata
+    lifecycle = _read_takeover_lifecycle(backup_path, operation=operation)
+    metadata = lifecycle.metadata
+    completion = lifecycle.completion
     if metadata is None:
-        if completion_read.receipt is not None:
-            completion = completion_read.receipt
+        if completion is not None:
             if backup_path.exists():
                 recovery = read_text_preserving_newlines(backup_path)
-                if not _matches_takeover_completion_backup(recovery, completion):
-                    raise RuntimeError(
-                        f"refusing {operation}: completion recovery is inconsistent"
-                    )
+                _require_takeover_completion_recovery(
+                    recovery,
+                    completion,
+                    operation=operation,
+                )
                 _retire_takeover_completion(backup_path)
             elif not config_path.exists():
                 raise RuntimeError(
@@ -1175,34 +1344,34 @@ def _prepare_managed_config_write(
                     completion,
                     read_text_preserving_newlines(config_path),
                 )
-        return None, "absent"
-    if metadata.cleanup_source_sha256 is not None:
+        return None, TakeoverPreparedState.ABSENT
+    if lifecycle.phase is TakeoverLifecyclePhase.CLEANUP_JOURNAL:
         _resume_takeover_cleanup(config_path, backup_path, metadata)
-        return None, "cleanup_resumed"
+        return None, TakeoverPreparedState.CLEANUP_RESUMED
     if not backup_path.exists():
         raise RuntimeError(f"refusing {operation}: recovery backup is missing or diverged")
 
     recovery = read_text_preserving_newlines(backup_path)
+    if completion is not None:
+        _require_takeover_completion_recovery(
+            recovery,
+            completion,
+            operation=operation,
+        )
+    if not _matches_takeover_recovery(recovery, metadata):
+        raise RuntimeError(f"refusing {operation}: recovery backup is missing or diverged")
     current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
     if is_interrupted_takeover(current, recovery, metadata):
         if not config_path.exists() or current != recovery:
             raise RuntimeError(
                 f"refusing {operation}: live config is missing or diverged"
             )
-        takeover_state = "interrupted"
+        takeover_state = TakeoverPreparedState.INTERRUPTED
     elif is_active_takeover_backup(current, recovery, metadata):
-        takeover_state = "active"
+        takeover_state = TakeoverPreparedState.ACTIVE
     else:
         raise RuntimeError(f"refusing {operation}: takeover state is not recognized")
-    if completion_read.receipt is not None:
-        completion = completion_read.receipt
-        if (
-            completion.original_owner != metadata.original_owner
-            or not _matches_takeover_completion_backup(recovery, completion)
-        ):
-            raise RuntimeError(
-                f"refusing {operation}: completion recovery is inconsistent"
-            )
+    if completion is not None:
         _retire_takeover_completion(backup_path)
     return metadata, takeover_state
 
@@ -1250,11 +1419,11 @@ def _apply_overlay_locked(
         backup_path,
         operation="overlay apply",
     )
-    if takeover_state == "active" and (
+    if takeover_state is TakeoverPreparedState.ACTIVE and (
         metadata is None or owner != metadata.takeover_owner
     ):
         raise RuntimeError("refusing overlay apply: active takeover belongs to another owner")
-    if takeover_state == "interrupted" and (
+    if takeover_state is TakeoverPreparedState.INTERRUPTED and (
         metadata is None
         or owner != metadata.takeover_owner
         or not takeover
@@ -1280,7 +1449,28 @@ def _apply_overlay_locked(
         atomic_write_text(backup_path, backup, encoding="utf-8")
         metadata_path = takeover_metadata_path(backup_path)
         if cross_owner_takeover:
-            write_takeover_metadata(backup_path, owner, active_owner)
+            published_backup = read_text_preserving_newlines(backup_path)
+            if published_backup != backup:
+                raise RuntimeError(
+                    "refusing overlay apply: recovery backup publication diverged"
+                )
+            recovery_sha256 = takeover_text_sha256(published_backup)
+            write_takeover_metadata(
+                backup_path,
+                owner,
+                active_owner,
+                recovery_sha256=recovery_sha256,
+            )
+            metadata_read = read_takeover_metadata(backup_path)
+            if not _matches_active_takeover_metadata(
+                metadata_read.metadata,
+                takeover_owner=owner,
+                original_owner=active_owner,
+                recovery_sha256=recovery_sha256,
+            ):
+                raise RuntimeError(
+                    "refusing overlay apply: takeover ownership evidence is inconsistent"
+                )
         elif metadata_path.exists():
             metadata_path.unlink()
 
@@ -1300,26 +1490,32 @@ def _apply_overlay_locked(
 
     # Retire an older completed generation only after this apply has durable
     # live bytes, a recovery backup, and takeover metadata when ownership moved.
-    completion_read = read_takeover_completion(backup_path)
-    if completion_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError("refusing overlay apply: takeover completion is invalid")
-    if completion_read.receipt is not None:
-        if not backup_path.exists() or not _matches_takeover_completion_backup(
-            read_text_preserving_newlines(backup_path),
-            completion_read.receipt,
-        ):
+    lifecycle = _read_takeover_lifecycle(
+        backup_path,
+        operation="overlay apply",
+    )
+    if lifecycle.completion is not None:
+        if not backup_path.exists():
             raise RuntimeError(
                 "refusing overlay apply: completion recovery is inconsistent"
             )
+        _require_takeover_completion_recovery(
+            read_text_preserving_newlines(backup_path),
+            lifecycle.completion,
+            operation="overlay apply",
+        )
         if cross_owner_takeover:
-            new_metadata_read = read_takeover_metadata(backup_path)
-            new_metadata = new_metadata_read.metadata
-            if (
-                new_metadata_read.state is not TakeoverMetadataState.VALID
-                or new_metadata is None
-                or new_metadata.takeover_owner != owner
-                or new_metadata.original_owner != active_owner
-                or new_metadata.cleanup_source_sha256 is not None
+            new_metadata = lifecycle.metadata
+            recovery_sha256 = takeover_text_sha256(
+                read_text_preserving_newlines(backup_path)
+            )
+            if lifecycle.phase is not TakeoverLifecyclePhase.ACTIVE or not (
+                _matches_active_takeover_metadata(
+                    new_metadata,
+                    takeover_owner=owner,
+                    original_owner=active_owner,
+                    recovery_sha256=recovery_sha256,
+                )
             ):
                 raise RuntimeError(
                     "refusing overlay apply: takeover ownership evidence is inconsistent"
@@ -1408,7 +1604,7 @@ def _resume_takeover_cleanup(
     write_takeover_completion_receipt(backup_path, expected_completion)
     completion_read = read_takeover_completion(backup_path)
     if (
-        completion_read.state is not TakeoverMetadataState.VALID
+        completion_read.state is not TakeoverRecordState.VALID
         or completion_read.receipt != expected_completion
     ):
         raise RuntimeError("refusing takeover cleanup: completion receipt readback failed")
@@ -1432,13 +1628,14 @@ def _start_takeover_cleanup(
         backup_path,
         metadata.takeover_owner,
         metadata.original_owner,
+        recovery_sha256=metadata.recovery_sha256,
         cleanup_source_sha256=takeover_text_sha256(current),
         cleanup_recovery_sha256=takeover_text_sha256(recovery),
         cleanup_final_sha256=takeover_text_sha256(final),
         cleanup_status=status,
     )
     journal_read = read_takeover_metadata(backup_path)
-    if journal_read.state is not TakeoverMetadataState.VALID:
+    if journal_read.state is not TakeoverRecordState.VALID:
         raise RuntimeError("refusing takeover cleanup: journal readback failed")
     journal = journal_read.metadata
     if journal is None:
@@ -1447,22 +1644,15 @@ def _start_takeover_cleanup(
 
 
 def _restore_overlay_locked(config_path: Path, backup_path: Path, unified_history: bool) -> str:
-    metadata_read = read_takeover_metadata(backup_path)
-    if metadata_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError("refusing takeover restore: takeover metadata is invalid")
-    completion_read = read_takeover_completion(backup_path)
-    if completion_read.state is TakeoverMetadataState.INVALID:
-        raise RuntimeError("refusing takeover restore: takeover completion is invalid")
-    metadata = metadata_read.metadata
-    if (
-        metadata is not None
-        and completion_read.receipt is not None
-        and completion_read.receipt.original_owner != metadata.original_owner
-    ):
-        raise RuntimeError(
-            "refusing takeover restore: completion ownership is inconsistent"
-        )
-    if metadata is not None and metadata.cleanup_source_sha256 is not None:
+    lifecycle = _read_takeover_lifecycle(
+        backup_path,
+        operation="takeover restore",
+    )
+    metadata = lifecycle.metadata
+    completion = lifecycle.completion
+    if lifecycle.phase is TakeoverLifecyclePhase.CLEANUP_JOURNAL:
+        if metadata is None:
+            raise RuntimeError("refusing takeover restore: takeover metadata is invalid")
         return _resume_takeover_cleanup(config_path, backup_path, metadata)
 
     if not backup_path.exists() and metadata is not None:
@@ -1470,17 +1660,23 @@ def _restore_overlay_locked(config_path: Path, backup_path: Path, unified_histor
     if (
         backup_path.exists()
         and metadata is not None
-        and completion_read.receipt is not None
-        and not _matches_takeover_completion_backup(
+        and completion is not None
+    ):
+        _require_takeover_completion_recovery(
             read_text_preserving_newlines(backup_path),
-            completion_read.receipt,
+            completion,
+            operation="takeover restore",
+        )
+    if (
+        backup_path.exists()
+        and metadata is not None
+        and not _matches_takeover_recovery(
+            read_text_preserving_newlines(backup_path),
+            metadata,
         )
     ):
-        raise RuntimeError(
-            "refusing takeover restore: completion recovery is inconsistent"
-        )
-    if not backup_path.exists() and metadata is None and completion_read.receipt is not None:
-        completion = completion_read.receipt
+        raise RuntimeError("refusing takeover restore: recovery backup is missing or diverged")
+    if not backup_path.exists() and metadata is None and completion is not None:
         if not config_path.exists():
             raise RuntimeError(
                 "refusing takeover restore: completed live config is missing or diverged"
@@ -1491,8 +1687,7 @@ def _restore_overlay_locked(config_path: Path, backup_path: Path, unified_histor
                 "refusing takeover restore: completed live config is missing or diverged"
             )
         return completion.status
-    if backup_path.exists() and metadata is None and completion_read.receipt is not None:
-        completion = completion_read.receipt
+    if backup_path.exists() and metadata is None and completion is not None:
         staged_backup = read_text_preserving_newlines(backup_path)
         if config_path.exists():
             current = read_text_preserving_newlines(config_path)
@@ -1502,10 +1697,11 @@ def _restore_overlay_locked(config_path: Path, backup_path: Path, unified_histor
             ):
                 backup_path.unlink()
                 return completion.status
-        if not _matches_takeover_completion_backup(staged_backup, completion):
-            raise RuntimeError(
-                "refusing takeover restore: completion recovery is inconsistent"
-            )
+        _require_takeover_completion_recovery(
+            staged_backup,
+            completion,
+            operation="takeover restore",
+        )
         _retire_takeover_completion(backup_path)
 
     if backup_path.exists():
