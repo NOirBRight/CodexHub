@@ -82,6 +82,27 @@ export interface CapabilityBinding {
   rejection_reason?: string | null;
 }
 
+export interface ProviderProtocolSwitch {
+  providerId: string;
+  upstreamProtocol: Exclude<Provider["upstream_format"], null | undefined | "auto">;
+  modelIds: string[];
+}
+
+export type ProviderCatalogTransactionOutcome =
+  | "committed"
+  | "unchanged"
+  | "rolled_back"
+  | "recovery_required";
+
+export interface ProviderCatalogTransactionResult {
+  outcome: ProviderCatalogTransactionOutcome;
+  providers: Provider[];
+  models: Model[];
+  protocolChanged: boolean;
+  detail?: string | null;
+  catalogDisabled: boolean;
+}
+
 export interface Provider {
   id: string;
   name: string;

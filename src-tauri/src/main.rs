@@ -18,6 +18,7 @@ mod models;
 mod official_refresh;
 mod openai_usage;
 mod proxy;
+mod provider_catalog_transaction;
 mod runtime_paths;
 mod safe_file;
 mod web_bridge;
@@ -381,7 +382,10 @@ fn switch_mode(
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
-    proxy::start_after(official_refresh::refresh_before_official_activation)
+    proxy::start_after(|| {
+        provider_catalog_transaction::recover_before_gateway_start()?;
+        official_refresh::refresh_before_official_activation()
+    })
 }
 
 #[tauri::command]
@@ -391,7 +395,10 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
-    proxy::restart_after(official_refresh::refresh_before_official_activation)
+    proxy::restart_after(|| {
+        provider_catalog_transaction::recover_before_gateway_start()?;
+        official_refresh::refresh_before_official_activation()
+    })
 }
 
 #[tauri::command]
@@ -402,6 +409,21 @@ fn get_providers() -> Result<Vec<Provider>, String> {
 #[tauri::command]
 fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
     config::save_providers(providers)
+}
+
+#[tauri::command]
+async fn persist_provider_catalog_state(
+    providers: Vec<Provider>,
+) -> Result<provider_catalog_transaction::ProviderCatalogTransactionResult, String> {
+    run_blocking("persist_provider_catalog_state", move || {
+        provider_catalog_transaction::persist_provider_catalog_state(providers)
+    })
+    .await
+}
+
+#[tauri::command]
+fn provider_catalog_recovery_pending() -> Result<bool, String> {
+    provider_catalog_transaction::recovery_pending()
 }
 
 #[tauri::command]
@@ -1115,6 +1137,8 @@ fn run_gui() {
             restart_proxy,
             get_providers,
             save_providers,
+            persist_provider_catalog_state,
+            provider_catalog_recovery_pending,
             get_settings,
             get_app_flavor,
             save_settings,
@@ -1192,6 +1216,7 @@ fn start_gateway_on_launch() {
         let start = || {
             proxy::start_after(|| {
                 launch_ready.signal();
+                provider_catalog_transaction::recover_before_gateway_start()?;
                 if let Err(error) = official_refresh::refresh_at_startup() {
                     log::warn!("startup Official model refresh failed: {error}");
                 }

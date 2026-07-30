@@ -30,6 +30,7 @@ import type {
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
   Provider,
+  ProviderCatalogTransactionResult,
   RoutingOwner,
   Settings,
   SubagentMatrixStatus,
@@ -196,6 +197,12 @@ export const api = {
   restartProxy: () => call<AppStatus>("restart_proxy"),
   getProviders: () => call<Provider[]>("get_providers"),
   saveProviders: (providers: Provider[]) => call<Provider[]>("save_providers", { providers }),
+  persistProviderCatalogState: (providers: Provider[]) =>
+    call<ProviderCatalogTransactionResult>("persist_provider_catalog_state", {
+      providers,
+    }),
+  providerCatalogRecoveryPending: () =>
+    call<boolean>("provider_catalog_recovery_pending"),
   getSettings: async () => normalizeSettings(await call<Partial<Settings>>("get_settings")),
   saveSettings: async (settings: Settings) =>
     normalizeSettings(

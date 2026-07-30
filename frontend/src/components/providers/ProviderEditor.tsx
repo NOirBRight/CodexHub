@@ -18,6 +18,7 @@ import {
   upstreamFormatLabel,
 } from "../../lib/providerEndpoint";
 import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
+import { providerCatalogSaveDisabled } from "../../lib/providerCatalogTransaction";
 import { normalizeModel } from "../../lib/providerModel";
 import { isProviderDirty } from "../../lib/providerComparison";
 import { cx, displayModel, renumberModels } from "../../lib/format";
@@ -38,6 +39,7 @@ export function ProviderDetail({
   onRefresh,
   probeResult,
   provider,
+  recoveryPending,
 }: {
   busy: string | null;
   discoverError?: string | null;
@@ -48,6 +50,7 @@ export function ProviderDetail({
   onRefresh: (provider: Provider) => void;
   probeResult: UpstreamFormatProbeResult | null;
   provider: Provider;
+  recoveryPending: boolean;
 }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
@@ -229,7 +232,7 @@ export function ProviderDetail({
         <button
           type="button"
           className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
-          disabled={!dirty || busy === "save"}
+          disabled={providerCatalogSaveDisabled(dirty, busy === "save", recoveryPending)}
           onClick={() => onChange(draft, t("providers.providerSaved", { name: draft.name }))}
         >
           <Save size={16} />

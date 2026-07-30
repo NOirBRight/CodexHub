@@ -24,6 +24,7 @@ const providerFormControlsPath = new URL("../src/components/providers/ProviderFo
 const providerModelSectionPath = new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url);
 const providerNavigationGuardPath = new URL("../src/hooks/useProviderNavigationGuard.ts", import.meta.url);
 const providerCatalogActionsPath = new URL("../src/hooks/useProviderCatalogActions.ts", import.meta.url);
+const providerCatalogTransactionPath = new URL("../src/lib/providerCatalogTransaction.ts", import.meta.url);
 const verticalOverflowPath = new URL("../src/hooks/useVerticalOverflow.ts", import.meta.url);
 const dateRangePath = new URL("../src/lib/dateRange.ts", import.meta.url);
 const officialModelsPath = new URL("../src/lib/officialModels.ts", import.meta.url);
@@ -113,29 +114,49 @@ test("i18n locales are registered and keep matching translation keys", async () 
 });
 
 test("provider protocol switches regenerate, read back, and disclose exact Codex restarts", async () => {
-  const [actionsSource, enSource, zhSource, typesSource] = await Promise.all([
+  const [
+    actionsSource,
+    enSource,
+    zhSource,
+    typesSource,
+    transactionSource,
+    tauriSource,
+    tauriMainSource,
+    webBridgeSource,
+  ] = await Promise.all([
     readFile(providerCatalogActionsPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(providerCatalogTransactionPath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
   ]);
-  const protocolSwitchSource = actionsSource.match(
-    /export function changedProviderProtocols[\s\S]*?export function verifyCatalogProtocolBindings/,
-  )?.[0] ?? "";
 
   assert.match(typesSource, /capability_profiles\?: CapabilityProfile\[\]/);
   assert.match(typesSource, /capability_binding\?: CapabilityBinding/);
-  assert.match(actionsSource, /changedProviderProtocols/);
+  assert.match(typesSource, /ProviderCatalogTransactionOutcome/);
   assert.match(
-    protocolSwitchSource,
+    transactionSource,
     /\.filter\(\(model\) => model\.enabled && model\.gateway_exported !== false\)[\s\S]*\.map\(\(model\) => model\.id\)/,
   );
-  assert.match(actionsSource, /verifyCatalogProtocolBindings/);
-  assert.match(actionsSource, /const catalogModels = await api\.generateCatalog\(\)/);
-  assert.match(actionsSource, /verifyCatalogProtocolBindings\(catalogModels, protocolSwitches\)/);
+  assert.match(tauriSource, /persistProviderCatalogState/);
+  assert.match(tauriSource, /providerCatalogRecoveryPending/);
+  assert.match(tauriMainSource, /recover_before_gateway_start\(\)/);
+  assert.match(webBridgeSource, /"persist_provider_catalog_state"/);
+  assert.match(webBridgeSource, /"provider_catalog_recovery_pending"/);
+  assert.match(actionsSource, /if \(mustRegenerateCatalog\)[\s\S]*await api\.persistProviderCatalogState\(next\)/);
+  assert.match(actionsSource, /catalogAlreadyPublished = true/);
+  assert.match(actionsSource, /setProviderCatalogRecoveryPending\(transaction\.outcome === "recovery_required"\)/);
+  assert.doesNotMatch(actionsSource, /verifyCatalogProtocolBindings/);
   assert.match(
     actionsSource,
     /async function persistProviderProbeResult[\s\S]*await saveProviders\([\s\S]*nextProviders,[\s\S]*true,/,
+  );
+  assert.doesNotMatch(
+    actionsSource.match(/async function persistProviderProbeResult[\s\S]*?function providerProbeModel/)?.[0] ?? "",
+    /setProviders\(nextProviders\)/,
   );
   assert.match(actionsSource, /providers\.protocolChangedRestartLongLivedCodex/);
   assert.match(enSource, /Quit and reopen Codex App/);
@@ -143,6 +164,115 @@ test("provider protocol switches regenerate, read back, and disclose exact Codex
   assert.match(enSource, /New Codex CLI processes use the new route immediately/);
   assert.match(zhSource, /退出并重新打开 Codex App/);
   assert.match(zhSource, /codex app-server/);
+});
+
+test("provider protocol transaction feedback reports committed and restored state behaviorally", async () => {
+  const source = await readFile(providerCatalogTransactionPath, "utf8");
+  const jsOutput = ts.transpileModule(
+    source.replace(/^\s*import[\s\S]*?;\s*$/gm, ""),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+  const moduleExports = {};
+  new Function("exports", jsOutput)(moduleExports);
+  const {
+    changedProviderProtocols,
+    providerCatalogSaveDisabled,
+    providerCatalogTransactionFeedback,
+  } = moduleExports;
+  const current = [{
+    id: "ollama-cloud",
+    upstream_format: "responses",
+    models: [{ id: "glm-5.2", upstream_model: "upstream-alias", enabled: true }],
+  }];
+  const next = [{
+    ...current[0],
+    upstream_format: "chat_completions",
+  }];
+
+  assert.deepEqual(changedProviderProtocols(current, next), [{
+    providerId: "ollama-cloud",
+    upstreamProtocol: "chat_completions",
+    modelIds: ["glm-5.2"],
+  }]);
+  assert.equal(providerCatalogSaveDisabled(false, false, false), true);
+  assert.equal(providerCatalogSaveDisabled(false, false, true), false);
+  assert.equal(providerCatalogSaveDisabled(true, true, true), true);
+
+  const t = (key, options = {}) => `${key}:${options.detail ?? ""}`;
+  const committed = providerCatalogTransactionFeedback({
+    outcome: "committed",
+    providers: next,
+    models: [],
+    protocolChanged: true,
+    detail: null,
+    catalogDisabled: false,
+  }, t);
+  const ordinaryCommit = providerCatalogTransactionFeedback({
+    outcome: "committed",
+    providers: current,
+    models: [],
+    protocolChanged: false,
+    detail: null,
+    catalogDisabled: false,
+  }, t);
+  const rolledBack = providerCatalogTransactionFeedback({
+    outcome: "rolled_back",
+    providers: current,
+    models: [],
+    protocolChanged: true,
+    detail: "generation failed",
+    catalogDisabled: false,
+  }, t);
+  const recoveryRequired = providerCatalogTransactionFeedback({
+    outcome: "recovery_required",
+    providers: next,
+    models: [],
+    protocolChanged: true,
+    detail: "rollback failed",
+    catalogDisabled: true,
+  }, t);
+  const recoveryInvalidationFailed = providerCatalogTransactionFeedback({
+    outcome: "recovery_required",
+    providers: next,
+    models: [],
+    protocolChanged: true,
+    detail: "catalog invalidation failed",
+    catalogDisabled: false,
+  }, t);
+
+  assert.deepEqual(committed, {
+    committed: true,
+    tone: "success",
+    text: "providers.protocolChangedRestartLongLivedCodex:",
+  });
+  assert.deepEqual(ordinaryCommit, {
+    committed: true,
+    tone: "success",
+    text: "providers.providerCatalogUpdated:",
+  });
+  assert.deepEqual(rolledBack, {
+    committed: false,
+    tone: "error",
+    text: "providers.protocolChangeRolledBack:generation failed",
+  });
+  assert.deepEqual(recoveryRequired, {
+    committed: false,
+    tone: "error",
+    text: "providers.protocolChangeRecoveryRequired:rollback failed",
+  });
+  assert.deepEqual(recoveryInvalidationFailed, {
+    committed: false,
+    tone: "error",
+    text: "providers.protocolChangeRecoveryInvalidationFailed:catalog invalidation failed",
+  });
+  assert.doesNotMatch(rolledBack.text, /RestartLongLivedCodex/);
+  assert.doesNotMatch(recoveryRequired.text, /RestartLongLivedCodex/);
+  assert.doesNotMatch(recoveryInvalidationFailed.text, /RestartLongLivedCodex/);
 });
 
 test("history sync is explicit and never participates in startup or settings save", async () => {

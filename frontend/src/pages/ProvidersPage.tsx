@@ -35,7 +35,10 @@ import {
 } from "../components/providers/ProviderModelSection";
 import { useProviderNavigationGuard } from "../hooks/useProviderNavigationGuard";
 import type { PendingProviderNavigation } from "../hooks/useProviderNavigationGuard";
-import { useProviderCatalogActions } from "../hooks/useProviderCatalogActions";
+import {
+  ProviderCatalogTransactionHandledError,
+  useProviderCatalogActions,
+} from "../hooks/useProviderCatalogActions";
 import { useVerticalOverflow } from "../hooks/useVerticalOverflow";
 import { cx, displayModel, renumberModels } from "../lib/format";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
@@ -176,6 +179,7 @@ function ProvidersPageImpl({
     persistProviderProbeResult,
     probeUpstreamFormat,
     providerProbeModel,
+    providerCatalogRecoveryPending,
     refreshOfficialModels,
     refreshProviderModels,
     saveAddProviderForm,
@@ -817,9 +821,18 @@ function ProvidersPageImpl({
         setError(t("providers.providerDeleteDidNotPersist", { name: target.name }));
         return;
       }
-    } catch {
-      setProviders(previousProviders);
-      setSelectedId(previousSelectedId);
+    } catch (err) {
+      if (err instanceof ProviderCatalogTransactionHandledError && err.providers) {
+        setProviders(err.providers);
+        setSelectedId(
+          err.providers.some((provider) => provider.id === providerId)
+            ? previousSelectedId
+            : err.providers[0]?.id ?? OFFICIAL_ID,
+        );
+      } else {
+        setProviders(previousProviders);
+        setSelectedId(previousSelectedId);
+      }
       return;
     }
     setProbeResult(null);
@@ -905,6 +918,7 @@ function ProvidersPageImpl({
                 discoverError={modelDiscoveryError}
                 probeResult={probeResult}
                 provider={selectedProvider}
+                recoveryPending={providerCatalogRecoveryPending}
                 onChange={(provider) => void updateProvider(provider)}
                 onDelete={() => void deleteProvider(selectedProvider.id)}
                 onDraftStateChange={trackProviderDraft}

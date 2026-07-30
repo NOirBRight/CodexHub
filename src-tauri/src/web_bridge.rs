@@ -279,6 +279,22 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             .map_err(|error| format!("invalid providers argument: {error}"))?;
             to_value(config::save_providers(providers))
         }
+        "persist_provider_catalog_state" => {
+            let providers = serde_json::from_value(
+                request
+                    .args
+                    .get("providers")
+                    .cloned()
+                    .ok_or_else(|| "providers argument is required".to_string())?,
+            )
+            .map_err(|error| format!("invalid providers argument: {error}"))?;
+            to_value(
+                crate::provider_catalog_transaction::persist_provider_catalog_state(providers),
+            )
+        }
+        "provider_catalog_recovery_pending" => {
+            to_value(crate::provider_catalog_transaction::recovery_pending())
+        }
         "get_settings" => to_value(
             config::get_settings().and_then(autostart::reconcile_settings),
         ),

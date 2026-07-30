@@ -1891,7 +1891,7 @@ fn generate_catalog_with_runner(
     read_catalog_models(&catalog_path)
 }
 
-fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
+pub(crate) fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     read_catalog_models_matching(path, |_| true)
 }
 

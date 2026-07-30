@@ -150,7 +150,7 @@ impl ConfigPaths {
         self.runtime_dir.join("proxy")
     }
 
-    fn runtime_providers_path(&self) -> PathBuf {
+    pub(crate) fn runtime_providers_path(&self) -> PathBuf {
         self.proxy_dir().join("config").join("providers.toml")
     }
 
@@ -233,10 +233,25 @@ impl ConfigPaths {
         runtime_dir.join("proxy").join(name)
     }
 
-    fn generated_catalog_path(&self) -> PathBuf {
+    pub(crate) fn generated_catalog_path(&self) -> PathBuf {
         self.runtime_dir
             .join("model-catalogs")
             .join("codexhub-model-catalog.json")
+    }
+
+    pub(crate) fn provider_catalog_recovery_path(&self) -> PathBuf {
+        self.proxy_dir()
+            .join("provider-catalog-transaction.json")
+    }
+
+    pub(crate) fn provider_catalog_providers_backup_path(&self) -> PathBuf {
+        self.runtime_providers_path()
+            .with_file_name(".provider-catalog-transaction.providers.toml")
+    }
+
+    pub(crate) fn provider_catalog_catalog_backup_path(&self) -> PathBuf {
+        self.generated_catalog_path()
+            .with_file_name(".provider-catalog-transaction.catalog.json")
     }
 
     pub(crate) fn config_overlay_script(&self) -> PathBuf {
@@ -539,19 +554,14 @@ fn sanitize_settings_for_save(
     settings
 }
 
-fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
+pub(crate) fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
     let path = if paths.runtime_providers_path().exists() {
         paths.runtime_providers_path()
     } else {
         paths.bundled_providers_path()
     };
 
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read providers TOML {}: {error}", path.display()))?;
-    let document: ProvidersDocument = toml::from_str(&text)
-        .map_err(|error| format!("failed to parse providers TOML {}: {error}", path.display()))?;
-
-    let mut providers = document.providers;
+    let mut providers = read_providers_document(&path)?;
     for provider in &mut providers {
         for model in &mut provider.models {
             crate::models::apply_resolved_model_limits(&provider.id, model);
@@ -561,7 +571,22 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     Ok(providers)
 }
 
-fn save_providers_with_paths(
+pub(crate) fn read_runtime_providers_with_paths(
+    paths: &ConfigPaths,
+) -> Result<Vec<Provider>, String> {
+    read_providers_document(&paths.runtime_providers_path())
+}
+
+fn read_providers_document(path: &Path) -> Result<Vec<Provider>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read providers TOML {}: {error}", path.display()))?;
+    let document: ProvidersDocument = toml::from_str(&text)
+        .map_err(|error| format!("failed to parse providers TOML {}: {error}", path.display()))?;
+
+    Ok(document.providers)
+}
+
+pub(crate) fn save_providers_with_paths(
     providers: Vec<Provider>,
     paths: &ConfigPaths,
 ) -> Result<Vec<Provider>, String> {
@@ -2167,6 +2192,18 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_eq!(paths.config_backup_path(), runtime.join("proxy/config.toml.release.backup"));
         assert_eq!(paths.codex_config_path(), target.join("config.toml"));
         assert_eq!(paths.generated_catalog_path(), runtime.join("model-catalogs/codexhub-model-catalog.json"));
+        assert_eq!(
+            paths.provider_catalog_recovery_path(),
+            runtime.join("proxy/provider-catalog-transaction.json")
+        );
+        assert_eq!(
+            paths.provider_catalog_providers_backup_path(),
+            runtime.join("proxy/config/.provider-catalog-transaction.providers.toml")
+        );
+        assert_eq!(
+            paths.provider_catalog_catalog_backup_path(),
+            runtime.join("model-catalogs/.provider-catalog-transaction.catalog.json")
+        );
     }
 
     #[test]

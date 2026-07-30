@@ -1,4 +1,4 @@
-import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { ToastContextValue } from "../components/PageToast";
 import { mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import {
@@ -8,6 +8,10 @@ import {
   sortOfficialModels,
 } from "../lib/officialModels";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
+import {
+  changedProviderProtocols,
+  providerCatalogTransactionFeedback,
+} from "../lib/providerCatalogTransaction";
 import { normalizeModel } from "../lib/providerModel";
 import {
   applyProviderProbeResult,
@@ -27,6 +31,16 @@ import type {
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 type SetState<T> = Dispatch<SetStateAction<T>>;
+
+export class ProviderCatalogTransactionHandledError extends Error {
+  readonly providers: Provider[] | null;
+
+  constructor(message: string, providers: Provider[] | null) {
+    super(message);
+    this.name = "ProviderCatalogTransactionHandledError";
+    this.providers = providers;
+  }
+}
 
 export type SaveProviders = (
   next: Provider[],
@@ -59,57 +73,6 @@ type ProviderCatalogActionOptions = {
   updateToastWithError: (toastId: string, err: unknown) => void;
 };
 
-type ProviderProtocolSwitch = {
-  providerId: string;
-  upstreamProtocol: Exclude<Provider["upstream_format"], null | undefined | "auto">;
-  modelIds: string[];
-};
-
-export function changedProviderProtocols(
-  currentProviders: Provider[],
-  nextProviders: Provider[],
-): ProviderProtocolSwitch[] {
-  const currentById = new Map(currentProviders.map((provider) => [provider.id, provider]));
-  return nextProviders.flatMap((provider) => {
-    const current = currentById.get(provider.id);
-    const upstreamProtocol = provider.upstream_format;
-    if (
-      !current
-      || current.upstream_format === upstreamProtocol
-      || !upstreamProtocol
-      || upstreamProtocol === "auto"
-    ) {
-      return [];
-    }
-    return [{
-      providerId: provider.id,
-      upstreamProtocol,
-      modelIds: provider.models
-        .filter((model) => model.enabled && model.gateway_exported !== false)
-        .map((model) => model.id),
-    }];
-  });
-}
-
-export function verifyCatalogProtocolBindings(
-  catalogModels: Model[],
-  protocolSwitches: ProviderProtocolSwitch[],
-) {
-  for (const protocolSwitch of protocolSwitches) {
-    for (const modelId of protocolSwitch.modelIds) {
-      const binding = catalogModels.find((model) => (
-        model.capability_binding?.provider === protocolSwitch.providerId
-        && model.capability_binding.model === modelId
-      ))?.capability_binding;
-      if (!binding || binding.upstream_protocol !== protocolSwitch.upstreamProtocol) {
-        throw new Error(
-          `Catalog readback did not bind ${protocolSwitch.providerId}/${modelId} to ${protocolSwitch.upstreamProtocol}`,
-        );
-      }
-    }
-  }
-}
-
 export function useProviderCatalogActions({
   form,
   officialModelOrderDraft,
@@ -134,6 +97,25 @@ export function useProviderCatalogActions({
   updateToastWithError,
 }: ProviderCatalogActionOptions) {
   const { showToast, updateToast } = toast;
+  const [providerCatalogRecoveryPending, setProviderCatalogRecoveryPending] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api.providerCatalogRecoveryPending()
+      .then((pending) => {
+        if (active) {
+          setProviderCatalogRecoveryPending(pending);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setProviderCatalogRecoveryPending(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   function updateProbeToast(toastId: string, result: UpstreamFormatProbeResult) {
     const detectedFormat = probeDetectedEndpointFormat(result);
@@ -151,11 +133,9 @@ export function useProviderCatalogActions({
     toastId?: string,
     options?: {
       catalogAlreadyPublished?: boolean;
-      protocolSwitches?: ProviderProtocolSwitch[];
     },
   ) {
     const catalogAlreadyPublished = options?.catalogAlreadyPublished ?? false;
-    const protocolSwitches = options?.protocolSwitches ?? [];
     if (toastId && !catalogAlreadyPublished) {
       updateToast(toastId, {
         action: null,
@@ -164,8 +144,7 @@ export function useProviderCatalogActions({
       });
     }
     if (!catalogAlreadyPublished) {
-      const catalogModels = await api.generateCatalog();
-      verifyCatalogProtocolBindings(catalogModels, protocolSwitches);
+      await api.generateCatalog();
     }
     const syncSettings = activeSettings ?? settingsDraft ?? settings;
     let syncResult: GatewayClientSyncSummary | null = null;
@@ -219,20 +198,75 @@ export function useProviderCatalogActions({
       successMessage ? `${successMessage}...` : t("providers.updateProviderCatalog"),
       "loading",
     );
+    const mustRegenerateCatalog = (
+      regenerateCatalog
+      || protocolSwitches.length > 0
+      || providerCatalogRecoveryPending
+    );
+    let transactionCommitted = false;
+    let protocolCommitted = false;
     try {
-      const saved = await api.saveProviders(next);
+      let saved: Provider[];
+      let catalogAlreadyPublished = false;
+      if (mustRegenerateCatalog) {
+        const transaction = await api.persistProviderCatalogState(next);
+        const feedback = providerCatalogTransactionFeedback(transaction, t);
+        saved = transaction.providers;
+        setProviderCatalogRecoveryPending(transaction.outcome === "recovery_required");
+        if (!feedback.committed) {
+          setProviders(saved);
+          onProvidersChanged?.(saved);
+          updateToast(activeToastId, {
+            action: null,
+            text: feedback.text,
+            tone: feedback.tone,
+          });
+          setError(feedback.text);
+          throw new ProviderCatalogTransactionHandledError(feedback.text, saved);
+        }
+        transactionCommitted = true;
+        protocolCommitted = transaction.protocolChanged;
+        catalogAlreadyPublished = true;
+      } else {
+        saved = await api.saveProviders(next);
+      }
       setProviders(saved);
       onProvidersChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
-      const mustRegenerateCatalog = regenerateCatalog || protocolSwitches.length > 0;
       if (mustRegenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(
-          undefined,
-          activeToastId,
-          { protocolSwitches },
-        );
+        try {
+          syncResult = await updateGatewayAfterCatalog(
+            undefined,
+            activeToastId,
+            { catalogAlreadyPublished },
+          );
+        } catch (err) {
+          if (!transactionCommitted) {
+            throw err;
+          }
+          const postCommitMessage = t(
+            protocolCommitted
+              ? "providers.protocolChangeCommittedRefreshFailed"
+              : "providers.providerCatalogCommittedRefreshFailed",
+            {
+              detail: messageFromError(err),
+            },
+          );
+          const committedMessage = `${
+            protocolCommitted
+              ? t("providers.protocolChangedRestartLongLivedCodex")
+              : successMessage ?? t("providers.providerCatalogUpdated")
+          } ${postCommitMessage}`;
+          updateToast(activeToastId, {
+            action: null,
+            text: committedMessage,
+            tone: "error",
+          });
+          setError(committedMessage);
+          return saved;
+        }
       }
-      const completedMessage = protocolSwitches.length
+      const completedMessage = protocolCommitted
         ? t("providers.protocolChangedRestartLongLivedCodex")
         : successMessage ?? t("providers.providerCatalogUpdated");
       const toastMessage = catalogSyncToastMessage(
@@ -255,6 +289,27 @@ export function useProviderCatalogActions({
       }
       return saved;
     } catch (err) {
+      if (err instanceof ProviderCatalogTransactionHandledError) {
+        throw err;
+      }
+      if (mustRegenerateCatalog && !transactionCommitted) {
+        setProviderCatalogRecoveryPending(true);
+        const message = t(
+          protocolSwitches.length
+            ? "providers.protocolChangeOutcomeUnconfirmed"
+            : "providers.providerCatalogOutcomeUnconfirmed",
+          {
+            detail: messageFromError(err),
+          },
+        );
+        updateToast(activeToastId, {
+          action: null,
+          text: message,
+          tone: "error",
+        });
+        setError(message);
+        throw new ProviderCatalogTransactionHandledError(message, null);
+      }
       updateToastWithError(activeToastId, err);
       throw err;
     } finally {
@@ -290,6 +345,10 @@ export function useProviderCatalogActions({
       );
       setModelDiscoveryError(null);
     } catch (err) {
+      if (err instanceof ProviderCatalogTransactionHandledError) {
+        setModelDiscoveryError(err.message);
+        return;
+      }
       const discoveryError = shortProviderDiscoveryError(err, tr);
       setModelDiscoveryError(discoveryError);
       updateToast(toastId, {
@@ -422,7 +481,6 @@ export function useProviderCatalogActions({
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
     );
-    setProviders(nextProviders);
     try {
       const detectedFormat = probeDetectedEndpointFormat(result);
       await saveProviders(
@@ -502,6 +560,7 @@ export function useProviderCatalogActions({
     persistProviderProbeResult,
     probeUpstreamFormat,
     providerProbeModel,
+    providerCatalogRecoveryPending,
     refreshOfficialModels,
     refreshProviderModels,
     saveAddProviderForm,
