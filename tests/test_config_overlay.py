@@ -1302,6 +1302,133 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), original)
             self.assertFalse(backup_path.exists())
 
+    def test_context_guard_rejects_config_lock_namespace_collision_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = config_path.with_name(f"{config_path.name}.lock")
+            catalog_path = self._official_budget_catalog(tmp)
+            original = b'model = "gpt-5.6-terra"\n'
+            config_path.write_bytes(original)
+
+            with self.assertRaisesRegex(ValueError, "lock namespace"):
+                set_context_guard(
+                    config_path,
+                    backup_path,
+                    state_path,
+                    enabled=True,
+                    catalog_path=catalog_path,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertFalse(backup_path.exists())
+            self.assertFalse(state_path.exists())
+
+    def test_context_guard_rejects_every_managed_lock_namespace_collision(self):
+        collision_names = (
+            "config",
+            "backup",
+            "metadata",
+            "completion",
+            "lifecycle",
+            "config_lock",
+            "config_guard",
+            "backup_lock",
+            "backup_guard",
+            "metadata_lock",
+            "metadata_guard",
+            "completion_lock",
+            "completion_guard",
+            "lifecycle_lock",
+            "lifecycle_guard",
+        )
+        for collision_name in collision_names:
+            with self.subTest(collision=collision_name), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path = tmp / "config.toml"
+                backup_path = tmp / "config.backup.toml"
+                metadata_path = config_overlay.takeover_metadata_path(backup_path)
+                completion_path = config_overlay.takeover_completion_path(backup_path)
+                lifecycle_path = config_overlay.overlay_lifecycle_lock_target(config_path)
+                bases = {
+                    "config": config_path,
+                    "backup": backup_path,
+                    "metadata": metadata_path,
+                    "completion": completion_path,
+                    "lifecycle": lifecycle_path,
+                }
+                collision_paths = dict(bases)
+                for name, path in bases.items():
+                    lock_path = path.with_name(f"{path.name}.lock")
+                    collision_paths[f"{name}_lock"] = lock_path
+                    collision_paths[f"{name}_guard"] = lock_path.with_name(
+                        f"{lock_path.name}.guard"
+                    )
+                state_path = collision_paths[collision_name]
+                catalog_path = self._official_budget_catalog(tmp)
+                config_path.write_text(
+                    'model = "gpt-5.6-terra"\n',
+                    encoding="utf-8",
+                )
+                before = {
+                    path.name: path.read_bytes()
+                    for path in tmp.iterdir()
+                    if path.is_file()
+                }
+
+                with self.assertRaisesRegex(ValueError, "lock namespaces"):
+                    set_context_guard(
+                        config_path,
+                        backup_path,
+                        state_path,
+                        enabled=True,
+                        catalog_path=catalog_path,
+                    )
+
+                after = {
+                    path.name: path.read_bytes()
+                    for path in tmp.iterdir()
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+
+    def test_apply_and_restore_reject_lock_namespace_collisions_before_mutation(self):
+        for operation in ("apply", "restore"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path = tmp / "config.toml"
+                backup_path = config_path.with_name(f"{config_path.name}.lock")
+                original = RUST_0_145_AGENTS_CONFIG.encode()
+                config_path.write_bytes(original)
+                before = {
+                    path.name: path.read_bytes()
+                    for path in tmp.iterdir()
+                    if path.is_file()
+                }
+
+                with self.assertRaisesRegex(ValueError, "lock namespaces"):
+                    if operation == "apply":
+                        apply_overlay(
+                            config_path,
+                            backup_path,
+                            None,
+                            "http://127.0.0.1:9099",
+                        )
+                    else:
+                        restore_overlay(
+                            config_path,
+                            backup_path,
+                            unified_history=True,
+                        )
+
+                after = {
+                    path.name: path.read_bytes()
+                    for path in tmp.iterdir()
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+
     def test_config_writers_serialize_across_processes_on_canonical_lifecycle_lock(self):
         for operation in ("apply", "restore", "context_guard"):
             with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmpdir:
@@ -1611,6 +1738,42 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), stable_active)
             self.assertFalse(metadata_path.exists())
 
+    def test_interrupted_takeover_retry_survives_ambiguous_terminal_sidecar_deletion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, backup_path, _, stable_active = (
+                self._stable_with_interrupted_beta_takeover(tmp)
+            )
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            real_unlink = Path.unlink
+
+            def delete_sidecar_then_fail(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                real_unlink(path, *args, **kwargs)
+                if path == metadata_path:
+                    raise OSError("simulated ambiguous interrupted sidecar deletion")
+
+            with patch.object(Path, "unlink", delete_sidecar_then_fail):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "ambiguous interrupted sidecar deletion",
+                ):
+                    restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(backup_path.exists())
+            self.assertFalse(metadata_path.exists())
+            self.assertTrue(completion_path.exists())
+
+            status = restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(status, "interrupted_takeover_discarded")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+
     def test_interrupted_takeover_backup_delete_failure_retains_artifacts_for_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1718,6 +1881,150 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(status, "restored_takeover_backup")
             self.assertEqual(config_path.read_bytes(), stable_active)
             self.assertFalse(metadata_path.exists())
+
+    def test_owned_takeover_retry_survives_ambiguous_terminal_sidecar_deletion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            stable_active = config_path.read_bytes()
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            real_unlink = Path.unlink
+
+            def delete_sidecar_then_fail(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                real_unlink(path, *args, **kwargs)
+                if path == metadata_path:
+                    raise OSError("simulated ambiguous owned sidecar deletion")
+
+            with patch.object(Path, "unlink", delete_sidecar_then_fail):
+                with self.assertRaisesRegex(OSError, "ambiguous owned sidecar deletion"):
+                    restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertFalse(metadata_path.exists())
+
+            status = restore_overlay(
+                config_path,
+                beta_backup_path,
+                unified_history=True,
+            )
+
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+
+    def test_owned_takeover_fresh_process_recovers_after_terminal_sidecar_crash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            stable_active = config_path.read_bytes()
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            completion_path = config_overlay.takeover_completion_path(beta_backup_path)
+            crash_script = "\n".join(
+                [
+                    "import os",
+                    "import sys",
+                    "from pathlib import Path",
+                    "import config_overlay",
+                    "config_path = Path(sys.argv[1])",
+                    "backup_path = Path(sys.argv[2])",
+                    "metadata_path = config_overlay.takeover_metadata_path(backup_path)",
+                    "real_unlink = Path.unlink",
+                    "def crash_after_sidecar_delete(path, *args, **kwargs):",
+                    "    real_unlink(path, *args, **kwargs)",
+                    "    if path == metadata_path:",
+                    "        os._exit(73)",
+                    "Path.unlink = crash_after_sidecar_delete",
+                    "config_overlay.restore_overlay(",
+                    "    config_path, backup_path, unified_history=True",
+                    ")",
+                ]
+            )
+
+            crashed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    crash_script,
+                    str(config_path),
+                    str(beta_backup_path),
+                ],
+                capture_output=True,
+                text=True,
+                env=self._subprocess_env(),
+                timeout=15,
+                check=False,
+            )
+
+            self.assertEqual(crashed.returncode, 73, crashed.stderr)
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertFalse(metadata_path.exists())
+            self.assertTrue(completion_path.exists())
+
+            recovered = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(config_overlay.__file__)),
+                    "restore",
+                    "--config",
+                    str(config_path),
+                    "--backup",
+                    str(beta_backup_path),
+                    "--unified-history",
+                ],
+                capture_output=True,
+                text=True,
+                env=self._subprocess_env(),
+                timeout=15,
+                check=False,
+            )
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn(
+                "unified_history=restored_takeover_backup",
+                recovered.stdout,
+            )
+            self.assertEqual(config_path.read_bytes(), stable_active)
 
     def test_unowned_unified_takeover_journal_write_failure_preserves_recovery_chain(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1845,6 +2152,48 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertFalse(backup_path.exists())
             self.assertFalse(metadata_path.exists())
 
+    def test_completion_receipt_publication_failures_resume_before_recovery_deletion(self):
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path, backup_path, original, _, metadata_path = (
+                    self._unowned_with_active_beta_takeover(tmp)
+                )
+                completion_path = config_overlay.takeover_completion_path(backup_path)
+                real_atomic_write = config_overlay.atomic_write_text
+
+                def fail_completion_publication(
+                    path: Path,
+                    text: str,
+                    *,
+                    encoding: str = "utf-8",
+                ) -> None:
+                    if path == completion_path:
+                        if ambiguous:
+                            real_atomic_write(path, text, encoding=encoding)
+                        raise OSError("simulated completion receipt publication failure")
+                    real_atomic_write(path, text, encoding=encoding)
+
+                with patch("config_overlay.atomic_write_text", fail_completion_publication):
+                    with self.assertRaisesRegex(
+                        OSError,
+                        "completion receipt publication failure",
+                    ):
+                        restore_overlay(config_path, backup_path, unified_history=True)
+
+                self.assertEqual(backup_path.read_bytes(), original)
+                self.assertTrue(metadata_path.exists())
+                self.assertEqual(completion_path.exists(), ambiguous)
+
+                published = config_path.read_bytes()
+                status = restore_overlay(config_path, backup_path, unified_history=True)
+
+                self.assertEqual(status, "injected")
+                self.assertEqual(config_path.read_bytes(), published)
+                self.assertFalse(backup_path.exists())
+                self.assertFalse(metadata_path.exists())
+                self.assertTrue(completion_path.exists())
+
     def test_unowned_unified_takeover_backup_delete_failure_resumes_published_final(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1959,8 +2308,11 @@ class ConfigOverlayTests(unittest.TestCase):
 
             status = restore_overlay(config_path, backup_path, unified_history=True)
 
-            self.assertEqual(status, "already_unified")
+            self.assertEqual(status, "injected")
             self.assertEqual(config_path.read_bytes(), published)
+            self.assertTrue(
+                config_overlay.takeover_completion_path(backup_path).exists()
+            )
 
     def test_apply_and_context_guard_reject_invalid_takeover_metadata_without_mutation(self):
         for operation in ("apply", "context_guard"):
@@ -1997,6 +2349,671 @@ class ConfigOverlayTests(unittest.TestCase):
                 self.assertEqual(backup_path.read_bytes(), original)
                 self.assertEqual(metadata_path.read_bytes(), invalid_metadata)
                 self.assertFalse(state_path.exists())
+
+    def test_all_managed_operations_reject_invalid_completion_receipt_without_mutation(self):
+        for operation in ("apply", "context_guard", "restore"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path, backup_path, _, _, _ = (
+                    self._unowned_with_active_beta_takeover(tmp)
+                )
+                self.assertEqual(
+                    restore_overlay(config_path, backup_path, unified_history=True),
+                    "injected",
+                )
+                completion_path = config_overlay.takeover_completion_path(backup_path)
+                invalid_receipt = b'{"version":2,"future_state":"unknown"}\n'
+                completion_path.write_bytes(invalid_receipt)
+                config_before = config_path.read_bytes()
+                state_path = tmp / "context-guard-state.json"
+                catalog_path = self._official_budget_catalog(tmp)
+
+                with self.assertRaisesRegex(RuntimeError, "completion is invalid"):
+                    if operation == "apply":
+                        apply_overlay(
+                            config_path,
+                            backup_path,
+                            catalog_path,
+                            "http://127.0.0.1:9109",
+                            owner="beta",
+                            takeover=True,
+                        )
+                    elif operation == "context_guard":
+                        set_context_guard(
+                            config_path,
+                            backup_path,
+                            state_path,
+                            enabled=True,
+                            catalog_path=catalog_path,
+                        )
+                    else:
+                        restore_overlay(
+                            config_path,
+                            backup_path,
+                            unified_history=True,
+                        )
+
+                self.assertEqual(config_path.read_bytes(), config_before)
+                self.assertFalse(backup_path.exists())
+                self.assertEqual(completion_path.read_bytes(), invalid_receipt)
+                self.assertFalse(state_path.exists())
+
+    def test_legacy_malformed_or_future_completion_receipts_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, backup_path, _, _, _ = (
+                self._unowned_with_active_beta_takeover(tmp)
+            )
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            valid = json.loads(completion_path.read_text(encoding="utf-8"))
+
+            def changed(**updates: object) -> str:
+                payload = dict(valid)
+                payload.update(updates)
+                return json.dumps(payload, sort_keys=True)
+
+            invalid_payloads = {
+                "truncated": "{",
+                "non_object": "[]",
+                "legacy_missing_terminal_fields": json.dumps(
+                    {
+                        "version": 1,
+                        "takeover_owner": "beta",
+                        "original_owner": None,
+                    }
+                ),
+                "future_version": changed(version=2),
+                "boolean_version": changed(version=True),
+                "duplicate_version": (
+                    '{"version":2,"version":1,"takeover_owner":"beta",'
+                    f'"original_owner":null,"final_sha256":"{valid["final_sha256"]}",'
+                    '"status":"injected"}'
+                ),
+                "duplicate_owner": (
+                    '{"version":1,"takeover_owner":"release",'
+                    '"takeover_owner":"beta","original_owner":null,'
+                    f'"final_sha256":"{valid["final_sha256"]}","status":"injected"}}'
+                ),
+                "same_owner": changed(original_owner="beta"),
+                "unknown_owner": changed(takeover_owner="future-owner"),
+                "non_scalar_owner": changed(takeover_owner=[]),
+                "unknown_field": json.dumps(
+                    {**valid, "future_field": True},
+                    sort_keys=True,
+                ),
+                "missing_status": json.dumps(
+                    {key: value for key, value in valid.items() if key != "status"},
+                    sort_keys=True,
+                ),
+                "malformed_digest": changed(final_sha256="not-a-digest"),
+                "uppercase_digest": changed(final_sha256="A" * 64),
+                "malformed_same_owner_backup_digest": changed(
+                    same_owner_backup_sha256="not-a-digest"
+                ),
+                "unknown_status": changed(status="future_status"),
+                "non_string_status": changed(status=[]),
+            }
+            completed = config_path.read_bytes()
+
+            for name, payload in invalid_payloads.items():
+                with self.subTest(name=name):
+                    completion_path.write_text(payload, encoding="utf-8")
+                    receipt_before = completion_path.read_bytes()
+
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "takeover completion is invalid",
+                    ):
+                        restore_overlay(
+                            config_path,
+                            backup_path,
+                            unified_history=True,
+                        )
+
+                    self.assertEqual(config_path.read_bytes(), completed)
+                    self.assertFalse(backup_path.exists())
+                    self.assertEqual(completion_path.read_bytes(), receipt_before)
+
+    def test_completion_receipt_is_bounded_and_contains_no_config_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "beta.backup.toml"
+            catalog_path = self._official_budget_catalog(tmp)
+            sensitive_marker = "receipt-must-never-copy-this-config-content"
+            gateway_key = "receipt-must-never-copy-this-gateway-key"
+            config_path.write_text(
+                'model = "gpt-5.6-terra"\n'
+                f'custom_user_value = "{sensitive_marker}"\n',
+                encoding="utf-8",
+            )
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+                gateway_key=gateway_key,
+            )
+
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            raw_receipt = completion_path.read_text(encoding="utf-8")
+            receipt = json.loads(raw_receipt)
+            self.assertEqual(
+                set(receipt),
+                {
+                    "version",
+                    "takeover_owner",
+                    "original_owner",
+                    "final_sha256",
+                    "same_owner_backup_sha256",
+                    "status",
+                },
+            )
+            self.assertLess(len(raw_receipt.encode("utf-8")), 384)
+            self.assertNotIn(sensitive_marker, raw_receipt)
+            self.assertNotIn(gateway_key, raw_receipt)
+            self.assertNotIn("custom_user_value", raw_receipt)
+
+    def test_context_guard_rebases_completed_receipt_for_later_restore_retry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "beta.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(
+                RUST_0_145_AGENTS_CONFIG.replace(
+                    'model = "ollama-cloud/glm-5.2"',
+                    'model = "gpt-5.6-terra"',
+                ),
+                encoding="utf-8",
+            )
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            completion_before = completion_path.read_bytes()
+
+            status = set_context_guard(
+                config_path,
+                backup_path,
+                state_path,
+                enabled=True,
+                catalog_path=catalog_path,
+            )
+            guarded = config_path.read_bytes()
+
+            self.assertTrue(status["enabled"])
+            self.assertNotEqual(completion_path.read_bytes(), completion_before)
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            self.assertEqual(config_path.read_bytes(), guarded)
+
+    def test_later_apply_staging_failure_rotates_back_to_completed_receipt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path, backup_path, _, _, _ = (
+                self._unowned_with_active_beta_takeover(tmp)
+            )
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            completed = config_path.read_bytes()
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            real_atomic_write = config_overlay.atomic_write_text
+
+            def fail_new_takeover_metadata(
+                path: Path,
+                text: str,
+                *,
+                encoding: str = "utf-8",
+            ) -> None:
+                if path == metadata_path:
+                    raise OSError("simulated later takeover metadata failure")
+                real_atomic_write(path, text, encoding=encoding)
+
+            with patch("config_overlay.atomic_write_text", fail_new_takeover_metadata):
+                with self.assertRaisesRegex(OSError, "later takeover metadata failure"):
+                    apply_overlay(
+                        config_path,
+                        backup_path,
+                        None,
+                        "http://127.0.0.1:9109",
+                        owner="beta",
+                        takeover=True,
+                    )
+
+            self.assertEqual(config_path.read_bytes(), completed)
+            self.assertEqual(backup_path.read_bytes(), completed)
+            self.assertFalse(metadata_path.exists())
+
+            status = restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(status, "injected")
+            self.assertEqual(config_path.read_bytes(), completed)
+            self.assertFalse(backup_path.exists())
+
+    def test_later_same_owner_apply_crash_keeps_completed_owner_active(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            release_backup_path = tmp / "release.backup.toml"
+            channel_backup_path = tmp / "channel.backup.toml"
+            config_path.write_text("", encoding="utf-8")
+            apply_overlay(
+                config_path,
+                release_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                channel_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            self.assertEqual(
+                restore_overlay(
+                    config_path,
+                    channel_backup_path,
+                    unified_history=True,
+                ),
+                "restored_takeover_backup",
+            )
+            completed = config_path.read_bytes()
+            completion_path = config_overlay.takeover_completion_path(
+                channel_backup_path
+            )
+            real_atomic_write = config_overlay.atomic_write_text
+
+            def fail_later_live_publication(
+                path: Path,
+                text: str,
+                *,
+                encoding: str = "utf-8",
+            ) -> None:
+                if path == config_path:
+                    raise OSError("simulated later same-owner apply crash")
+                real_atomic_write(path, text, encoding=encoding)
+
+            with patch(
+                "config_overlay.atomic_write_text",
+                fail_later_live_publication,
+            ):
+                with self.assertRaisesRegex(OSError, "same-owner apply crash"):
+                    apply_overlay(
+                        config_path,
+                        channel_backup_path,
+                        None,
+                        "http://127.0.0.1:9099",
+                        owner="release",
+                    )
+
+            self.assertEqual(config_path.read_bytes(), completed)
+            self.assertTrue(channel_backup_path.exists())
+            self.assertNotEqual(channel_backup_path.read_bytes(), completed)
+            self.assertTrue(completion_path.exists())
+
+            self.assertEqual(
+                restore_overlay(
+                    config_path,
+                    channel_backup_path,
+                    unified_history=True,
+                ),
+                "restored_takeover_backup",
+            )
+            self.assertEqual(config_path.read_bytes(), completed)
+            self.assertFalse(channel_backup_path.exists())
+            self.assertTrue(completion_path.exists())
+
+    def test_later_apply_rotates_completion_receipt_across_owner_and_provider_cases(self):
+        cases = (
+            ("same_owner", "", "beta", False, "injected"),
+            ("different_owner", "", "release", False, "injected"),
+            (
+                "official_direct",
+                'model_provider = "openai"\n',
+                "beta",
+                False,
+                "injected",
+            ),
+            (
+                "no_op_explicit_provider",
+                'model_provider = "azure"\n',
+                "beta",
+                False,
+                "explicit_model_provider",
+            ),
+            ("different_owner_takeover", "", "release", True, "injected"),
+        )
+        for name, original, later_owner, takeover, initial_status in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path = tmp / "config.toml"
+                backup_path = tmp / "channel.backup.toml"
+                config_path.write_text(original, encoding="utf-8")
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    None,
+                    "http://127.0.0.1:9109",
+                    owner="beta",
+                    takeover=True,
+                )
+                self.assertEqual(
+                    restore_overlay(
+                        config_path,
+                        backup_path,
+                        unified_history=True,
+                    ),
+                    initial_status,
+                )
+                completion_path = config_overlay.takeover_completion_path(backup_path)
+                completed = config_path.read_bytes()
+                self.assertTrue(completion_path.exists())
+
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    None,
+                    "http://127.0.0.1:9099",
+                    owner=later_owner,
+                    takeover=takeover,
+                )
+
+                self.assertTrue(backup_path.exists())
+                self.assertFalse(
+                    completion_path.exists(),
+                    "a successful later apply retained a stale completion generation",
+                )
+
+                restore_overlay(config_path, backup_path, unified_history=True)
+                restored = config_path.read_bytes()
+                self.assertEqual(restored, completed)
+
+                restore_overlay(config_path, backup_path, unified_history=True)
+                self.assertEqual(config_path.read_bytes(), restored)
+
+    def test_later_apply_receipt_retirement_is_ordered_after_durable_recovery(self):
+        cases = (
+            ("normal_apply", "beta", False),
+            ("takeover_apply", "release", True),
+        )
+        for name, later_owner, takeover in cases:
+            for commit_point in ("before_unlink", "after_unlink"):
+                with (
+                    self.subTest(name=name, commit_point=commit_point),
+                    tempfile.TemporaryDirectory() as tmpdir,
+                ):
+                    self._assert_later_apply_receipt_retirement_prefix(
+                        Path(tmpdir),
+                        later_owner=later_owner,
+                        takeover=takeover,
+                        commit_point=commit_point,
+                    )
+
+    def _assert_later_apply_receipt_retirement_prefix(
+        self,
+        tmp: Path,
+        *,
+        later_owner: str,
+        takeover: bool,
+        commit_point: str,
+    ) -> None:
+        config_path = tmp / "config.toml"
+        backup_path = tmp / "beta.backup.toml"
+        config_path.write_text("", encoding="utf-8")
+        apply_overlay(
+            config_path,
+            backup_path,
+            None,
+            "http://127.0.0.1:9109",
+            owner="beta",
+            takeover=True,
+        )
+        self.assertEqual(
+            restore_overlay(
+                config_path,
+                backup_path,
+                unified_history=True,
+            ),
+            "injected",
+        )
+        completed = config_path.read_bytes()
+        completion_path = config_overlay.takeover_completion_path(backup_path)
+        real_unlink = Path.unlink
+
+        def fail_receipt_retirement(
+            path: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            if path == completion_path:
+                self.assertTrue(backup_path.exists())
+                self.assertEqual(
+                    config_overlay.overlay_owner(
+                        config_path.read_text(encoding="utf-8")
+                    ),
+                    later_owner,
+                )
+                metadata_read = config_overlay.read_takeover_metadata(backup_path)
+                if takeover:
+                    self.assertIsNotNone(metadata_read.metadata)
+                    self.assertEqual(
+                        metadata_read.metadata.takeover_owner,
+                        later_owner,
+                    )
+                else:
+                    self.assertIsNone(metadata_read.metadata)
+                if commit_point == "after_unlink":
+                    real_unlink(path, *args, **kwargs)
+                raise OSError(f"simulated {commit_point} receipt retirement")
+            real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_receipt_retirement):
+            with self.assertRaisesRegex(
+                OSError,
+                f"{commit_point} receipt retirement",
+            ):
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    None,
+                    "http://127.0.0.1:9109",
+                    owner=later_owner,
+                    takeover=takeover,
+                )
+
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(backup_path.read_bytes(), completed)
+        self.assertEqual(
+            config_overlay.overlay_owner(
+                config_path.read_text(encoding="utf-8")
+            ),
+            later_owner,
+        )
+
+        restore_overlay(config_path, backup_path, unified_history=True)
+        recovered = config_path.read_bytes()
+        self.assertEqual(recovered, completed)
+        self.assertFalse(backup_path.exists())
+        self.assertEqual(completion_path.exists(), takeover)
+
+        restore_overlay(config_path, backup_path, unified_history=True)
+        self.assertEqual(config_path.read_bytes(), recovered)
+
+    def test_completion_receipt_does_not_authorize_unrelated_later_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "beta.backup.toml"
+            config_path.write_text("", encoding="utf-8")
+            apply_overlay(
+                config_path,
+                backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            unrelated_live = (
+                f"{MARKER_BEGIN}\n# owner = release\n"
+                f"{config_overlay.MARKER_END}\n"
+            ).encode()
+            unrelated_backup = (
+                f"{MARKER_BEGIN}\n# owner = beta\n"
+                f"{config_overlay.MARKER_END}\n"
+            ).encode()
+            config_path.write_bytes(unrelated_live)
+            backup_path.write_bytes(unrelated_backup)
+            receipt_before = completion_path.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "completion.*inconsistent"):
+                restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), unrelated_live)
+            self.assertEqual(backup_path.read_bytes(), unrelated_backup)
+            self.assertEqual(completion_path.read_bytes(), receipt_before)
+
+    def test_active_takeover_stale_receipt_rejects_diverged_recovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "channel.backup.toml"
+            config_path.write_text("", encoding="utf-8")
+            apply_overlay(
+                config_path,
+                backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            self.assertEqual(
+                restore_overlay(config_path, backup_path, unified_history=True),
+                "injected",
+            )
+            completion_path = config_overlay.takeover_completion_path(backup_path)
+            real_unlink = Path.unlink
+
+            def fail_receipt_retirement(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                if path == completion_path:
+                    raise OSError("simulated retained stale receipt")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_receipt_retirement):
+                with self.assertRaisesRegex(OSError, "retained stale receipt"):
+                    apply_overlay(
+                        config_path,
+                        backup_path,
+                        None,
+                        "http://127.0.0.1:9099",
+                        owner="release",
+                        takeover=True,
+                    )
+
+            backup_path.write_text(
+                backup_path.read_text(encoding="utf-8")
+                + "# unrelated recovery bytes\n",
+                encoding="utf-8",
+            )
+            live_before = config_path.read_bytes()
+            backup_before = backup_path.read_bytes()
+            metadata_path = config_overlay.takeover_metadata_path(backup_path)
+            metadata_before = metadata_path.read_bytes()
+            receipt_before = completion_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "completion recovery is inconsistent",
+            ):
+                restore_overlay(config_path, backup_path, unified_history=True)
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+            self.assertEqual(completion_path.read_bytes(), receipt_before)
+
+    def test_owned_completion_rejects_unowned_transformation_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            config_path.write_text(RUST_0_145_AGENTS_CONFIG, encoding="utf-8")
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            self.assertEqual(
+                restore_overlay(config_path, beta_backup_path, unified_history=True),
+                "restored_takeover_backup",
+            )
+            completion_path = config_overlay.takeover_completion_path(beta_backup_path)
+            receipt = json.loads(completion_path.read_text(encoding="utf-8"))
+            receipt["status"] = "injected"
+            completion_path.write_text(
+                json.dumps(receipt, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_before = config_path.read_bytes()
+            receipt_before = completion_path.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "completion is invalid"):
+                restore_overlay(
+                    config_path,
+                    beta_backup_path,
+                    unified_history=True,
+                )
+
+            self.assertEqual(config_path.read_bytes(), config_before)
+            self.assertEqual(completion_path.read_bytes(), receipt_before)
 
     def test_new_managed_write_resumes_pending_cleanup_before_publication(self):
         for operation in ("apply", "context_guard"):
