@@ -930,15 +930,22 @@ impl RuntimeProviderCatalogStore {
     }
 
     fn verify_catalog_write_prefix(&self, record: &RecoveryRecord) -> Result<(), String> {
-        if !file_matches_identity(
+        let provider_is_base = file_matches_snapshot(
+            &self.paths.runtime_providers_path(),
+            &record.providers,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "catalog-write base provider configuration",
+        )?;
+        let provider_is_candidate = file_matches_identity(
             &self.paths.runtime_providers_path(),
             record.candidate_providers_sha256.as_deref(),
             record.candidate_providers_bytes,
             MAX_PROVIDER_SNAPSHOT_BYTES,
             "catalog-write candidate provider configuration",
-        )? {
+        )?;
+        if !provider_is_base && !provider_is_candidate {
             return Err(
-                "provider configuration diverged from this transaction's exact catalog-write candidate bytes"
+                "provider configuration diverged from this transaction's exact catalog-write base or candidate bytes"
                     .to_string(),
             );
         }
@@ -1437,6 +1444,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             provider_rollback_owner,
             "provider configuration",
         )?;
+        transaction_fault("after-provider-restore")?;
         restore_file(
             &self.paths.generated_catalog_path(),
             &self.paths.provider_catalog_catalog_backup_path(),
@@ -3859,6 +3867,139 @@ mod tests {
     }
 
     #[test]
+    fn catalog_write_restart_finishes_existing_provider_rollback_after_first_restore_crash() {
+        let root = temp_root("catalog-write-existing-first-restore-crash");
+        let paths = isolated_paths(&root);
+        let providers_path = paths.runtime_providers_path();
+        let catalog_path = paths.generated_catalog_path();
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_provider = fs::read(&providers_path).unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&catalog_path, &base_catalog);
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let candidate = provider(UpstreamFormat::ChatCompletions);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        #[cfg(windows)]
+        let candidate_provider = fs::read(&providers_path).unwrap();
+        let candidate_catalog =
+            capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+        store
+            .mark_catalog_write_pending(&candidate_catalog)
+            .unwrap();
+        write_fixture(&catalog_path, &candidate_catalog);
+        let marker = store.read_recovery().unwrap().unwrap();
+        let provider_evidence = store
+            .rollback_evidence_path(&providers_path, &marker.transaction_id)
+            .unwrap();
+
+        super::install_transaction_fault("after-provider-restore");
+        let error = store
+            .restore_pending()
+            .expect_err("the injected crash must stop before catalog rollback");
+        super::clear_transaction_fault();
+
+        assert!(error.contains("after-provider-restore"));
+        assert_eq!(fs::read(&providers_path).unwrap(), base_provider);
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), candidate_catalog);
+        assert!(paths.provider_catalog_recovery_path().exists());
+        #[cfg(windows)]
+        write_fixture(
+            &provider_evidence,
+            std::str::from_utf8(&candidate_provider).unwrap(),
+        );
+        drop(store);
+
+        let mut restarted = RuntimeProviderCatalogStore::new(paths.clone());
+        restarted
+            .recover_pending()
+            .expect("restart must accept the exact restored provider base prefix");
+
+        assert_eq!(fs::read(&providers_path).unwrap(), base_provider);
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), base_catalog);
+        assert!(!provider_evidence.exists());
+        assert!(!paths.provider_catalog_recovery_path().exists());
+        assert!(!paths.provider_catalog_providers_backup_path().exists());
+        assert!(!paths.provider_catalog_catalog_backup_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_write_restart_finishes_absent_provider_rollback_after_first_restore_crash() {
+        let root = temp_root("catalog-write-absent-first-restore-crash");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a repository parent")
+            .to_path_buf();
+        let paths = config::ConfigPaths::new_isolated(
+            root.join("runtime"),
+            root.join("codex"),
+            repo_root,
+        );
+        let providers_path = paths.runtime_providers_path();
+        let catalog_path = paths.generated_catalog_path();
+        assert!(!providers_path.exists());
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&catalog_path, &base_catalog);
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let candidate = provider(UpstreamFormat::ChatCompletions);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        #[cfg(windows)]
+        let candidate_provider = fs::read(&providers_path).unwrap();
+        let candidate_catalog =
+            capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+        store
+            .mark_catalog_write_pending(&candidate_catalog)
+            .unwrap();
+        write_fixture(&catalog_path, &candidate_catalog);
+        let marker = store.read_recovery().unwrap().unwrap();
+        let provider_evidence = store
+            .rollback_evidence_path(&providers_path, &marker.transaction_id)
+            .unwrap();
+
+        super::install_transaction_fault("after-provider-restore");
+        let error = store
+            .restore_pending()
+            .expect_err("the injected crash must stop before catalog rollback");
+        super::clear_transaction_fault();
+
+        assert!(error.contains("after-provider-restore"));
+        assert!(!providers_path.exists());
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), candidate_catalog);
+        assert!(paths.provider_catalog_recovery_path().exists());
+        #[cfg(windows)]
+        write_fixture(
+            &provider_evidence,
+            std::str::from_utf8(&candidate_provider).unwrap(),
+        );
+        drop(store);
+
+        let mut restarted = RuntimeProviderCatalogStore::new(paths.clone());
+        restarted
+            .recover_pending()
+            .expect("restart must accept the exact absent provider base prefix");
+
+        assert!(!providers_path.exists());
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), base_catalog);
+        assert!(!provider_evidence.exists());
+        assert!(!paths.provider_catalog_recovery_path().exists());
+        assert!(!paths.provider_catalog_providers_backup_path().exists());
+        assert!(!paths.provider_catalog_catalog_backup_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn catalog_write_recovery_preserves_semantically_equal_external_provider_edit() {
         let root = temp_root("catalog-write-external-formatting");
         let paths = isolated_paths(&root);
@@ -3886,7 +4027,7 @@ mod tests {
             .recover_pending()
             .expect_err("raw provider divergence must not be overwritten");
 
-        assert!(error.contains("exact catalog-write candidate bytes"));
+        assert!(error.contains("exact catalog-write base or candidate bytes"));
         assert_eq!(
             fs::read_to_string(paths.runtime_providers_path()).unwrap(),
             externally_edited
