@@ -24,6 +24,7 @@ import type {
   GatewayUsageSnapshot,
   Model,
   Provider,
+  ProviderCatalogSnapshot,
   Settings,
   TabId,
   UsageQueryWindow,
@@ -34,7 +35,7 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 type RuntimeSnapshot = {
   status: RuntimeCache<AppStatus>;
   settings: RuntimeCache<Settings>;
-  providers: RuntimeCache<Provider[]>;
+  providers: RuntimeCache<ProviderCatalogSnapshot>;
   gatewayStatus: RuntimeCache<GatewayStatus>;
   gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>;
   gatewayEvents: RuntimeCache<GatewayEvent[]>;
@@ -312,7 +313,10 @@ export default function App() {
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({
     status: runtimeCache<AppStatus>(),
     settings: runtimeCache<Settings>(),
-    providers: runtimeCache<Provider[]>([]),
+    providers: runtimeCache<ProviderCatalogSnapshot>({
+      providers: [],
+      revision: "" as ProviderCatalogSnapshot["revision"],
+    }),
     gatewayStatus: runtimeCache<GatewayStatus>(),
     gatewayUsageSnapshot: runtimeCache<GatewayUsageSnapshot>(),
     gatewayEvents: runtimeCache<GatewayEvent[]>([]),
@@ -423,7 +427,11 @@ export default function App() {
 
   const refreshProviders = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<Provider[]>("providers", () => api.getProviders(), options),
+      runCachedRequest<ProviderCatalogSnapshot>(
+        "providers",
+        () => api.getProviderCatalogSnapshot(),
+        options,
+      ),
     [runCachedRequest],
   );
 
@@ -917,7 +925,11 @@ export default function App() {
 
   const appStatus = runtime.status.data;
   const settings = runtime.settings.data;
-  const providers = runtime.providers.data ?? [];
+  const providerCatalogSnapshot = runtime.providers.data ?? {
+    providers: [],
+    revision: "" as ProviderCatalogSnapshot["revision"],
+  };
+  const providers = providerCatalogSnapshot.providers;
   const gatewayStatus = runtime.gatewayStatus.data;
   const gatewayUsageSnapshot = runtime.gatewayUsageSnapshot.data;
   const gatewayEvents = runtime.gatewayEvents.data ?? [];
@@ -1057,7 +1069,7 @@ export default function App() {
     [runRuntimeAction],
   );
   const updateProvidersCache = useCallback(
-    (nextProviders: Provider[]) => setRuntimeCacheData("providers", nextProviders),
+    (snapshot: ProviderCatalogSnapshot) => setRuntimeCacheData("providers", snapshot),
     [setRuntimeCacheData],
   );
   const updateSettingsCache = useCallback(
@@ -1122,6 +1134,7 @@ export default function App() {
                 gatewayStatus={gatewayStatus}
                 modelMetadata={modelMetadata}
                 providers={providers}
+                providerRevision={providerCatalogSnapshot.revision}
                 settings={settings}
                 onGatewayChanged={refreshProviderRuntime}
                 onRefreshClients={loadGatewayClients}

@@ -1,6 +1,7 @@
 import importlib
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -1929,6 +1930,71 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(calls[0][0], target)
             self.assertEqual(calls[0][2], "utf-8")
             self.assertEqual(json.loads(calls[0][1]), {"ok": True})
+
+    def test_staged_catalog_requires_and_consumes_the_private_rust_capability(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_home = Path(tmpdir) / "runtime"
+            staging_dir = (
+                runtime_home
+                / "proxy"
+                / "provider-catalog-staging"
+                / ("stage-" + "a" * 64)
+            )
+            staging_dir.mkdir(parents=True)
+            token = "token-" + "b" * 64
+            token_path = staging_dir / catalog_sync.CATALOG_STAGING_TOKEN_FILE
+            token_path.write_text(token + "\n", encoding="ascii")
+            canonical = runtime_home / "model-catalogs" / "codexhub-model-catalog.json"
+            canonical.parent.mkdir(parents=True)
+            canonical.write_text("canonical-evidence", encoding="utf-8")
+
+            def fake_sync(**kwargs):
+                catalog_path = kwargs["catalog_output_path"]
+                state_path = kwargs["state_output_path"]
+                catalog_path.write_text('{"models":[]}\n', encoding="utf-8")
+                state_path.write_text('{"diff":{"added":[],"removed":[]}}\n', encoding="utf-8")
+                return {"diff": {"added": [], "removed": []}}
+
+            with (
+                patch.object(catalog_sync, "RUNTIME_CODEX_DIR", runtime_home),
+                patch.object(catalog_sync, "_sync_catalog_unlocked", side_effect=fake_sync) as sync,
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                with self.assertRaisesRegex(PermissionError, "missing or invalid"):
+                    catalog_sync.build_staged_catalog(staging_dir)
+                sync.assert_not_called()
+            self.assertTrue(token_path.exists())
+
+            with (
+                patch.object(catalog_sync, "RUNTIME_CODEX_DIR", runtime_home),
+                patch.object(catalog_sync, "_sync_catalog_unlocked", side_effect=fake_sync) as sync,
+                patch.dict(
+                    os.environ,
+                    {catalog_sync.CATALOG_STAGING_TOKEN_ENV: "token-" + "c" * 64},
+                    clear=True,
+                ),
+            ):
+                with self.assertRaisesRegex(PermissionError, "did not match"):
+                    catalog_sync.build_staged_catalog(staging_dir)
+                sync.assert_not_called()
+            self.assertTrue(token_path.exists())
+
+            with (
+                patch.object(catalog_sync, "RUNTIME_CODEX_DIR", runtime_home),
+                patch.object(catalog_sync, "_sync_catalog_unlocked", side_effect=fake_sync) as sync,
+                patch.dict(
+                    os.environ,
+                    {catalog_sync.CATALOG_STAGING_TOKEN_ENV: token},
+                    clear=True,
+                ),
+            ):
+                _, catalog_path, state_path = catalog_sync.build_staged_catalog(staging_dir)
+                sync.assert_called_once()
+
+            self.assertFalse(token_path.exists())
+            self.assertEqual(catalog_path.parent, staging_dir)
+            self.assertEqual(state_path.parent, staging_dir)
+            self.assertEqual(canonical.read_text(encoding="utf-8"), "canonical-evidence")
 
     def test_extracts_context_and_capabilities_from_ollama_show_payload(self):
         payload = {

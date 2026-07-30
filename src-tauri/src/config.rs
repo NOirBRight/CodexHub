@@ -8,20 +8,21 @@ use std::process::Command;
 use std::{error::Error, fmt};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    get_providers_with_paths(&ConfigPaths::runtime()?)
-}
-
-pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    crate::provider_catalog_transaction::save_providers(providers)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        get_providers_with_paths(&ConfigPaths::runtime()?)
+    })
 }
 
 pub fn get_settings() -> Result<Settings, String> {
-    get_settings_with_paths(&ConfigPaths::runtime()?)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        get_settings_with_paths(&ConfigPaths::runtime()?)
+    })
 }
 
 pub fn save_settings(settings: Settings) -> Result<Settings, String> {
-    save_settings_with_paths(settings, &ConfigPaths::runtime()?)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        save_settings_with_paths(settings, &ConfigPaths::runtime()?)
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,16 @@ pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
 }
 
 pub fn switch_mode_with_takeover(
+    mode: &str,
+    auto_sync: bool,
+    force_takeover: bool,
+) -> Result<AppStatus, String> {
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        switch_mode_with_takeover_locked(mode, auto_sync, force_takeover)
+    })
+}
+
+fn switch_mode_with_takeover_locked(
     mode: &str,
     auto_sync: bool,
     force_takeover: bool,
@@ -155,11 +166,15 @@ impl ConfigPaths {
         &self.runtime_dir
     }
 
+    pub(crate) fn resource_root(&self) -> &Path {
+        &self.repo_root
+    }
+
     pub(crate) fn runtime_providers_path(&self) -> PathBuf {
         self.proxy_dir().join("config").join("providers.toml")
     }
 
-    fn bundled_providers_path(&self) -> PathBuf {
+    pub(crate) fn bundled_providers_path(&self) -> PathBuf {
         self.repo_root.join("config").join("providers.toml")
     }
 
@@ -560,20 +575,22 @@ fn sanitize_settings_for_save(
 }
 
 pub(crate) fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
-    let path = if paths.runtime_providers_path().exists() {
-        paths.runtime_providers_path()
-    } else {
-        paths.bundled_providers_path()
-    };
+    crate::provider_catalog_transaction::with_transaction_guard_for_paths(paths, || {
+        let path = if paths.runtime_providers_path().exists() {
+            paths.runtime_providers_path()
+        } else {
+            paths.bundled_providers_path()
+        };
 
-    let mut providers = read_providers_document(&path)?;
-    for provider in &mut providers {
-        for model in &mut provider.models {
-            crate::models::apply_resolved_model_limits(&provider.id, model);
+        let mut providers = read_providers_document(&path)?;
+        for provider in &mut providers {
+            for model in &mut provider.models {
+                crate::models::apply_resolved_model_limits(&provider.id, model);
+            }
         }
-    }
 
-    Ok(providers)
+        Ok(providers)
+    })
 }
 
 fn read_providers_document(path: &Path) -> Result<Vec<Provider>, String> {
@@ -599,15 +616,18 @@ pub(crate) fn save_providers_with_paths(
         })?;
     }
 
-    let document = ProvidersDocument {
-        providers: providers.clone(),
-    };
-    let text = toml::to_string_pretty(&document)
-        .map_err(|error| format!("failed to serialize providers TOML: {error}"))?;
+    let text = serialize_providers_document(&providers)?;
     safe_file::write_text_atomic(&path, &text)
         .map_err(|error| format!("failed to write providers TOML {}: {error}", path.display()))?;
 
     Ok(providers)
+}
+
+pub(crate) fn serialize_providers_document(providers: &[Provider]) -> Result<String, String> {
+    toml::to_string_pretty(&ProvidersDocument {
+        providers: providers.to_vec(),
+    })
+    .map_err(|error| format!("failed to serialize providers TOML: {error}"))
 }
 
 fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {

@@ -25,6 +25,8 @@ import type {
   GatewayClientSyncSummary,
   Model,
   Provider,
+  ProviderCatalogRevision,
+  ProviderCatalogSnapshot,
   Settings,
   UpstreamFormatProbeResult,
 } from "../lib/types";
@@ -53,7 +55,8 @@ type ProviderCatalogActionOptions = {
   form: AddProviderForm;
   officialModelOrderDraft: string[];
   officialModelRefreshStartedRef: MutableRefObject<boolean>;
-  onProvidersChanged?: (providers: Provider[]) => void;
+  onProvidersChanged?: (snapshot: ProviderCatalogSnapshot) => void;
+  providerRevision: ProviderCatalogRevision;
   providers: Provider[];
   refreshGatewayState: () => Promise<void>;
   setBusy: SetState<string | null>;
@@ -64,6 +67,7 @@ type ProviderCatalogActionOptions = {
   setOfficialModels: SetState<Model[]>;
   setProbeResult: SetState<UpstreamFormatProbeResult | null>;
   setProviders: SetState<Provider[]>;
+  setProviderRevision: SetState<ProviderCatalogRevision>;
   setSelectedId: SetState<string>;
   settings: Settings | null;
   settingsDraft: Settings | null;
@@ -78,6 +82,7 @@ export function useProviderCatalogActions({
   officialModelOrderDraft,
   officialModelRefreshStartedRef,
   onProvidersChanged,
+  providerRevision,
   providers,
   refreshGatewayState,
   setBusy,
@@ -88,6 +93,7 @@ export function useProviderCatalogActions({
   setOfficialModels,
   setProbeResult,
   setProviders,
+  setProviderRevision,
   setSelectedId,
   settings,
   settingsDraft,
@@ -188,7 +194,7 @@ export function useProviderCatalogActions({
 
   async function saveProviders(
     next: Provider[],
-    regenerateCatalog = true,
+    _regenerateCatalog = true,
     successMessage?: string,
     toastId?: string,
   ) {
@@ -198,73 +204,60 @@ export function useProviderCatalogActions({
       successMessage ? `${successMessage}...` : t("providers.updateProviderCatalog"),
       "loading",
     );
-    const mustRegenerateCatalog = (
-      regenerateCatalog
-      || protocolSwitches.length > 0
-      || providerCatalogRecoveryPending
-    );
     let transactionCommitted = false;
     let protocolCommitted = false;
     try {
-      let saved: Provider[];
-      let catalogAlreadyPublished = false;
-      if (mustRegenerateCatalog) {
-        const transaction = await api.persistProviderCatalogState(next, providers);
-        const feedback = providerCatalogTransactionFeedback(transaction, t);
-        saved = transaction.providers;
-        setProviderCatalogRecoveryPending(transaction.outcome === "recovery_required");
-        if (!feedback.committed) {
-          setProviders(saved);
-          onProvidersChanged?.(saved);
-          updateToast(activeToastId, {
-            action: null,
-            text: feedback.text,
-            tone: feedback.tone,
-          });
-          setError(feedback.text);
-          throw new ProviderCatalogTransactionHandledError(feedback.text, saved);
-        }
-        transactionCommitted = true;
-        protocolCommitted = transaction.protocolChanged;
-        catalogAlreadyPublished = true;
-      } else {
-        saved = await api.saveProviders(next);
+      const transaction = await api.persistProviderCatalogState(next, providerRevision);
+      const feedback = providerCatalogTransactionFeedback(transaction, t);
+      const saved = transaction.providers;
+      setProviderRevision(transaction.revision);
+      setProviderCatalogRecoveryPending(transaction.outcome === "recovery_required");
+      if (!feedback.committed) {
+        setProviders(saved);
+        onProvidersChanged?.({ providers: saved, revision: transaction.revision });
+        updateToast(activeToastId, {
+          action: null,
+          text: feedback.text,
+          tone: feedback.tone,
+        });
+        setError(feedback.text);
+        throw new ProviderCatalogTransactionHandledError(feedback.text, saved);
       }
+      transactionCommitted = true;
+      protocolCommitted = transaction.protocolChanged;
       setProviders(saved);
-      onProvidersChanged?.(saved);
+      onProvidersChanged?.({ providers: saved, revision: transaction.revision });
       let syncResult: GatewayClientSyncSummary | null = null;
-      if (mustRegenerateCatalog) {
-        try {
-          syncResult = await updateGatewayAfterCatalog(
-            undefined,
-            activeToastId,
-            { catalogAlreadyPublished },
-          );
-        } catch (err) {
-          if (!transactionCommitted) {
-            throw err;
-          }
-          const postCommitMessage = t(
-            protocolCommitted
-              ? "providers.protocolChangeCommittedRefreshFailed"
-              : "providers.providerCatalogCommittedRefreshFailed",
-            {
-              detail: messageFromError(err),
-            },
-          );
-          const committedMessage = `${
-            protocolCommitted
-              ? t("providers.protocolChangedRestartLongLivedCodex")
-              : successMessage ?? t("providers.providerCatalogUpdated")
-          } ${postCommitMessage}`;
-          updateToast(activeToastId, {
-            action: null,
-            text: committedMessage,
-            tone: "error",
-          });
-          setError(committedMessage);
-          return saved;
+      try {
+        syncResult = await updateGatewayAfterCatalog(
+          undefined,
+          activeToastId,
+          { catalogAlreadyPublished: true },
+        );
+      } catch (err) {
+        if (!transactionCommitted) {
+          throw err;
         }
+        const postCommitMessage = t(
+          protocolCommitted
+            ? "providers.protocolChangeCommittedRefreshFailed"
+            : "providers.providerCatalogCommittedRefreshFailed",
+          {
+            detail: messageFromError(err),
+          },
+        );
+        const committedMessage = `${
+          protocolCommitted
+            ? t("providers.protocolChangedRestartLongLivedCodex")
+            : successMessage ?? t("providers.providerCatalogUpdated")
+        } ${postCommitMessage}`;
+        updateToast(activeToastId, {
+          action: null,
+          text: committedMessage,
+          tone: "error",
+        });
+        setError(committedMessage);
+        return saved;
       }
       const completedMessage = protocolCommitted
         ? t("providers.protocolChangedRestartLongLivedCodex")
@@ -292,7 +285,7 @@ export function useProviderCatalogActions({
       if (err instanceof ProviderCatalogTransactionHandledError) {
         throw err;
       }
-      if (mustRegenerateCatalog && !transactionCommitted) {
+      if (!transactionCommitted) {
         setProviderCatalogRecoveryPending(true);
         const message = t(
           protocolSwitches.length

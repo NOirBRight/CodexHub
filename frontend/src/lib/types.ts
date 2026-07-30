@@ -95,10 +95,21 @@ export type ProviderCatalogTransactionOutcome =
   | "rolled_back"
   | "recovery_required";
 
+declare const providerCatalogRevisionBrand: unique symbol;
+export type ProviderCatalogRevision = string & {
+  readonly [providerCatalogRevisionBrand]: true;
+};
+
+export interface ProviderCatalogSnapshot {
+  providers: Provider[];
+  revision: ProviderCatalogRevision;
+}
+
 export interface ProviderCatalogTransactionResult {
   outcome: ProviderCatalogTransactionOutcome;
   providers: Provider[];
   models: Model[];
+  revision: ProviderCatalogRevision;
   protocolChanged: boolean;
   detail?: string | null;
   catalogDisabled: boolean;

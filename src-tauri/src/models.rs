@@ -21,6 +21,8 @@ const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
+const CATALOG_STAGING_TOKEN_ENV: &str = "CODEXHUB_CATALOG_STAGING_TOKEN";
+const CATALOG_STAGING_TOKEN_FILE: &str = ".request-token";
 const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
 const OFFICIAL_CATALOG_METADATA_JSON: &str =
     include_str!("../../config/official_model_catalog_metadata.json");
@@ -248,38 +250,40 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let python = find_python();
     let runner = ProcessCatalogSyncRunner;
-
-    generate_catalog_with_runner(&paths, &python, &runner)
+    let staged = stage_catalog_with_runner(&paths, &python, &runner)?;
+    publish_staged_catalog(&paths, &staged)
 }
 
 pub fn list_models() -> Result<Vec<Model>, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    let paths = ModelPaths::runtime()?;
-    let catalog_path = paths.existing_generated_catalog_path();
-    if !catalog_path.exists() {
-        return Ok(Vec::new());
-    }
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = ModelPaths::runtime()?;
+        let catalog_path = paths.existing_generated_catalog_path();
+        if !catalog_path.exists() {
+            return Ok(Vec::new());
+        }
 
-    read_catalog_models(&catalog_path)
+        read_catalog_models(&catalog_path)
+    })
 }
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    let paths = ModelPaths::runtime()?;
-    let config_paths = config::ConfigPaths::runtime()?;
-    let known_official_models = config::known_official_model_ids(&config_paths);
-    let cached = read_metadata_cache(&paths).unwrap_or_default();
-    let cached = merge_metadata_with_overrides(
-        builtin_model_metadata(),
-        cached,
-        &known_official_models,
-    );
-    let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    Ok(merge_metadata_with_overrides(
-        cached,
-        overrides,
-        &known_official_models,
-    ))
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = ModelPaths::runtime()?;
+        let config_paths = config::ConfigPaths::runtime()?;
+        let known_official_models = config::known_official_model_ids(&config_paths);
+        let cached = read_metadata_cache(&paths).unwrap_or_default();
+        let cached = merge_metadata_with_overrides(
+            builtin_model_metadata(),
+            cached,
+            &known_official_models,
+        );
+        let overrides = read_metadata_overrides(&paths).unwrap_or_default();
+        Ok(merge_metadata_with_overrides(
+            cached,
+            overrides,
+            &known_official_models,
+        ))
+    })
 }
 
 pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
@@ -288,24 +292,26 @@ pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, S
 }
 
 pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    let paths = ModelPaths::runtime()?;
-    let metadata = builtin_model_metadata();
-    write_models_json(&paths.metadata_cache_path(), &metadata)?;
-    list_model_metadata()
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = ModelPaths::runtime()?;
+        let metadata = builtin_model_metadata();
+        write_models_json(&paths.metadata_cache_path(), &metadata)?;
+        list_model_metadata()
+    })
 }
 
 pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    let paths = ModelPaths::runtime()?;
-    let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
-        *existing = model.clone();
-    } else {
-        overrides.push(model.clone());
-    }
-    write_models_json(&paths.metadata_overrides_path(), &overrides)?;
-    Ok(model)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let paths = ModelPaths::runtime()?;
+        let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
+        if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
+            *existing = model.clone();
+        } else {
+            overrides.push(model.clone());
+        }
+        write_models_json(&paths.metadata_overrides_path(), &overrides)?;
+        Ok(model)
+    })
 }
 
 #[cfg(test)]
@@ -1745,21 +1751,38 @@ fn nonblank(value: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 struct ModelPaths {
     codex_dir: PathBuf,
+    codex_target_dir: PathBuf,
     repo_root: PathBuf,
 }
 
 impl ModelPaths {
     fn runtime() -> Result<Self, String> {
         let codex_dir = runtime_paths::codex_home_dir()?;
+        let codex_target_dir = runtime_paths::codex_target_home_dir()?;
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, repo_root))
+        Ok(Self {
+            codex_dir,
+            codex_target_dir,
+            repo_root,
+        })
     }
 
+    #[cfg(test)]
     fn new(codex_dir: impl Into<PathBuf>, repo_root: impl Into<PathBuf>) -> Self {
+        let codex_dir = codex_dir.into();
         Self {
-            codex_dir: codex_dir.into(),
+            codex_target_dir: codex_dir.clone(),
+            codex_dir,
             repo_root: repo_root.into(),
+        }
+    }
+
+    fn from_config(paths: &config::ConfigPaths) -> Self {
+        Self {
+            codex_dir: paths.runtime_root().to_path_buf(),
+            codex_target_dir: paths.codex_dir().to_path_buf(),
+            repo_root: paths.resource_root().to_path_buf(),
         }
     }
 
@@ -1777,6 +1800,18 @@ impl ModelPaths {
         self.codex_dir
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE)
+    }
+
+    fn generated_state_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join("codex-proxy-state.json")
+    }
+
+    fn staging_root(&self) -> PathBuf {
+        self.codex_dir
+            .join("proxy")
+            .join("provider-catalog-staging")
     }
 
     fn legacy_generated_catalog_path(&self) -> PathBuf {
@@ -1829,6 +1864,9 @@ trait CatalogSyncRunner {
         python: &Path,
         script: &Path,
         codex_dir: &Path,
+        codex_target_dir: &Path,
+        staging_dir: &Path,
+        staging_token: &str,
     ) -> Result<CatalogCommandOutcome, String>;
 }
 
@@ -1840,12 +1878,18 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         python: &Path,
         script: &Path,
         codex_dir: &Path,
+        codex_target_dir: &Path,
+        staging_dir: &Path,
+        staging_token: &str,
     ) -> Result<CatalogCommandOutcome, String> {
         let mut command = Command::new(python);
         command
             .arg(script)
-            .arg("--sync")
-            .env("CODEX_HOME", codex_dir);
+            .arg("--build-staging-dir")
+            .arg(staging_dir)
+            .env("CODEX_HOME", codex_dir)
+            .env("CODEXHUB_CODEX_TARGET_HOME", codex_target_dir)
+            .env(CATALOG_STAGING_TOKEN_ENV, staging_token);
         configure_no_window(&mut command);
         let output = command
             .output()
@@ -1859,11 +1903,52 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
     }
 }
 
+pub(crate) struct StagedCatalog {
+    catalog_text: String,
+    state_text: String,
+    models: Vec<Model>,
+    staging_dir: PathBuf,
+}
+
+impl StagedCatalog {
+    pub(crate) fn catalog_text(&self) -> &str {
+        &self.catalog_text
+    }
+
+    pub(crate) fn models(&self) -> &[Model] {
+        &self.models
+    }
+}
+
+impl Drop for StagedCatalog {
+    fn drop(&mut self) {
+        cleanup_catalog_staging(&self.staging_dir);
+    }
+}
+
+#[cfg(test)]
 fn generate_catalog_with_runner(
     paths: &ModelPaths,
     python: &Path,
     runner: &dyn CatalogSyncRunner,
 ) -> Result<Vec<Model>, String> {
+    let staged = stage_catalog_with_runner(paths, python, runner)?;
+    publish_staged_catalog(paths, &staged)
+}
+
+pub(crate) fn stage_catalog_for_config(
+    paths: &config::ConfigPaths,
+) -> Result<StagedCatalog, String> {
+    let model_paths = ModelPaths::from_config(paths);
+    let python = runtime_paths::find_python(Some(model_paths.repo_root.as_path()));
+    stage_catalog_with_runner(&model_paths, &python, &ProcessCatalogSyncRunner)
+}
+
+fn stage_catalog_with_runner(
+    paths: &ModelPaths,
+    python: &Path,
+    runner: &dyn CatalogSyncRunner,
+) -> Result<StagedCatalog, String> {
     let script = paths.catalog_sync_script();
     if !script.exists() {
         return Err(format!(
@@ -1872,18 +1957,47 @@ fn generate_catalog_with_runner(
         ));
     }
 
-    let catalog_path = paths.generated_catalog_path();
-    if let Some(parent) = catalog_path.parent() {
+    let staging_root = paths.staging_root();
+    if let Some(parent) = staging_root.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "failed to create catalog output directory {}: {error}",
+                "failed to create catalog staging parent {}: {error}",
                 parent.display()
             )
         })?;
     }
+    fs::create_dir_all(&staging_root).map_err(|error| {
+        format!(
+            "failed to create catalog staging root {}: {error}",
+            staging_root.display()
+        )
+    })?;
+    let staging_name = random_catalog_staging_capability("stage")?;
+    let staging_token = random_catalog_staging_capability("token")?;
+    let staging_dir = staging_root.join(staging_name);
+    fs::create_dir(&staging_dir).map_err(|error| {
+        format!(
+            "failed to create private catalog staging directory {}: {error}",
+            staging_dir.display()
+        )
+    })?;
+    safe_file::write_private_text_atomic(
+        &staging_dir.join(CATALOG_STAGING_TOKEN_FILE),
+        &(staging_token.clone() + "\n"),
+        &staging_root,
+    )
+    .inspect_err(|_| cleanup_catalog_staging(&staging_dir))?;
 
-    let outcome = runner.run_sync(python, &script, &paths.codex_dir)?;
+    let outcome = runner.run_sync(
+        python,
+        &script,
+        &paths.codex_dir,
+        &paths.codex_target_dir,
+        &staging_dir,
+        &staging_token,
+    )?;
     if outcome.code != Some(0) {
+        cleanup_catalog_staging(&staging_dir);
         return Err(format!(
             "catalog sync failed with {}\nstdout:\n{}\nstderr:\n{}",
             format_exit_code(outcome.code),
@@ -1892,7 +2006,103 @@ fn generate_catalog_with_runner(
         ));
     }
 
-    read_catalog_models(&catalog_path)
+    let catalog_path = staging_dir.join("catalog.json");
+    let state_path = staging_dir.join("state.json");
+    let catalog_text = safe_file::read_single_link_text(
+        &catalog_path,
+        64 * 1024 * 1024,
+        "staged generated catalog",
+    )
+    .map_err(|error| {
+        cleanup_catalog_staging(&staging_dir);
+        format!(
+            "failed to read staged catalog {}: {error}",
+            catalog_path.display()
+        )
+    })?;
+    let models = read_catalog_models_text(&catalog_text, &catalog_path).inspect_err(|_| {
+        cleanup_catalog_staging(&staging_dir);
+    })?;
+    let state_text =
+        safe_file::read_single_link_text(&state_path, 8 * 1024 * 1024, "staged catalog state")
+            .map_err(|error| {
+        cleanup_catalog_staging(&staging_dir);
+        format!(
+            "failed to read staged catalog state {}: {error}",
+            state_path.display()
+        )
+    })?;
+    serde_json::from_str::<Value>(&state_text).map_err(|error| {
+        cleanup_catalog_staging(&staging_dir);
+        format!(
+            "failed to parse staged catalog state {}: {error}",
+            state_path.display()
+        )
+    })?;
+    Ok(StagedCatalog {
+        catalog_text,
+        state_text,
+        models,
+        staging_dir,
+    })
+}
+
+fn random_catalog_staging_capability(prefix: &str) -> Result<String, String> {
+    let mut nonce = [0_u8; 32];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|error| format!("failed to create catalog staging capability: {error}"))?;
+    let encoded = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{prefix}-{encoded}"))
+}
+
+pub(crate) fn publish_staged_catalog_for_config(
+    paths: &config::ConfigPaths,
+    staged: &StagedCatalog,
+) -> Result<Vec<Model>, String> {
+    publish_staged_catalog(&ModelPaths::from_config(paths), staged)
+}
+
+fn publish_staged_catalog(
+    paths: &ModelPaths,
+    staged: &StagedCatalog,
+) -> Result<Vec<Model>, String> {
+    let result = (|| {
+        safe_file::write_text_atomic(&paths.generated_state_path(), &staged.state_text)
+            .map_err(|error| format!("failed to publish generated catalog state: {error}"))?;
+        safe_file::write_text_atomic(&paths.generated_catalog_path(), &staged.catalog_text)
+            .map_err(|error| format!("failed to publish generated catalog: {error}"))?;
+        let published = fs::read_to_string(paths.generated_catalog_path())
+            .map_err(|error| format!("failed to read published generated catalog: {error}"))?;
+        if published.as_bytes() != staged.catalog_text.as_bytes() {
+            return Err("published generated catalog did not match the staged bytes".to_string());
+        }
+        read_catalog_models_text(&published, &paths.generated_catalog_path())
+    })();
+    cleanup_catalog_staging(&staged.staging_dir);
+    result
+}
+
+fn cleanup_catalog_staging(staging_dir: &Path) {
+    for name in [
+        "catalog.json",
+        "catalog.json.lock",
+        "catalog.json.lock.guard",
+        "state.json",
+        "state.json.lock",
+        "state.json.lock.guard",
+        CATALOG_STAGING_TOKEN_FILE,
+        ".request-token.lock",
+        ".request-token.lock.guard",
+    ] {
+        let path = staging_dir.join(name);
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let _ = fs::remove_dir(staging_dir);
 }
 
 pub(crate) fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
@@ -1940,7 +2150,44 @@ fn read_catalog_models_matching_text(
             )
         })?;
 
-    let mut seen = HashSet::new();
+    let mut seen_slugs = HashSet::new();
+    let mut seen_bindings = HashSet::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        if let Some(slug) = catalog_item_id(object) {
+            if !seen_slugs.insert(slug.clone()) {
+                return Err(format!(
+                    "duplicate catalog slug {slug} in {}",
+                    path.display()
+                ));
+            }
+        }
+        if let Some(binding_value) = object
+            .get("codex_proxy_metadata")
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("capability_binding"))
+        {
+            let binding: crate::CapabilityBinding = serde_json::from_value(binding_value.clone())
+                .map_err(|error| {
+                    format!(
+                        "invalid catalog capability binding in {}: {error}",
+                        path.display()
+                    )
+                })?;
+            let identity = (binding.provider.clone(), binding.model.clone());
+            if !seen_bindings.insert(identity) {
+                return Err(format!(
+                    "duplicate catalog capability binding {}/{} in {}",
+                    binding.provider,
+                    binding.model,
+                    path.display()
+                ));
+            }
+        }
+    }
+
     let mut models = Vec::new();
     for item in items {
         if !include(item) {
@@ -1949,12 +2196,20 @@ fn read_catalog_models_matching_text(
         let Some(model) = catalog_model_from_item(item) else {
             continue;
         };
-        if seen.insert(model.id.clone()) {
-            models.push(model);
-        }
+        models.push(model);
     }
 
     Ok(models)
+}
+
+fn catalog_item_id(object: &Map<String, Value>) -> Option<String> {
+    object
+        .get("slug")
+        .or_else(|| object.get("id"))
+        .or_else(|| object.get("model"))
+        .or_else(|| object.get("name"))
+        .and_then(Value::as_str)
+        .and_then(nonblank)
 }
 
 fn read_metadata_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
@@ -2308,13 +2563,7 @@ fn priced_metadata(
 
 fn catalog_model_from_item(item: &Value) -> Option<Model> {
     let object = item.as_object()?;
-    let id = object
-        .get("slug")
-        .or_else(|| object.get("id"))
-        .or_else(|| object.get("model"))
-        .or_else(|| object.get("name"))
-        .and_then(Value::as_str)
-        .and_then(nonblank)?;
+    let id = catalog_item_id(object)?;
 
     Some(Model {
         id,
@@ -2505,10 +2754,11 @@ mod tests {
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
         list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
-        refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
+        read_catalog_models_text, refresh_official_models_with_runner,
+        resolve_gateway_api_key_for_settings,
         subscription_models_from_payload, subscription_models_to_metadata_models,
         test_model_endpoint_with_timeout, AppServerModelListRunner, CatalogCommandOutcome,
-        CatalogSyncRunner, ModelPaths,
+        CatalogSyncRunner, ModelPaths, CATALOG_STAGING_TOKEN_FILE,
     };
     use crate::{MetadataProvenance, Model, Settings, ToolSurfaceStrategy, UpstreamFormat};
     use reqwest::blocking::Client;
@@ -2525,6 +2775,48 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn catalog_readback_rejects_duplicate_raw_slugs_before_model_deduplication() {
+        let catalog = r#"{
+            "models": [
+                {"slug": "ollama-cloud/kimi-k2.7-code"},
+                {"slug": "ollama-cloud/kimi-k2.7-code"}
+            ]
+        }"#;
+
+        let error = read_catalog_models_text(catalog, Path::new("catalog.json"))
+            .expect_err("duplicate raw slugs must fail closed");
+
+        assert!(error.contains("duplicate catalog slug"));
+        assert!(error.contains("ollama-cloud/kimi-k2.7-code"));
+    }
+
+    #[test]
+    fn catalog_readback_rejects_duplicate_raw_provider_model_bindings() {
+        let binding = r#""capability_binding": {
+            "schema_version": 1,
+            "provider": "ollama-cloud",
+            "model": "kimi-k2.7-code",
+            "upstream_protocol": "responses",
+            "qualification_state": "unqualified",
+            "advanced_capabilities_enabled": false
+        }"#;
+        let catalog = format!(
+            r#"{{
+                "models": [
+                    {{"slug": "first", "codex_proxy_metadata": {{{binding}}}}},
+                    {{"slug": "second", "codex_proxy_metadata": {{{binding}}}}}
+                ]
+            }}"#
+        );
+
+        let error = read_catalog_models_text(&catalog, Path::new("catalog.json"))
+            .expect_err("duplicate raw provider/model bindings must fail closed");
+
+        assert!(error.contains("duplicate catalog capability binding"));
+        assert!(error.contains("ollama-cloud/kimi-k2.7-code"));
+    }
 
     #[test]
     fn desktop_codex_exe_finds_the_app_managed_runtime() {
@@ -3981,16 +4273,15 @@ for line in sys.stdin:
 
     struct WritingCatalogRunner {
         commands: RefCell<Vec<RecordedCatalogCommand>>,
-        catalog_path: PathBuf,
         catalog_body: String,
         outcome: CatalogCommandOutcome,
     }
 
     impl WritingCatalogRunner {
         fn new(catalog_path: PathBuf, catalog_body: &str, outcome: CatalogCommandOutcome) -> Self {
+            let _ = catalog_path;
             Self {
                 commands: RefCell::new(Vec::new()),
-                catalog_path,
                 catalog_body: catalog_body.to_string(),
                 outcome,
             }
@@ -4003,17 +4294,21 @@ for line in sys.stdin:
             python: &Path,
             script: &Path,
             codex_dir: &Path,
+            _codex_target_dir: &Path,
+            staging_dir: &Path,
+            staging_token: &str,
         ) -> Result<CatalogCommandOutcome, String> {
-            let catalog_parent = self
-                .catalog_path
-                .parent()
-                .ok_or_else(|| "catalog path must have a parent".to_string())?;
-            assert!(
-                catalog_parent.is_dir(),
-                "catalog output directory should exist before sync runs"
-            );
-            fs::write(&self.catalog_path, &self.catalog_body)
+            let request_token = fs::read_to_string(staging_dir.join(CATALOG_STAGING_TOKEN_FILE))
+                .map_err(|error| format!("failed to read test staging token: {error}"))?;
+            if request_token.trim() != staging_token {
+                return Err("test staging capability did not match".to_string());
+            }
+            fs::remove_file(staging_dir.join(CATALOG_STAGING_TOKEN_FILE))
+                .map_err(|error| format!("failed to consume test staging token: {error}"))?;
+            fs::write(staging_dir.join("catalog.json"), &self.catalog_body)
                 .map_err(|error| format!("failed to write test catalog: {error}"))?;
+            fs::write(staging_dir.join("state.json"), "{}\n")
+                .map_err(|error| format!("failed to write test state: {error}"))?;
             self.commands.borrow_mut().push(RecordedCatalogCommand {
                 python: python.to_path_buf(),
                 script: script.to_path_buf(),

@@ -253,8 +253,9 @@ pub(crate) fn start_scheduled_refresh_loop() {
 }
 
 fn refresh(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
-    refresh_with_flight(refresh_flight(), trigger, refresh_once)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        refresh_with_flight(refresh_flight(), trigger, refresh_once)
+    })
 }
 
 fn refresh_with_flight<F>(

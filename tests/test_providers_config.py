@@ -21,10 +21,35 @@ from providers_config import (
     resolve_external_model_alias,
     resolve_ollama_cloud_model,
     save_providers,
+    select_capability_binding,
 )
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_python_capability_binding_matches_the_shared_rust_schema_vectors(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "capability_binding_parity.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        schema = fixture["schema"]
+        self.assertEqual(schema["version"], 1)
+        required = set(schema["required_fields"])
+        allowed = required | set(schema["optional_fields"])
+
+        for vector in fixture["vectors"]:
+            with self.subTest(vector=vector["name"]):
+                profiles = [
+                    CapabilityProfile(**profile)
+                    for profile in vector["profiles"]
+                ]
+                actual = select_capability_binding(
+                    vector["provider"],
+                    vector["model"],
+                    vector["upstream_protocol"],
+                    profiles,
+                )
+                self.assertEqual(actual, vector["expected"])
+                self.assertLessEqual(required, set(actual))
+                self.assertLessEqual(set(actual), allowed)
+
     def test_bundled_ollama_catalog_uses_k27_and_route_qualified_candidate_profiles(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         ollama = next(provider for provider in providers if provider.id == "ollama-cloud")
@@ -1168,6 +1193,29 @@ api_key = "test-secret"
         self.assertEqual(calls[0][2], "utf-8")
         self.assertIn("[[providers]]", calls[0][1])
         self.assertIn('id = "atomic-provider"', calls[0][1])
+
+    def test_save_providers_refuses_runtime_destination_without_rust_transaction(self):
+        providers = [
+            ProviderConfig(
+                id="runtime-provider",
+                name="Runtime Provider",
+                base_url="https://runtime.example/v1",
+                api_key=None,
+                models=[ModelConfig(id="runtime-model")],
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime" / "proxy" / "config" / "providers.toml"
+            path.parent.mkdir(parents=True)
+            path.write_text("external-evidence", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "Rust provider/catalog transaction",
+            ):
+                save_providers(providers, path)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "external-evidence")
 
     def test_anthropic_endpoint_selection_load_save_and_index(self):
         providers = [

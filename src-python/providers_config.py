@@ -10,7 +10,7 @@ import tomllib
 from typing import Any, Iterable
 from urllib.request import Request, urlopen
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text, provider_catalog_transaction_guard
 from catalog import canonical_model_id
 
 
@@ -829,7 +829,28 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                     ]
                 )
 
-    atomic_write_text(path, "\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    text = "\n".join(chunks).rstrip() + "\n"
+    with provider_catalog_transaction_guard(_provider_catalog_runtime_root(path)):
+        if _is_runtime_provider_destination(path):
+            raise PermissionError(
+                "runtime provider configuration must be saved through the Rust provider/catalog transaction"
+            )
+        atomic_write_text(path, text, encoding="utf-8")
+
+
+def _provider_catalog_runtime_root(path: Path) -> Path:
+    resolved = path.resolve(strict=False)
+    if resolved.parent.name == "config" and resolved.parent.parent.name == "proxy":
+        return resolved.parent.parent.parent
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).resolve(strict=False)
+    return resolved.parent
+
+
+def _is_runtime_provider_destination(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    return resolved.parent.name == "config" and resolved.parent.parent.name == "proxy"
 
 
 def _sort_by_order[T](indexed_items: Iterable[tuple[int, T]]) -> list[T]:

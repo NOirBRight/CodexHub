@@ -18,6 +18,7 @@ type TestLockAcquireHook = Box<dyn Fn(&Path, &'static str) + Send + Sync>;
 #[cfg(test)]
 thread_local! {
     static TEST_PRE_OPEN_EXISTING_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
+    static TEST_PRE_PRIVATE_PUBLISH_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
 }
 
 /// Test-only hook invoked from the lock-acquisition seam. The event argument is
@@ -39,6 +40,25 @@ fn clear_test_pre_open_hook() {
 #[cfg(test)]
 fn invoke_test_pre_open_hook(path: &Path) {
     TEST_PRE_OPEN_EXISTING_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_test_pre_private_publish_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_PRE_PRIVATE_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn clear_test_pre_private_publish_hook() {
+    TEST_PRE_PRIVATE_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn invoke_test_pre_private_publish_hook(path: &Path) {
+    TEST_PRE_PRIVATE_PUBLISH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow().as_ref() {
             hook(path);
         }
@@ -80,6 +100,22 @@ mod flock_op {
     pub(crate) const ESRCH: i32 = 3;
 }
 
+#[cfg(target_os = "linux")]
+mod unix_private_io {
+    pub(crate) const O_WRONLY: i32 = 0x0001;
+    pub(crate) const O_CREAT: i32 = 0x0040;
+    pub(crate) const O_EXCL: i32 = 0x0080;
+    pub(crate) const O_DIRECTORY: i32 = 0x1_0000;
+    pub(crate) const O_NOFOLLOW: i32 = 0x2_0000;
+    pub(crate) const O_CLOEXEC: i32 = 0x8_0000;
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+mod unix_private_io {
+    pub(crate) const O_DIRECTORY: i32 = 0x0010_0000;
+    pub(crate) const O_NOFOLLOW: i32 = 0x0000_0100;
+}
+
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -100,22 +136,23 @@ pub(crate) fn write_private_text_atomic(
     boundary: &Path,
 ) -> Result<(), String> {
     validate_confined_path(path, boundary, true)?;
+    let pinned_parent = PinnedPrivateParent::open(path, boundary)?;
     let lock = FileLock::acquire(path)?;
-    write_text_locked_impl(path, text, &lock, true)
+    write_text_locked_impl(path, text, &lock, Some(&pinned_parent))
 }
 
 /// Write `text` to `path` using a temp file and atomic rename while already
 /// holding an exclusive lock on `path`. Used for multi-step check-then-write
 /// operations that must remain atomic across processes.
 pub(crate) fn write_text_locked(path: &Path, text: &str, lock: &FileLock) -> Result<(), String> {
-    write_text_locked_impl(path, text, lock, false)
+    write_text_locked_impl(path, text, lock, None)
 }
 
 fn write_text_locked_impl(
     path: &Path,
     text: &str,
     lock: &FileLock,
-    private: bool,
+    private_parent: Option<&PinnedPrivateParent>,
 ) -> Result<(), String> {
     if lock.target_path() != path {
         return Err("atomic write lock does not match target path".to_owned());
@@ -131,13 +168,11 @@ fn write_text_locked_impl(
 
     lock.verify_namespace_identity()?;
     let temp_path = unique_temp_path(path);
-    let mut temp_file = create_new_temp_file(&temp_path, private)
-        .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
-    if private {
-        apply_private_permissions(&temp_path).inspect_err(|_| {
-            let _ = fs::remove_file(&temp_path);
-        })?;
+    let mut temp_file = match private_parent {
+        Some(parent) => parent.create_temp(&temp_path),
+        None => create_new_temp_file(&temp_path, false),
     }
+        .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
     temp_file
         .write_all(text.as_bytes())
         .and_then(|_| temp_file.sync_all())
@@ -145,84 +180,442 @@ fn write_text_locked_impl(
             let _ = fs::remove_file(&temp_path);
             format!("failed to write temp file {}: {error}", temp_path.display())
         })?;
-    drop(temp_file);
-
     lock.verify_namespace_identity().inspect_err(|_| {
         let _ = fs::remove_file(&temp_path);
     })?;
-    fs::rename(&temp_path, path).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
-        format!(
-            "failed to move temp file {} to {}: {error}",
-            temp_path.display(),
-            path.display()
-        )
-    })
+    #[cfg(test)]
+    if private_parent.is_some() {
+        invoke_test_pre_private_publish_hook(path);
+    }
+    match private_parent {
+        Some(parent) => parent.publish(&mut temp_file, &temp_path, path),
+        None => {
+            drop(temp_file);
+            fs::rename(&temp_path, path).map_err(|error| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "failed to move temp file {} to {}: {error}",
+                    temp_path.display(),
+                    path.display()
+                )
+            })
+        }
+    }
 }
 
-fn create_new_temp_file(path: &Path, _private: bool) -> std::io::Result<File> {
+#[cfg(unix)]
+struct PinnedPrivateParent {
+    directory: File,
+    parent_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl PinnedPrivateParent {
+    fn open(path: &Path, boundary: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        validate_confined_path(path, boundary, true)?;
+        let parent_path = path
+            .parent()
+            .ok_or_else(|| "confined path has no parent".to_string())?
+            .to_path_buf();
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(unix_private_io::O_DIRECTORY | unix_private_io::O_NOFOLLOW)
+            .open(&parent_path)
+            .map_err(|error| {
+                format!(
+                    "failed to pin private file parent {}: {error}",
+                    parent_path.display()
+                )
+            })?;
+        let opened = directory.metadata().map_err(|error| {
+            format!(
+                "failed to inspect pinned private file parent {}: {error}",
+                parent_path.display()
+            )
+        })?;
+        let current = fs::metadata(&parent_path).map_err(|error| {
+            format!(
+                "failed to recheck private file parent {}: {error}",
+                parent_path.display()
+            )
+        })?;
+        if !opened.is_dir()
+            || opened.dev() != current.dev()
+            || opened.ino() != current.ino()
+        {
+            return Err(format!(
+                "private file parent identity changed before pinning {}",
+                parent_path.display()
+            ));
+        }
+        Ok(Self {
+            directory,
+            parent_path,
+        })
+    }
+
+    fn create_temp(&self, temp_path: &Path) -> std::io::Result<File> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            use std::os::unix::ffi::OsStrExt;
+
+            let name = temp_path
+                .file_name()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let name = CString::new(name.as_bytes())
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let fd = unsafe {
+                openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    unix_private_io::O_WRONLY
+                        | unix_private_io::O_CREAT
+                        | unix_private_io::O_EXCL
+                        | unix_private_io::O_NOFOLLOW
+                        | unix_private_io::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &self.parent_path;
+            create_new_temp_file(temp_path, true)
+        }
+    }
+
+    fn publish(
+        &self,
+        _temp_file: &mut File,
+        temp_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+
+            let temp_name = CString::new(
+                temp_path
+                    .file_name()
+                    .ok_or_else(|| "private temp path has no file name".to_string())?
+                    .as_bytes(),
+            )
+            .map_err(|_| "private temp file name contains a NUL byte".to_string())?;
+            let target_name = CString::new(
+                target_path
+                    .file_name()
+                    .ok_or_else(|| "private target path has no file name".to_string())?
+                    .as_bytes(),
+            )
+            .map_err(|_| "private target file name contains a NUL byte".to_string())?;
+            if unsafe {
+                renameat(
+                    self.directory.as_raw_fd(),
+                    temp_name.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(format!(
+                    "failed to publish private temp file in pinned parent {}: {}",
+                    self.parent_path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            self.directory.sync_all().map_err(|error| {
+                format!(
+                    "failed to flush private file parent {}: {error}",
+                    self.parent_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            fs::rename(temp_path, target_path).map_err(|error| {
+                format!(
+                    "failed to move temp file {} to {}: {error}",
+                    temp_path.display(),
+                    target_path.display()
+                )
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+struct PinnedPrivateParent {
+    directory: File,
+    parent_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl PinnedPrivateParent {
+    fn open(path: &Path, boundary: &Path) -> Result<Self, String> {
+        validate_confined_path(path, boundary, true)?;
+        let parent_path = path
+            .parent()
+            .ok_or_else(|| "confined path has no parent".to_string())?
+            .to_path_buf();
+        let (directory, identity) = open_windows_directory(&parent_path)?;
+        let (current, current_identity) = open_windows_directory(&parent_path)?;
+        drop(current);
+        if identity != current_identity {
+            return Err(format!(
+                "private file parent identity changed before pinning {}",
+                parent_path.display()
+            ));
+        }
+        Ok(Self {
+            directory,
+            parent_path,
+        })
+    }
+
+    fn create_temp(&self, temp_path: &Path) -> std::io::Result<File> {
+        let _ = &self.parent_path;
+        create_private_temp_file_windows(temp_path)
+    }
+
+    fn publish(
+        &self,
+        temp_file: &mut File,
+        _temp_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::AsRawHandle;
+
+        let target_name = target_path
+            .file_name()
+            .ok_or_else(|| "private target path has no file name".to_string())?
+            .encode_wide()
+            .collect::<Vec<_>>();
+        let total_bytes = std::mem::size_of::<FileRenameInformation>()
+            + target_name.len() * std::mem::size_of::<u16>();
+        let words = total_bytes.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let information = storage.as_mut_ptr().cast::<FileRenameInformation>();
+        unsafe {
+            (*information).flags = 1;
+            (*information).root_directory = self.directory.as_raw_handle();
+            (*information).file_name_length =
+                u32::try_from(target_name.len() * std::mem::size_of::<u16>())
+                    .map_err(|_| "private target file name is too long".to_string())?;
+            std::ptr::copy_nonoverlapping(
+                target_name.as_ptr(),
+                std::ptr::addr_of_mut!((*information).file_name).cast::<u16>(),
+                target_name.len(),
+            );
+        }
+        let mut io_status = IoStatusBlock::default();
+        let status = unsafe {
+            NtSetInformationFile(
+                temp_file.as_raw_handle(),
+                &mut io_status,
+                information.cast(),
+                u32::try_from(total_bytes)
+                    .map_err(|_| "private rename information is too large".to_string())?,
+                10,
+            )
+        };
+        if status < 0 {
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(format!(
+                "failed to publish private temp file in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn create_new_temp_file(path: &Path, private: bool) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    if _private {
+    if private {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     options.open(path)
 }
 
-#[cfg(unix)]
-fn apply_private_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        format!(
-            "failed to set private file mode {}: {error}",
-            path.display()
-        )
-    })
+#[cfg(windows)]
+fn create_new_temp_file(path: &Path, private: bool) -> std::io::Result<File> {
+    if !private {
+        return OpenOptions::new().write(true).create_new(true).open(path);
+    }
+    create_private_temp_file_windows(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_new_temp_file(path: &Path, _private: bool) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 #[cfg(windows)]
-fn apply_private_permissions(path: &Path) -> Result<(), String> {
-    let whoami = std::process::Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .map_err(|error| format!("failed to resolve current Windows user SID: {error}"))?;
-    if !whoami.status.success() {
-        return Err("failed to resolve current Windows user SID".to_string());
+fn create_private_temp_file_windows(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::io::FromRawHandle;
+
+    const SDDL_REVISION_1: u32 = 1;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const CREATE_NEW: u32 = 1;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+    const PRIVATE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
+
+    let wide_path = windows_wide_path(path)?;
+    let wide_sddl = PRIVATE_SDDL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor = std::ptr::null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if converted == 0 || descriptor.is_null() {
+        return Err(std::io::Error::last_os_error());
     }
-    let output = String::from_utf8_lossy(&whoami.stdout);
-    let sid = output
-        .split(',')
-        .nth(1)
-        .map(|value| value.trim().trim_matches('"'))
-        .filter(|value| value.starts_with("S-1-"))
-        .ok_or_else(|| "failed to parse current Windows user SID".to_string())?;
-    let owner_grant = format!("*{sid}:(F)");
-    let status = std::process::Command::new("icacls")
-        .arg(path)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            owner_grant.as_str(),
-            "*S-1-5-18:(F)",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to set private Windows DACL on {}: {error}",
-                path.display()
-            )
-        })?;
-    if !status.success() {
+    let mut attributes = SecurityAttributes {
+        length: u32::try_from(std::mem::size_of::<SecurityAttributes>()).unwrap_or(u32::MAX),
+        security_descriptor: descriptor,
+        inherit_handle: 0,
+    };
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_WRITE | DELETE,
+            win32::SHARE_READ_WRITE_DELETE,
+            &mut attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    let creation_error = (handle == INVALID_HANDLE_VALUE).then(std::io::Error::last_os_error);
+    unsafe {
+        LocalFree(descriptor);
+    }
+    if let Some(error) = creation_error {
+        return Err(error);
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn open_windows_directory(path: &Path) -> Result<(File, (u32, u64)), String> {
+    use std::os::windows::io::FromRawHandle;
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+
+    let wide = windows_wide_path(path).map_err(|error| {
+        format!(
+            "failed to make private file parent path absolute {}: {error}",
+            path.display()
+        )
+    })?;
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            0x0000_0001 | 0x0000_0002,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
         return Err(format!(
-            "failed to set private Windows DACL on {}",
+            "failed to pin private file parent {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    let mut information = ByHandleFileInformation::default();
+    let result = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    if result == 0
+        || information.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(format!(
+            "private file parent {} is not a stable non-reparse directory",
             path.display()
         ));
     }
-    Ok(())
+    let index =
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
+    Ok((file, (information.volume_serial_number, index)))
+}
+
+#[cfg(windows)]
+fn windows_wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut raw = absolute
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| if unit == u16::from(b'/') { u16::from(b'\\') } else { unit })
+        .collect::<Vec<_>>();
+    const VERBATIM_PREFIX: [u16; 4] = [
+        u16::from_le_bytes(*b"\\\0"),
+        u16::from_le_bytes(*b"\\\0"),
+        u16::from_le_bytes(*b"?\0"),
+        u16::from_le_bytes(*b"\\\0"),
+    ];
+    const DEVICE_PREFIX: [u16; 4] = [
+        u16::from_le_bytes(*b"\\\0"),
+        u16::from_le_bytes(*b"\\\0"),
+        u16::from_le_bytes(*b".\0"),
+        u16::from_le_bytes(*b"\\\0"),
+    ];
+    const UNC_PREFIX: [u16; 2] = [
+        u16::from_le_bytes(*b"\\\0"),
+        u16::from_le_bytes(*b"\\\0"),
+    ];
+
+    let mut wide = if raw.starts_with(&VERBATIM_PREFIX) || raw.starts_with(&DEVICE_PREFIX) {
+        raw
+    } else if raw.starts_with(&UNC_PREFIX) {
+        let mut wide = "\\\\?\\UNC\\".encode_utf16().collect::<Vec<_>>();
+        wide.extend_from_slice(&raw[UNC_PREFIX.len()..]);
+        wide
+    } else {
+        let mut wide = VERBATIM_PREFIX.to_vec();
+        wide.append(&mut raw);
+        wide
+    };
+    wide.push(0);
+    Ok(wide)
 }
 
 pub(crate) fn validate_confined_path(
@@ -1087,6 +1480,17 @@ unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn openat(directory_fd: i32, path: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
+    fn renameat(
+        old_directory_fd: i32,
+        old_path: *const std::ffi::c_char,
+        new_directory_fd: i32,
+        new_path: *const std::ffi::c_char,
+    ) -> i32;
+}
+
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
@@ -1117,8 +1521,45 @@ struct Overlapped {
 }
 
 #[cfg(windows)]
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    inherit_handle: i32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct FileRenameInformation {
+    flags: u32,
+    root_directory: *mut std::ffi::c_void,
+    file_name_length: u32,
+    file_name: [u16; 1],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct IoStatusBlock {
+    status_or_pointer: usize,
+    information: usize,
+}
+
+#[cfg(windows)]
+const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1_isize as *mut std::ffi::c_void;
+
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *mut SecurityAttributes,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
     fn GetFileInformationByHandle(
         handle: *mut std::ffi::c_void,
         information: *mut ByHandleFileInformation,
@@ -1141,8 +1582,31 @@ unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn GetExitCodeProcess(handle: *mut std::ffi::c_void, code: *mut u32) -> i32;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-    #[cfg(test)]
     fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtSetInformationFile(
+        file_handle: *mut std::ffi::c_void,
+        io_status_block: *mut IoStatusBlock,
+        file_information: *const std::ffi::c_void,
+        length: u32,
+        file_information_class: i32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+#[cfg(windows)]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        string_sd_revision: u32,
+        security_descriptor: *mut *mut std::ffi::c_void,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
 }
 
 #[cfg(all(test, windows))]
@@ -1170,9 +1634,10 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_test_pre_open_hook, install_test_pre_open_hook, lock_state, parse_legacy_pid,
-        read_single_link_text, write_private_text_atomic, write_text_atomic, write_text_locked,
-        FileLock, LockState, LOCK_PROTOCOL,
+        clear_test_pre_open_hook, clear_test_pre_private_publish_hook,
+        install_test_pre_open_hook, install_test_pre_private_publish_hook, lock_state,
+        parse_legacy_pid, read_single_link_text, write_private_text_atomic, write_text_atomic,
+        write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
     };
     use std::{
         fs,
@@ -1198,6 +1663,137 @@ mod tests {
 
         assert!(error.contains("single-link"));
         assert_eq!(fs::read_to_string(peer).unwrap(), "peer-content");
+    }
+
+    #[test]
+    fn private_atomic_write_publishes_only_through_the_pinned_parent_during_a_real_rename_race() {
+        let root = test_root("private-parent-race");
+        let parent = root.join("owned");
+        let moved_parent = root.join("owned-moved");
+        let target = parent.join("secret.backup");
+        fs::create_dir_all(&parent).unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let parent_for_attacker = parent.clone();
+        let moved_for_attacker = moved_parent.clone();
+        let attacker = thread::spawn(move || {
+            start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let rename_result = fs::rename(&parent_for_attacker, &moved_for_attacker);
+            #[cfg(unix)]
+            if rename_result.is_ok() {
+                fs::create_dir_all(&parent_for_attacker).unwrap();
+                fs::write(parent_for_attacker.join("sentinel"), "replacement").unwrap();
+            }
+            done_tx.send(rename_result).unwrap();
+        });
+        install_test_pre_private_publish_hook(move |_| {
+            start_tx.send(()).unwrap();
+            let result = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            #[cfg(windows)]
+            assert!(
+                result.is_err(),
+                "the pinned Windows directory handle must deny parent rename/delete"
+            );
+            #[cfg(unix)]
+            assert!(
+                result.is_ok(),
+                "the Unix race fixture must actually rename the pathname"
+            );
+        });
+
+        let result = write_private_text_atomic(&target, "sensitive", &root);
+        clear_test_pre_private_publish_hook();
+        result.unwrap();
+        attacker.join().unwrap();
+
+        #[cfg(windows)]
+        assert_eq!(fs::read_to_string(&target).unwrap(), "sensitive");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::read_to_string(moved_parent.join("secret.backup")).unwrap(),
+                "sensitive"
+            );
+            assert_eq!(
+                fs::read_to_string(parent.join("sentinel")).unwrap(),
+                "replacement"
+            );
+            assert!(!parent.join("secret.backup").exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_atomic_write_supports_long_nested_windows_paths() {
+        let root = test_root("private-long-path");
+        let parent = root
+            .join(format!("nested-a-{}", "a".repeat(72)))
+            .join(format!("nested-b-{}", "b".repeat(72)))
+            .join(format!("nested-c-{}", "c".repeat(72)));
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join(".request-token");
+        assert!(
+            target.as_os_str().to_string_lossy().encode_utf16().count() > 260,
+            "fixture must cross the legacy Win32 MAX_PATH boundary"
+        );
+
+        write_private_text_atomic(&target, "one-shot-token\n", &root).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "one-shot-token\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_temp_file_never_exposes_an_inherited_dacl_to_parent_monitoring() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let root = test_root("private-temp-creation-dacl");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("secret.backup");
+        let monitor_ready = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let exposed = Arc::new(AtomicBool::new(false));
+        let monitor_root = root.clone();
+        let monitor_ready_clone = monitor_ready.clone();
+        let stop_clone = stop.clone();
+        let exposed_clone = exposed.clone();
+        let monitor = thread::spawn(move || {
+            monitor_ready_clone.store(true, Ordering::Release);
+            while !stop_clone.load(Ordering::Acquire) {
+                let Ok(entries) = fs::read_dir(&monitor_root) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !name.ends_with(".tmp-codexhub") {
+                        continue;
+                    }
+                    if let Ok(sddl) = super::security_descriptor_sddl(&entry.path()) {
+                        if !sddl.contains("D:P") {
+                            exposed_clone.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
+        });
+        while !monitor_ready.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        write_private_text_atomic(&target, "sensitive", &root).unwrap();
+        stop.store(true, Ordering::Release);
+        monitor.join().unwrap();
+
+        assert!(
+            !exposed.load(Ordering::Acquire),
+            "private temp file was visible before its protected DACL was installed"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -374,17 +374,18 @@ fn switch_mode(
     auto_sync: bool,
     force_takeover: Option<bool>,
 ) -> Result<AppStatus, String> {
-    if mode == "custom" {
-        official_refresh::refresh_before_official_activation()?;
-    }
-    config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    provider_catalog_transaction::with_transaction_guard(|| {
+        if mode == "custom" {
+            official_refresh::refresh_before_official_activation()?;
+        }
+        config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    })
 }
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
-    proxy::start_after(|| {
-        provider_catalog_transaction::recover_before_gateway_start()?;
-        official_refresh::refresh_before_official_activation()
+    provider_catalog_transaction::recover_before_gateway_start_with(|| {
+        proxy::start_after(official_refresh::refresh_before_official_activation)
     })
 }
 
@@ -395,29 +396,24 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
-    proxy::restart_after(|| {
-        provider_catalog_transaction::recover_before_gateway_start()?;
-        official_refresh::refresh_before_official_activation()
+    provider_catalog_transaction::recover_before_gateway_start_with(|| {
+        proxy::restart_after(official_refresh::refresh_before_official_activation)
     })
 }
 
 #[tauri::command]
-fn get_providers() -> Result<Vec<Provider>, String> {
-    config::get_providers()
-}
-
-#[tauri::command]
-fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    provider_catalog_transaction::save_providers(providers)
+fn get_provider_catalog_snapshot(
+) -> Result<provider_catalog_transaction::ProviderCatalogSnapshot, String> {
+    provider_catalog_transaction::get_provider_catalog_snapshot()
 }
 
 #[tauri::command]
 async fn persist_provider_catalog_state(
     providers: Vec<Provider>,
-    expected_providers: Vec<Provider>,
+    expected_revision: provider_catalog_transaction::ProviderCatalogRevision,
 ) -> Result<provider_catalog_transaction::ProviderCatalogTransactionResult, String> {
     run_blocking("persist_provider_catalog_state", move || {
-        provider_catalog_transaction::persist_provider_catalog_state(providers, expected_providers)
+        provider_catalog_transaction::persist_provider_catalog_state(providers, expected_revision)
     })
     .await
 }
@@ -503,7 +499,10 @@ fn test_model_endpoint(
 
 #[tauri::command]
 async fn gateway_status() -> Result<gateway::GatewayStatus, String> {
-    run_blocking("gateway_status", gateway::gateway_status).await
+    run_blocking("gateway_status", || {
+        provider_catalog_transaction::with_transaction_guard(gateway::gateway_status)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -541,7 +540,9 @@ fn gateway_test_request(
     kind: gateway::GatewayTestKind,
     model: Option<String>,
 ) -> Result<gateway::GatewayTestResult, String> {
-    gateway::gateway_test_request(kind, model)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::gateway_test_request(kind, model)
+    })
 }
 
 #[tauri::command]
@@ -595,7 +596,9 @@ fn gateway_copy_client_config(
     client_kind: Option<String>,
     model: Option<String>,
 ) -> Result<gateway::GatewayClientConfig, String> {
-    gateway::gateway_copy_client_config(client_kind, model)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::gateway_copy_client_config(client_kind, model)
+    })
 }
 
 #[tauri::command]
@@ -603,7 +606,9 @@ async fn list_gateway_clients(
     include_versions: Option<bool>,
 ) -> Result<Vec<gateway::GatewayClientInfo>, String> {
     run_blocking("list_gateway_clients", move || {
-        gateway::list_gateway_clients(include_versions.unwrap_or(false))
+        provider_catalog_transaction::with_transaction_guard(|| {
+            gateway::list_gateway_clients(include_versions.unwrap_or(false))
+        })
     })
     .await
 }
@@ -613,8 +618,9 @@ fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<gateway::GatewayClientConfigPreview, String> {
-    provider_catalog_transaction::require_startup_recovery()?;
-    gateway::preview_gateway_client_config(client_id, model)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::preview_gateway_client_config(client_id, model)
+    })
 }
 
 #[tauri::command]
@@ -622,16 +628,18 @@ fn apply_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    provider_catalog_transaction::require_startup_recovery()?;
-    gateway::apply_gateway_client_config(client_id, model)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::apply_gateway_client_config(client_id, model)
+    })
 }
 
 #[tauri::command]
 fn restore_gateway_client_config(
     client_id: String,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    provider_catalog_transaction::require_startup_recovery()?;
-    gateway::restore_gateway_client_config(client_id)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::restore_gateway_client_config(client_id)
+    })
 }
 
 #[tauri::command]
@@ -641,24 +649,26 @@ fn switch_gateway_client_route(
     model: Option<String>,
     force_takeover: Option<bool>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    provider_catalog_transaction::require_startup_recovery()?;
-    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
+    provider_catalog_transaction::with_transaction_guard(|| {
+        gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
+    })
 }
 
 #[tauri::command]
 async fn sync_gateway_clients(
     model: Option<String>,
 ) -> Result<gateway::GatewayClientSyncSummary, String> {
-    provider_catalog_transaction::require_startup_recovery()?;
     run_blocking("sync_gateway_clients", move || {
-        gateway::sync_gateway_clients(model)
+        provider_catalog_transaction::with_transaction_guard(|| {
+            gateway::sync_gateway_clients(model)
+        })
     })
     .await
 }
 
 #[tauri::command]
 fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String> {
-    gateway::subagent_matrix_status()
+    provider_catalog_transaction::with_transaction_guard(gateway::subagent_matrix_status)
 }
 
 #[tauri::command]
@@ -1112,12 +1122,13 @@ fn run_gui() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 runtime_paths::set_resource_root(resource_dir);
             }
-            provider_catalog_transaction::initialize_startup_recovery()?;
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
-            web_bridge::start_background(app.handle().clone())?;
-            start_gateway_on_launch();
+            provider_catalog_transaction::recover_before_gateway_start_with(|| {
+                web_bridge::start_background(app.handle().clone())?;
+                start_gateway_on_launch()
+            })?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1142,8 +1153,7 @@ fn run_gui() {
             start_proxy,
             stop_proxy,
             restart_proxy,
-            get_providers,
-            save_providers,
+            get_provider_catalog_snapshot,
             persist_provider_catalog_state,
             provider_catalog_recovery_pending,
             get_settings,
@@ -1212,55 +1222,23 @@ fn run_gui() {
     });
 }
 
-fn start_gateway_on_launch() {
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut launch_ready = StartupLaunchReady::new(ready_tx);
-        official_refresh::start_scheduled_refresh_loop();
-        let Ok(settings) = config::get_settings() else {
-            return;
-        };
-        let start = || {
-            proxy::start_after(|| {
-                launch_ready.signal();
-                if let Err(error) = official_refresh::refresh_at_startup() {
-                    log::warn!("startup Official model refresh failed: {error}");
-                }
-                official_refresh::refresh_before_official_activation()
-            })
-        };
-        if let Err(error) = start_gateway_after_startup(settings.auto_start_gateway, start) {
-            eprintln!("failed to start CodexHub gateway on app launch: {error}");
-        } else if !settings.auto_start_gateway {
-            launch_ready.signal();
+fn start_gateway_on_launch() -> Result<(), String> {
+    official_refresh::start_scheduled_refresh_loop();
+    let settings = config::get_settings()?;
+    let start = || {
+        proxy::start_after(|| {
             if let Err(error) = official_refresh::refresh_at_startup() {
                 log::warn!("startup Official model refresh failed: {error}");
             }
-        }
-    });
-    // Do not expose the initial window until automatic startup either owns the
-    // cross-process gate (and publishes Starting) or has already completed.
-    let _ = ready_rx.recv();
-}
-
-struct StartupLaunchReady(Option<std::sync::mpsc::SyncSender<()>>);
-
-impl StartupLaunchReady {
-    fn new(sender: std::sync::mpsc::SyncSender<()>) -> Self {
-        Self(Some(sender))
-    }
-
-    fn signal(&mut self) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
+            official_refresh::refresh_before_official_activation()
+        })
+    };
+    if !start_gateway_after_startup(settings.auto_start_gateway, start)? {
+        if let Err(error) = official_refresh::refresh_at_startup() {
+            log::warn!("startup Official model refresh failed: {error}");
         }
     }
-}
-
-impl Drop for StartupLaunchReady {
-    fn drop(&mut self) {
-        self.signal();
-    }
+    Ok(())
 }
 
 fn start_gateway_after_startup<StartGateway>(

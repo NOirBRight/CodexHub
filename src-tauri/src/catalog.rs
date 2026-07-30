@@ -1,9 +1,14 @@
-use crate::{config, models, runtime_paths, Model};
+use crate::{models, runtime_paths, Model};
+#[cfg(test)]
+use crate::config;
+#[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+#[cfg(test)]
 const CODEX_TARGET_HOME_ENV: &str = "CODEXHUB_CODEX_TARGET_HOME";
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
@@ -16,11 +21,11 @@ pub fn sync_catalog() -> Result<String, String> {
 
 pub(crate) fn sync_catalog_locked() -> Result<String, String> {
     let paths = CatalogPaths::runtime()?;
-    let python = config::find_python();
-    let runner = ProcessCatalogSyncCommandRunner;
-    sync_catalog_with_paths(&paths, &python, &runner)
+    models::generate_catalog()?;
+    Ok(paths.generated_catalog_path().to_string_lossy().into_owned())
 }
 
+#[cfg(test)]
 fn sync_catalog_with_paths(
     paths: &CatalogPaths,
     python: &Path,
@@ -66,19 +71,30 @@ fn sync_catalog_with_paths(
 #[derive(Debug, Clone)]
 struct CatalogPaths {
     codex_dir: PathBuf,
+    #[cfg(test)]
     codex_target_dir: PathBuf,
+    #[cfg(test)]
     repo_root: PathBuf,
 }
 
 impl CatalogPaths {
     fn runtime() -> Result<Self, String> {
         let codex_dir = runtime_paths::codex_home_dir()?;
+        #[cfg(test)]
         let codex_target_dir = runtime_paths::codex_target_home_dir()?;
+        #[cfg(test)]
         let repo_root = runtime_paths::resource_root()?;
 
-        Ok(Self::new(codex_dir, codex_target_dir, repo_root))
+        Ok(Self {
+            codex_dir,
+            #[cfg(test)]
+            codex_target_dir,
+            #[cfg(test)]
+            repo_root,
+        })
     }
 
+    #[cfg(test)]
     fn new(
         codex_dir: impl Into<PathBuf>,
         codex_target_dir: impl Into<PathBuf>,
@@ -91,6 +107,7 @@ impl CatalogPaths {
         }
     }
 
+    #[cfg(test)]
     fn catalog_sync_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("catalog_sync.py")
     }
@@ -102,8 +119,10 @@ impl CatalogPaths {
     }
 }
 
+#[cfg(test)]
 type CatalogCommandOutcome = config::CommandOutcome;
 
+#[cfg(test)]
 trait CatalogSyncCommandRunner {
     fn run(
         &self,
@@ -111,34 +130,6 @@ trait CatalogSyncCommandRunner {
         args: &[String],
         env: &[(String, PathBuf)],
     ) -> Result<CatalogCommandOutcome, String>;
-}
-
-struct ProcessCatalogSyncCommandRunner;
-
-impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
-    fn run(
-        &self,
-        program: &Path,
-        args: &[String],
-        env: &[(String, PathBuf)],
-    ) -> Result<CatalogCommandOutcome, String> {
-        let mut command = Command::new(program);
-        command.args(args);
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        config::configure_no_window(&mut command);
-
-        let output = command
-            .output()
-            .map_err(|error| format!("failed to start {}: {error}", program.display()))?;
-
-        Ok(CatalogCommandOutcome {
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
-    }
 }
 
 #[cfg(test)]

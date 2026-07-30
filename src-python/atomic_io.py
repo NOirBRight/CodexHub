@@ -101,6 +101,15 @@ def file_lock_for(path: Path) -> Iterator[Callable[[], None]]:
             os.close(namespace_fd)
 
 
+@contextlib.contextmanager
+def provider_catalog_transaction_guard(runtime_root: Path) -> Iterator[None]:
+    """Serialize every public provider/catalog writer across Rust and Python."""
+
+    guard_target = runtime_root / "proxy" / "provider-catalog-transaction-guard"
+    with file_lock_for(guard_target):
+        yield
+
+
 def _acquire_namespace_guard(lock_path: Path, started: float) -> int:
     guard_path = lock_path.with_name(f"{lock_path.name}.guard")
     while True:

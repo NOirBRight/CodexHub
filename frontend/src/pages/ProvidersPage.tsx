@@ -61,6 +61,8 @@ import type {
   Model,
   OpenAIUsageSnapshot,
   Provider,
+  ProviderCatalogRevision,
+  ProviderCatalogSnapshot,
   Settings,
   UpstreamFormatProbeResult,
 } from "../lib/types";
@@ -80,10 +82,11 @@ type ProvidersPageProps = {
   gatewayStatus?: GatewayStatus | null;
   modelMetadata: Model[];
   providers: Provider[];
+  providerRevision: ProviderCatalogRevision;
   settings: Settings | null;
   onGatewayChanged?: () => Promise<GatewayStatus | null | void>;
   onRefreshClients?: () => Promise<void>;
-  onProvidersChanged?: (providers: Provider[]) => void;
+  onProvidersChanged?: (snapshot: ProviderCatalogSnapshot) => void;
   onSettingsChanged?: (settings: Settings) => void;
   onStartProxy?: () => Promise<void>;
   onStatusChanged?: (status: AppStatus) => void;
@@ -102,6 +105,7 @@ function ProvidersPageImpl({
   onStartProxy,
   onStatusChanged,
   providers: providersSnapshot,
+  providerRevision: providerRevisionSnapshot,
   settings: settingsSnapshot,
 }: ProvidersPageProps) {
   const { t } = useTranslation();
@@ -110,6 +114,8 @@ function ProvidersPageImpl({
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
   const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
   const [providers, setProviders] = useState<Provider[]>(() => providersSnapshot);
+  const [providerRevision, setProviderRevision] =
+    useState<ProviderCatalogRevision>(() => providerRevisionSnapshot);
   const [settings, setSettings] = useState<Settings | null>(() => (
     settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
   ));
@@ -190,6 +196,7 @@ function ProvidersPageImpl({
     officialModelOrderDraft,
     officialModelRefreshStartedRef,
     onProvidersChanged,
+    providerRevision,
     providers,
     refreshGatewayState,
     setBusy,
@@ -200,6 +207,7 @@ function ProvidersPageImpl({
     setOfficialModels,
     setProbeResult,
     setProviders,
+    setProviderRevision,
     setSelectedId,
     settings,
     settingsDraft,
@@ -228,6 +236,7 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     setProviders(providersSnapshot);
+    setProviderRevision(providerRevisionSnapshot);
     if (
       selectedId !== OFFICIAL_ID &&
       selectedId !== ADD_ID &&
@@ -235,7 +244,7 @@ function ProvidersPageImpl({
     ) {
       setSelectedId(providersSnapshot[0]?.id ?? OFFICIAL_ID);
     }
-  }, [providersSnapshot, selectedId]);
+  }, [providerRevisionSnapshot, providersSnapshot, selectedId]);
 
   useEffect(() => {
     setCodexStatus(appStatusSnapshot);

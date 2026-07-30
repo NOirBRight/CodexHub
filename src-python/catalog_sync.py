@@ -4,16 +4,18 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text, provider_catalog_transaction_guard
 from catalog import (
     CatalogPolicy,
     canonical_model_id,
@@ -40,6 +42,8 @@ from model_limits import (
     resolve_official_context_budget,
 )
 
+CATALOG_STAGING_TOKEN_ENV = "CODEXHUB_CATALOG_STAGING_TOKEN"
+CATALOG_STAGING_TOKEN_FILE = ".request-token"
 
 PROXY_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PROXY_DIR.parent
@@ -1698,7 +1702,18 @@ def normalize_official_model_id(model_id: str) -> str | None:
 
 
 def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
-    if catalog_cache_is_fresh(max_age_seconds):
+    with provider_catalog_transaction_guard(RUNTIME_CODEX_DIR):
+        return _sync_catalog_unlocked(max_age_seconds=max_age_seconds)
+
+
+def _sync_catalog_unlocked(
+    *,
+    max_age_seconds: int = 0,
+    catalog_output_path: Path = GENERATED_CATALOG_PATH,
+    state_output_path: Path = GENERATED_STATE_PATH,
+    allow_cache: bool = True,
+) -> dict[str, Any]:
+    if allow_cache and catalog_cache_is_fresh(max_age_seconds):
         state = load_cached_state(GENERATED_STATE_PATH)
         state["cache_status"] = "fresh"
         return state
@@ -1782,14 +1797,74 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         "diff": diff,
     }
 
-    write_json(GENERATED_CATALOG_PATH, catalog)
-    write_json(GENERATED_STATE_PATH, state)
+    write_json(catalog_output_path, catalog)
+    write_json(state_output_path, state)
     return state
+
+
+def build_staged_catalog(staging_dir: Path) -> tuple[dict[str, Any], Path, Path]:
+    staging_root = (RUNTIME_CODEX_DIR / "proxy" / "provider-catalog-staging").resolve(strict=False)
+    requested = staging_dir.resolve(strict=False)
+    if (
+        requested.parent != staging_root
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", requested.name)
+    ):
+        raise ValueError("catalog staging directory is outside the private staging namespace")
+    if not requested.is_dir() or requested.is_symlink() or requested.resolve(strict=True).parent != staging_root:
+        raise ValueError("catalog staging directory is not a stable direct child")
+    _consume_catalog_staging_capability(requested)
+    catalog_path = requested / "catalog.json"
+    state_path = requested / "state.json"
+    state = _sync_catalog_unlocked(
+        catalog_output_path=catalog_path,
+        state_output_path=state_path,
+        allow_cache=False,
+    )
+    return state, catalog_path, state_path
+
+
+def _consume_catalog_staging_capability(staging_dir: Path) -> None:
+    provided = os.environ.pop(CATALOG_STAGING_TOKEN_ENV, "")
+    if not re.fullmatch(r"token-[0-9a-f]{64}", provided):
+        raise PermissionError("catalog staging capability is missing or invalid")
+    token_path = staging_dir / CATALOG_STAGING_TOKEN_FILE
+    before = token_path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 256:
+        raise PermissionError("catalog staging capability file is not a private regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(token_path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise PermissionError("catalog staging capability identity changed")
+        raw = os.read(fd, 257)
+        if len(raw) > 256:
+            raise PermissionError("catalog staging capability is oversized")
+    finally:
+        os.close(fd)
+    stored = raw.decode("ascii", errors="strict").strip()
+    if not hmac.compare_digest(stored, provided):
+        raise PermissionError("catalog staging capability did not match")
+    token_path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync Codex proxy model catalog from Ollama discovery.")
-    parser.add_argument("--sync", action="store_true", help="discover models and write generated catalog/state files")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument(
+        "--sync",
+        action="store_true",
+        help="discover models and transactionally write generated catalog/state files",
+    )
+    action.add_argument(
+        "--build-staging-dir",
+        type=Path,
+        help="build catalog/state artifacts in the guarded Rust staging namespace",
+    )
     parser.add_argument(
         "--max-age-seconds",
         type=int,
@@ -1798,14 +1873,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.sync:
-        parser.print_help()
-        return 2
-
-    state = sync_catalog(max_age_seconds=args.max_age_seconds)
+    if args.build_staging_dir is not None:
+        if args.max_age_seconds:
+            parser.error("--max-age-seconds is not valid for staging builds")
+        state, catalog_path, state_path = build_staged_catalog(args.build_staging_dir)
+    else:
+        state = sync_catalog(max_age_seconds=args.max_age_seconds)
+        catalog_path = GENERATED_CATALOG_PATH
+        state_path = GENERATED_STATE_PATH
     diff = state["diff"]
-    print(f"catalog={GENERATED_CATALOG_PATH}")
-    print(f"state={GENERATED_STATE_PATH}")
+    print(f"catalog={catalog_path}")
+    print(f"state={state_path}")
     print(f"discovery_source={state['discovery_source']}")
     print(f"discovery_status={state['discovery_status']}")
     print(f"discovery_detail={state['discovery_detail']}")

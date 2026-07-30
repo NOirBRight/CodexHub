@@ -137,18 +137,24 @@ test("provider protocol switches regenerate, read back, and disclose exact Codex
   assert.match(typesSource, /capability_profiles\?: CapabilityProfile\[\]/);
   assert.match(typesSource, /capability_binding\?: CapabilityBinding/);
   assert.match(typesSource, /ProviderCatalogTransactionOutcome/);
+  assert.match(typesSource, /providerCatalogRevisionBrand: unique symbol/);
+  assert.match(typesSource, /revision: ProviderCatalogRevision/);
   assert.match(
     transactionSource,
     /\.filter\(\(model\) => model\.enabled && model\.gateway_exported !== false\)[\s\S]*\.map\(\(model\) => model\.id\)/,
   );
   assert.match(tauriSource, /persistProviderCatalogState/);
+  assert.match(tauriSource, /expectedRevision: ProviderCatalogRevision/);
+  assert.doesNotMatch(tauriSource, /expectedProviders/);
   assert.match(tauriSource, /providerCatalogRecoveryPending/);
-  assert.match(tauriMainSource, /recover_before_gateway_start\(\)/);
+  assert.match(tauriMainSource, /recover_before_gateway_start_with/);
   assert.match(webBridgeSource, /"persist_provider_catalog_state"/);
   assert.match(webBridgeSource, /"provider_catalog_recovery_pending"/);
-  assert.match(actionsSource, /if \(mustRegenerateCatalog\)[\s\S]*await api\.persistProviderCatalogState\(next, providers\)/);
-  assert.match(actionsSource, /catalogAlreadyPublished = true/);
+  assert.match(actionsSource, /await api\.persistProviderCatalogState\(next, providerRevision\)/);
+  assert.doesNotMatch(actionsSource, /mustRegenerateCatalog/);
+  assert.match(actionsSource, /catalogAlreadyPublished: true/);
   assert.match(actionsSource, /setProviderCatalogRecoveryPending\(transaction\.outcome === "recovery_required"\)/);
+  assert.match(actionsSource, /setProviderRevision\(transaction\.revision\)/);
   assert.doesNotMatch(actionsSource, /verifyCatalogProtocolBindings/);
   assert.match(
     actionsSource,
@@ -788,10 +794,10 @@ test("desktop startup opens the gateway backend and reuses the existing app inst
     "gateway startup should run after packaged resources are registered",
   );
   assert.match(mainSource, /fn start_gateway_on_launch\(\)/);
-  assert.match(mainSource, /std::thread::spawn\(move \|\|/);
   assert.match(mainSource, /proxy::start_after\(\|\|/);
-  assert.match(mainSource, /launch_ready\.signal\(\)/);
-  assert.match(mainSource, /ready_rx\.recv\(\)/);
+  assert.match(setupSource, /recover_before_gateway_start_with\(\|\|[\s\S]*web_bridge::start_background[\s\S]*start_gateway_on_launch/);
+  assert.doesNotMatch(mainSource, /launch_ready\.signal\(\)/);
+  assert.doesNotMatch(mainSource, /ready_rx\.recv\(\)/);
   assert.match(cargoSource, /tauri-plugin-single-instance\s*=\s*"2"/);
   assert.match(mainSource, /tauri_plugin_single_instance::init\(\|app,[\s\S]*show_main_window\(app\)/);
 });

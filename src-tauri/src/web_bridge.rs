@@ -26,19 +26,19 @@ struct InvokeRequest {
 
 pub fn run(args: &[String]) -> i32 {
     let addr = parse_addr(args).unwrap_or_else(default_addr);
-    if let Err(error) = crate::provider_catalog_transaction::initialize_startup_recovery() {
-        eprintln!("failed provider/catalog startup recovery before web bridge: {error}");
-        return 1;
-    }
-    gateway::start_telemetry_ingester();
-    match TcpListener::bind(&addr) {
+    let listener = crate::provider_catalog_transaction::recover_before_gateway_start_with(|| {
+        gateway::start_telemetry_ingester();
+        TcpListener::bind(&addr)
+            .map_err(|error| format!("failed to bind CodexHub web bridge on {addr}: {error}"))
+    });
+    match listener {
         Ok(listener) => {
             println!("CodexHub web bridge listening on http://{addr}");
             serve(listener, None);
             0
         }
         Err(error) => {
-            eprintln!("failed to bind CodexHub web bridge on {addr}: {error}");
+            eprintln!("{error}");
             1
         }
     }
@@ -50,20 +50,29 @@ pub fn start_background(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
+    gateway::start_telemetry_ingester();
+    let addr = default_addr();
+    let listener = match TcpListener::bind(&addr) {
+        Ok(listener) => Some(listener),
+        Err(error) if error.kind() == ErrorKind::AddrInUse => {
+            eprintln!("CodexHub web bridge already listening on http://{addr}");
+            None
+        }
+        Err(error) => {
+            BACKGROUND_BRIDGE_STARTED.store(false, Ordering::Release);
+            return Err(format!(
+                "failed to bind CodexHub web bridge on {addr}: {error}"
+            ));
+        }
+    };
+    let Some(listener) = listener else {
+        return Ok(());
+    };
+
     std::thread::Builder::new()
         .name("codexhub-web-bridge".to_string())
         .spawn(move || {
-            gateway::start_telemetry_ingester();
-            let addr = default_addr();
-            match TcpListener::bind(&addr) {
-                Ok(listener) => serve(listener, Some(app)),
-                Err(error) if error.kind() == ErrorKind::AddrInUse => {
-                    eprintln!("CodexHub web bridge already listening on http://{addr}");
-                }
-                Err(error) => {
-                    eprintln!("failed to bind CodexHub web bridge on {addr}: {error}");
-                }
-            }
+            serve(listener, Some(app));
         })
         .map(|_| ())
         .map_err(|error| {
@@ -239,7 +248,12 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 }
 
 fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, String> {
-    crate::provider_catalog_transaction::require_startup_recovery()?;
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        dispatch_locked(request, app)
+    })
+}
+
+fn dispatch_locked(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, String> {
     match request.command.as_str() {
         "get_app_version" => to_value(Ok(app_updates::get_app_version(desktop_app(&app)?))),
         "check_app_update" => to_value(tauri::async_runtime::block_on(
@@ -273,18 +287,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "start_proxy" => to_value(crate::start_proxy()),
         "stop_proxy" => to_value(proxy::stop()),
         "restart_proxy" => to_value(crate::restart_proxy()),
-        "get_providers" => to_value(config::get_providers()),
-        "save_providers" => {
-            let providers = serde_json::from_value(
-                request
-                    .args
-                    .get("providers")
-                    .cloned()
-                    .ok_or_else(|| "providers argument is required".to_string())?,
-            )
-            .map_err(|error| format!("invalid providers argument: {error}"))?;
-            to_value(config::save_providers(providers))
-        }
+        "get_provider_catalog_snapshot" => to_value(
+            crate::provider_catalog_transaction::get_provider_catalog_snapshot(),
+        ),
         "persist_provider_catalog_state" => {
             let providers = serde_json::from_value(
                 request
@@ -294,19 +299,19 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                     .ok_or_else(|| "providers argument is required".to_string())?,
             )
             .map_err(|error| format!("invalid providers argument: {error}"))?;
-            let expected_providers = serde_json::from_value(
+            let expected_revision = serde_json::from_value(
                 request
                     .args
-                    .get("expectedProviders")
-                    .or_else(|| request.args.get("expected_providers"))
+                    .get("expectedRevision")
+                    .or_else(|| request.args.get("expected_revision"))
                     .cloned()
-                    .ok_or_else(|| "expectedProviders argument is required".to_string())?,
+                    .ok_or_else(|| "expectedRevision argument is required".to_string())?,
             )
-            .map_err(|error| format!("invalid expectedProviders argument: {error}"))?;
+            .map_err(|error| format!("invalid expectedRevision argument: {error}"))?;
             to_value(
                 crate::provider_catalog_transaction::persist_provider_catalog_state(
                     providers,
-                    expected_providers,
+                    expected_revision,
                 ),
             )
         }
@@ -599,8 +604,23 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
 pub(crate) fn dispatch_startup_recovery_probe() -> Result<Value, String> {
     dispatch(
         InvokeRequest {
-            command: "get_providers".to_string(),
+            command: "get_provider_catalog_snapshot".to_string(),
             args: Value::Null,
+        },
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn dispatch_startup_recovery_route_probe() -> Result<Value, String> {
+    dispatch(
+        InvokeRequest {
+            command: "switch_mode".to_string(),
+            args: json!({
+                "mode": "official",
+                "autoSync": false,
+                "forceTakeover": false,
+            }),
         },
         None,
     )

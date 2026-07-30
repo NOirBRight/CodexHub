@@ -4,12 +4,14 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const RECOVERY_SCHEMA_VERSION: u32 = 3;
+const RECOVERY_SCHEMA_VERSION: u32 = 4;
 const MAX_RECOVERY_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_PROVIDER_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CATALOG_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
@@ -17,15 +19,114 @@ const MAX_FUTURE_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 const STARTUP_UNCHECKED: u8 = 0;
 const STARTUP_READY: u8 = 1;
 const STARTUP_BLOCKED: u8 = 2;
+const MAX_ISSUED_REVISIONS: usize = 1024;
 #[cfg(not(test))]
 static STARTUP_RECOVERY_STATE: AtomicU8 = AtomicU8::new(STARTUP_UNCHECKED);
 #[cfg(test)]
 static STARTUP_RECOVERY_STATE: AtomicU8 = AtomicU8::new(STARTUP_READY);
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ProviderCatalogRevision(String);
+
+impl ProviderCatalogRevision {
+    fn unavailable() -> Self {
+        Self(String::new())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Default)]
+struct ProviderCatalogRevisionRegistry {
+    fingerprints: HashMap<String, String>,
+    issued: VecDeque<String>,
+}
+
+static PROVIDER_CATALOG_REVISIONS: OnceLock<Mutex<ProviderCatalogRevisionRegistry>> =
+    OnceLock::new();
+
+fn provider_catalog_revision_registry() -> &'static Mutex<ProviderCatalogRevisionRegistry> {
+    PROVIDER_CATALOG_REVISIONS
+        .get_or_init(|| Mutex::new(ProviderCatalogRevisionRegistry::default()))
+}
+
+fn provider_state_fingerprint(paths: &config::ConfigPaths) -> Result<String, String> {
+    let (surface, path) = if paths.runtime_providers_path().exists() {
+        ("runtime", paths.runtime_providers_path())
+    } else {
+        ("bundled", paths.bundled_providers_path())
+    };
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("failed to read provider configuration revision: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(surface.as_bytes());
+    digest.update([0]);
+    digest.update(path.as_os_str().to_string_lossy().as_bytes());
+    digest.update([0]);
+    digest.update(bytes);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn issue_provider_catalog_revision(
+    paths: &config::ConfigPaths,
+) -> Result<ProviderCatalogRevision, String> {
+    let fingerprint = provider_state_fingerprint(paths)?;
+    let mut nonce = [0_u8; 32];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|error| format!("failed to create opaque provider revision: {error}"))?;
+    let token = format!("pcr1_{}", hash_bytes(&nonce));
+    let mut registry = provider_catalog_revision_registry()
+        .lock()
+        .map_err(|_| "provider revision registry lock was poisoned".to_string())?;
+    registry.fingerprints.insert(token.clone(), fingerprint);
+    registry.issued.push_back(token.clone());
+    while registry.issued.len() > MAX_ISSUED_REVISIONS {
+        if let Some(expired) = registry.issued.pop_front() {
+            registry.fingerprints.remove(&expired);
+        }
+    }
+    Ok(ProviderCatalogRevision(token))
+}
+
+fn validate_provider_catalog_revision(
+    paths: &config::ConfigPaths,
+    revision: &ProviderCatalogRevision,
+) -> Result<(), String> {
+    let current = provider_state_fingerprint(paths)?;
+    let mut registry = provider_catalog_revision_registry()
+        .lock()
+        .map_err(|_| "provider revision registry lock was poisoned".to_string())?;
+    if registry.fingerprints.get(revision.as_str()) == Some(&current) {
+        registry.fingerprints.remove(revision.as_str());
+        return Ok(());
+    }
+    Err("provider configuration changed since this editor snapshot was loaded".to_string())
+}
+
 #[cfg(test)]
 thread_local! {
     static TRANSACTION_FAULT_PHASE: std::cell::RefCell<Option<&'static str>> =
         const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    static HELD_TRANSACTION_GUARDS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct HeldTransactionGuard(PathBuf);
+
+impl Drop for HeldTransactionGuard {
+    fn drop(&mut self) {
+        HELD_TRANSACTION_GUARDS.with(|held| {
+            let mut held = held.borrow_mut();
+            let removed = held.pop();
+            debug_assert_eq!(removed.as_ref(), Some(&self.0));
+        });
+    }
 }
 
 #[cfg(test)]
@@ -70,9 +171,17 @@ pub struct ProviderCatalogTransactionResult {
     pub outcome: ProviderCatalogTransactionOutcome,
     pub providers: Vec<Provider>,
     pub models: Vec<Model>,
+    pub revision: ProviderCatalogRevision,
     pub protocol_changed: bool,
     pub detail: Option<String>,
     pub catalog_disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCatalogSnapshot {
+    pub providers: Vec<Provider>,
+    pub revision: ProviderCatalogRevision,
 }
 
 trait ProviderCatalogStore {
@@ -82,7 +191,6 @@ trait ProviderCatalogStore {
     fn generate_catalog(&mut self) -> Result<Vec<Model>, String>;
     fn prepare_recovery(&mut self) -> Result<(), String>;
     fn mark_provider_write_pending(&mut self, providers: &[Provider]) -> Result<(), String>;
-    fn mark_catalog_write_pending(&mut self) -> Result<(), String>;
     fn save_providers(&mut self, providers: Vec<Provider>) -> Result<Vec<Provider>, String>;
     fn restore_pending(&mut self) -> Result<(), String>;
     fn mark_committed(&mut self) -> Result<(), String>;
@@ -93,13 +201,26 @@ trait ProviderCatalogStore {
 
 pub fn persist_provider_catalog_state(
     providers: Vec<Provider>,
-    expected_providers: Vec<Provider>,
+    expected_revision: ProviderCatalogRevision,
 ) -> Result<ProviderCatalogTransactionResult, String> {
     let paths = config::ConfigPaths::runtime()?;
-    with_transaction_guard_for_paths(&paths, || {
+    persist_provider_catalog_state_with_paths(&paths, providers, expected_revision)
+}
+
+fn persist_provider_catalog_state_with_paths(
+    paths: &config::ConfigPaths,
+    providers: Vec<Provider>,
+    expected_revision: ProviderCatalogRevision,
+) -> Result<ProviderCatalogTransactionResult, String> {
+    with_transaction_guard_for_paths(paths, || {
         let mut store = RuntimeProviderCatalogStore::new(paths.clone());
-        let mut result =
-            persist_with_expected_store(&mut store, providers, Some(&expected_providers));
+        if let Err(detail) = validate_provider_catalog_revision(paths, &expected_revision) {
+            let current = store.current_providers().unwrap_or_default();
+            let mut result = conflict_result(current, detail);
+            result.revision = issue_provider_catalog_revision(paths)?;
+            return Ok(result);
+        }
+        let mut result = persist_with_store(&mut store, providers);
         if paths.provider_catalog_recovery_path().exists()
             && result.outcome != ProviderCatalogTransactionOutcome::RecoveryRequired
         {
@@ -122,25 +243,52 @@ pub fn persist_provider_catalog_state(
             },
             Ordering::Release,
         );
+        result.revision = issue_provider_catalog_revision(paths)?;
         Ok(result)
     })
 }
 
-pub fn initialize_startup_recovery() -> Result<(), String> {
-    STARTUP_RECOVERY_STATE.store(STARTUP_BLOCKED, Ordering::Release);
-    let paths = config::ConfigPaths::runtime()?;
-    let result = with_transaction_guard_for_paths(&paths, || {
-        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
-        recover_before_gateway_with_store(&mut store)
-    });
-    if result.is_ok() {
-        STARTUP_RECOVERY_STATE.store(STARTUP_READY, Ordering::Release);
-    }
-    result
+pub fn get_provider_catalog_snapshot() -> Result<ProviderCatalogSnapshot, String> {
+    with_transaction_guard(|| {
+        let paths = config::ConfigPaths::runtime()?;
+        Ok(ProviderCatalogSnapshot {
+            providers: config::get_providers_with_paths(&paths)?,
+            revision: issue_provider_catalog_revision(&paths)?,
+        })
+    })
 }
 
-pub fn recover_before_gateway_start() -> Result<(), String> {
-    initialize_startup_recovery()
+pub fn initialize_startup_recovery() -> Result<(), String> {
+    let paths = config::ConfigPaths::runtime()?;
+    recover_before_gateway_start_with_paths(&paths, || Ok(()))
+}
+
+pub fn recover_before_gateway_start_with<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let paths = config::ConfigPaths::runtime()?;
+    recover_before_gateway_start_with_paths(&paths, operation)
+}
+
+fn recover_before_gateway_start_with_paths<T>(
+    paths: &config::ConfigPaths,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    STARTUP_RECOVERY_STATE.store(STARTUP_BLOCKED, Ordering::Release);
+    let mut recovery_completed = false;
+    let result = with_transaction_guard_for_paths(paths, || {
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        recover_before_gateway_with_store(&mut store)?;
+        recovery_completed = true;
+        STARTUP_RECOVERY_STATE.store(STARTUP_READY, Ordering::Release);
+        operation()
+    });
+    if recovery_completed && !paths.provider_catalog_recovery_path().exists() {
+        STARTUP_RECOVERY_STATE.store(STARTUP_READY, Ordering::Release);
+    } else {
+        STARTUP_RECOVERY_STATE.store(STARTUP_BLOCKED, Ordering::Release);
+    }
+    result
 }
 
 pub fn require_startup_recovery() -> Result<(), String> {
@@ -180,21 +328,25 @@ pub(crate) fn with_transaction_guard<T>(
     })
 }
 
-fn with_transaction_guard_for_paths<T>(
+pub(crate) fn with_transaction_guard_for_paths<T>(
     paths: &config::ConfigPaths,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let transaction_lock_path = paths.proxy_dir().join("provider-catalog-transaction-guard");
+    let proxy_dir = paths.proxy_dir();
+    fs::create_dir_all(&proxy_dir).map_err(|error| {
+        format!("failed to create provider/catalog transaction directory: {error}")
+    })?;
+    let transaction_lock_path = proxy_dir.join("provider-catalog-transaction-guard");
+    if HELD_TRANSACTION_GUARDS
+        .with(|held| held.borrow().iter().any(|path| path == &transaction_lock_path))
+    {
+        return operation();
+    }
     let _transaction_lock = safe_file::FileLock::acquire(&transaction_lock_path)
         .map_err(|error| format!("failed to lock provider/catalog transaction: {error}"))?;
+    HELD_TRANSACTION_GUARDS.with(|held| held.borrow_mut().push(transaction_lock_path.clone()));
+    let _held_transaction_guard = HeldTransactionGuard(transaction_lock_path);
     operation()
-}
-
-pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    with_transaction_guard(|| {
-        let paths = config::ConfigPaths::runtime()?;
-        config::save_providers_with_paths(providers, &paths)
-    })
 }
 
 fn recover_before_gateway_with_store(store: &mut dyn ProviderCatalogStore) -> Result<(), String> {
@@ -217,18 +369,9 @@ pub fn recovery_pending() -> Result<bool, String> {
         .exists())
 }
 
-#[cfg(test)]
 fn persist_with_store(
     store: &mut dyn ProviderCatalogStore,
     providers: Vec<Provider>,
-) -> ProviderCatalogTransactionResult {
-    persist_with_expected_store(store, providers, None)
-}
-
-fn persist_with_expected_store(
-    store: &mut dyn ProviderCatalogStore,
-    providers: Vec<Provider>,
-    expected_providers: Option<&[Provider]>,
 ) -> ProviderCatalogTransactionResult {
     if let Err(error) = store.recover_pending() {
         let providers = store.current_providers().unwrap_or_default();
@@ -243,14 +386,6 @@ fn persist_with_expected_store(
         Ok(providers) => providers,
         Err(error) => return unchanged_result(Vec::new(), Vec::new(), error, false),
     };
-    if let Some(expected) = expected_providers {
-        if hash_provider_state(expected).ok() != hash_provider_state(&previous_providers).ok() {
-            return conflict_result(
-                previous_providers,
-                "provider configuration changed since this editor snapshot was loaded".to_string(),
-            );
-        }
-    }
     let protocol_switches = detected_protocol_switches(&previous_providers, &providers);
     let protocol_changed = !protocol_switches.is_empty();
     let previous_models = match store.current_catalog().and_then(|models| {
@@ -309,15 +444,6 @@ fn persist_with_expected_store(
             protocol_changed,
         );
     }
-    if let Err(error) = store.mark_catalog_write_pending() {
-        return rollback_result(
-            store,
-            previous_providers,
-            previous_models,
-            error,
-            protocol_changed,
-        );
-    }
     let models = match store.generate_catalog() {
         Ok(models) => models,
         Err(error) => {
@@ -353,6 +479,7 @@ fn persist_with_expected_store(
         outcome: ProviderCatalogTransactionOutcome::Committed,
         providers: saved,
         models,
+        revision: ProviderCatalogRevision::unavailable(),
         protocol_changed,
         detail,
         catalog_disabled: false,
@@ -364,6 +491,7 @@ fn conflict_result(providers: Vec<Provider>, detail: String) -> ProviderCatalogT
         outcome: ProviderCatalogTransactionOutcome::Conflict,
         providers,
         models: Vec::new(),
+        revision: ProviderCatalogRevision::unavailable(),
         protocol_changed: false,
         detail: Some(detail),
         catalog_disabled: false,
@@ -398,7 +526,7 @@ fn detected_protocol_switches(
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RecoveryState {
     Preparing,
@@ -409,11 +537,114 @@ enum RecoveryState {
     CatalogDisabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    ClearPrepared,
+    RestoreProviderPrefix,
+    RestoreCatalogPrefix,
+    VerifyCommitted,
+    RegenerateDisabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryRecordShape {
+    Prepared,
+    ProviderCandidate,
+    CatalogCandidate,
+    Committed,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecoveryPhase {
+    marker_fault: &'static str,
+    action: RecoveryAction,
+    shape: RecoveryRecordShape,
+}
+
+impl RecoveryState {
+    fn classify(self) -> RecoveryPhase {
+        match self {
+            Self::Preparing => RecoveryPhase {
+                marker_fault: "write-preparing-marker",
+                action: RecoveryAction::ClearPrepared,
+                shape: RecoveryRecordShape::Prepared,
+            },
+            Self::Prepared => RecoveryPhase {
+                marker_fault: "write-prepared-marker",
+                action: RecoveryAction::ClearPrepared,
+                shape: RecoveryRecordShape::Prepared,
+            },
+            Self::ProviderWritePending => RecoveryPhase {
+                marker_fault: "write-provider-marker",
+                action: RecoveryAction::RestoreProviderPrefix,
+                shape: RecoveryRecordShape::ProviderCandidate,
+            },
+            Self::CatalogWritePending => RecoveryPhase {
+                marker_fault: "write-catalog-marker",
+                action: RecoveryAction::RestoreCatalogPrefix,
+                shape: RecoveryRecordShape::CatalogCandidate,
+            },
+            Self::Committed => RecoveryPhase {
+                marker_fault: "write-committed-marker",
+                action: RecoveryAction::VerifyCommitted,
+                shape: RecoveryRecordShape::Committed,
+            },
+            Self::CatalogDisabled => RecoveryPhase {
+                marker_fault: "write-disabled-marker",
+                action: RecoveryAction::RegenerateDisabled,
+                shape: RecoveryRecordShape::Disabled,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryTransition {
+    FinishPreparation,
+    BeginProviderPublish,
+    BeginCatalogPublish,
+    Commit,
+}
+
+impl RecoveryTransition {
+    fn states(self) -> (RecoveryState, RecoveryState) {
+        match self {
+            Self::FinishPreparation => (RecoveryState::Preparing, RecoveryState::Prepared),
+            Self::BeginProviderPublish => (
+                RecoveryState::Prepared,
+                RecoveryState::ProviderWritePending,
+            ),
+            Self::BeginCatalogPublish => (
+                RecoveryState::ProviderWritePending,
+                RecoveryState::CatalogWritePending,
+            ),
+            Self::Commit => (RecoveryState::CatalogWritePending, RecoveryState::Committed),
+        }
+    }
+}
+
+fn apply_recovery_transition(
+    record: &mut RecoveryRecord,
+    transition: RecoveryTransition,
+) -> Result<(), String> {
+    let (expected, next) = transition.states();
+    if record.state != expected {
+        return Err(format!(
+            "provider/catalog recovery phase mismatch for {transition:?}: expected {expected:?}, found {:?}",
+            record.state
+        ));
+    }
+    record.state = next;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileSnapshot {
     existed: bool,
     sha256: Option<String>,
+    bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +658,10 @@ struct RecoveryRecord {
     catalog: FileSnapshot,
     base_provider_state_sha256: Option<String>,
     candidate_provider_state_sha256: Option<String>,
+    candidate_providers_sha256: Option<String>,
+    candidate_providers_bytes: Option<u64>,
+    candidate_catalog_sha256: Option<String>,
+    candidate_catalog_bytes: Option<u64>,
     committed_providers_sha256: Option<String>,
     committed_catalog_sha256: Option<String>,
 }
@@ -484,14 +719,7 @@ impl RuntimeProviderCatalogStore {
     }
 
     fn write_recovery(&self, record: &RecoveryRecord) -> Result<(), String> {
-        transaction_fault(match record.state {
-            RecoveryState::Preparing => "write-preparing-marker",
-            RecoveryState::Prepared => "write-prepared-marker",
-            RecoveryState::ProviderWritePending => "write-provider-marker",
-            RecoveryState::CatalogWritePending => "write-catalog-marker",
-            RecoveryState::Committed => "write-committed-marker",
-            RecoveryState::CatalogDisabled => "write-disabled-marker",
-        })?;
+        transaction_fault(record.state.classify().marker_fault)?;
         let text = serde_json::to_string(record).map_err(|error| {
             format!("failed to serialize provider/catalog recovery record: {error}")
         })?;
@@ -544,28 +772,33 @@ impl RuntimeProviderCatalogStore {
     }
 
     fn verify_provider_write_prefix(&self, record: &RecoveryRecord) -> Result<(), String> {
-        verify_snapshot_target(
+        if !file_matches_snapshot(
             &self.paths.generated_catalog_path(),
             &record.catalog,
             MAX_CATALOG_SNAPSHOT_BYTES,
             "provider-write generated catalog",
-        )?;
-        let actual = hash_provider_state(&self.current_providers()?)?;
-        let base = record
-            .base_provider_state_sha256
-            .as_deref()
-            .ok_or_else(|| {
-                "provider-write journal is missing the base provider hash".to_string()
-            })?;
-        let candidate = record
-            .candidate_provider_state_sha256
-            .as_deref()
-            .ok_or_else(|| {
-                "provider-write journal is missing the candidate provider hash".to_string()
-            })?;
-        if actual != base && actual != candidate {
+        )? {
             return Err(
-                "provider configuration diverged from this transaction's base and candidate states"
+                "generated catalog diverged from this transaction's provider-write base"
+                    .to_string(),
+            );
+        }
+        let provider_is_base = file_matches_snapshot(
+            &self.paths.runtime_providers_path(),
+            &record.providers,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "provider-write base provider configuration",
+        )?;
+        let provider_is_candidate = file_matches_identity(
+            &self.paths.runtime_providers_path(),
+            record.candidate_providers_sha256.as_deref(),
+            record.candidate_providers_bytes,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "provider-write candidate provider configuration",
+        )?;
+        if !provider_is_base && !provider_is_candidate {
+            return Err(
+                "provider configuration diverged from this transaction's exact base and candidate bytes"
                     .to_string(),
             );
         }
@@ -573,68 +806,38 @@ impl RuntimeProviderCatalogStore {
     }
 
     fn verify_catalog_write_prefix(&self, record: &RecoveryRecord) -> Result<(), String> {
-        let providers = self.current_providers()?;
-        let actual_provider_state = hash_provider_state(&providers)?;
-        let base = record
-            .base_provider_state_sha256
-            .as_deref()
-            .ok_or_else(|| "catalog-write journal is missing the base provider hash".to_string())?;
-        let candidate = record
-            .candidate_provider_state_sha256
-            .as_deref()
-            .ok_or_else(|| {
-                "catalog-write journal is missing the candidate provider hash".to_string()
-            })?;
-        if actual_provider_state != base && actual_provider_state != candidate {
+        if !file_matches_identity(
+            &self.paths.runtime_providers_path(),
+            record.candidate_providers_sha256.as_deref(),
+            record.candidate_providers_bytes,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "catalog-write candidate provider configuration",
+        )? {
             return Err(
-                "provider configuration diverged from this transaction's catalog-write prefix"
+                "provider configuration diverged from this transaction's exact catalog-write candidate bytes"
                     .to_string(),
             );
         }
-        verify_file_hash(
-            &self.paths.runtime_providers_path(),
-            record.committed_providers_sha256.as_deref(),
-            MAX_PROVIDER_SNAPSHOT_BYTES,
-            "catalog-write candidate provider configuration",
-        )?;
-        if verify_snapshot_target(
+        let catalog_is_base = file_matches_snapshot(
             &self.paths.generated_catalog_path(),
             &record.catalog,
             MAX_CATALOG_SNAPSHOT_BYTES,
             "catalog-write base catalog",
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
-        if actual_provider_state != candidate {
-            return Err(
-                "generated catalog changed while providers remained at the base state".to_string(),
-            );
-        }
-        if read_bounded(
+        )?;
+        let catalog_is_candidate = file_matches_identity(
             &self.paths.generated_catalog_path(),
+            record.candidate_catalog_sha256.as_deref(),
+            record.candidate_catalog_bytes,
             MAX_CATALOG_SNAPSHOT_BYTES,
             "catalog-write candidate catalog",
-        )
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|value| {
-                value
-                    .get("models")
-                    .and_then(|models| models.as_array())
-                    .cloned()
-            })
-            .is_some_and(|models| models.is_empty())
-        {
-            return Ok(());
+        )?;
+        if !catalog_is_base && !catalog_is_candidate {
+            return Err(
+                "generated catalog diverged from this transaction's exact base and candidate bytes"
+                    .to_string(),
+            );
         }
-        let models = self.current_catalog().map_err(|_| {
-            "generated catalog is neither the transaction base nor a complete candidate".to_string()
-        })?;
-        verify_catalog_for_providers(&models, &providers).map_err(|_| {
-            "generated catalog is neither the transaction base nor a complete candidate".to_string()
-        })
+        Ok(())
     }
 }
 
@@ -648,23 +851,25 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             }
             return Ok(());
         };
-        match record.state {
-            RecoveryState::Committed => {
-                verify_file_hash(
+        match record.state.classify().action {
+            RecoveryAction::VerifyCommitted => {
+                verify_file_identity(
                     &self.paths.runtime_providers_path(),
                     record.committed_providers_sha256.as_deref(),
+                    record.candidate_providers_bytes,
                     MAX_PROVIDER_SNAPSHOT_BYTES,
                     "committed provider configuration",
                 )?;
-                verify_file_hash(
+                verify_file_identity(
                     &self.paths.generated_catalog_path(),
                     record.committed_catalog_sha256.as_deref(),
+                    record.candidate_catalog_bytes,
                     MAX_CATALOG_SNAPSHOT_BYTES,
                     "committed generated catalog",
                 )?;
                 self.clear_recovery()
             }
-            RecoveryState::Preparing | RecoveryState::Prepared => {
+            RecoveryAction::ClearPrepared => {
                 verify_snapshot_target(
                     &self.paths.runtime_providers_path(),
                     &record.providers,
@@ -679,17 +884,17 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 )?;
                 self.clear_recovery()
             }
-            RecoveryState::ProviderWritePending => {
+            RecoveryAction::RestoreProviderPrefix => {
                 self.verify_provider_write_prefix(&record)?;
                 self.restore_pending()?;
                 self.clear_recovery()
             }
-            RecoveryState::CatalogWritePending => {
+            RecoveryAction::RestoreCatalogPrefix => {
                 self.verify_catalog_write_prefix(&record)?;
                 self.restore_pending()?;
                 self.clear_recovery()
             }
-            RecoveryState::CatalogDisabled => {
+            RecoveryAction::RegenerateDisabled => {
                 let providers = self.current_providers()?;
                 let expected_hash =
                     record
@@ -723,7 +928,20 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
     }
 
     fn generate_catalog(&mut self) -> Result<Vec<Model>, String> {
-        models::generate_catalog()
+        let staged = models::stage_catalog_for_config(&self.paths)?;
+        let providers = self.current_providers()?;
+        verify_catalog_for_providers(staged.models(), &providers)?;
+        if self
+            .read_recovery()?
+            .is_some_and(|record| record.state == RecoveryState::ProviderWritePending)
+        {
+            self.mark_catalog_write_pending(staged.catalog_text())?;
+            transaction_fault("after-catalog-marker")?;
+        }
+        let published = models::publish_staged_catalog_for_config(&self.paths, &staged)?;
+        transaction_fault("after-catalog-publish")?;
+        verify_catalog_for_providers(&published, &providers)?;
+        Ok(published)
     }
 
     fn prepare_recovery(&mut self) -> Result<(), String> {
@@ -752,6 +970,10 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 )?,
                 base_provider_state_sha256: Some(hash_provider_state(&self.current_providers()?)?),
                 candidate_provider_state_sha256: None,
+                candidate_providers_sha256: None,
+                candidate_providers_bytes: None,
+                candidate_catalog_sha256: None,
+                candidate_catalog_bytes: None,
                 committed_providers_sha256: None,
                 committed_catalog_sha256: None,
             };
@@ -775,7 +997,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 "generated catalog",
             )?;
             transaction_fault("after-catalog-backup")?;
-            record.state = RecoveryState::Prepared;
+            apply_recovery_transition(&mut record, RecoveryTransition::FinishPreparation)?;
             self.write_recovery(&record)
         })();
         if prepared.is_err() {
@@ -790,52 +1012,71 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
         let mut record = self.read_recovery()?.ok_or_else(|| {
             "provider/catalog recovery record disappeared before provider write".to_string()
         })?;
-        if !matches!(record.state, RecoveryState::Prepared) {
-            return Err(
-                "provider/catalog transaction was not prepared before provider write".to_string(),
-            );
-        }
-        record.state = RecoveryState::ProviderWritePending;
+        apply_recovery_transition(&mut record, RecoveryTransition::BeginProviderPublish)?;
+        let candidate_text = config::serialize_providers_document(providers)?;
         record.candidate_provider_state_sha256 =
             Some(hash_provider_state(&normalized_provider_state(providers))?);
-        self.write_recovery(&record)
-    }
-
-    fn mark_catalog_write_pending(&mut self) -> Result<(), String> {
-        let mut record = self.read_recovery()?.ok_or_else(|| {
-            "provider/catalog recovery record disappeared before catalog write".to_string()
-        })?;
-        if !matches!(record.state, RecoveryState::ProviderWritePending) {
-            return Err("provider/catalog provider write phase was not recorded".to_string());
-        }
-        let expected = record
-            .candidate_provider_state_sha256
-            .as_deref()
-            .ok_or_else(|| {
-                "provider/catalog transaction is missing the candidate provider hash".to_string()
-            })?;
-        if hash_provider_state(&self.current_providers()?)? != expected {
-            return Err("provider configuration identity changed before catalog write".to_string());
-        }
-        record.state = RecoveryState::CatalogWritePending;
-        record.committed_providers_sha256 = Some(hash_file(
-            &self.paths.runtime_providers_path(),
-            MAX_PROVIDER_SNAPSHOT_BYTES,
-        )?);
+        record.candidate_providers_sha256 = Some(hash_bytes(candidate_text.as_bytes()));
+        record.candidate_providers_bytes = Some(candidate_text.len() as u64);
         self.write_recovery(&record)
     }
 
     fn save_providers(&mut self, providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
         config::save_providers_with_paths(providers, &self.paths)?;
-        config::get_providers_with_paths(&self.paths)
+        transaction_fault("after-provider-publish")?;
+        let saved = config::get_providers_with_paths(&self.paths)?;
+        let record = self.read_recovery()?.ok_or_else(|| {
+            "provider/catalog recovery record disappeared after provider write".to_string()
+        })?;
+        if !file_matches_identity(
+            &self.paths.runtime_providers_path(),
+            record.candidate_providers_sha256.as_deref(),
+            record.candidate_providers_bytes,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "published candidate provider configuration",
+        )? {
+            return Err(
+                "published provider configuration did not match the journaled candidate bytes"
+                    .to_string(),
+            );
+        }
+        Ok(saved)
     }
 
     fn restore_pending(&mut self) -> Result<(), String> {
         let Some(record) = self.read_recovery()? else {
             return Ok(());
         };
-        if matches!(record.state, RecoveryState::Committed) {
+        if record.state == RecoveryState::Committed {
             return Ok(());
+        }
+        match record.state.classify().action {
+            RecoveryAction::ClearPrepared => {
+                verify_snapshot_target(
+                    &self.paths.runtime_providers_path(),
+                    &record.providers,
+                    MAX_PROVIDER_SNAPSHOT_BYTES,
+                    "prepared provider configuration",
+                )?;
+                verify_snapshot_target(
+                    &self.paths.generated_catalog_path(),
+                    &record.catalog,
+                    MAX_CATALOG_SNAPSHOT_BYTES,
+                    "prepared generated catalog",
+                )?;
+            }
+            RecoveryAction::RestoreProviderPrefix => {
+                self.verify_provider_write_prefix(&record)?;
+            }
+            RecoveryAction::RestoreCatalogPrefix => {
+                self.verify_catalog_write_prefix(&record)?;
+            }
+            RecoveryAction::VerifyCommitted | RecoveryAction::RegenerateDisabled => {
+                return Err(
+                    "provider/catalog recovery phase cannot restore a transaction snapshot"
+                        .to_string(),
+                );
+            }
         }
         validate_snapshot_backup(
             &self.paths.provider_catalog_providers_backup_path(),
@@ -879,20 +1120,23 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
         let Some(mut record) = self.read_recovery()? else {
             return Err("provider/catalog recovery record disappeared before commit".to_string());
         };
-        if !matches!(record.state, RecoveryState::CatalogWritePending) {
-            return Err(
-                "provider/catalog recovery record was not prepared before commit".to_string(),
-            );
-        }
-        record.state = RecoveryState::Committed;
-        record.committed_providers_sha256 = Some(hash_file(
+        apply_recovery_transition(&mut record, RecoveryTransition::Commit)?;
+        verify_file_identity(
             &self.paths.runtime_providers_path(),
+            record.candidate_providers_sha256.as_deref(),
+            record.candidate_providers_bytes,
             MAX_PROVIDER_SNAPSHOT_BYTES,
-        )?);
-        record.committed_catalog_sha256 = Some(hash_file(
+            "committed provider configuration",
+        )?;
+        verify_file_identity(
             &self.paths.generated_catalog_path(),
+            record.candidate_catalog_sha256.as_deref(),
+            record.candidate_catalog_bytes,
             MAX_CATALOG_SNAPSHOT_BYTES,
-        )?);
+            "committed generated catalog",
+        )?;
+        record.committed_providers_sha256 = record.candidate_providers_sha256.clone();
+        record.committed_catalog_sha256 = record.candidate_catalog_sha256.clone();
         self.write_recovery(&record)
     }
 
@@ -910,13 +1154,19 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             providers: FileSnapshot {
                 existed: false,
                 sha256: None,
+                bytes: None,
             },
             catalog: FileSnapshot {
                 existed: false,
                 sha256: None,
+                bytes: None,
             },
             base_provider_state_sha256: None,
             candidate_provider_state_sha256: None,
+            candidate_providers_sha256: None,
+            candidate_providers_bytes: None,
+            candidate_catalog_sha256: None,
+            candidate_catalog_bytes: None,
             committed_providers_sha256: Some(hash_provider_state(&providers)?),
             committed_catalog_sha256: None,
         })
@@ -947,23 +1197,75 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
     fn invalidate_catalog(&mut self) -> Result<(), String> {
         self.validate_transaction_paths()?;
         let path = self.paths.generated_catalog_path();
-        match safe_file::write_text_atomic(&path, "{\"models\":[]}\n") {
-            Ok(()) => Ok(()),
-            Err(write_error) => {
-                if !path.exists() {
-                    return Ok(());
-                }
-                fs::remove_file(&path).map_err(|remove_error| {
-                    format!(
-                        "failed to replace catalog with an empty fail-closed catalog ({write_error}); failed to remove it ({remove_error})"
-                    )
-                })
+        const DISABLED_CATALOG: &str = "{\"models\":[]}\n";
+        let transaction = self
+            .read_recovery()
+            .ok()
+            .flatten()
+            .map(|record| record.transaction_id)
+            .unwrap_or(transaction_id()?);
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "generated catalog has no valid file name".to_string())?;
+        let quarantine =
+            path.with_file_name(format!("{file_name}.recovery-{transaction}.quarantine"));
+        safe_file::validate_confined_path(&quarantine, self.paths.runtime_root(), true)?;
+        if path.exists() {
+            let current = read_bounded(
+                &path,
+                MAX_CATALOG_SNAPSHOT_BYTES,
+                "catalog requiring fail-closed quarantine",
+            )?;
+            if current == DISABLED_CATALOG && quarantine.exists() {
+                return Ok(());
             }
+            if quarantine.exists() {
+                return Err(format!(
+                    "catalog recovery quarantine already exists: {}",
+                    quarantine.display()
+                ));
+            }
+            fs::rename(&path, &quarantine).map_err(|error| {
+                format!(
+                    "failed to preserve divergent generated catalog at {}: {error}",
+                    quarantine.display()
+                )
+            })?;
         }
+        safe_file::write_text_atomic(&path, DISABLED_CATALOG).map_err(|error| {
+            format!("failed to publish the empty fail-closed generated catalog: {error}")
+        })
     }
+
 }
 
 impl RuntimeProviderCatalogStore {
+    fn mark_catalog_write_pending(&mut self, candidate_catalog: &str) -> Result<(), String> {
+        let mut record = self.read_recovery()?.ok_or_else(|| {
+            "provider/catalog recovery record disappeared before catalog write".to_string()
+        })?;
+        apply_recovery_transition(&mut record, RecoveryTransition::BeginCatalogPublish)?;
+        let expected = record
+            .candidate_provider_state_sha256
+            .as_deref()
+            .ok_or_else(|| {
+                "provider/catalog transaction is missing the candidate provider hash".to_string()
+            })?;
+        if hash_provider_state(&self.current_providers()?)? != expected {
+            return Err("provider configuration identity changed before catalog write".to_string());
+        }
+        verify_file_identity(
+            &self.paths.runtime_providers_path(),
+            record.candidate_providers_sha256.as_deref(),
+            record.candidate_providers_bytes,
+            MAX_PROVIDER_SNAPSHOT_BYTES,
+            "candidate provider configuration before catalog write",
+        )?;
+        record.candidate_catalog_sha256 = Some(hash_bytes(candidate_catalog.as_bytes()));
+        record.candidate_catalog_bytes = Some(candidate_catalog.len() as u64);
+        self.write_recovery(&record)
+    }
     fn clear_orphaned_backups(&self) -> Result<(), String> {
         self.validate_transaction_paths()?;
         for path in [
@@ -988,12 +1290,14 @@ fn snapshot_file(path: &Path, max_bytes: u64, label: &str) -> Result<FileSnapsho
         return Ok(FileSnapshot {
             existed: false,
             sha256: None,
+            bytes: None,
         });
     }
     let contents = read_bounded(path, max_bytes, label)?;
     Ok(FileSnapshot {
         existed: true,
         sha256: Some(hash_bytes(contents.as_bytes())),
+        bytes: Some(contents.len() as u64),
     })
 }
 
@@ -1008,7 +1312,9 @@ fn capture_snapshot(
         return Ok(());
     }
     let contents = read_bounded(path, max_bytes, label)?;
-    if snapshot.sha256.as_deref() != Some(hash_bytes(contents.as_bytes()).as_str()) {
+    if snapshot.sha256.as_deref() != Some(hash_bytes(contents.as_bytes()).as_str())
+        || snapshot.bytes != Some(contents.len() as u64)
+    {
         return Err(format!(
             "{label} changed while its recovery backup was captured"
         ));
@@ -1076,13 +1382,17 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
     }
     validate_snapshot_shape(&record.providers, "provider configuration")?;
     validate_snapshot_shape(&record.catalog, "generated catalog")?;
-    match record.state {
-        RecoveryState::Preparing | RecoveryState::Prepared => {
+    match record.state.classify().shape {
+        RecoveryRecordShape::Prepared => {
             validate_sha256(
                 record.base_provider_state_sha256.as_deref(),
                 "base provider state",
             )?;
             if record.candidate_provider_state_sha256.is_some()
+                || record.candidate_providers_sha256.is_some()
+                || record.candidate_providers_bytes.is_some()
+                || record.candidate_catalog_sha256.is_some()
+                || record.candidate_catalog_bytes.is_some()
                 || record.committed_providers_sha256.is_some()
                 || record.committed_catalog_sha256.is_some()
             {
@@ -1092,7 +1402,7 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
                 );
             }
         }
-        RecoveryState::ProviderWritePending => {
+        RecoveryRecordShape::ProviderCandidate => {
             validate_sha256(
                 record.base_provider_state_sha256.as_deref(),
                 "base provider state",
@@ -1101,13 +1411,21 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
                 record.candidate_provider_state_sha256.as_deref(),
                 "candidate provider state",
             )?;
-            if record.committed_providers_sha256.is_some()
+            validate_hash_and_length(
+                record.candidate_providers_sha256.as_deref(),
+                record.candidate_providers_bytes,
+                MAX_PROVIDER_SNAPSHOT_BYTES,
+                "candidate provider configuration",
+            )?;
+            if record.candidate_catalog_sha256.is_some()
+                || record.candidate_catalog_bytes.is_some()
+                || record.committed_providers_sha256.is_some()
                 || record.committed_catalog_sha256.is_some()
             {
                 return Err("provider-write recovery record contains committed hashes".to_string());
             }
         }
-        RecoveryState::CatalogWritePending => {
+        RecoveryRecordShape::CatalogCandidate => {
             validate_sha256(
                 record.base_provider_state_sha256.as_deref(),
                 "base provider state",
@@ -1116,17 +1434,27 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
                 record.candidate_provider_state_sha256.as_deref(),
                 "candidate provider state",
             )?;
-            validate_sha256(
-                record.committed_providers_sha256.as_deref(),
-                "candidate provider file",
+            validate_hash_and_length(
+                record.candidate_providers_sha256.as_deref(),
+                record.candidate_providers_bytes,
+                MAX_PROVIDER_SNAPSHOT_BYTES,
+                "candidate provider configuration",
             )?;
-            if record.committed_catalog_sha256.is_some() {
+            validate_hash_and_length(
+                record.candidate_catalog_sha256.as_deref(),
+                record.candidate_catalog_bytes,
+                MAX_CATALOG_SNAPSHOT_BYTES,
+                "candidate generated catalog",
+            )?;
+            if record.committed_providers_sha256.is_some()
+                || record.committed_catalog_sha256.is_some()
+            {
                 return Err(
-                    "catalog-write recovery record contains a committed catalog hash".to_string(),
+                    "catalog-write recovery record contains committed hashes".to_string(),
                 );
             }
         }
-        RecoveryState::Committed => {
+        RecoveryRecordShape::Committed => {
             validate_sha256(
                 record.base_provider_state_sha256.as_deref(),
                 "base provider state",
@@ -1134,6 +1462,18 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
             validate_sha256(
                 record.candidate_provider_state_sha256.as_deref(),
                 "candidate provider state",
+            )?;
+            validate_hash_and_length(
+                record.candidate_providers_sha256.as_deref(),
+                record.candidate_providers_bytes,
+                MAX_PROVIDER_SNAPSHOT_BYTES,
+                "candidate provider configuration",
+            )?;
+            validate_hash_and_length(
+                record.candidate_catalog_sha256.as_deref(),
+                record.candidate_catalog_bytes,
+                MAX_CATALOG_SNAPSHOT_BYTES,
+                "candidate generated catalog",
             )?;
             validate_sha256(
                 record.committed_providers_sha256.as_deref(),
@@ -1143,14 +1483,28 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
                 record.committed_catalog_sha256.as_deref(),
                 "committed generated catalog",
             )?;
+            if record.committed_providers_sha256 != record.candidate_providers_sha256
+                || record.committed_catalog_sha256 != record.candidate_catalog_sha256
+            {
+                return Err(
+                    "committed provider/catalog hashes do not match the journaled candidates"
+                        .to_string(),
+                );
+            }
         }
-        RecoveryState::CatalogDisabled => {
+        RecoveryRecordShape::Disabled => {
             if record.providers.existed
                 || record.providers.sha256.is_some()
+                || record.providers.bytes.is_some()
                 || record.catalog.existed
                 || record.catalog.sha256.is_some()
+                || record.catalog.bytes.is_some()
                 || record.base_provider_state_sha256.is_some()
                 || record.candidate_provider_state_sha256.is_some()
+                || record.candidate_providers_sha256.is_some()
+                || record.candidate_providers_bytes.is_some()
+                || record.candidate_catalog_sha256.is_some()
+                || record.candidate_catalog_bytes.is_some()
                 || record.committed_catalog_sha256.is_some()
             {
                 return Err(
@@ -1168,13 +1522,41 @@ fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
 }
 
 fn validate_snapshot_shape(snapshot: &FileSnapshot, label: &str) -> Result<(), String> {
-    match (snapshot.existed, snapshot.sha256.as_deref()) {
-        (true, hash) => validate_sha256(hash, label),
-        (false, None) => Ok(()),
-        (false, Some(_)) => Err(format!(
-            "provider/catalog recovery record has a hash for absent {label}"
+    match (snapshot.existed, snapshot.sha256.as_deref(), snapshot.bytes) {
+        (true, Some(hash), Some(bytes)) => {
+            let max_bytes = if label.contains("provider") {
+                MAX_PROVIDER_SNAPSHOT_BYTES
+            } else {
+                MAX_CATALOG_SNAPSHOT_BYTES
+            };
+            validate_hash_and_length(Some(hash), Some(bytes), max_bytes, label)
+        }
+        (false, None, None) => Ok(()),
+        (false, _, _) => Err(format!(
+            "provider/catalog recovery record has identity metadata for absent {label}"
+        )),
+        (true, _, _) => Err(format!(
+            "provider/catalog recovery record is missing identity metadata for {label}"
         )),
     }
+}
+
+fn validate_hash_and_length(
+    hash: Option<&str>,
+    bytes: Option<u64>,
+    max_bytes: u64,
+    label: &str,
+) -> Result<(), String> {
+    validate_sha256(hash, label)?;
+    let bytes = bytes.ok_or_else(|| {
+        format!("provider/catalog recovery record is missing the {label} byte length")
+    })?;
+    if bytes > max_bytes {
+        return Err(format!(
+            "provider/catalog recovery record has an oversized {label} byte length"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_sha256(value: Option<&str>, label: &str) -> Result<(), String> {
@@ -1205,10 +1587,15 @@ fn validate_snapshot_backup(
         }
         return Ok(());
     }
-    let actual = hash_file(backup_path, max_bytes)?;
-    if snapshot.sha256.as_deref() != Some(actual.as_str()) {
+    if !file_matches_identity(
+        backup_path,
+        snapshot.sha256.as_deref(),
+        snapshot.bytes,
+        max_bytes,
+        &format!("{label} recovery backup"),
+    )? {
         return Err(format!(
-            "{label} recovery backup hash did not match the journal"
+            "{label} recovery backup identity did not match the journal"
         ));
     }
     Ok(())
@@ -1227,27 +1614,57 @@ fn verify_snapshot_target(
             Ok(())
         };
     }
-    verify_file_hash(path, snapshot.sha256.as_deref(), max_bytes, label)
+    verify_file_identity(path, snapshot.sha256.as_deref(), snapshot.bytes, max_bytes, label)
 }
 
-fn verify_file_hash(
+fn file_matches_snapshot(
     path: &Path,
-    expected: Option<&str>,
+    snapshot: &FileSnapshot,
+    max_bytes: u64,
+    label: &str,
+) -> Result<bool, String> {
+    if !snapshot.existed {
+        return Ok(!path.exists());
+    }
+    file_matches_identity(path, snapshot.sha256.as_deref(), snapshot.bytes, max_bytes, label)
+}
+
+fn file_matches_identity(
+    path: &Path,
+    expected_hash: Option<&str>,
+    expected_bytes: Option<u64>,
+    max_bytes: u64,
+    label: &str,
+) -> Result<bool, String> {
+    let expected_hash =
+        expected_hash.ok_or_else(|| format!("missing expected hash for {label}"))?;
+    let expected_bytes =
+        expected_bytes.ok_or_else(|| format!("missing expected byte length for {label}"))?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = read_bounded(path, max_bytes, label)?;
+    Ok(contents.len() as u64 == expected_bytes
+        && hash_bytes(contents.as_bytes()) == expected_hash)
+}
+
+fn verify_file_identity(
+    path: &Path,
+    expected_hash: Option<&str>,
+    expected_bytes: Option<u64>,
     max_bytes: u64,
     label: &str,
 ) -> Result<(), String> {
-    let expected = expected.ok_or_else(|| format!("missing expected hash for {label}"))?;
-    let actual = hash_file(path, max_bytes)?;
-    if actual != expected {
-        return Err(format!("{label} hash did not match the recovery record"));
+    if file_matches_identity(
+        path,
+        expected_hash,
+        expected_bytes,
+        max_bytes,
+        label,
+    )? {
+        return Ok(());
     }
-    Ok(())
-}
-
-fn hash_file(path: &Path, max_bytes: u64) -> Result<String, String> {
-    let label = path.display().to_string();
-    let contents = read_bounded(path, max_bytes, &label)?;
-    Ok(hash_bytes(contents.as_bytes()))
+    Err(format!("{label} identity did not match the recovery record"))
 }
 
 fn read_bounded(path: &Path, max_bytes: u64, label: &str) -> Result<String, String> {
@@ -1362,6 +1779,7 @@ fn rollback_result(
         outcome: ProviderCatalogTransactionOutcome::RolledBack,
         providers: restored_providers,
         models: restored_models,
+        revision: ProviderCatalogRevision::unavailable(),
         protocol_changed,
         detail: Some(match cleanup_error {
             Some(error) => format!(
@@ -1394,6 +1812,7 @@ fn recovery_required_result(
         outcome: ProviderCatalogTransactionOutcome::RecoveryRequired,
         providers,
         models,
+        revision: ProviderCatalogRevision::unavailable(),
         protocol_changed,
         detail: Some(match invalidation_error {
             Some(error) => {
@@ -1619,6 +2038,7 @@ fn unchanged_result(
         outcome: ProviderCatalogTransactionOutcome::Unchanged,
         providers,
         models,
+        revision: ProviderCatalogRevision::unavailable(),
         protocol_changed,
         detail: Some(detail),
         catalog_disabled: false,
@@ -1628,21 +2048,98 @@ fn unchanged_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        persist_with_expected_store, persist_with_store, recover_before_gateway_with_store,
-        verify_catalog_for_providers, ProviderCatalogStore, ProviderCatalogTransactionOutcome,
-        RuntimeProviderCatalogStore,
+        expected_capability_binding, issue_provider_catalog_revision,
+        persist_provider_catalog_state_with_paths,
+        persist_with_store, recover_before_gateway_with_store,
+        validate_provider_catalog_revision, verify_catalog_for_providers, ProviderCatalogStore,
+        ProviderCatalogRevision, ProviderCatalogTransactionOutcome, RecoveryAction,
+        RecoveryRecordShape, RecoveryState, RecoveryTransition, RuntimeProviderCatalogStore,
     };
     use crate::{
         config, CapabilityBinding, CapabilityProfile, Model, Provider, QualificationState,
         UpstreamFormat,
     };
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn opaque_revision_detects_secret_only_changes_without_disclosing_provider_state() {
+        let root = temp_root("opaque-revision-secret-change");
+        let paths = isolated_paths(&root);
+        let mut original = provider(UpstreamFormat::Responses);
+        original.api_key = Some("secret-alpha".to_string());
+        config::save_providers_with_paths(vec![original.clone()], &paths).unwrap();
+
+        let revision = issue_provider_catalog_revision(&paths).expect("issue opaque revision");
+        assert!(!revision.as_str().contains("secret-alpha"));
+        assert!(!revision.as_str().contains(&original.id));
+        validate_provider_catalog_revision(&paths, &revision)
+            .expect("unchanged raw provider state must validate");
+
+        original.api_key = Some("secret-bravo".to_string());
+        config::save_providers_with_paths(vec![original], &paths).unwrap();
+        let error = validate_provider_catalog_revision(&paths, &revision)
+            .expect_err("secret-only changes must stale the opaque revision");
+
+        assert!(error.contains("changed since this editor snapshot"));
+        assert!(!error.contains("secret-alpha"));
+        assert!(!error.contains("secret-bravo"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opaque_revisions_are_multiwindow_safe_process_local_and_one_shot() {
+        let root = temp_root("opaque-revision-lifecycle");
+        let paths = isolated_paths(&root);
+        let loaded = provider(UpstreamFormat::Responses);
+        config::save_providers_with_paths(vec![loaded.clone()], &paths).unwrap();
+        let first_window = issue_provider_catalog_revision(&paths).unwrap();
+        let second_window = issue_provider_catalog_revision(&paths).unwrap();
+        assert_ne!(first_window, second_window);
+
+        validate_provider_catalog_revision(&paths, &first_window)
+            .expect("first window may claim its unchanged snapshot");
+        validate_provider_catalog_revision(&paths, &second_window)
+            .expect("second window has an independent token for the same unchanged snapshot");
+        let replay = validate_provider_catalog_revision(&paths, &first_window)
+            .expect_err("opaque revisions are one-shot capabilities");
+        assert!(replay.contains("changed since this editor snapshot"));
+
+        let mutation_owner = issue_provider_catalog_revision(&paths).unwrap();
+        let stale_peer = issue_provider_catalog_revision(&paths).unwrap();
+        validate_provider_catalog_revision(&paths, &mutation_owner)
+            .expect("mutation owner claims the current snapshot");
+        let mut changed = loaded.clone();
+        changed.name = "Committed by another window".to_string();
+        config::save_providers_with_paths(vec![changed], &paths).unwrap();
+        let stale = validate_provider_catalog_revision(&paths, &stale_peer)
+            .expect_err("a successful raw mutation must stale peer window tokens");
+        assert!(stale.contains("changed since this editor snapshot"));
+
+        let provider_before = fs::read(paths.runtime_providers_path()).unwrap();
+        let catalog_path = paths.generated_catalog_path();
+        write_fixture(&catalog_path, "{\"models\":[{\"slug\":\"restart-evidence\"}]}\n");
+        let catalog_before = fs::read(&catalog_path).unwrap();
+        let restarted_process_token =
+            ProviderCatalogRevision(format!("pcr1_{}", "f".repeat(64)));
+        let result = persist_provider_catalog_state_with_paths(
+            &paths,
+            vec![loaded],
+            restarted_process_token,
+        )
+        .unwrap();
+
+        assert_eq!(result.outcome, ProviderCatalogTransactionOutcome::Conflict);
+        assert_eq!(fs::read(paths.runtime_providers_path()).unwrap(), provider_before);
+        assert_eq!(fs::read(catalog_path).unwrap(), catalog_before);
+        assert!(!paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn protocol_switch_commits_only_after_matching_catalog_readback() {
@@ -1692,31 +2189,31 @@ mod tests {
 
     #[test]
     fn stale_editor_snapshot_returns_typed_conflict_without_modifying_either_file() {
+        let root = temp_root("stale-revision-zero-mutation");
+        let paths = isolated_paths(&root);
         let loaded = provider(UpstreamFormat::Responses);
+        config::save_providers_with_paths(vec![loaded.clone()], &paths).unwrap();
+        let catalog = "{\"models\":[{\"slug\":\"external-catalog-evidence\"}]}\n";
+        write_fixture(&paths.generated_catalog_path(), catalog);
+        let revision = issue_provider_catalog_revision(&paths).unwrap();
+
         let mut externally_updated = loaded.clone();
         externally_updated.name = "External update".to_string();
-        let catalog = vec![catalog_model(UpstreamFormat::Responses)];
+        config::save_providers_with_paths(vec![externally_updated.clone()], &paths).unwrap();
+        let provider_bytes = fs::read(paths.runtime_providers_path()).unwrap();
+        let catalog_bytes = fs::read(paths.generated_catalog_path()).unwrap();
         let mut requested = loaded.clone();
         requested.name = "Stale editor update".to_string();
-        let mut store = MemoryStore::new(
-            vec![externally_updated.clone()],
-            catalog.clone(),
-            std::iter::empty(),
-        );
 
-        let result = persist_with_expected_store(
-            &mut store,
-            vec![requested],
-            Some(std::slice::from_ref(&loaded)),
-        );
+        let result =
+            persist_provider_catalog_state_with_paths(&paths, vec![requested], revision).unwrap();
 
         assert_eq!(result.outcome, ProviderCatalogTransactionOutcome::Conflict);
-        assert_eq!(store.providers[0].name, externally_updated.name);
-        assert_eq!(
-            serde_json::to_value(&store.catalog).unwrap(),
-            serde_json::to_value(&catalog).unwrap()
-        );
-        assert!(store.pending.is_none());
+        assert_eq!(result.providers[0].name, externally_updated.name);
+        assert_eq!(fs::read(paths.runtime_providers_path()).unwrap(), provider_bytes);
+        assert_eq!(fs::read(paths.generated_catalog_path()).unwrap(), catalog_bytes);
+        assert!(!paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1755,6 +2252,292 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_reader_waits_for_the_real_transaction_guard_before_opening_config() {
+        let root = temp_root("shared-reader-guard");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(vec![provider(UpstreamFormat::Responses)], &paths)
+            .unwrap();
+        fs::create_dir_all(paths.proxy_dir()).unwrap();
+        let guard_path = paths.proxy_dir().join("provider-catalog-transaction-guard");
+        let holder = crate::safe_file::FileLock::acquire(&guard_path).unwrap();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let reader_paths = paths.clone();
+        let reader = thread::spawn(move || {
+            let result = config::get_providers_with_paths(&reader_paths);
+            completed_tx.send(result).unwrap();
+        });
+
+        assert!(
+            completed_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "provider reader opened configuration while the transaction guard was held"
+        );
+        drop(holder);
+        let providers = completed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reader should resume after guard release")
+            .expect("provider read");
+        assert_eq!(providers.len(), 1);
+        reader.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_recovery_keeps_the_guard_through_gateway_snapshot_and_start_handshake() {
+        let root = temp_root("startup-wide-guard");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(vec![provider(UpstreamFormat::Responses)], &paths)
+            .unwrap();
+        write_fixture(
+            &paths.generated_catalog_path(),
+            r#"{"models":[{"slug":"startup-safe"}]}"#,
+        );
+        let guard_path = paths.proxy_dir().join("provider-catalog-transaction-guard");
+        let contender_path = guard_path.clone();
+
+        let (contender, entered_rx) =
+            super::recover_before_gateway_start_with_paths(&paths, || {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let contender = thread::spawn(move || {
+                let _guard = crate::safe_file::FileLock::acquire(&contender_path).unwrap();
+                entered_tx.send(()).unwrap();
+            });
+            assert!(
+                entered_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_err(),
+                "startup guard was released before the Gateway handshake finished"
+            );
+            Ok((contender, entered_rx))
+        })
+        .unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("contender should enter after startup guard release");
+        contender.join().unwrap();
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_transaction_guard_blocks_the_public_python_provider_writer() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+
+        let root = temp_root("rust-guard-python-provider-writer");
+        let paths = isolated_paths(&root);
+        fs::create_dir_all(paths.runtime_providers_path().parent().unwrap()).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+        let python = std::env::var_os("CODEXHUB_PYTHON")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".local").join("bin").join("python3.13.exe"))
+                    .filter(|candidate| candidate.exists())
+            })
+            .unwrap_or_else(config::find_python);
+        let script = "import pathlib, sys; from providers_config import save_providers; print('ready', flush=True);\ntry: save_providers([], pathlib.Path(sys.argv[1]))\nexcept PermissionError: print('refused', flush=True)\nelse: raise SystemExit('runtime provider write unexpectedly bypassed the Rust transaction')";
+        let mut child = None;
+        let mut events = None;
+
+        super::with_transaction_guard_for_paths(&paths, || {
+            let mut writer = std::process::Command::new(&python)
+                .env("PYTHONPATH", &source)
+                .env("CODEX_HOME", paths.runtime_root())
+                .arg("-c")
+                .arg(script)
+                .arg(paths.runtime_providers_path())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("python is required for cross-process writer tests");
+            let stdout = writer.stdout.take().unwrap();
+            let (events_tx, events_rx) = mpsc::channel();
+            thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if events_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            assert_eq!(
+                events_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("Python writer should reach its public save seam"),
+                "ready"
+            );
+            assert!(
+                events_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_err(),
+                "Python provider writer bypassed the provider/catalog transaction guard"
+            );
+            child = Some(writer);
+            events = Some(events_rx);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            events
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap(),
+            "refused"
+        );
+        assert!(child.unwrap().wait().unwrap().success());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_transaction_guard_blocks_the_public_python_catalog_writer() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+
+        let root = temp_root("rust-guard-python-catalog-writer");
+        let paths = isolated_paths(&root);
+        fs::create_dir_all(paths.proxy_dir()).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+        let python = std::env::var_os("CODEXHUB_PYTHON")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".local").join("bin").join("python3.13.exe"))
+                    .filter(|candidate| candidate.exists())
+            })
+            .unwrap_or_else(config::find_python);
+        let script = "import catalog_sync; catalog_sync._sync_catalog_unlocked = lambda **kwargs: print('entered', flush=True) or {}; print('ready', flush=True); catalog_sync.sync_catalog()";
+        let mut child = None;
+        let mut events = None;
+
+        super::with_transaction_guard_for_paths(&paths, || {
+            let mut writer = std::process::Command::new(&python)
+                .env("PYTHONPATH", &source)
+                .env("CODEX_HOME", paths.runtime_root())
+                .arg("-c")
+                .arg(script)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("python is required for cross-process writer tests");
+            let stdout = writer.stdout.take().unwrap();
+            let (events_tx, events_rx) = mpsc::channel();
+            thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if events_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            assert_eq!(
+                events_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("Python catalog writer should reach its public sync seam"),
+                "ready"
+            );
+            assert!(
+                events_rx
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_err(),
+                "Python catalog writer bypassed the provider/catalog transaction guard"
+            );
+            child = Some(writer);
+            events = Some(events_rx);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            events
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap(),
+            "entered"
+        );
+        assert!(child.unwrap().wait().unwrap().success());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn python_transaction_guard_blocks_the_rust_writer_until_release() {
+        use std::io::{BufRead, Write};
+        use std::process::Stdio;
+
+        let root = temp_root("python-guard-rust-writer");
+        let paths = isolated_paths(&root);
+        fs::create_dir_all(paths.proxy_dir()).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+        let python = std::env::var_os("CODEXHUB_PYTHON")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".local").join("bin").join("python3.13.exe"))
+                    .filter(|candidate| candidate.exists())
+            })
+            .unwrap_or_else(config::find_python);
+        let script = "import pathlib, sys; from atomic_io import provider_catalog_transaction_guard; root = pathlib.Path(sys.argv[1]);\nwith provider_catalog_transaction_guard(root):\n print('ready', flush=True)\n if sys.stdin.readline().strip() != 'release': raise SystemExit(2)\nprint('released', flush=True)";
+        let mut holder = std::process::Command::new(python)
+            .env("PYTHONPATH", source)
+            .arg("-c")
+            .arg(script)
+            .arg(paths.runtime_root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("python is required for cross-process writer tests");
+        let mut stdin = holder.stdin.take().unwrap();
+        let stdout = holder.stdout.take().unwrap();
+        let (python_tx, python_rx) = mpsc::channel();
+        thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if python_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            python_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "ready"
+        );
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let rust_paths = paths.clone();
+        let rust_writer = thread::spawn(move || {
+            super::with_transaction_guard_for_paths(&rust_paths, || {
+                entered_tx.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        assert!(
+            entered_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "Rust writer entered while Python held the shared transaction guard"
+        );
+        stdin.write_all(b"release\n").unwrap();
+        stdin.flush().unwrap();
+        assert_eq!(
+            python_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "released"
+        );
+        assert!(holder.wait().unwrap().success());
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Rust writer should enter after Python releases the guard");
+        rust_writer.join().unwrap();
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1821,17 +2604,88 @@ mod tests {
             .unwrap();
         store.save_providers(vec![candidate]).unwrap();
         super::install_transaction_fault("write-catalog-marker");
-        assert!(store.mark_catalog_write_pending().is_err());
+        assert!(store
+            .mark_catalog_write_pending("{\"models\":[]}\n")
+            .is_err());
         super::clear_transaction_fault();
         assert!(paths.provider_catalog_recovery_path().exists());
 
-        store.mark_catalog_write_pending().unwrap();
+        store
+            .mark_catalog_write_pending("{\"models\":[]}\n")
+            .unwrap();
         write_fixture(&paths.generated_catalog_path(), "{\"models\":[]}\n");
         super::install_transaction_fault("write-committed-marker");
         assert!(store.mark_committed().is_err());
         super::clear_transaction_fault();
         assert!(paths.provider_catalog_recovery_path().exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_publication_crash_prefix_recovers_only_exact_transaction_owned_bytes() {
+        for phase in [
+            "after-provider-marker",
+            "after-provider-publish",
+            "after-catalog-marker",
+            "after-catalog-publish",
+        ] {
+            let root = temp_root(phase);
+            let paths = isolated_paths(&root);
+            config::save_providers_with_paths(
+                vec![provider(UpstreamFormat::Responses)],
+                &paths,
+            )
+            .unwrap();
+            let base_providers = fs::read(paths.runtime_providers_path()).unwrap();
+            let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+            write_fixture(&paths.generated_catalog_path(), &base_catalog);
+            let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+            store.prepare_recovery().unwrap();
+            let candidate = provider(UpstreamFormat::ChatCompletions);
+            store
+                .mark_provider_write_pending(std::slice::from_ref(&candidate))
+                .unwrap();
+
+            if phase != "after-provider-marker" {
+                if phase == "after-provider-publish" {
+                    super::install_transaction_fault("after-provider-publish");
+                    let error = store
+                        .save_providers(vec![candidate])
+                        .expect_err("fault must interrupt provider readback");
+                    super::clear_transaction_fault();
+                    assert!(error.contains("after-provider-publish"));
+                } else {
+                    store.save_providers(vec![candidate]).unwrap();
+                    let candidate_catalog =
+                        capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+                    store
+                        .mark_catalog_write_pending(&candidate_catalog)
+                        .unwrap();
+                    if phase == "after-catalog-publish" {
+                        write_fixture(&paths.generated_catalog_path(), &candidate_catalog);
+                    }
+                }
+            }
+            drop(store);
+
+            let mut restarted = RuntimeProviderCatalogStore::new(paths.clone());
+            restarted
+                .recover_pending()
+                .unwrap_or_else(|error| panic!("phase {phase} failed exact recovery: {error}"));
+
+            assert_eq!(
+                fs::read(paths.runtime_providers_path()).unwrap(),
+                base_providers,
+                "phase {phase} did not restore exact provider bytes"
+            );
+            assert_eq!(
+                fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+                base_catalog,
+                "phase {phase} did not restore exact catalog bytes"
+            );
+            assert!(!paths.provider_catalog_recovery_path().exists());
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -1873,11 +2727,17 @@ mod tests {
         }
         let mut candidate = provider(UpstreamFormat::ChatCompletions);
         candidate.name = "Candidate".to_string();
+        candidate.api_key = Some("candidate-secret".to_string());
         store
             .mark_provider_write_pending(std::slice::from_ref(&candidate))
             .unwrap();
+        let candidate_journal =
+            fs::read_to_string(paths.provider_catalog_recovery_path()).unwrap();
+        assert!(!candidate_journal.contains("candidate-secret"));
         store.save_providers(vec![candidate]).unwrap();
-        store.mark_catalog_write_pending().unwrap();
+        store
+            .mark_catalog_write_pending("{\"models\":[]}\n")
+            .unwrap();
         write_fixture(&catalog_path, "{\"models\":[]}\n");
         drop(store);
         let mut restarted_store = RuntimeProviderCatalogStore::new(paths.clone());
@@ -1913,7 +2773,9 @@ mod tests {
             .mark_provider_write_pending(std::slice::from_ref(&candidate))
             .unwrap();
         store.save_providers(vec![candidate]).unwrap();
-        store.mark_catalog_write_pending().unwrap();
+        store
+            .mark_catalog_write_pending("{\"models\":[]}\n")
+            .unwrap();
         let externally_edited = format!(
             "{}# external owner preserved this comment\n",
             fs::read_to_string(paths.runtime_providers_path()).unwrap()
@@ -1925,7 +2787,7 @@ mod tests {
             .recover_pending()
             .expect_err("raw provider divergence must not be overwritten");
 
-        assert!(error.contains("hash did not match"));
+        assert!(error.contains("exact catalog-write candidate bytes"));
         assert_eq!(
             fs::read_to_string(paths.runtime_providers_path()).unwrap(),
             externally_edited
@@ -1936,6 +2798,86 @@ mod tests {
         );
         assert!(paths.provider_catalog_recovery_path().exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_write_recovery_accepts_only_the_exact_base_or_journaled_candidate_bytes() {
+        for (label, external_catalog) in [
+            ("external-empty", "{\"models\":[]}\n".to_string()),
+            (
+                "external-semantic",
+                capability_catalog_text(UpstreamFormat::ChatCompletions, true),
+            ),
+        ] {
+            let root = temp_root(label);
+            let paths = isolated_paths(&root);
+            config::save_providers_with_paths(
+                vec![provider(UpstreamFormat::Responses)],
+                &paths,
+            )
+            .unwrap();
+            let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+            write_fixture(&paths.generated_catalog_path(), &base_catalog);
+            let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+            store.prepare_recovery().unwrap();
+            let candidate = provider(UpstreamFormat::ChatCompletions);
+            store
+                .mark_provider_write_pending(std::slice::from_ref(&candidate))
+                .unwrap();
+            store.save_providers(vec![candidate]).unwrap();
+            let candidate_catalog =
+                capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+            store
+                .mark_catalog_write_pending(&candidate_catalog)
+                .unwrap();
+            assert_ne!(
+                external_catalog.as_bytes(),
+                candidate_catalog.as_bytes(),
+                "fixture must be semantically or structurally different at the raw boundary"
+            );
+            write_fixture(&paths.generated_catalog_path(), &external_catalog);
+            let provider_before = fs::read(paths.runtime_providers_path()).unwrap();
+
+            let error = store
+                .recover_pending()
+                .expect_err("unknown catalog bytes must not be rolled back over");
+
+            assert!(error.contains("exact base and candidate bytes"));
+            assert_eq!(
+                fs::read(paths.runtime_providers_path()).unwrap(),
+                provider_before
+            );
+            assert_eq!(
+                fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+                external_catalog
+            );
+            assert!(paths.provider_catalog_recovery_path().exists());
+
+            let startup_error = recover_before_gateway_with_store(&mut store)
+                .expect_err("Gateway must remain blocked after catalog divergence");
+            assert!(startup_error.contains("generated catalog disabled fail-closed"));
+            assert_eq!(
+                fs::read(paths.runtime_providers_path()).unwrap(),
+                provider_before
+            );
+            assert_eq!(
+                fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+                "{\"models\":[]}\n"
+            );
+            let quarantined = fs::read_dir(paths.generated_catalog_path().parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".quarantine"))
+                })
+                .expect("divergent catalog evidence must be quarantined");
+            assert_eq!(fs::read_to_string(quarantined).unwrap(), external_catalog);
+            assert!(paths.provider_catalog_recovery_path().exists());
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -2064,7 +3006,7 @@ mod tests {
                     }
                     "malformed" => write_fixture(
                         &paths.provider_catalog_recovery_path(),
-                        "{\"schema_version\":3,\"secret\":\"must-not-appear\"}\n",
+                        "{\"schema_version\":4,\"secret\":\"must-not-appear\"}\n",
                     ),
                     "divergent" => {
                         store.prepare_recovery().unwrap();
@@ -2142,8 +3084,7 @@ mod tests {
         );
 
         if expected_success {
-            let providers = config::get_providers().expect("provider read after recovery");
-            config::save_providers(providers).expect("provider write after recovery");
+            super::get_provider_catalog_snapshot().expect("provider snapshot after recovery");
             crate::web_bridge::dispatch_startup_recovery_probe()
                 .expect("bridge dispatch after recovery");
             let started = std::cell::Cell::new(false);
@@ -2157,10 +3098,11 @@ mod tests {
             assert_eq!(started.get(), auto_start);
         } else {
             assert!(config::get_providers().is_err());
-            assert!(config::save_providers(Vec::new()).is_err());
+            assert!(super::get_provider_catalog_snapshot().is_err());
             assert!(crate::catalog::sync_catalog().is_err());
             assert!(crate::official_refresh::refresh_manual().is_err());
             assert!(crate::web_bridge::dispatch_startup_recovery_probe().is_err());
+            assert!(crate::web_bridge::dispatch_startup_recovery_route_probe().is_err());
         }
     }
 
@@ -2181,9 +3123,11 @@ mod tests {
             .mark_provider_write_pending(std::slice::from_ref(&candidate))
             .unwrap();
         store.save_providers(vec![candidate]).unwrap();
-        store.mark_catalog_write_pending().unwrap();
-        let committed_providers = fs::read_to_string(&providers_path).unwrap();
         let committed_catalog = "{\"models\":[{\"id\":\"committed\"}]}\n";
+        store
+            .mark_catalog_write_pending(committed_catalog)
+            .unwrap();
+        let committed_providers = fs::read_to_string(&providers_path).unwrap();
         write_fixture(&catalog_path, committed_catalog);
         store.mark_committed().expect("mark recovery committed");
         store.recover_pending().expect("clean committed journal");
@@ -2215,8 +3159,11 @@ mod tests {
             .mark_provider_write_pending(std::slice::from_ref(&candidate))
             .unwrap();
         store.save_providers(vec![candidate]).unwrap();
-        store.mark_catalog_write_pending().unwrap();
-        write_fixture(&catalog_path, "{\"models\":[{\"id\":\"committed\"}]}\n");
+        let committed_catalog = "{\"models\":[{\"id\":\"committed\"}]}\n";
+        store
+            .mark_catalog_write_pending(committed_catalog)
+            .unwrap();
+        write_fixture(&catalog_path, committed_catalog);
         store.mark_committed().expect("mark recovery committed");
         write_fixture(&catalog_path, "{\"models\":[{\"id\":\"tampered\"}]}\n");
         drop(store);
@@ -2226,7 +3173,7 @@ mod tests {
             .recover_pending()
             .expect_err("tampered commit must fail closed");
 
-        assert!(error.contains("committed generated catalog hash"));
+        assert!(error.contains("committed generated catalog identity"));
         assert!(paths.provider_catalog_recovery_path().exists());
         assert!(paths.provider_catalog_catalog_backup_path().exists());
         let _ = fs::remove_dir_all(root);
@@ -2257,7 +3204,7 @@ mod tests {
         let paths = isolated_paths(&root);
         write_fixture(
             &paths.provider_catalog_recovery_path(),
-            r#"{"schema_version":3,"state":"prepared","unexpected":"field"}"#,
+            r#"{"schema_version":4,"state":"prepared","unexpected":"field"}"#,
         );
         let store = RuntimeProviderCatalogStore::new(paths.clone());
 
@@ -2408,6 +3355,136 @@ mod tests {
         )
         .unwrap_err()
         .contains("missing route fields"));
+    }
+
+    #[test]
+    fn rust_capability_binding_matches_the_shared_python_schema_vectors() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/capability_binding_parity.json"
+        ))
+        .unwrap();
+        let schema = fixture["schema"].as_object().unwrap();
+        assert_eq!(schema["version"], 1);
+        let required = schema["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<HashSet<_>>();
+        let optional = schema["optional_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<HashSet<_>>();
+        let allowed = required
+            .union(&optional)
+            .copied()
+            .collect::<HashSet<_>>();
+
+        for vector in fixture["vectors"].as_array().unwrap() {
+            let name = vector["name"].as_str().unwrap();
+            let profiles = serde_json::from_value::<Vec<CapabilityProfile>>(
+                vector["profiles"].clone(),
+            )
+            .unwrap();
+            let protocol = serde_json::from_value::<UpstreamFormat>(
+                vector["upstream_protocol"].clone(),
+            )
+            .unwrap();
+            let binding = expected_capability_binding(
+                vector["provider"].as_str().unwrap(),
+                vector["model"].as_str().unwrap(),
+                &protocol,
+                &profiles,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let actual = serde_json::to_value(binding).unwrap();
+
+            assert_eq!(actual, vector["expected"], "parity vector {name}");
+            let fields = actual.as_object().unwrap().keys().map(String::as_str);
+            let fields = fields.collect::<HashSet<_>>();
+            assert!(
+                required.is_subset(&fields),
+                "{name} omitted a required binding field"
+            );
+            assert!(
+                fields.is_subset(&allowed),
+                "{name} emitted a field outside the shared schema"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_phase_classifier_has_one_typed_forward_transition_graph() {
+        let transitions = [
+            (
+                RecoveryTransition::FinishPreparation,
+                RecoveryState::Preparing,
+                RecoveryState::Prepared,
+            ),
+            (
+                RecoveryTransition::BeginProviderPublish,
+                RecoveryState::Prepared,
+                RecoveryState::ProviderWritePending,
+            ),
+            (
+                RecoveryTransition::BeginCatalogPublish,
+                RecoveryState::ProviderWritePending,
+                RecoveryState::CatalogWritePending,
+            ),
+            (
+                RecoveryTransition::Commit,
+                RecoveryState::CatalogWritePending,
+                RecoveryState::Committed,
+            ),
+        ];
+        for (transition, expected, next) in transitions {
+            assert_eq!(transition.states(), (expected, next));
+        }
+
+        let phases = [
+            (
+                RecoveryState::Preparing,
+                RecoveryAction::ClearPrepared,
+                RecoveryRecordShape::Prepared,
+            ),
+            (
+                RecoveryState::Prepared,
+                RecoveryAction::ClearPrepared,
+                RecoveryRecordShape::Prepared,
+            ),
+            (
+                RecoveryState::ProviderWritePending,
+                RecoveryAction::RestoreProviderPrefix,
+                RecoveryRecordShape::ProviderCandidate,
+            ),
+            (
+                RecoveryState::CatalogWritePending,
+                RecoveryAction::RestoreCatalogPrefix,
+                RecoveryRecordShape::CatalogCandidate,
+            ),
+            (
+                RecoveryState::Committed,
+                RecoveryAction::VerifyCommitted,
+                RecoveryRecordShape::Committed,
+            ),
+            (
+                RecoveryState::CatalogDisabled,
+                RecoveryAction::RegenerateDisabled,
+                RecoveryRecordShape::Disabled,
+            ),
+        ];
+        let mut marker_faults = HashSet::new();
+        for (state, action, shape) in phases {
+            let classified = state.classify();
+            assert_eq!(classified.action, action);
+            assert_eq!(classified.shape, shape);
+            assert!(
+                marker_faults.insert(classified.marker_fault),
+                "every durable state must own a unique marker fault seam"
+            );
+        }
     }
 
     #[test]
@@ -2743,10 +3820,6 @@ mod tests {
             Ok(())
         }
 
-        fn mark_catalog_write_pending(&mut self) -> Result<(), String> {
-            Ok(())
-        }
-
         fn save_providers(&mut self, providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
             if self.fail_save {
                 return Err("injected provider publication failure".to_string());
@@ -2859,6 +3932,40 @@ mod tests {
                 rejection_reason: Some("qualification_state_unqualified".to_string()),
             }),
             ..Model::default()
+        }
+    }
+
+    fn capability_catalog_text(
+        upstream_protocol: UpstreamFormat,
+        alternate_formatting: bool,
+    ) -> String {
+        let provider = provider(upstream_protocol.clone());
+        let profile = &provider.models[0].capability_profiles[0];
+        let value = serde_json::json!({
+            "models": [{
+                "slug": "glm-5.2",
+                "codex_proxy_metadata": {
+                    "capability_binding": {
+                        "schema_version": 1,
+                        "provider": "ollama-cloud",
+                        "model": "glm-5.2",
+                        "upstream_protocol": upstream_protocol,
+                        "tool_profile": "test-tools",
+                        "collaboration_backend": "none",
+                        "collaboration_version": "none",
+                        "capability_manifest_version": "test-manifest",
+                        "capability_manifest_hash": profile.capability_manifest_hash,
+                        "qualification_state": "unqualified",
+                        "advanced_capabilities_enabled": false,
+                        "rejection_reason": "qualification_state_unqualified"
+                    }
+                }
+            }]
+        });
+        if alternate_formatting {
+            format!("{}\n", serde_json::to_string_pretty(&value).unwrap())
+        } else {
+            format!("{}\n", serde_json::to_string(&value).unwrap())
         }
     }
 

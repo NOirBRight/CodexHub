@@ -30,6 +30,8 @@ import type {
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
   Provider,
+  ProviderCatalogRevision,
+  ProviderCatalogSnapshot,
   ProviderCatalogTransactionResult,
   RoutingOwner,
   Settings,
@@ -195,12 +197,15 @@ export const api = {
   startProxy: () => call<AppStatus>("start_proxy"),
   stopProxy: () => call<AppStatus>("stop_proxy"),
   restartProxy: () => call<AppStatus>("restart_proxy"),
-  getProviders: () => call<Provider[]>("get_providers"),
-  saveProviders: (providers: Provider[]) => call<Provider[]>("save_providers", { providers }),
-  persistProviderCatalogState: (providers: Provider[], expectedProviders: Provider[]) =>
+  getProviderCatalogSnapshot: () =>
+    call<ProviderCatalogSnapshot>("get_provider_catalog_snapshot"),
+  persistProviderCatalogState: (
+    providers: Provider[],
+    expectedRevision: ProviderCatalogRevision,
+  ) =>
     call<ProviderCatalogTransactionResult>("persist_provider_catalog_state", {
       providers,
-      expectedProviders,
+      expectedRevision,
     }),
   providerCatalogRecoveryPending: () =>
     call<boolean>("provider_catalog_recovery_pending"),

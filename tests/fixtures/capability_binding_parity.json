@@ -1,0 +1,166 @@
+{
+  "schema": {
+    "version": 1,
+    "required_fields": [
+      "schema_version",
+      "provider",
+      "model",
+      "upstream_protocol",
+      "qualification_state",
+      "advanced_capabilities_enabled"
+    ],
+    "optional_fields": [
+      "tool_profile",
+      "collaboration_backend",
+      "collaboration_version",
+      "capability_manifest_version",
+      "capability_manifest_hash",
+      "rejection_reason"
+    ],
+    "route_protocols": [
+      "responses",
+      "chat_completions"
+    ],
+    "qualification_states": [
+      "supported",
+      "unsupported",
+      "unqualified",
+      "temporarily_unavailable",
+      "degraded"
+    ]
+  },
+  "vectors": [
+    {
+      "name": "responses_unqualified",
+      "provider": "ollama-cloud",
+      "model": "kimi-k2.7-code",
+      "upstream_protocol": "responses",
+      "profiles": [
+        {
+          "schema_version": 1,
+          "upstream_protocol": "responses",
+          "tool_profile": "responses_beta1_candidate",
+          "collaboration_backend": "codex_client",
+          "collaboration_version": "v2",
+          "capability_manifest_version": "0.1.8-beta.1",
+          "capability_manifest_hash": "sha256:7baa6d6cc39ba2ae9c4d45c94291c539c149816b7dd32f849cb25e9c10014e32",
+          "qualification_state": "unqualified"
+        }
+      ],
+      "expected": {
+        "schema_version": 1,
+        "provider": "ollama-cloud",
+        "model": "kimi-k2.7-code",
+        "upstream_protocol": "responses",
+        "tool_profile": "responses_beta1_candidate",
+        "collaboration_backend": "codex_client",
+        "collaboration_version": "v2",
+        "capability_manifest_version": "0.1.8-beta.1",
+        "capability_manifest_hash": "sha256:7baa6d6cc39ba2ae9c4d45c94291c539c149816b7dd32f849cb25e9c10014e32",
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": false,
+        "rejection_reason": "qualification_state_unqualified"
+      }
+    },
+    {
+      "name": "chat_supported",
+      "provider": "ollama-cloud",
+      "model": "kimi-k2.7-code",
+      "upstream_protocol": "chat_completions",
+      "profiles": [
+        {
+          "schema_version": 1,
+          "upstream_protocol": "chat_completions",
+          "tool_profile": "chat_standard_tools",
+          "collaboration_backend": "none",
+          "collaboration_version": "none",
+          "capability_manifest_version": "0.1.8-beta.1",
+          "capability_manifest_hash": "sha256:48565f53b7c857ad944dabe4b166f14dc36268e713f19eafe007dcbefbb487de",
+          "qualification_state": "supported"
+        }
+      ],
+      "expected": {
+        "schema_version": 1,
+        "provider": "ollama-cloud",
+        "model": "kimi-k2.7-code",
+        "upstream_protocol": "chat_completions",
+        "tool_profile": "chat_standard_tools",
+        "collaboration_backend": "none",
+        "collaboration_version": "none",
+        "capability_manifest_version": "0.1.8-beta.1",
+        "capability_manifest_hash": "sha256:48565f53b7c857ad944dabe4b166f14dc36268e713f19eafe007dcbefbb487de",
+        "qualification_state": "supported",
+        "advanced_capabilities_enabled": true
+      }
+    },
+    {
+      "name": "missing_route_profile",
+      "provider": "ollama-cloud",
+      "model": "kimi-k2.7-code",
+      "upstream_protocol": "responses",
+      "profiles": [],
+      "expected": {
+        "schema_version": 1,
+        "provider": "ollama-cloud",
+        "model": "kimi-k2.7-code",
+        "upstream_protocol": "responses",
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": false,
+        "rejection_reason": "missing_route_profile"
+      }
+    },
+    {
+      "name": "conflicting_route_profiles",
+      "provider": "ollama-cloud",
+      "model": "kimi-k2.7-code",
+      "upstream_protocol": "responses",
+      "profiles": [
+        {
+          "schema_version": 1,
+          "upstream_protocol": "responses",
+          "tool_profile": "responses_beta1_candidate",
+          "collaboration_backend": "codex_client",
+          "collaboration_version": "v2",
+          "capability_manifest_version": "0.1.8-beta.1",
+          "capability_manifest_hash": "sha256:7baa6d6cc39ba2ae9c4d45c94291c539c149816b7dd32f849cb25e9c10014e32",
+          "qualification_state": "unqualified"
+        },
+        {
+          "schema_version": 1,
+          "upstream_protocol": "responses",
+          "tool_profile": "responses_beta1_candidate",
+          "collaboration_backend": "codex_client",
+          "collaboration_version": "v2",
+          "capability_manifest_version": "0.1.8-beta.1",
+          "capability_manifest_hash": "sha256:7baa6d6cc39ba2ae9c4d45c94291c539c149816b7dd32f849cb25e9c10014e32",
+          "qualification_state": "unqualified"
+        }
+      ],
+      "expected": {
+        "schema_version": 1,
+        "provider": "ollama-cloud",
+        "model": "kimi-k2.7-code",
+        "upstream_protocol": "responses",
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": false,
+        "rejection_reason": "conflicting_route_profiles"
+      }
+    },
+    {
+      "name": "unsupported_protocol_scope",
+      "provider": "ollama-cloud",
+      "model": "kimi-k2.7-code",
+      "upstream_protocol": "anthropic_messages",
+      "profiles": [],
+      "expected": {
+        "schema_version": 1,
+        "provider": "ollama-cloud",
+        "model": "kimi-k2.7-code",
+        "upstream_protocol": "anthropic_messages",
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": false,
+        "rejection_reason": "unsupported_upstream_protocol_scope"
+      }
+    }
+  ]
+}
