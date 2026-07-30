@@ -2509,6 +2509,11 @@ mod tests {
             std::env::var_os(APP_SERVER_TEST_PROCESS_LIVENESS_ENV)
                 .expect("app-server test-process liveness path"),
         );
+        let liveness_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind app-server test-process liveness listener");
+        let liveness_address = liveness_listener
+            .local_addr()
+            .expect("read app-server test-process liveness address");
         let mut liveness_options = fs::OpenOptions::new();
         liveness_options.create_new(true).read(true).write(true);
         #[cfg(windows)]
@@ -2516,9 +2521,18 @@ mod tests {
             use std::os::windows::fs::OpenOptionsExt;
             liveness_options.share_mode(0);
         }
-        let _liveness = liveness_options
+        let mut liveness = liveness_options
             .open(&liveness_path)
             .expect("hold app-server test-process liveness file");
+        writeln!(
+            liveness,
+            "pid={}\naddress={liveness_address}",
+            std::process::id()
+        )
+        .expect("write app-server test-process liveness record");
+        liveness
+            .flush()
+            .expect("flush app-server test-process liveness record");
 
         if mode.as_deref() == Ok("respond") {
             println!("\n{}", json!({"id": 2, "result": {"data": []}}));
@@ -2566,6 +2580,17 @@ mod tests {
             liveness_path.is_file(),
             "the deterministic app-server helper must reach response readiness"
         );
+        let liveness_record =
+            fs::read_to_string(liveness_path).expect("read app-server helper liveness record");
+        let liveness_address = liveness_record
+            .lines()
+            .find_map(|line| line.strip_prefix("address="))
+            .expect("app-server helper liveness address")
+            .parse::<std::net::SocketAddr>()
+            .expect("parse app-server helper liveness address");
+        let released_listener = std::net::TcpListener::bind(liveness_address)
+            .expect("app-server helper must release its liveness listener");
+        drop(released_listener);
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
