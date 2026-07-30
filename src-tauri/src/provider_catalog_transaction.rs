@@ -108,10 +108,19 @@ fn validate_provider_catalog_revision(
 }
 
 #[cfg(test)]
+type TestPreRestorePublishHook = Box<dyn Fn()>;
+
+#[cfg(test)]
+type TestPreRestoreTargetCommitHook = Box<dyn Fn(&Path)>;
+
+#[cfg(test)]
 thread_local! {
     static TRANSACTION_FAULT_PHASE: std::cell::RefCell<Option<&'static str>> =
         const { std::cell::RefCell::new(None) };
-    static TEST_PRE_RESTORE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+    static TEST_PRE_RESTORE_PUBLISH_HOOK: std::cell::RefCell<Option<TestPreRestorePublishHook>> =
+        std::cell::RefCell::new(None);
+    static TEST_PRE_RESTORE_TARGET_COMMIT_HOOK:
+        std::cell::RefCell<Option<TestPreRestoreTargetCommitHook>> =
         std::cell::RefCell::new(None);
 }
 
@@ -166,6 +175,25 @@ fn invoke_test_pre_restore_publish_hook() {
     TEST_PRE_RESTORE_PUBLISH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow().as_ref() {
             hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_test_pre_restore_target_commit_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_PRE_RESTORE_TARGET_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn clear_test_pre_restore_target_commit_hook() {
+    TEST_PRE_RESTORE_TARGET_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn invoke_test_pre_restore_target_commit_hook(path: &Path) {
+    TEST_PRE_RESTORE_TARGET_COMMIT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
         }
     });
 }
@@ -750,6 +778,7 @@ struct RuntimeProviderCatalogStore {
 }
 
 impl RuntimeProviderCatalogStore {
+    #[cfg(test)]
     fn new(paths: config::ConfigPaths) -> Self {
         Self { paths }
     }
@@ -772,7 +801,7 @@ impl RuntimeProviderCatalogStore {
                     .to_string(),
             );
         }
-        Ok(Self::new(paths))
+        Ok(Self { paths })
     }
 
     fn recovery_path(&self) -> PathBuf {
@@ -943,6 +972,20 @@ impl RuntimeProviderCatalogStore {
             .ok_or_else(|| "generated catalog has no valid file name".to_string())?;
         Ok(path.with_file_name(format!(
             "{file_name}.recovery-{transaction_id}.quarantine"
+        )))
+    }
+
+    fn rollback_evidence_path(
+        &self,
+        path: &Path,
+        transaction_id: &str,
+    ) -> Result<PathBuf, String> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "rollback target has no valid file name".to_string())?;
+        Ok(path.with_file_name(format!(
+            "{file_name}.rollback-{transaction_id}.quarantine"
         )))
     }
 
@@ -1361,7 +1404,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
         )?;
         #[cfg(test)]
         invoke_test_pre_restore_publish_hook();
-        let provider_absent_owner = match recovery_action {
+        let provider_rollback_owner = match recovery_action {
             RecoveryAction::RestoreProviderPrefix | RecoveryAction::RestoreCatalogPrefix => record
                 .candidate_providers_sha256
                 .as_deref()
@@ -1369,7 +1412,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 .map(|(hash, bytes)| (hash, bytes, MAX_PROVIDER_SNAPSHOT_BYTES)),
             _ => None,
         };
-        let catalog_absent_owner = match recovery_action {
+        let catalog_rollback_owner = match recovery_action {
             RecoveryAction::RestoreCatalogPrefix => record
                 .candidate_catalog_sha256
                 .as_deref()
@@ -1377,20 +1420,30 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
                 .map(|(hash, bytes)| (hash, bytes, MAX_CATALOG_SNAPSHOT_BYTES)),
             _ => None,
         };
+        let provider_evidence = self.rollback_evidence_path(
+            &self.paths.runtime_providers_path(),
+            &record.transaction_id,
+        )?;
+        let catalog_evidence = self.rollback_evidence_path(
+            &self.paths.generated_catalog_path(),
+            &record.transaction_id,
+        )?;
         restore_file(
             &self.paths.runtime_providers_path(),
             &self.paths.provider_catalog_providers_backup_path(),
+            &provider_evidence,
             &record.providers,
             provider_backup.as_deref(),
-            provider_absent_owner,
+            provider_rollback_owner,
             "provider configuration",
         )?;
         restore_file(
             &self.paths.generated_catalog_path(),
             &self.paths.provider_catalog_catalog_backup_path(),
+            &catalog_evidence,
             &record.catalog,
             catalog_backup.as_deref(),
-            catalog_absent_owner,
+            catalog_rollback_owner,
             "generated catalog",
         )?;
         verify_snapshot_target(
@@ -1686,19 +1739,45 @@ fn common_ancestor<'a>(left: &'a Path, right: &'a Path) -> Option<&'a Path> {
 fn restore_file(
     path: &Path,
     backup_path: &Path,
+    evidence_path: &Path,
     snapshot: &FileSnapshot,
     validated_backup: Option<&str>,
-    absent_snapshot_owner: Option<(&str, u64, u64)>,
+    rollback_owner: Option<(&str, u64, u64)>,
     label: &str,
 ) -> Result<(), String> {
+    let max_bytes = if label.contains("provider") {
+        MAX_PROVIDER_SNAPSHOT_BYTES
+    } else {
+        MAX_CATALOG_SNAPSHOT_BYTES
+    };
     if snapshot.existed {
         let contents = validated_backup.ok_or_else(|| {
             format!("validated {label} recovery backup was not loaded before restore")
         })?;
         let boundary = common_ancestor(path, backup_path)
             .ok_or_else(|| format!("failed to resolve trusted boundary for restored {label}"))?;
-        safe_file::write_private_text_atomic(path, contents, boundary)
-            .map_err(|error| format!("failed to restore {label}: {error}"))?;
+        let expected_owner = rollback_owner;
+        safe_file::replace_private_text_if_unchanged(
+            safe_file::PrivateTextReplacement {
+                path,
+                evidence: evidence_path,
+                boundary,
+                contents,
+                max_bytes,
+                label,
+            },
+            |current| {
+                expected_owner.is_some_and(|(expected_hash, expected_bytes, _)| {
+                    current.len() as u64 == expected_bytes
+                        && hash_bytes(current.as_bytes()) == expected_hash
+                })
+            },
+            || {
+                #[cfg(test)]
+                invoke_test_pre_restore_target_commit_hook(path);
+            },
+        )
+        .map_err(|error| format!("failed to conditionally restore {label}: {error}"))?;
         return Ok(());
     }
     if validated_backup.is_some() {
@@ -1706,27 +1785,27 @@ fn restore_file(
             "validated {label} recovery backup exists for an absent snapshot"
         ));
     }
-    if !path.try_exists().map_err(|error| {
-        format!(
-            "failed to inspect newly created {label} before rollback: {error}"
-        )
-    })? {
-        return Ok(());
-    }
-    let (expected_hash, expected_bytes, max_bytes) = absent_snapshot_owner.ok_or_else(|| {
-        format!(
-            "refused to delete newly created {label} without an exact journaled candidate owner"
-        )
-    })?;
-    verify_file_identity(
+    let boundary = common_ancestor(path, backup_path)
+        .ok_or_else(|| format!("failed to resolve trusted boundary for removed {label}"))?;
+    let expected_owner = rollback_owner;
+    safe_file::remove_private_text_if_unchanged(
         path,
-        Some(expected_hash),
-        Some(expected_bytes),
+        evidence_path,
+        boundary,
         max_bytes,
-        &format!("newly created {label} candidate before rollback deletion"),
-    )?;
-    fs::remove_file(path)
-        .map_err(|error| format!("failed to remove newly created {label}: {error}"))
+        label,
+        |current| {
+            expected_owner.is_some_and(|(expected_hash, expected_bytes, _)| {
+                current.len() as u64 == expected_bytes
+                    && hash_bytes(current.as_bytes()) == expected_hash
+            })
+        },
+        || {
+            #[cfg(test)]
+            invoke_test_pre_restore_target_commit_hook(path);
+        },
+    )
+    .map_err(|error| format!("failed to conditionally remove {label}: {error}"))
 }
 
 fn validate_recovery_record(record: &RecoveryRecord) -> Result<(), String> {
@@ -3116,6 +3195,60 @@ mod tests {
     }
 
     #[test]
+    fn rollback_never_clobbers_unjournaled_live_bytes_after_prefix_validation() {
+        let root = temp_root("rollback-existing-target-cas");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &base_catalog);
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let candidate = provider(UpstreamFormat::ChatCompletions);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        let live_provider = paths.runtime_providers_path();
+        let external = b"unjournaled-provider-bytes-after-prefix-validation".to_vec();
+        super::install_test_pre_restore_target_commit_hook({
+            let live_provider = live_provider.clone();
+            let external = external.clone();
+            move |path| {
+                if path == live_provider {
+                    fs::write(path, &external).unwrap();
+                }
+            }
+        });
+
+        let error = store
+            .restore_pending()
+            .expect_err("rollback must not clobber bytes written after prefix validation");
+        super::clear_test_pre_restore_target_commit_hook();
+
+        assert!(
+            error.contains("changed") || error.contains("mismatch"),
+            "unexpected rollback error: {error}"
+        );
+        assert!(paths.provider_catalog_recovery_path().exists());
+        let evidence_preserved = fs::read(&live_provider)
+            .is_ok_and(|contents| contents == external)
+            || fs::read_dir(live_provider.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_file())
+                .any(|entry| fs::read(entry.path()).is_ok_and(|contents| contents == external));
+        assert!(
+            evidence_preserved,
+            "the unjournaled live bytes must remain exact at the live path or in transaction evidence"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rollback_never_deletes_unjournaled_bytes_for_an_absent_base_snapshot() {
         let root = temp_root("rollback-absent-snapshot-owner-cas");
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3152,13 +3285,73 @@ mod tests {
             .expect_err("an absent snapshot may delete only its exact journaled candidate");
         super::clear_test_pre_restore_publish_hook();
 
-        assert!(error.contains("candidate") || error.contains("journal"));
+        assert!(
+            error.contains("candidate")
+                || error.contains("journal")
+                || error.contains("changed"),
+            "unexpected rollback error: {error}"
+        );
         assert_eq!(
             fs::read_to_string(&live_provider).unwrap(),
             "unjournaled-external-provider-bytes",
             "rollback must not delete a replacement it does not own"
         );
         assert!(paths.provider_catalog_recovery_path().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_never_deletes_replacement_bytes_after_absent_candidate_validation() {
+        let root = temp_root("rollback-absent-target-commit-race");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a repository parent")
+            .to_path_buf();
+        let paths = config::ConfigPaths::new_isolated(
+            root.join("runtime"),
+            root.join("codex-target"),
+            repo_root,
+        );
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let candidate = provider(UpstreamFormat::Responses);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        let live_provider = paths.runtime_providers_path();
+        let external = b"unjournaled-bytes-after-absent-candidate-validation".to_vec();
+        super::install_test_pre_restore_target_commit_hook({
+            let live_provider = live_provider.clone();
+            let external = external.clone();
+            move |path| {
+                if path == live_provider {
+                    fs::write(path, &external).unwrap();
+                }
+            }
+        });
+
+        let error = store
+            .restore_pending()
+            .expect_err("rollback must not delete bytes replacing a validated absent candidate");
+        super::clear_test_pre_restore_target_commit_hook();
+
+        assert!(
+            error.contains("changed") || error.contains("mismatch"),
+            "unexpected rollback error: {error}"
+        );
+        assert!(paths.provider_catalog_recovery_path().exists());
+        let evidence_preserved = fs::read(&live_provider)
+            .is_ok_and(|contents| contents == external)
+            || fs::read_dir(live_provider.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_file())
+                .any(|entry| fs::read(entry.path()).is_ok_and(|contents| contents == external));
+        assert!(
+            evidence_preserved,
+            "the replacement bytes must remain exact at the live path or in transaction evidence"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

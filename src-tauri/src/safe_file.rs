@@ -234,7 +234,9 @@ pub(crate) fn write_private_text_atomic(
 /// substituted bytes as evidence. This is not an atomic conditional rename
 /// against an arbitrary same-principal process that can continuously rewrite
 /// entries in the directory; that stronger broker/ownership boundary is
-/// intentionally outside this contract.
+/// intentionally outside this contract. Non-Linux Unix keeps the legacy
+/// quarantine path and is explicitly outside the 0.1.8 production gate under
+/// follow-up #270; the 0.1.8 gate covers Windows plus Linux x86_64/aarch64.
 pub(crate) fn quarantine_private_text(
     source: &Path,
     quarantine: &Path,
@@ -294,6 +296,7 @@ pub(crate) fn quarantine_private_text(
                         placeholder_temp.display()
                     )
                 })?;
+                let mut cleanup = TempPathCleanup::new(placeholder_temp.clone());
                 placeholder
                     .write_all(replacement.as_bytes())
                     .and_then(|_| placeholder.sync_all())
@@ -311,6 +314,7 @@ pub(crate) fn quarantine_private_text(
                 })?;
                 validate_regular_single_link(&metadata, &placeholder_temp)?;
                 parent.publish_new(&placeholder_temp, quarantine)?;
+                cleanup.disarm();
                 placeholder
             }
             Err(error) => {
@@ -391,6 +395,509 @@ pub(crate) fn quarantine_private_text(
         }
         Ok(text)
     }
+}
+
+/// Conditional rollback is a 0.1.8 release-gated primitive. Only Windows and
+/// Linux x86_64/aarch64 provide the required conditional replace/isolate
+/// semantics; every other target returns a fail-closed unsupported error and
+/// remains tracked by #270.
+pub(crate) struct PrivateTextReplacement<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) evidence: &'a Path,
+    pub(crate) boundary: &'a Path,
+    pub(crate) contents: &'a str,
+    pub(crate) max_bytes: u64,
+    pub(crate) label: &'a str,
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_private_text_if_unchanged<Expected, BeforeCommit>(
+    replacement: PrivateTextReplacement<'_>,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    let PrivateTextReplacement {
+        path,
+        evidence,
+        boundary,
+        contents: replacement,
+        max_bytes,
+        label,
+    } = replacement;
+    if path.parent() != evidence.parent() {
+        return Err("conditional private replacement paths must share one parent".to_string());
+    }
+    validate_confined_path(path, boundary, false)?;
+    validate_confined_path(evidence, boundary, true)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let mut opened = parent
+        .open_existing(path)
+        .map_err(|error| format!("failed to open {label} before conditional restore: {error}"))?;
+    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
+    if current == replacement {
+        return finish_private_evidence_windows(
+            &parent,
+            evidence,
+            max_bytes,
+            label,
+            &expected,
+        );
+    }
+    if !expected(&current) {
+        return Err(format!(
+            "{label} changed before conditional restore; live bytes were preserved"
+        ));
+    }
+    let opened_identity = lock_file_identity(&opened)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+    if evidence.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect conditional restore evidence {}: {error}",
+            evidence.display()
+        )
+    })? {
+        return Err(format!(
+            "conditional restore evidence already exists while live {label} still requires replacement"
+        ));
+    }
+
+    let temp_path = unique_temp_path(path);
+    let mut temp = parent.create_temp(&temp_path).map_err(|error| {
+        format!(
+            "failed to create conditional restore temp {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    let mut cleanup = TempPathCleanup::new(temp_path.clone());
+    temp.write_all(replacement.as_bytes())
+        .and_then(|_| temp.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to persist conditional restore temp {}: {error}",
+                temp_path.display()
+            )
+        })?;
+    drop(temp);
+    before_commit();
+
+    let live_wide = windows_wide_path(path)
+        .map_err(|error| format!("failed to encode conditional restore target: {error}"))?;
+    let temp_wide = windows_wide_path(&temp_path)
+        .map_err(|error| format!("failed to encode conditional restore temp: {error}"))?;
+    let evidence_wide = windows_wide_path(evidence)
+        .map_err(|error| format!("failed to encode conditional restore evidence: {error}"))?;
+    const REPLACEFILE_WRITE_THROUGH: u32 = 0x0000_0001;
+    let replaced = unsafe {
+        ReplaceFileW(
+            live_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            evidence_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if replaced == 0 {
+        return Err(format!(
+            "failed to conditionally replace {label}; live bytes were preserved: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    cleanup.disarm();
+
+    let mut displaced = parent.open_existing(evidence).map_err(|error| {
+        format!("failed to open displaced {label} evidence after conditional restore: {error}")
+    })?;
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    let displaced_identity = lock_file_identity(&displaced)
+        .map_err(|_| format!("displaced {label} evidence is not a stable single-link file"))?;
+    if displaced_identity != opened_identity || !expected(&displaced_text) {
+        return Err(format!(
+            "displaced {label} mismatch after conditional restore; exact evidence remains at {}",
+            evidence.display()
+        ));
+    }
+    delete_opened_file_windows(&mut displaced, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn replace_private_text_if_unchanged<Expected, BeforeCommit>(
+    replacement: PrivateTextReplacement<'_>,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    let PrivateTextReplacement {
+        path,
+        evidence,
+        boundary,
+        contents: replacement,
+        max_bytes,
+        label,
+    } = replacement;
+    if path.parent() != evidence.parent() {
+        return Err("conditional private replacement paths must share one parent".to_string());
+    }
+    validate_confined_path(path, boundary, false)?;
+    validate_confined_path(evidence, boundary, true)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let mut opened = parent
+        .open_existing(path)
+        .map_err(|error| format!("failed to open {label} before conditional restore: {error}"))?;
+    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
+    if current == replacement {
+        return finish_private_evidence_linux(
+            &parent,
+            evidence,
+            max_bytes,
+            label,
+            &expected,
+        );
+    }
+    if !expected(&current) {
+        return Err(format!(
+            "{label} changed before conditional restore; live bytes were preserved"
+        ));
+    }
+    let opened_identity = lock_file_identity(&opened)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+
+    let placeholder = match parent.open_existing(evidence) {
+        Ok(mut placeholder) => {
+            let contents = read_opened_single_link_text(
+                &mut placeholder,
+                evidence,
+                max_bytes,
+                "conditional restore placeholder",
+            )?;
+            if contents != replacement {
+                return Err(format!(
+                    "conditional restore evidence contains neither the exact placeholder nor a completed owner: {}",
+                    evidence.display()
+                ));
+            }
+            placeholder
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let temp_path = unique_temp_path(evidence);
+            let mut placeholder = parent.create_temp(&temp_path).map_err(|error| {
+                format!(
+                    "failed to create conditional restore placeholder temp {}: {error}",
+                    temp_path.display()
+                )
+            })?;
+            let mut cleanup = TempPathCleanup::new(temp_path.clone());
+            placeholder
+                .write_all(replacement.as_bytes())
+                .and_then(|_| placeholder.sync_all())
+                .map_err(|error| {
+                    format!(
+                        "failed to persist conditional restore placeholder temp {}: {error}",
+                        temp_path.display()
+                    )
+                })?;
+            parent.publish_new(&temp_path, evidence)?;
+            cleanup.disarm();
+            placeholder
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect conditional restore evidence {}: {error}",
+                evidence.display()
+            ));
+        }
+    };
+    let placeholder_identity = lock_file_identity(&placeholder)
+        .map_err(|_| "conditional restore placeholder is not a stable file".to_string())?;
+    before_commit();
+    parent.exchange_existing(path, evidence)?;
+
+    let mut live = parent.open_existing(path).map_err(|error| {
+        format!("failed to open restored {label} after conditional exchange: {error}")
+    })?;
+    let live_text = read_opened_single_link_text(&mut live, path, max_bytes, label)?;
+    let live_identity = lock_file_identity(&live)
+        .map_err(|_| format!("restored {label} is not a stable file"))?;
+    if live_text != replacement || live_identity != placeholder_identity {
+        return Err(format!(
+            "restored {label} did not match the exact replacement after conditional exchange"
+        ));
+    }
+    let mut displaced = parent.open_existing(evidence).map_err(|error| {
+        format!("failed to open displaced {label} after conditional exchange: {error}")
+    })?;
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    let displaced_identity = lock_file_identity(&displaced)
+        .map_err(|_| format!("displaced {label} is not a stable file"))?;
+    if displaced_identity != opened_identity || !expected(&displaced_text) {
+        return Err(format!(
+            "displaced {label} mismatch after conditional exchange; exact evidence remains at {}",
+            evidence.display()
+        ));
+    }
+    remove_opened_file_linux(&parent, &displaced, evidence, label)
+}
+
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+pub(crate) fn replace_private_text_if_unchanged<Expected, BeforeCommit>(
+    replacement: PrivateTextReplacement<'_>,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    let PrivateTextReplacement {
+        path,
+        evidence,
+        boundary,
+        contents: replacement,
+        max_bytes,
+        label,
+    } = replacement;
+    let _ = (
+        path,
+        evidence,
+        boundary,
+        replacement,
+        max_bytes,
+        expected,
+        before_commit,
+    );
+    Err(format!(
+        "conditional rollback replacement for {label} is supported only by the Windows and Linux x86_64/aarch64 0.1.8 release gates"
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn remove_private_text_if_unchanged<Expected, BeforeCommit>(
+    path: &Path,
+    evidence: &Path,
+    boundary: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    if path.parent() != evidence.parent() {
+        return Err("conditional private removal paths must share one parent".to_string());
+    }
+    validate_confined_path(path, boundary, true)?;
+    validate_confined_path(evidence, boundary, true)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let mut opened = match parent.open_existing(path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return finish_private_evidence_windows(
+                &parent,
+                evidence,
+                max_bytes,
+                label,
+                &expected,
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to open {label} before conditional removal: {error}"
+            ));
+        }
+    };
+    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
+    if !expected(&current) {
+        return Err(format!(
+            "{label} changed before conditional removal; live bytes were preserved"
+        ));
+    }
+    let opened_identity = lock_file_identity(&opened)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+    if evidence.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect conditional removal evidence {}: {error}",
+            evidence.display()
+        )
+    })? {
+        return Err(format!(
+            "conditional removal evidence already exists while live {label} remains"
+        ));
+    }
+    before_commit();
+    parent.rename_existing(&mut opened, path, evidence)?;
+
+    match parent.open_existing(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "live {label} changed during conditional removal; displaced evidence remains at {}",
+                evidence.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to verify live {label} absence after conditional removal: {error}"
+            ));
+        }
+    }
+    let mut displaced = parent.open_existing(evidence).map_err(|error| {
+        format!("failed to open displaced {label} after conditional removal: {error}")
+    })?;
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    let displaced_identity = lock_file_identity(&displaced)
+        .map_err(|_| format!("displaced {label} is not a stable single-link file"))?;
+    if displaced_identity != opened_identity || !expected(&displaced_text) {
+        return Err(format!(
+            "displaced {label} mismatch after conditional removal; exact evidence remains at {}",
+            evidence.display()
+        ));
+    }
+    delete_opened_file_windows(&mut displaced, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn remove_private_text_if_unchanged<Expected, BeforeCommit>(
+    path: &Path,
+    evidence: &Path,
+    boundary: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    if path.parent() != evidence.parent() {
+        return Err("conditional private removal paths must share one parent".to_string());
+    }
+    validate_confined_path(path, boundary, true)?;
+    validate_confined_path(evidence, boundary, true)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let mut opened = match parent.open_existing(path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return finish_private_evidence_linux(
+                &parent,
+                evidence,
+                max_bytes,
+                label,
+                &expected,
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to open {label} before conditional removal: {error}"
+            ));
+        }
+    };
+    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
+    if !expected(&current) {
+        return Err(format!(
+            "{label} changed before conditional removal; live bytes were preserved"
+        ));
+    }
+    let opened_identity = lock_file_identity(&opened)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+    if evidence.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect conditional removal evidence {}: {error}",
+            evidence.display()
+        )
+    })? {
+        return Err(format!(
+            "conditional removal evidence already exists while live {label} remains"
+        ));
+    }
+    before_commit();
+    parent.rename_path_noreplace(path, evidence)?;
+
+    match parent.open_existing(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "live {label} changed during conditional removal; displaced evidence remains at {}",
+                evidence.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to verify live {label} absence after conditional removal: {error}"
+            ));
+        }
+    }
+    let mut displaced = parent.open_existing(evidence).map_err(|error| {
+        format!("failed to open displaced {label} after conditional removal: {error}")
+    })?;
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    let displaced_identity = lock_file_identity(&displaced)
+        .map_err(|_| format!("displaced {label} is not a stable file"))?;
+    if displaced_identity != opened_identity || !expected(&displaced_text) {
+        return Err(format!(
+            "displaced {label} mismatch after conditional removal; exact evidence remains at {}",
+            evidence.display()
+        ));
+    }
+    remove_opened_file_linux(&parent, &displaced, evidence, label)
+}
+
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+pub(crate) fn remove_private_text_if_unchanged<Expected, BeforeCommit>(
+    path: &Path,
+    evidence: &Path,
+    boundary: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected: Expected,
+    before_commit: BeforeCommit,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+    BeforeCommit: FnOnce(),
+{
+    let _ = (
+        path,
+        evidence,
+        boundary,
+        max_bytes,
+        expected,
+        before_commit,
+    );
+    Err(format!(
+        "conditional rollback removal for {label} is supported only by the Windows and Linux x86_64/aarch64 0.1.8 release gates"
+    ))
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -756,6 +1263,88 @@ impl PinnedPrivateParent {
         self.directory.sync_all().map_err(|error| {
             format!(
                 "failed to flush private placeholder parent {}: {error}",
+                self.parent_path.display()
+            )
+        })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn rename_path_noreplace(
+        &self,
+        source_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source_name = CString::new(
+            source_path
+                .file_name()
+                .ok_or_else(|| "private isolate source has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private isolate source name contains a NUL byte".to_string())?;
+        let target_name = CString::new(
+            target_path
+                .file_name()
+                .ok_or_else(|| "private isolate target has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private isolate target name contains a NUL byte".to_string())?;
+        let isolate_result = unsafe {
+            syscall(
+                unix_private_io::SYS_RENAMEAT2,
+                self.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                self.directory.as_raw_fd(),
+                target_name.as_ptr(),
+                unix_private_io::RENAME_NOREPLACE,
+            ) as i32
+        };
+        if isolate_result != 0 {
+            return Err(format!(
+                "failed to isolate private file without replacing evidence in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.directory.sync_all().map_err(|error| {
+            format!(
+                "failed to flush private isolate parent {}: {error}",
+                self.parent_path.display()
+            )
+        })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn remove_path(&self, path: &Path) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = CString::new(
+            path.file_name()
+                .ok_or_else(|| "private cleanup target has no file name".to_string())?
+                .as_bytes(),
+        )
+        .map_err(|_| "private cleanup target name contains a NUL byte".to_string())?;
+        if unsafe { unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(format!(
+                "failed to remove verified private evidence in pinned parent {}: {}",
+                self.parent_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.directory.sync_all().map_err(|error| {
+            format!(
+                "failed to flush private cleanup parent {}: {error}",
                 self.parent_path.display()
             )
         })
@@ -1389,6 +1978,171 @@ fn unique_temp_path(path: &Path) -> PathBuf {
     ))
 }
 
+#[cfg(windows)]
+fn finish_private_evidence_windows<Expected>(
+    parent: &PinnedPrivateParent,
+    evidence: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected: &Expected,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+{
+    if !evidence.try_exists().map_err(|error| {
+        format!(
+            "failed to inspect completed {label} rollback evidence {}: {error}",
+            evidence.display()
+        )
+    })? {
+        return Ok(());
+    }
+    let mut displaced = parent.open_existing(evidence).map_err(|error| {
+        format!("failed to open completed {label} rollback evidence: {error}")
+    })?;
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    if !expected(&displaced_text) {
+        return Err(format!(
+            "completed {label} rollback has mismatched evidence at {}; recovery remains fail-closed",
+            evidence.display()
+        ));
+    }
+    delete_opened_file_windows(&mut displaced, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn finish_private_evidence_linux<Expected>(
+    parent: &PinnedPrivateParent,
+    evidence: &Path,
+    max_bytes: u64,
+    label: &str,
+    expected: &Expected,
+) -> Result<(), String>
+where
+    Expected: Fn(&str) -> bool,
+{
+    let mut displaced = match parent.open_existing(evidence) {
+        Ok(displaced) => displaced,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed to open completed {label} rollback evidence: {error}"
+            ));
+        }
+    };
+    let displaced_text =
+        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
+    if !expected(&displaced_text) {
+        return Err(format!(
+            "completed {label} rollback has mismatched evidence at {}; recovery remains fail-closed",
+            evidence.display()
+        ));
+    }
+    remove_opened_file_linux(parent, &displaced, evidence, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn remove_opened_file_linux(
+    parent: &PinnedPrivateParent,
+    opened: &File,
+    path: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let opened_identity = lock_file_identity(opened)
+        .map_err(|_| format!("verified {label} evidence is not a stable file"))?;
+    let current = parent.open_existing(path).map_err(|error| {
+        format!(
+            "failed to re-open verified {label} evidence before cleanup: {error}"
+        )
+    })?;
+    let current_identity = lock_file_identity(&current)
+        .map_err(|_| format!("current {label} evidence is not a stable file"))?;
+    if current_identity != opened_identity {
+        return Err(format!(
+            "{label} evidence changed before cleanup; replacement evidence was preserved"
+        ));
+    }
+    drop(current);
+    parent.remove_path(path)
+}
+
+#[cfg(windows)]
+fn delete_opened_file_windows(file: &mut File, label: &str) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+
+    let disposition = FileDispositionInformation { delete_file: 1 };
+    let mut io_status = IoStatusBlock::default();
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut io_status,
+            std::ptr::addr_of!(disposition).cast(),
+            u32::try_from(std::mem::size_of::<FileDispositionInformation>())
+                .map_err(|_| "private delete disposition is too large".to_string())?,
+            13,
+        )
+    };
+    if status < 0 {
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(format!(
+            "failed to remove verified {label} recovery evidence by handle: {}",
+            std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+struct TempPathCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+#[cfg(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+impl TempPathCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+impl Drop for TempPathCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.lock",
@@ -2008,6 +2762,7 @@ unsafe extern "C" {
         new_directory_fd: i32,
         new_path: *const std::ffi::c_char,
     ) -> i32;
+    fn unlinkat(directory_fd: i32, path: *const std::ffi::c_char, flags: i32) -> i32;
 }
 
 #[cfg(all(
@@ -2066,6 +2821,12 @@ struct FileRenameInformation {
 
 #[cfg(windows)]
 #[repr(C)]
+struct FileDispositionInformation {
+    delete_file: u8,
+}
+
+#[cfg(windows)]
+#[repr(C)]
 #[derive(Default)]
 struct IoStatusBlock {
     status_or_pointer: usize,
@@ -2110,6 +2871,14 @@ unsafe extern "system" {
     fn GetExitCodeProcess(handle: *mut std::ffi::c_void, code: *mut u32) -> i32;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn ReplaceFileW(
+        replaced_file_name: *const u16,
+        replacement_file_name: *const u16,
+        backup_file_name: *const u16,
+        replace_flags: u32,
+        exclude: *mut std::ffi::c_void,
+        reserved: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 #[cfg(windows)]
@@ -2425,6 +3194,15 @@ mod tests {
             "transaction-owned-catalog"
         );
         assert!(!quarantine.exists());
+        assert!(
+            !fs::read_dir(&root).unwrap().filter_map(Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".tmp-codexhub"))
+            }),
+            "a failed placeholder publication must remove its private temp"
+        );
 
         let readback = quarantine_private_text(
             &source,
