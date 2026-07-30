@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 import weakref
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, fields, replace
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -367,6 +367,72 @@ def post_handler(path: str, body: bytes, headers: dict[str, str] | None = None):
     return handler, fake
 
 
+@dataclass(frozen=True)
+class RelayPlanFixture:
+    streaming_policy: codex_proxy.StreamingPolicy
+    usage_policy: codex_proxy.UsagePolicy
+    response_mutation_policy: codex_proxy.MutationPolicy
+    sse_mutation_policy: codex_proxy.MutationPolicy
+    verify_cross_protocol_source: bool
+
+    def build(
+        self,
+        *,
+        selected_upstream_format: str,
+        request_kind: str,
+        lifecycle_final_retry_enabled: bool,
+    ) -> codex_proxy.RelayExecutionPlan:
+        return codex_proxy.RelayExecutionPlan(
+            selected_upstream_format=selected_upstream_format,
+            request_kind=request_kind,
+            streaming_policy=self.streaming_policy,
+            usage_policy=self.usage_policy,
+            response_mutation_policy=self.response_mutation_policy,
+            sse_mutation_policy=self.sse_mutation_policy,
+            verify_cross_protocol_source=self.verify_cross_protocol_source,
+            lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
+        )
+
+
+RELAY_PLAN_FIXTURES = {
+    "gateway": RelayPlanFixture(
+        streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+        response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+        sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+        verify_cross_protocol_source=False,
+    ),
+    "official_passthrough": RelayPlanFixture(
+        streaming_policy=codex_proxy.StreamingPolicy.OFFICIAL_PASSTHROUGH,
+        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+        response_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
+        sse_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
+        verify_cross_protocol_source=False,
+    ),
+    "transparent": RelayPlanFixture(
+        streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT,
+        usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
+        response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+        sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+        verify_cross_protocol_source=False,
+    ),
+    "transparent_converted": RelayPlanFixture(
+        streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT_CONVERTED,
+        usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
+        response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+        sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+        verify_cross_protocol_source=True,
+    ),
+    "gateway_verified_conversion": RelayPlanFixture(
+        streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+        response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+        sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+        verify_cross_protocol_source=True,
+    ),
+}
+
+
 def relay_upstream_response(
     handler,
     response,
@@ -374,102 +440,46 @@ def relay_upstream_response(
     *args,
     **kwargs,
 ):
-    """Adapt focused relay tests to the production typed execution seam."""
+    """Call the production relay with an explicit typed policy fixture."""
 
-    behavior_profile = kwargs.pop("behavior_profile", None)
-    upstream_format = kwargs.get("upstream_format", "responses")
-    inbound_format = kwargs.get("inbound_format", "responses")
-    event_context = kwargs.get("event_context")
+    legacy_fixture_profile = kwargs.pop("behavior_profile", None)
+    fixture_name = kwargs.pop(
+        "relay_fixture",
+        {
+            None: "gateway",
+            (
+                codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+            ): "official_passthrough",
+            (
+                codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+            ): "transparent",
+        }.get(legacy_fixture_profile),
+    )
+    if fixture_name is None:
+        raise AssertionError(
+            f"relay test requires an explicit fixture: {legacy_fixture_profile!r}"
+        )
+    upstream_format = kwargs.pop("upstream_format", "responses")
     request_kind = kwargs.pop(
         "request_kind",
         codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
     )
-    streaming_policy = kwargs.pop("streaming_policy", None)
-    if streaming_policy is None:
-        if (
-            behavior_profile
-            == codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-        ):
-            streaming_policy = (
-                codex_proxy.StreamingPolicy.OFFICIAL_PASSTHROUGH
-            )
-        elif (
-            behavior_profile
-            == codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-        ):
-            streaming_policy = (
-                codex_proxy.StreamingPolicy.TRANSPARENT
-                if upstream_format == inbound_format
-                else codex_proxy.StreamingPolicy.TRANSPARENT_CONVERTED
-            )
-        else:
-            streaming_policy = codex_proxy.StreamingPolicy.GATEWAY_ADAPTED
-    usage_policy = kwargs.pop("usage_policy", None)
-    if usage_policy is None:
-        usage_policy = (
-            codex_proxy.UsagePolicy.ASYNC_TAP
-            if (
-                behavior_profile
-                == codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-            )
-            else codex_proxy.UsagePolicy.SYNC_CAPTURE
-        )
-    response_mutation_policy = kwargs.pop(
-        "response_mutation_policy",
-        None,
-    )
-    if response_mutation_policy is None:
-        response_mutation_policy = (
-            codex_proxy.MutationPolicy.TRANSPARENT
-            if (
-                behavior_profile
-                == codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-            )
-            else (
-                codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH
-                if (
-                    behavior_profile
-                    == codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-                )
-                else codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY
-            )
-        )
-    sse_mutation_policy = kwargs.pop(
-        "sse_mutation_policy",
-        response_mutation_policy,
-    )
+    fixture = RELAY_PLAN_FIXTURES[fixture_name]
     verify_cross_protocol_source = kwargs.pop(
         "verify_cross_protocol_source",
-        None,
+        fixture.verify_cross_protocol_source,
     )
-    if verify_cross_protocol_source is None:
-        verify_cross_protocol_source = (
-            codex_proxy._verified_cross_protocol_source_format(
-                behavior_profile=behavior_profile,
-                upstream_format=upstream_format,
-                inbound_format=inbound_format,
-            )
-            is not None
-        )
     lifecycle_final_retry_enabled = kwargs.pop(
         "lifecycle_final_retry_enabled",
-        None,
+        False,
     )
-    if lifecycle_final_retry_enabled is None:
-        lifecycle_final_retry_enabled = (
-            codex_proxy.lifecycle_empty_final_resample_enabled(
-                event_context,
-                request_kind,
-            )
-        )
-    relay_execution_plan = codex_proxy.RelayExecutionPlan(
-        request_kind=request_kind,
-        streaming_policy=streaming_policy,
-        usage_policy=usage_policy,
-        response_mutation_policy=response_mutation_policy,
-        sse_mutation_policy=sse_mutation_policy,
+    relay_execution_plan = replace(
+        fixture.build(
+            selected_upstream_format=upstream_format,
+            request_kind=request_kind,
+            lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
+        ),
         verify_cross_protocol_source=verify_cross_protocol_source,
-        lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
     )
     return CodexProxyHandler._relay_upstream_response(
         handler,
@@ -1263,6 +1273,88 @@ class RoutingTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             plan.attempts[0].upstream_protocol = codex_proxy.RouteProtocol.CHAT_COMPLETIONS
 
+    def test_route_plan_primary_execution_fields_are_read_only_attempt_views(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "base_url": "https://ollama.example.test/v1",
+                "auth": "ollama_api_key",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "auto",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="ollama-cloud/glm-5.2",
+        )
+        duplicate_primary_fields = {
+            "authentication_strategy",
+            "upstream_protocol",
+            "selected_upstream_format",
+            "wire_format_adapter",
+            "request_kind",
+            "retry_policy",
+            "retry_eligibility",
+            "usage_policy",
+            "streaming_policy",
+            "transport_policy",
+            "request_mutation_policy",
+            "response_mutation_policy",
+            "sse_mutation_policy",
+        }
+
+        self.assertTrue(plan.attempts)
+        self.assertTrue(
+            duplicate_primary_fields.isdisjoint(
+                field.name for field in fields(codex_proxy.RoutePlan)
+            )
+        )
+        primary_attempt = plan.attempts[0]
+        self.assertEqual(
+            plan.authentication_strategy,
+            primary_attempt.authentication_strategy,
+        )
+        self.assertEqual(plan.upstream_protocol, primary_attempt.upstream_protocol)
+        self.assertEqual(
+            plan.selected_upstream_format,
+            primary_attempt.selected_upstream_format,
+        )
+        self.assertEqual(
+            plan.wire_format_adapter,
+            primary_attempt.wire_format_adapter,
+        )
+        self.assertEqual(plan.request_kind, primary_attempt.retry.request_kind)
+        self.assertEqual(plan.retry_policy, primary_attempt.retry.policy)
+        self.assertEqual(
+            plan.retry_eligibility,
+            primary_attempt.retry.eligibility,
+        )
+        self.assertEqual(plan.usage_policy, primary_attempt.usage_policy)
+        self.assertEqual(
+            plan.streaming_policy,
+            primary_attempt.streaming_policy,
+        )
+        self.assertEqual(
+            plan.transport_policy,
+            primary_attempt.transport_policy,
+        )
+        self.assertEqual(
+            plan.request_mutation_policy,
+            primary_attempt.request_mutation_policy,
+        )
+        self.assertEqual(
+            plan.response_mutation_policy,
+            primary_attempt.response_mutation_policy,
+        )
+        self.assertEqual(
+            plan.sse_mutation_policy,
+            primary_attempt.sse_mutation_policy,
+        )
+        with self.assertRaises(TypeError):
+            replace(
+                plan,
+                selected_upstream_format="chat_completions",
+            )
+
     def test_route_plan_attempt_retry_execution_uses_only_explicit_runtime_facts(self):
         runtime_facts = codex_proxy.RouteRuntimeFacts(
             request_timeout_seconds=41,
@@ -1823,8 +1915,201 @@ class RoutingTests(unittest.TestCase):
             success_plan.response_mutation_policy,
             codex_proxy.MutationPolicy.TRANSPARENT,
         )
+        self.assertEqual(
+            success_plan.selected_upstream_format,
+            codex_proxy.RouteProtocol.RESPONSES.value,
+        )
         self.assertNotIn("behavior_profile", relayed[0])
         self.assertNotIn("behavior_profile", relayed[1])
+
+    def test_auto_compact_final_http_error_relays_with_the_active_fallback_attempt_format(self):
+        upstream = {
+            "name": "volcengine",
+            "base_url": "https://ark.example.test/v1",
+            "auth": "api_key",
+            "api_key": "test-token",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "auto",
+        }
+        cases = (
+            (
+                "responses",
+                "/v1/responses",
+                {
+                    "model": "volc/glm-5.2",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": (
+                                "Create a detailed summary of the conversation so far. "
+                                "This is a compact summary. Respond with text only. "
+                                "The summary should include <summary>."
+                            ),
+                        }
+                    ],
+                    "stream": False,
+                },
+                False,
+            ),
+            (
+                "chat_completions",
+                "/v1/chat/completions",
+                {
+                    "model": "volc/glm-5.2",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Create a detailed summary of the conversation so far. "
+                                "This is a compact summary. Respond with text only. "
+                                "The summary should include <summary>."
+                            ),
+                        }
+                    ],
+                    "stream": False,
+                },
+                False,
+            ),
+        )
+
+        for (
+            inbound_format,
+            path,
+            payload,
+            expected_cross_protocol_verification,
+        ) in cases:
+            with self.subTest(inbound_format=inbound_format):
+                body = json.dumps(payload).encode("utf-8")
+                handler, _fake = post_handler(path, body)
+                relayed: list[dict[str, Any]] = []
+                handler._relay_upstream_response = (
+                    lambda response, upstream_name, **kwargs:
+                    relayed.append(kwargs) or getattr(response, "code", 502)
+                )
+                responses_error = HTTPError(
+                    "https://ark.example.test/v1/responses",
+                    404,
+                    "unsupported responses endpoint",
+                    {"Content-Type": "application/json"},
+                    io.BytesIO(b'{"error":"unsupported responses endpoint"}'),
+                )
+                chat_error = HTTPError(
+                    "https://ark.example.test/v1/chat/completions",
+                    400,
+                    "invalid chat request",
+                    {"Content-Type": "application/json"},
+                    io.BytesIO(b'{"error":"invalid chat request"}'),
+                )
+
+                with (
+                    patch("codex_proxy.choose_upstream", return_value=upstream),
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        side_effect=[responses_error, chat_error],
+                    ),
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format=inbound_format,
+                    )
+
+                self.assertEqual(len(relayed), 1)
+                relay_plan = relayed[0]["relay_execution_plan"]
+                self.assertEqual(
+                    relay_plan.selected_upstream_format,
+                    codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
+                )
+                self.assertEqual(
+                    relay_plan.verify_cross_protocol_source,
+                    expected_cross_protocol_verification,
+                )
+                request_complete = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if (
+                        call.args
+                        and call.args[0] == "request_complete"
+                        and call.kwargs.get("status") == 400
+                    )
+                )
+                self.assertEqual(
+                    request_complete["upstream_format"],
+                    codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
+                )
+                self.write_proxy_event.reset_mock()
+
+    def test_same_format_relay_verification_is_strictly_plan_driven_for_json_and_sse(self):
+        response_body = json.dumps(
+            {
+                "id": "resp_same_format",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }
+        ).encode("utf-8")
+        cases = (
+            (
+                "json",
+                FakeResponse(response_body),
+                False,
+            ),
+            (
+                "sse",
+                FakeSseResponse(
+                    [
+                        (
+                            b'data: {"type":"response.created",'
+                            b'"response":{"id":"resp_same_format"}}\n\n'
+                        ),
+                        (
+                            b'data: {"type":"response.output_text.delta",'
+                            b'"delta":"ok"}\n\n'
+                        ),
+                        (
+                            b'data: {"type":"response.completed",'
+                            b'"response":{"id":"resp_same_format",'
+                            b'"status":"completed","output":[]}}\n\n'
+                        ),
+                        b"",
+                    ]
+                ),
+                True,
+            ),
+        )
+
+        for name, response, caller_stream in cases:
+            with self.subTest(case=name):
+                fake = FakeHandler()
+                usage_capture: dict[str, Any] = {}
+                status = relay_upstream_response(
+                    fake,
+                    response,
+                    "volcengine",
+                    request_id=f"req-same-format-{name}",
+                    model="volc/glm-5.2",
+                    upstream_format="responses",
+                    inbound_format="responses",
+                    caller_stream=caller_stream,
+                    verify_cross_protocol_source=True,
+                    usage_capture=usage_capture,
+                )
+
+                self.assertEqual(status, 200)
+                self.assertNotEqual(fake.wfile.writes, [])
 
     def test_open_upstream_response_consumes_planned_retry_execution(self):
         runtime_facts = codex_proxy.RouteRuntimeFacts(
@@ -3049,6 +3334,10 @@ class RoutingTests(unittest.TestCase):
             request_complete["route_attempt_protocol"],
             codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
         )
+        self.assertEqual(
+            request_complete["upstream_format"],
+            codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
+        )
         self.assertIn(
             codex_proxy.RouteMutation.WIRE_CONVERSION.value,
             request_complete["route_attempt_mutation_summary"],
@@ -3206,6 +3495,10 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             request_complete["executed_upstream_protocol"],
+            codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
+        )
+        self.assertEqual(
+            request_complete["upstream_format"],
             codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
         )
         self.assertEqual(
@@ -5259,6 +5552,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="chat_completions",
             caller_stream=True,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5298,6 +5592,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=True,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5331,6 +5626,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="chat_completions",
             caller_stream=True,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5386,6 +5682,7 @@ class RoutingTests(unittest.TestCase):
                     inbound_format=inbound_format,
                     caller_stream=True,
                     behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                    relay_fixture="transparent_converted",
                     usage_capture={},
                 )
 
@@ -5567,6 +5864,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=False,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5643,6 +5941,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=False,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5700,6 +5999,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=False,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -5776,6 +6076,7 @@ class RoutingTests(unittest.TestCase):
                         inbound_format=inbound_format,
                         caller_stream=True,
                         behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                        relay_fixture="transparent_converted",
                         usage_capture={},
                     )
                     self.assertEqual(status, 200)
@@ -5853,6 +6154,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=True,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
             usage_capture={},
         )
 
@@ -6244,6 +6546,8 @@ class RoutingTests(unittest.TestCase):
                     "subagent_lifecycle_complete": True,
                 },
                 behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
+                relay_fixture="gateway_verified_conversion",
+                lifecycle_final_retry_enabled=True,
             )
 
         written = b"".join(handler.wfile.writes)
@@ -12831,7 +13135,10 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["model"], "glm-5.2")
         self.assertEqual(payload["messages"], [{"role": "user", "content": "hi"}])
         self.assertFalse(payload["stream"])
-        self.assertEqual(relayed[0]["upstream_format"], "chat_completions")
+        self.assertEqual(
+            relayed[0]["relay_execution_plan"].selected_upstream_format,
+            "chat_completions",
+        )
 
     def test_official_auth_injects_codex_subscription_token(self):
         upstream = choose_upstream("gpt-5.5")
@@ -14697,6 +15004,7 @@ class RoutingTests(unittest.TestCase):
             caller_stream=True,
             event_context={"client_id": "omp", "client_inference_source": "header"},
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
         )
 
         self.assertEqual(status, 499)
@@ -20086,6 +20394,7 @@ Execution constraints:
             caller_stream=True,
             event_context=close_context,
             behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture="transparent_converted",
         )
 
         diagnostic_names = {

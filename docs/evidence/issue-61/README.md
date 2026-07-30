@@ -79,6 +79,23 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   described attempt 0; and final `HTTPError` lacked the future-policy relay
   sentinel. Each test failed on `76b02adf` before its corresponding repair and
   passed afterward.
+- Fifth-review repair added public-seam RED coverage for the remaining four
+  review findings. Both compact `auto` directions reproduced a Responses 404
+  followed by a Chat 400 whose final relay still used attempt 0 format; real
+  JSON and SSE relays with same-format `verify=true` reproduced the deleted
+  `behavior_profile` `NameError`; and the RoutePlan dataclass still accepted
+  duplicate primary-attempt constructor fields. The focused RED reported five
+  failing subtests at `013e1daa`. The repaired focused selection then passed
+  6 tests and 4 subtests.
+- Relay tests now use small typed fixtures with literal policy expectations.
+  Converted fixtures are selected explicitly at the call site; the helper does
+  not branch on production profiles or derive expected policy from the tested
+  upstream/inbound formats. A full routing run found one remaining assertion
+  against the deliberately removed `upstream_format` relay keyword
+  (589 passed, 221 subtests passed). Updating that assertion to the required
+  `RelayExecutionPlan.selected_upstream_format` contract produced 590 passed,
+  221 subtests passed; this was a test-contract update, not a production
+  regression.
 
 ## Candidate verification
 
@@ -125,5 +142,47 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   2 unused imports, 83 dead functions, 146 duplicate names, 0 parse errors.
   No new RoutePlan finding remains; baseline findings were not changed or
   allowlisted.
+
+## Fifth-review repair verification
+
+- Full routing: `py -3.13 -m pytest -q tests/test_routing.py` — 590 passed,
+  221 subtests passed in 31.03 seconds.
+- Chat/event/shutdown focused gate:
+  `py -3.13 -m pytest -q tests/test_chat_completions_gateway.py
+  tests/test_proxy_event_logging.py tests/test_proxy_shutdown.py` — 137 passed,
+  10 subtests passed in 23.76 seconds.
+- Final routing plus shutdown gate after removing every duplicated executable
+  primary field, including `request_kind`: 610 passed, 221 subtests passed in
+  34.46 seconds.
+- `/shutdown` has an explicit independent-credential regression: the real
+  endpoint completes while both upstream selection and operational provider
+  authentication materialization are fail-if-called. The directed test passed.
+- The first core attempt used a Python 3.13 parent but inherited Hermes Python
+  3.11 first on `PATH`. It reported 1,481 passed, 1 skipped, 456 subtests and
+  three failures: one shared diagnostic incident-counter ordering failure, plus
+  two nested issue-108 PowerShell replays whose child interpreter rejected the
+  repository's Python 3.13 type-parameter syntax. The diagnostic test passed
+  immediately in isolation; a direct traceback identified the two replay
+  failures as Python 3.11 `SyntaxError`, not route-plan behavior.
+- Authoritative core with
+  `C:\Users\noirb\AppData\Local\Programs\Python\Python313` first on `PATH`:
+  1,484 passed, 1 skipped, 456 subtests passed in 92.29 seconds. A later
+  redundant path-recording run printed the same Python 3.13.11 executable and
+  had only the independently reproduced diagnostic incident-counter flake
+  (1,483 passed); no product or test code was changed to mask it.
+- `py -3.13 -m py_compile src-python/codex_proxy.py tests/test_routing.py
+  tests/test_proxy_shutdown.py` — passed.
+- Static contract scan: `_relay_upstream_response` has no `upstream_format`
+  argument, contains no `behavior_profile` name, and all four production calls
+  pass the required `RelayExecutionPlan`. `RoutePlan` exposes executable
+  primary values only as read-only attempt views; its dataclass fields no
+  longer include the duplicated values.
+- `py -3.13 scripts/report_quality_gates.py --json` — report-only, exit 0:
+  2 unused imports, 83 dead functions, 146 duplicate names, 0 parse errors.
+  The obsolete cross-protocol profile helper was deleted; no new finding was
+  introduced.
+- `git diff --check` — passed apart from the repository's CRLF normalization
+  warnings. The synthetic real-client partition was not run because none of
+  its policy-listed contract-surface paths changed.
 
 No live-provider or manual Desktop evidence is required by issue #61.

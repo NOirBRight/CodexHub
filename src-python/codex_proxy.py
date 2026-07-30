@@ -3082,23 +3082,6 @@ class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
 
-def _verified_cross_protocol_source_format(
-    *,
-    behavior_profile: str | None,
-    upstream_format: str,
-    inbound_format: str,
-) -> str | None:
-    if upstream_format == inbound_format:
-        return None
-    if behavior_profile not in {
-        BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-        BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
-        BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
-    }:
-        return None
-    return upstream_format
-
-
 def _verified_converted_sse_semantic_error(
     source_format: str,
 ) -> UpstreamSseSemanticError:
@@ -11383,6 +11366,7 @@ class RetryExecutionPlan:
 
 @dataclass(frozen=True)
 class RelayExecutionPlan:
+    selected_upstream_format: str
     request_kind: str
     streaming_policy: StreamingPolicy
     usage_policy: UsagePolicy
@@ -11430,6 +11414,7 @@ class RouteAttemptPlan:
         lifecycle_final_retry_enabled: bool,
     ) -> RelayExecutionPlan:
         return RelayExecutionPlan(
+            selected_upstream_format=self.selected_upstream_format,
             request_kind=self.retry.request_kind,
             streaming_policy=self.streaming_policy,
             usage_policy=self.usage_policy,
@@ -11500,11 +11485,9 @@ class RoutePlan:
     model_requested: str | None
     canonical_model: str | None
     upstream_model: str | None
-    authentication_strategy: AuthenticationStrategy
     inbound_protocol: RouteProtocol
     configured_upstream_protocol_name: str
     configured_upstream_protocol: RouteProtocol
-    upstream_protocol: RouteProtocol
     protocol_capability_state: CapabilityState
     protocol_failure_reason: str | None
     attempts: tuple[RouteAttemptPlan, ...]
@@ -11512,28 +11495,17 @@ class RoutePlan:
     capability_manifest_hash: str | None
     capability_manifest_state: CapabilityState
     behavior_profile: str
-    selected_upstream_format: str
-    wire_format_adapter: str
     caller_request_body_mode: CallerRequestBodyMode
     prepared_request_protocol: RouteProtocol
     codex_semantic_adapter: str
-    request_kind: str
     raw_provider_probe: bool
     request_kind_policy: str
-    retry_policy: RetryPolicy
-    retry_eligibility: CapabilityState
-    usage_policy: UsagePolicy
     repair_policy: str
     vision: VisionPlan
     tool_exposure: ToolExposurePolicy
     codex_compatibility_policy: CodexCompatibilityPolicy
     collaboration_backend: CollaborationBackend
     execution_owner: ExecutionOwner
-    streaming_policy: StreamingPolicy
-    transport_policy: TransportPolicy
-    request_mutation_policy: MutationPolicy
-    response_mutation_policy: MutationPolicy
-    sse_mutation_policy: MutationPolicy
     named_mutations: frozenset[RouteMutation]
     official_http_passthrough: bool
     transparent_metered: bool
@@ -11552,6 +11524,123 @@ class RoutePlan:
     @property
     def primary_attempt(self) -> RouteAttemptPlan | None:
         return self.attempts[0] if self.attempts else None
+
+    @property
+    def request_kind(self) -> str:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.retry.request_kind
+            if primary_attempt is not None
+            else RETRY_REQUEST_MAIN_GENERATION
+        )
+
+    @property
+    def authentication_strategy(self) -> AuthenticationStrategy:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.authentication_strategy
+            if primary_attempt is not None
+            else AuthenticationStrategy.UNKNOWN
+        )
+
+    @property
+    def upstream_protocol(self) -> RouteProtocol:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.upstream_protocol
+            if primary_attempt is not None
+            else RouteProtocol.UNKNOWN
+        )
+
+    @property
+    def selected_upstream_format(self) -> str:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.selected_upstream_format
+            if primary_attempt is not None
+            else self.configured_upstream_protocol_name
+        )
+
+    @property
+    def wire_format_adapter(self) -> str:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.wire_format_adapter
+            if primary_attempt is not None
+            else WIRE_TRANSPARENT
+        )
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.retry.policy
+            if primary_attempt is not None
+            else RetryPolicy.GATEWAY_FULL
+        )
+
+    @property
+    def retry_eligibility(self) -> CapabilityState:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.retry.eligibility
+            if primary_attempt is not None
+            else self.protocol_capability_state
+        )
+
+    @property
+    def usage_policy(self) -> UsagePolicy:
+        primary_attempt = self.primary_attempt
+        return (
+            primary_attempt.usage_policy
+            if primary_attempt is not None
+            else UsagePolicy.SYNC_CAPTURE
+        )
+
+    @property
+    def streaming_policy(self) -> StreamingPolicy:
+        primary_attempt = self.primary_attempt
+        if primary_attempt is not None:
+            return primary_attempt.streaming_policy
+        if self.official_http_passthrough:
+            return StreamingPolicy.OFFICIAL_PASSTHROUGH
+        return StreamingPolicy.GATEWAY_ADAPTED
+
+    @property
+    def transport_policy(self) -> TransportPolicy:
+        primary_attempt = self.primary_attempt
+        if primary_attempt is not None:
+            return primary_attempt.transport_policy
+        if self.official_http_passthrough:
+            return TransportPolicy.OFFICIAL_KEEPALIVE
+        return TransportPolicy.STANDARD
+
+    @property
+    def request_mutation_policy(self) -> MutationPolicy:
+        primary_attempt = self.primary_attempt
+        if primary_attempt is not None:
+            return primary_attempt.request_mutation_policy
+        if self.official_http_passthrough:
+            return MutationPolicy.OFFICIAL_PASSTHROUGH
+        return MutationPolicy.GATEWAY_COMPATIBILITY
+
+    @property
+    def response_mutation_policy(self) -> MutationPolicy:
+        primary_attempt = self.primary_attempt
+        if primary_attempt is not None:
+            return primary_attempt.response_mutation_policy
+        if self.official_http_passthrough:
+            return MutationPolicy.OFFICIAL_PASSTHROUGH
+        return MutationPolicy.GATEWAY_COMPATIBILITY
+
+    @property
+    def sse_mutation_policy(self) -> MutationPolicy:
+        primary_attempt = self.primary_attempt
+        if primary_attempt is not None:
+            return primary_attempt.sse_mutation_policy
+        if self.official_http_passthrough:
+            return MutationPolicy.OFFICIAL_PASSTHROUGH
+        return MutationPolicy.GATEWAY_COMPATIBILITY
 
 
 def behavior_profile_for_request(
@@ -12302,15 +12391,9 @@ def route_plan_for_request(
         model_requested=model_requested,
         canonical_model=canonical_model,
         upstream_model=upstream_model,
-        authentication_strategy=authentication_strategy,
         inbound_protocol=_route_protocol(inbound_format),
         configured_upstream_protocol_name=configured_upstream_format,
         configured_upstream_protocol=configured_upstream_protocol,
-        upstream_protocol=(
-            attempts[0].upstream_protocol
-            if attempts
-            else RouteProtocol.UNKNOWN
-        ),
         protocol_capability_state=protocol_capability_state,
         protocol_failure_reason=(
             None
@@ -12326,8 +12409,6 @@ def route_plan_for_request(
         capability_manifest_hash=manifest_hash,
         capability_manifest_state=manifest_state,
         behavior_profile=behavior_profile,
-        selected_upstream_format=selected_upstream_format,
-        wire_format_adapter=wire_adapter,
         caller_request_body_mode=caller_request_body_mode,
         prepared_request_protocol=(
             RouteProtocol.RESPONSES
@@ -12338,23 +12419,14 @@ def route_plan_for_request(
             else _route_protocol(inbound_format)
         ),
         codex_semantic_adapter=codex_semantic_adapter,
-        request_kind=effective_request_kind,
         raw_provider_probe=raw_provider_probe,
         request_kind_policy=request_kind_policy,
-        retry_policy=retry_policy,
-        retry_eligibility=protocol_capability_state,
-        usage_policy=usage_policy,
         repair_policy=repair_policy,
         vision=vision,
         tool_exposure=tool_exposure,
         codex_compatibility_policy=codex_compatibility_policy,
         collaboration_backend=collaboration_backend,
         execution_owner=ExecutionOwner.CODEX_CLIENT,
-        streaming_policy=streaming_policy,
-        transport_policy=transport_policy,
-        request_mutation_policy=mutation_policy,
-        response_mutation_policy=mutation_policy,
-        sse_mutation_policy=mutation_policy,
         named_mutations=frozenset(named_mutations),
         official_http_passthrough=official_http_passthrough,
         transparent_metered=transparent_metered,
@@ -16407,13 +16479,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 nonlocal downstream_sse_started
                 downstream_sse_started = True
 
-            selected_upstream_format = upstream_format
             open_attempt_budget = (
                 primary_route_attempt.retry.new_open_attempt_budget()
             )
             for route_attempt in route_plan.attempts:
                 active_route_attempt = route_attempt
-                selected_upstream_format = route_attempt.selected_upstream_format
+                upstream_format = route_attempt.selected_upstream_format
                 route_attempt_event_fields = _route_attempt_event_fields(route_attempt)
                 proxy_request_context.update(route_attempt_event_fields)
                 if isinstance(adapter_event_context, dict):
@@ -16440,7 +16511,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     while relay_attempt <= max_relay_attempts:
                         seam = _handler_downstream_stream_commit(self)
                         if seam is not None:
-                            seam.set_upstream_format(selected_upstream_format)
+                            seam.set_upstream_format(upstream_format)
                         request, request_observability = upstream_request_for_attempt(
                             route_attempt,
                             lifecycle_final_retry_reason,
@@ -16450,7 +16521,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             with _open_upstream_response(
                                 request,
                                 upstream_name=upstream_name,
-                                upstream_format=selected_upstream_format,
+                                upstream_format=upstream_format,
                                 timeout=(
                                     route_attempt.retry.request_timeout_seconds
                                 ),
@@ -16472,7 +16543,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     upstream_name,
                                     request_id=request_id,
                                     model=model_canonical,
-                                    upstream_format=selected_upstream_format,
                                     inbound_format=inbound_format,
                                     caller_stream=caller_stream,
                                     event_context=adapter_event_context,
@@ -16513,7 +16583,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 stream_model_access_path = _model_access_path_from_event_context(
                                     adapter_event_context,
                                     upstream_name,
-                                    selected_upstream_format,
+                                    upstream_format,
                                 )
                                 retry_safety_class = _retry_safety_class(
                                     retry_exc,
@@ -16528,7 +16598,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     _emit_upstream_retry_suppressed_event(
                                         adapter_event_context,
                                         upstream_name=upstream_name,
-                                        upstream_format=selected_upstream_format,
+                                        upstream_format=upstream_format,
                                         request_kind=request_kind,
                                         attempt=relay_attempt,
                                         max_attempts=max_relay_attempts,
@@ -16569,7 +16639,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 stream_model_access_path = _model_access_path_from_event_context(
                                     adapter_event_context,
                                     upstream_name,
-                                    selected_upstream_format,
+                                    upstream_format,
                                 )
                                 retry_safety_class = _retry_safety_class(
                                     retry_exc,
@@ -16584,7 +16654,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     _emit_upstream_retry_suppressed_event(
                                         adapter_event_context,
                                         upstream_name=upstream_name,
-                                        upstream_format=selected_upstream_format,
+                                        upstream_format=upstream_format,
                                         request_kind=request_kind,
                                         attempt=relay_attempt,
                                         max_attempts=retry_limit,
@@ -16601,7 +16671,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                             model=model,
                                             upstream=upstream_name,
                                             status=502,
-                                            upstream_format=selected_upstream_format,
+                                            upstream_format=upstream_format,
                                             inbound_format=inbound_format,
                                             terminal_seen=False,
                                             completed_seen=True,
@@ -16656,7 +16726,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             _emit_upstream_retry_event(
                                 adapter_event_context,
                                 upstream_name=upstream_name,
-                                upstream_format=selected_upstream_format,
+                                upstream_format=upstream_format,
                                 request_kind=request_kind,
                                 attempt=relay_attempt,
                                 max_attempts=retry_limit,
@@ -16669,7 +16739,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if not emit_downstream_retry(
                                 _downstream_retry_payload(
                                     upstream_name=upstream_name,
-                                    upstream_format=selected_upstream_format,
+                                    upstream_format=upstream_format,
                                     request_kind=request_kind,
                                     attempt=relay_attempt,
                                     max_attempts=retry_limit,
@@ -16688,7 +16758,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         relay_attempt += 1
                     else:
                         raise RuntimeError("unreachable upstream relay retry state")
-                    upstream_format = selected_upstream_format
                     break
                 except HTTPError as exc:
                     next_attempt_index = route_attempt.index + 1
@@ -16708,7 +16777,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         fallback_model_access_path = _model_access_path_from_event_context(
                             adapter_event_context,
                             upstream_name,
-                            selected_upstream_format,
+                            upstream_format,
                         )
                         fallback_retry_safety_class = _retry_safety_class(
                             exc,
@@ -16737,7 +16806,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 provider_hint=provider_hint,
                                 upstream_format=route_plan.configured_upstream_protocol_name,
                                 behavior_profile=behavior_profile,
-                                failed_upstream_format=selected_upstream_format,
+                                failed_upstream_format=upstream_format,
                                 next_upstream_format=next_attempt.selected_upstream_format,
                                 failed_route_attempt_index=(
                                     failed_attempt_snapshot["index"]
@@ -16788,7 +16857,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         _emit_upstream_retry_suppressed_event(
                             adapter_event_context,
                             upstream_name=upstream_name,
-                            upstream_format=selected_upstream_format,
+                            upstream_format=upstream_format,
                             request_kind=request_kind,
                             attempt=relay_attempt,
                             max_attempts=relay_attempts,
@@ -17156,7 +17225,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream_name or "upstream_error",
                     request_id=request_id,
                     model=canonical_model_id(model) if model else None,
-                    upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     caller_stream=caller_stream,
                     event_context=adapter_event_context,
@@ -17572,6 +17640,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         upstream = official_upstream()
         upstream_name = upstream["name"]
         relay_execution_plan = RelayExecutionPlan(
+            selected_upstream_format=RouteProtocol.RESPONSES.value,
             request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
             streaming_policy=StreamingPolicy.GATEWAY_ADAPTED,
             usage_policy=UsagePolicy.SYNC_CAPTURE,
@@ -18836,7 +18905,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         relay_execution_plan: RelayExecutionPlan,
         request_id: str | None = None,
         model: str | None = None,
-        upstream_format: str = "responses",
         inbound_format: str = "responses",
         caller_stream: bool = True,
         event_context: Mapping[str, Any] | None = None,
@@ -18846,6 +18914,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         mark_downstream_sse_started: Callable[[], None] | None = None,
         response_lifecycle_state: dict[str, str] | None = None,
     ) -> int:
+        upstream_format = relay_execution_plan.selected_upstream_format
         request_kind = relay_execution_plan.request_kind
         streaming_policy = relay_execution_plan.streaming_policy
         usage_policy = relay_execution_plan.usage_policy
@@ -18903,16 +18972,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         verified_source_format = (
             upstream_format
             if (
-                verify_cross_protocol_source is True
+                verify_cross_protocol_source
                 and upstream_format != inbound_format
             )
             else None
-            if verify_cross_protocol_source is False
-            else _verified_cross_protocol_source_format(
-                behavior_profile=behavior_profile,
-                upstream_format=upstream_format,
-                inbound_format=inbound_format,
-            )
         )
         usage_context = _usage_observed_context(
             event_context,

@@ -212,13 +212,31 @@ def test_shutdown_endpoint_stops_server() -> None:
     try:
         host, port = server.server_address
         connection = HTTPConnection(host, port, timeout=2)
-        connection.request("POST", "/shutdown")
-        response = connection.getresponse()
-        payload = json.loads(response.read().decode("utf-8"))
+        with (
+            patch.object(
+                codex_proxy,
+                "choose_upstream",
+                side_effect=AssertionError(
+                    "shutdown must not select an upstream"
+                ),
+            ) as choose_upstream,
+            patch.object(
+                codex_proxy,
+                "materialize_operational_authentication",
+                side_effect=AssertionError(
+                    "shutdown must not materialize provider credentials"
+                ),
+            ) as materialize_authentication,
+        ):
+            connection.request("POST", "/shutdown")
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
         connection.close()
 
         assert response.status == 200
         assert payload["ok"] is True
+        choose_upstream.assert_not_called()
+        materialize_authentication.assert_not_called()
 
         thread.join(timeout=2)
         assert not thread.is_alive()
