@@ -283,10 +283,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-deps-v2-test-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-deps-v2-test-
 
       - name: Prepare Tauri resource placeholder
         run: |
@@ -423,10 +422,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-deps-v2-clippy-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-deps-v2-clippy-
 
       - name: Prepare Tauri resource placeholder
         run: |
