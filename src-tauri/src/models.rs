@@ -941,6 +941,8 @@ fn subscription_models_to_metadata_models(
             )),
             upstream_model: Some(subscription_model.slug.clone()),
             tool_surface_strategy: None,
+            capability_profiles: Vec::new(),
+            capability_binding: None,
             aliases: Vec::new(),
             source_kind: Some("official".to_string()),
             locked: true,
@@ -2019,6 +2021,14 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         tool_surface_strategy: override_model
             .tool_surface_strategy
             .or(base.tool_surface_strategy.take()),
+        capability_profiles: if override_model.capability_profiles.is_empty() {
+            std::mem::take(&mut base.capability_profiles)
+        } else {
+            override_model.capability_profiles
+        },
+        capability_binding: override_model
+            .capability_binding
+            .or(base.capability_binding.take()),
         aliases,
         source_kind: override_model.source_kind.or(base.source_kind.take()),
         locked: base.locked || override_model.locked,
@@ -2309,6 +2319,13 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
                     .and_then(nonblank)
             }),
         tool_surface_strategy: None,
+        capability_profiles: Vec::new(),
+        capability_binding: object
+            .get("codex_proxy_metadata")
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("capability_binding"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
         aliases: object
             .get("aliases")
             .and_then(string_array)
@@ -3589,6 +3606,8 @@ for line in sys.stdin:
             Some(["low".to_string(), "medium".to_string(), "high".to_string()].as_slice())
         );
         assert_eq!(models[0].default_reasoning_level.as_deref(), Some("medium"));
+        assert!(models[0].capability_profiles.is_empty());
+        assert!(models[0].capability_binding.is_none());
         let request = server.request();
         assert!(request.starts_with("POST /api/show "));
         assert!(request
@@ -3637,7 +3656,22 @@ for line in sys.stdin:
                   "slug": "glm-5.2",
                   "display_name": "GLM-5.2",
                   "max_context_window": 1000000,
-                  "limit": {"output": 131072}
+                  "limit": {"output": 131072},
+                  "codex_proxy_metadata": {
+                    "capability_binding": {
+                      "schema_version": 1,
+                      "provider": "ollama-cloud",
+                      "model": "glm-5.2",
+                      "upstream_protocol": "responses",
+                      "tool_profile": "responses_beta1_candidate",
+                      "collaboration_backend": "codex_client",
+                      "collaboration_version": "v2",
+                      "capability_manifest_version": "0.1.8-beta.1",
+                      "capability_manifest_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "qualification_state": "unqualified",
+                      "advanced_capabilities_enabled": false
+                    }
+                  }
                 },
                 {"slug": "  "}
               ]
@@ -3673,6 +3707,17 @@ for line in sys.stdin:
             Some(131_072),
             None,
         );
+        let binding = models[1]
+            .capability_binding
+            .as_ref()
+            .expect("catalog capability binding readback");
+        assert_eq!(binding.upstream_protocol, UpstreamFormat::Responses);
+        assert_eq!(binding.collaboration_version.as_deref(), Some("v2"));
+        assert_eq!(
+            binding.qualification_state,
+            crate::QualificationState::Unqualified
+        );
+        assert!(!binding.advanced_capabilities_enabled);
 
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 1);

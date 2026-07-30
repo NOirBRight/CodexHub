@@ -66,7 +66,6 @@ EXTERNAL_PROVIDER_DEFINITIONS: tuple[ExternalProviderDefinition, ...] = (
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "minimax-m3",
-            "kimi-k2.6",
         ),
         default_models={},
         probed_max_output_tokens=8192,

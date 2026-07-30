@@ -112,6 +112,39 @@ test("i18n locales are registered and keep matching translation keys", async () 
   assert.deepEqual(flattenKeys(parseLocaleObject(zhSource)).sort(), flattenKeys(parseLocaleObject(enSource)).sort());
 });
 
+test("provider protocol switches regenerate, read back, and disclose exact Codex restarts", async () => {
+  const [actionsSource, enSource, zhSource, typesSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+    readFile(typesPath, "utf8"),
+  ]);
+  const protocolSwitchSource = actionsSource.match(
+    /export function changedProviderProtocols[\s\S]*?export function verifyCatalogProtocolBindings/,
+  )?.[0] ?? "";
+
+  assert.match(typesSource, /capability_profiles\?: CapabilityProfile\[\]/);
+  assert.match(typesSource, /capability_binding\?: CapabilityBinding/);
+  assert.match(actionsSource, /changedProviderProtocols/);
+  assert.match(
+    protocolSwitchSource,
+    /\.filter\(\(model\) => model\.enabled && model\.gateway_exported !== false\)[\s\S]*\.map\(\(model\) => model\.id\)/,
+  );
+  assert.match(actionsSource, /verifyCatalogProtocolBindings/);
+  assert.match(actionsSource, /const catalogModels = await api\.generateCatalog\(\)/);
+  assert.match(actionsSource, /verifyCatalogProtocolBindings\(catalogModels, protocolSwitches\)/);
+  assert.match(
+    actionsSource,
+    /async function persistProviderProbeResult[\s\S]*await saveProviders\([\s\S]*nextProviders,[\s\S]*true,/,
+  );
+  assert.match(actionsSource, /providers\.protocolChangedRestartLongLivedCodex/);
+  assert.match(enSource, /Quit and reopen Codex App/);
+  assert.match(enSource, /stop and restart any running codex app-server process/);
+  assert.match(enSource, /New Codex CLI processes use the new route immediately/);
+  assert.match(zhSource, /退出并重新打开 Codex App/);
+  assert.match(zhSource, /codex app-server/);
+});
+
 test("history sync is explicit and never participates in startup or settings save", async () => {
   const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
     readFile(appPath, "utf8"),
@@ -1900,7 +1933,7 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(catalogActionsSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
   assert.match(catalogActionsSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
   assert.match(catalogActionsSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
-  assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
+  assert.match(catalogActionsSource, /await saveProviders\(\s*nextProviders,\s*true,/);
   assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
   assert.match(providerDetail, /const dirty = isProviderDirty\(normalizedProvider, draft\);/);

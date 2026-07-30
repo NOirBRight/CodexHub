@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,27 @@ UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
+CAPABILITY_PROFILE_SCHEMA_VERSION = 1
+CAPABILITY_PROFILE_PROTOCOLS = {"responses", "chat_completions"}
+QUALIFICATION_STATES = {
+    "supported",
+    "unsupported",
+    "unqualified",
+    "temporarily_unavailable",
+    "degraded",
+}
+
+
+@dataclass
+class CapabilityProfile:
+    schema_version: int
+    upstream_protocol: str
+    tool_profile: str
+    collaboration_backend: str
+    collaboration_version: str
+    capability_manifest_version: str
+    capability_manifest_hash: str
+    qualification_state: str
 
 
 @dataclass
@@ -64,6 +86,10 @@ class ModelConfig:
     default_reasoning_level: str | None = None
     tool_surface_strategy: str | None = None
     native_responses_tool_codec: str | None = None
+    capability_profiles: tuple[CapabilityProfile, ...] = ()
+    _capability_profiles_explicit: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
     _bundled_tool_surface_strategy: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -222,6 +248,12 @@ def build_external_model_index(
             alias = canonical_model_id(f"{provider_id}/{model_id}")
             tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
             native_responses_tool_codec = _resolved_native_responses_tool_codec(provider, model)
+            capability_binding = select_capability_binding(
+                provider_id,
+                model_id,
+                provider.upstream_format,
+                model.capability_profiles,
+            )
             entry = {
                 "alias": alias,
                 "provider_alias": provider_id,
@@ -233,6 +265,7 @@ def build_external_model_index(
                 "tool_protocol": provider.tool_protocol,
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
+                "capability_binding": capability_binding,
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
                 "supports_developer_role": provider.supports_developer_role,
                 "upstream_model": _upstream_model_name(model),
@@ -304,6 +337,12 @@ def build_ollama_cloud_model_index(
             qualified_alias = canonical_model_id(f"{provider_id}/{model_id}")
             tool_surface_strategy = _resolved_tool_surface_strategy(provider, model)
             native_responses_tool_codec = _resolved_native_responses_tool_codec(provider, model)
+            capability_binding = select_capability_binding(
+                provider_id,
+                model_id,
+                provider.upstream_format,
+                model.capability_profiles,
+            )
             entry = {
                 "alias": qualified_alias,
                 "provider_alias": provider_id,
@@ -315,6 +354,7 @@ def build_ollama_cloud_model_index(
                 "tool_protocol": provider.tool_protocol,
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
+                "capability_binding": capability_binding,
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -388,6 +428,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
     if path.resolve() != DEFAULT_PROVIDERS_PATH.resolve():
         _apply_bundled_tool_surface_strategy_defaults(providers)
         _apply_bundled_native_responses_tool_codec_defaults(providers)
+        _apply_bundled_capability_profile_defaults(providers)
     return providers
 
 
@@ -425,11 +466,15 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 native_responses_tool_codec=_native_responses_tool_codec_field(
                     raw_model.get("native_responses_tool_codec"), default=None
                 ),
+                capability_profiles=_capability_profiles_field(
+                    raw_model.get("capability_profiles")
+                ),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
                 codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
                 gateway_exported=_bool_field(raw_model.get("gateway_exported"), True),
             )
+            model._capability_profiles_explicit = "capability_profiles" in raw_model
             indexed_models.append((model_index, model))
 
         provider_tool_surface_strategy = _tool_surface_strategy_field(
@@ -542,6 +587,38 @@ def _apply_bundled_native_responses_tool_codec_defaults(
                 runtime_model._bundled_native_responses_tool_codec = (
                     bundled_model.native_responses_tool_codec
                 )
+
+
+def _apply_bundled_capability_profile_defaults(
+    runtime_providers: Iterable[ProviderConfig],
+) -> None:
+    runtime_providers = list(runtime_providers)
+    if not any(
+        not model._capability_profiles_explicit
+        for provider in runtime_providers
+        for model in provider.models
+    ):
+        return
+
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError):
+        # Missing reviewed metadata is unqualified by construction.
+        return
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        for runtime_model in runtime_provider.models:
+            if runtime_model._capability_profiles_explicit:
+                continue
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is not None:
+                runtime_model.capability_profiles = bundled_model.capability_profiles
 
 
 def _provider_native_responses_tool_codec_is_explicit(provider: ProviderConfig) -> bool:
@@ -702,6 +779,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                         indent="  ",
                     )
                 )
+            if model._capability_profiles_explicit and not model.capability_profiles:
+                chunks.append("  capability_profiles = []")
             chunks.extend(
                 [
                     _toml_int_line("sort_order", model.sort_order, indent="  "),
@@ -710,6 +789,45 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                     _toml_bool_line("gateway_exported", model.gateway_exported, indent="  "),
                 ]
             )
+            for profile in model.capability_profiles:
+                chunks.extend(
+                    [
+                        "",
+                        "    [[providers.models.capability_profiles]]",
+                        _toml_int_line("schema_version", profile.schema_version, indent="    "),
+                        _toml_string_line(
+                            "upstream_protocol",
+                            profile.upstream_protocol,
+                            indent="    ",
+                        ),
+                        _toml_string_line("tool_profile", profile.tool_profile, indent="    "),
+                        _toml_string_line(
+                            "collaboration_backend",
+                            profile.collaboration_backend,
+                            indent="    ",
+                        ),
+                        _toml_string_line(
+                            "collaboration_version",
+                            profile.collaboration_version,
+                            indent="    ",
+                        ),
+                        _toml_string_line(
+                            "capability_manifest_version",
+                            profile.capability_manifest_version,
+                            indent="    ",
+                        ),
+                        _toml_string_line(
+                            "capability_manifest_hash",
+                            profile.capability_manifest_hash,
+                            indent="    ",
+                        ),
+                        _toml_string_line(
+                            "qualification_state",
+                            profile.qualification_state,
+                            indent="    ",
+                        ),
+                    ]
+                )
 
     atomic_write_text(path, "\n".join(chunks).rstrip() + "\n", encoding="utf-8")
 
@@ -829,6 +947,137 @@ def _upstream_formats_field(value: Any) -> tuple[str, ...]:
         if upstream_format != "auto" and upstream_format not in result:
             result.append(upstream_format)
     return tuple(result)
+
+
+def _capability_profiles_field(value: Any) -> tuple[CapabilityProfile, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        return ()
+    profiles: list[CapabilityProfile] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        profiles.append(
+            CapabilityProfile(
+                schema_version=_int_field(item.get("schema_version"), 0),
+                upstream_protocol=_string_field(item.get("upstream_protocol"))
+                .strip()
+                .lower(),
+                tool_profile=_string_field(item.get("tool_profile")).strip(),
+                collaboration_backend=_string_field(
+                    item.get("collaboration_backend")
+                ).strip(),
+                collaboration_version=_string_field(
+                    item.get("collaboration_version")
+                ).strip(),
+                capability_manifest_version=_string_field(
+                    item.get("capability_manifest_version")
+                ).strip(),
+                capability_manifest_hash=_string_field(
+                    item.get("capability_manifest_hash")
+                )
+                .strip()
+                .lower(),
+                qualification_state=_string_field(item.get("qualification_state"))
+                .strip()
+                .lower(),
+            )
+        )
+    return tuple(profiles)
+
+
+def capability_profile_manifest_hash(
+    provider_id: str,
+    model_id: str,
+    profile: CapabilityProfile,
+) -> str:
+    manifest = {
+        "schema_version": profile.schema_version,
+        "provider_id": canonical_model_id(provider_id),
+        "model_id": canonical_model_id(model_id),
+        "upstream_protocol": profile.upstream_protocol,
+        "tool_profile": profile.tool_profile,
+        "collaboration_backend": profile.collaboration_backend,
+        "collaboration_version": profile.collaboration_version,
+        "capability_manifest_version": profile.capability_manifest_version,
+        "qualification_state": profile.qualification_state,
+    }
+    canonical = json.dumps(
+        manifest,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def select_capability_binding(
+    provider_id: str,
+    model_id: str,
+    upstream_protocol: str,
+    profiles: Iterable[CapabilityProfile],
+) -> dict[str, Any]:
+    provider_id = canonical_model_id(provider_id)
+    model_id = canonical_model_id(model_id)
+    upstream_protocol = _upstream_format_field(upstream_protocol)
+    base = {
+        "schema_version": CAPABILITY_PROFILE_SCHEMA_VERSION,
+        "provider": provider_id,
+        "model": model_id,
+        "upstream_protocol": upstream_protocol,
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": False,
+    }
+    if upstream_protocol not in CAPABILITY_PROFILE_PROTOCOLS:
+        return {**base, "rejection_reason": "unsupported_upstream_protocol_scope"}
+
+    matching = [
+        profile
+        for profile in profiles
+        if profile.upstream_protocol == upstream_protocol
+    ]
+    if not matching:
+        return {**base, "rejection_reason": "missing_route_profile"}
+    if len(matching) != 1:
+        return {**base, "rejection_reason": "conflicting_route_profiles"}
+
+    profile = matching[0]
+    required_values = (
+        profile.tool_profile,
+        profile.collaboration_backend,
+        profile.collaboration_version,
+        profile.capability_manifest_version,
+        profile.capability_manifest_hash,
+    )
+    if (
+        profile.schema_version != CAPABILITY_PROFILE_SCHEMA_VERSION
+        or not all(value.strip() for value in required_values)
+        or profile.qualification_state not in QUALIFICATION_STATES
+        or (profile.collaboration_backend == "none")
+        != (profile.collaboration_version == "none")
+    ):
+        return {**base, "rejection_reason": "invalid_route_profile"}
+
+    expected_hash = capability_profile_manifest_hash(provider_id, model_id, profile)
+    if profile.capability_manifest_hash != expected_hash:
+        return {**base, "rejection_reason": "stale_capability_manifest_hash"}
+
+    binding = {
+        **base,
+        "tool_profile": profile.tool_profile,
+        "collaboration_backend": profile.collaboration_backend,
+        "collaboration_version": profile.collaboration_version,
+        "capability_manifest_version": profile.capability_manifest_version,
+        "capability_manifest_hash": profile.capability_manifest_hash,
+        "qualification_state": profile.qualification_state,
+        "advanced_capabilities_enabled": profile.qualification_state == "supported",
+    }
+    if profile.qualification_state != "supported":
+        binding["rejection_reason"] = (
+            f"qualification_state_{profile.qualification_state}"
+        )
+    return binding
 
 
 def _tool_protocol_field(value: Any) -> str:

@@ -7,11 +7,13 @@ import unittest
 from unittest.mock import patch
 
 from providers_config import (
+    CapabilityProfile,
     DEFAULT_PROVIDERS_PATH,
     ModelConfig,
     ProviderConfig,
     build_external_model_index,
     build_ollama_cloud_model_index,
+    capability_profile_manifest_hash,
     catalog_visible_ollama_cloud_models,
     discover_official_models,
     discover_provider_models,
@@ -23,6 +25,221 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_bundled_ollama_catalog_uses_k27_and_route_qualified_candidate_profiles(self):
+        providers = load_providers(DEFAULT_PROVIDERS_PATH)
+        ollama = next(provider for provider in providers if provider.id == "ollama-cloud")
+        by_id = {model.id: model for model in ollama.models}
+
+        self.assertEqual(ollama.upstream_format, "responses")
+        self.assertEqual(
+            ollama.available_upstream_formats,
+            ("responses", "chat_completions"),
+        )
+        self.assertIn("kimi-k2.7-code", by_id)
+        self.assertNotIn("kimi-k2.6", by_id)
+        self.assertEqual(by_id["kimi-k2.7-code"].context_window, 262144)
+        self.assertEqual(by_id["kimi-k2.7-code"].max_output_tokens, 32768)
+        for model_id in ("glm-5.2", "kimi-k2.7-code"):
+            with self.subTest(model_id=model_id):
+                profiles = {
+                    profile.upstream_protocol: profile
+                    for profile in by_id[model_id].capability_profiles
+                }
+                self.assertEqual(set(profiles), {"responses", "chat_completions"})
+                self.assertEqual(profiles["responses"].qualification_state, "unqualified")
+                self.assertEqual(profiles["responses"].collaboration_version, "v2")
+                self.assertEqual(profiles["chat_completions"].collaboration_backend, "none")
+                self.assertEqual(profiles["chat_completions"].collaboration_version, "none")
+
+        configured, index = build_ollama_cloud_model_index(
+            providers,
+            require_api_key=False,
+        )
+        self.assertTrue(configured)
+        self.assertFalse(index["glm-5.2"]["capability_binding"]["advanced_capabilities_enabled"])
+        self.assertEqual(
+            index["glm-5.2"]["capability_binding"]["upstream_protocol"],
+            "responses",
+        )
+        self.assertEqual(
+            index["kimi-k2.7-code"]["capability_binding"]["qualification_state"],
+            "unqualified",
+        )
+        for model_id in ("glm-5.2", "kimi-k2.7-code"):
+            with self.subTest(binding_hash=model_id):
+                self.assertEqual(
+                    index[model_id]["capability_binding"]["rejection_reason"],
+                    "qualification_state_unqualified",
+                )
+
+    def test_capability_profile_roundtrip_preserves_versioned_route_metadata(self):
+        profile = CapabilityProfile(
+            schema_version=1,
+            upstream_protocol="responses",
+            tool_profile="responses_beta1_candidate",
+            collaboration_backend="codex_client",
+            collaboration_version="v2",
+            capability_manifest_version="0.1.8-beta.1",
+            capability_manifest_hash="",
+            qualification_state="unqualified",
+        )
+        profile.capability_manifest_hash = capability_profile_manifest_hash(
+            "provider",
+            "model",
+            profile,
+        )
+        providers = [
+            ProviderConfig(
+                id="provider",
+                name="Provider",
+                base_url="https://provider.example/v1",
+                api_key="{env:PROVIDER_KEY}",
+                upstream_format="responses",
+                models=[
+                    ModelConfig(
+                        id="model",
+                        capability_profiles=(profile,),
+                    )
+                ],
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            save_providers(providers, path)
+            loaded = load_providers(path)
+            raw_toml = path.read_text(encoding="utf-8")
+
+        self.assertEqual(loaded[0].models[0].capability_profiles, (profile,))
+        self.assertIn("[[providers.models.capability_profiles]]", raw_toml)
+        self.assertIn('upstream_protocol = "responses"', raw_toml)
+        self.assertIn('qualification_state = "unqualified"', raw_toml)
+
+    def test_protocol_switch_selects_only_the_matching_route_profile(self):
+        profiles = []
+        for protocol, tool_profile, backend, version in (
+            ("responses", "responses_beta1_candidate", "codex_client", "v2"),
+            ("chat_completions", "chat_standard_tools", "none", "none"),
+        ):
+            profile = CapabilityProfile(
+                schema_version=1,
+                upstream_protocol=protocol,
+                tool_profile=tool_profile,
+                collaboration_backend=backend,
+                collaboration_version=version,
+                capability_manifest_version="0.1.8-beta.1",
+                capability_manifest_hash="",
+                qualification_state="supported",
+            )
+            profile.capability_manifest_hash = capability_profile_manifest_hash(
+                "ollama-cloud",
+                "glm-5.2",
+                profile,
+            )
+            profiles.append(profile)
+
+        model = ModelConfig(id="glm-5.2", capability_profiles=tuple(profiles))
+        responses_provider = ProviderConfig(
+            id="ollama-cloud",
+            name="Ollama Cloud",
+            base_url="https://ollama.example.test/v1",
+            api_key="secret",
+            upstream_format="responses",
+            models=[model],
+        )
+        chat_provider = ProviderConfig(
+            id="ollama-cloud",
+            name="Ollama Cloud",
+            base_url="https://ollama.example.test/v1",
+            api_key="secret",
+            upstream_format="chat_completions",
+            models=[model],
+        )
+
+        responses = build_ollama_cloud_model_index(
+            [responses_provider],
+            require_api_key=False,
+        )[1]["glm-5.2"]["capability_binding"]
+        chat = build_ollama_cloud_model_index(
+            [chat_provider],
+            require_api_key=False,
+        )[1]["glm-5.2"]["capability_binding"]
+
+        self.assertEqual(responses["tool_profile"], "responses_beta1_candidate")
+        self.assertEqual(responses["collaboration_version"], "v2")
+        self.assertTrue(responses["advanced_capabilities_enabled"])
+        self.assertEqual(chat["tool_profile"], "chat_standard_tools")
+        self.assertEqual(chat["collaboration_backend"], "none")
+        self.assertTrue(chat["advanced_capabilities_enabled"])
+
+    def test_stale_conflicting_missing_and_unqualified_profiles_fail_closed(self):
+        valid = CapabilityProfile(
+            schema_version=1,
+            upstream_protocol="responses",
+            tool_profile="responses_beta1_candidate",
+            collaboration_backend="codex_client",
+            collaboration_version="v2",
+            capability_manifest_version="0.1.8-beta.1",
+            capability_manifest_hash="",
+            qualification_state="supported",
+        )
+        valid.capability_manifest_hash = capability_profile_manifest_hash(
+            "ollama-cloud",
+            "glm-5.2",
+            valid,
+        )
+
+        cases = {
+            "missing": (),
+            "stale": (
+                CapabilityProfile(
+                    **{
+                        **valid.__dict__,
+                        "capability_manifest_hash": "sha256:" + ("0" * 64),
+                    }
+                ),
+            ),
+            "conflicting": (valid, valid),
+            "unqualified": (
+                CapabilityProfile(
+                    **{
+                        **valid.__dict__,
+                        "qualification_state": "unqualified",
+                        "capability_manifest_hash": "",
+                    }
+                ),
+            ),
+        }
+        cases["unqualified"][0].capability_manifest_hash = capability_profile_manifest_hash(
+            "ollama-cloud",
+            "glm-5.2",
+            cases["unqualified"][0],
+        )
+
+        for name, profiles in cases.items():
+            with self.subTest(name=name):
+                provider = ProviderConfig(
+                    id="ollama-cloud",
+                    name="Ollama Cloud",
+                    base_url="https://ollama.example.test/v1",
+                    api_key="secret",
+                    upstream_format="responses",
+                    models=[
+                        ModelConfig(
+                            id="glm-5.2",
+                            capability_profiles=profiles,
+                        )
+                    ],
+                )
+                binding = build_ollama_cloud_model_index(
+                    [provider],
+                    require_api_key=False,
+                )[1]["glm-5.2"]["capability_binding"]
+
+                self.assertFalse(binding["advanced_capabilities_enabled"])
+                self.assertEqual(binding["qualification_state"], "unqualified")
+                self.assertIn("rejection_reason", binding)
+
     def test_bundled_volc_declares_responses_as_its_only_upstream_format(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         volc = next(provider for provider in providers if provider.id == "volc")
@@ -30,7 +247,7 @@ class ProvidersConfigTests(unittest.TestCase):
         self.assertEqual(volc.upstream_format, "responses")
         self.assertEqual(volc.available_upstream_formats, ("responses",))
 
-    def test_bundled_ollama_glm_uses_the_only_deferred_core_model_override(self):
+    def test_bundled_ollama_advanced_metadata_is_not_route_agnostic(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         ollama = next(provider for provider in providers if provider.id == "ollama-cloud")
         configured_models = [
@@ -38,13 +255,12 @@ class ProvidersConfigTests(unittest.TestCase):
         ]
 
         self.assertEqual(ollama.tool_surface_strategy, "eager")
-        self.assertEqual(
-            next(model.tool_surface_strategy for model in ollama.models if model.id == "glm-5.2"),
-            "deferred_core",
+        self.assertIsNone(
+            next(model.tool_surface_strategy for model in ollama.models if model.id == "glm-5.2")
         )
-        self.assertEqual(configured_models, ["glm-5.2"])
+        self.assertEqual(configured_models, [])
 
-    def test_bundled_ollama_models_select_the_exact_strict_apply_patch_native_responses_codec_whitelist(
+    def test_bundled_ollama_models_do_not_select_a_route_agnostic_native_responses_codec(
         self,
     ):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
@@ -57,18 +273,14 @@ class ProvidersConfigTests(unittest.TestCase):
         ]
 
         self.assertTrue(configured)
-        self.assertEqual(configured_models, ["glm-5.2", "kimi-k2.6"])
-        self.assertEqual(index["glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
-        self.assertEqual(index["ollama-cloud/glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
-        self.assertEqual(index["kimi-k2.6"]["native_responses_tool_codec"], "strict_apply_patch")
-        self.assertEqual(
-            index["ollama-cloud/kimi-k2.6"]["native_responses_tool_codec"],
-            "strict_apply_patch",
-        )
+        self.assertEqual(configured_models, [])
+        self.assertEqual(index["glm-5.2"]["native_responses_tool_codec"], "none")
+        self.assertEqual(index["ollama-cloud/glm-5.2"]["native_responses_tool_codec"], "none")
+        self.assertEqual(index["kimi-k2.7-code"]["native_responses_tool_codec"], "none")
         self.assertEqual(index["minimax-m3"]["native_responses_tool_codec"], "none")
 
         external_index = build_external_model_index(providers, require_api_key=False)
-        self.assertEqual(external_index["volc/kimi-k2.6"]["native_responses_tool_codec"], "none")
+        self.assertEqual(external_index["volc/glm-5.2"]["native_responses_tool_codec"], "none")
         self.assertEqual(external_index["minimax-cn/minimax-m3"]["native_responses_tool_codec"], "none")
 
     def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
@@ -449,7 +661,7 @@ enabled = true
         self.assertEqual(ollama["ollama-cloud/glm-5.2"]["tool_surface_strategy"], "deferred_core")
         self.assertEqual(ollama["minimax-m3"]["tool_surface_strategy"], "eager")
 
-    def test_runtime_omission_inherits_bundled_model_strategy_for_ollama_cloud_aliases(self):
+    def test_runtime_omission_does_not_inherit_a_route_agnostic_model_strategy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -475,10 +687,14 @@ api_key = "ollama-secret"
 
         self.assertTrue(configured)
         self.assertTrue(qualified_configured)
-        self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
-        self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+        self.assertEqual(unqualified["tool_surface_strategy"], "eager")
+        self.assertEqual(qualified["tool_surface_strategy"], "eager")
+        self.assertEqual(
+            unqualified["capability_binding"]["qualification_state"],
+            "unqualified",
+        )
 
-    def test_runtime_omission_inherits_only_the_bundled_ollama_codec_whitelist_for_aliases(self):
+    def test_runtime_omission_does_not_inherit_a_route_agnostic_codec_for_aliases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -493,7 +709,7 @@ api_key = "ollama-secret"
   id = "glm-5.2"
 
   [[providers.models]]
-  id = "kimi-k2.6"
+  id = "runtime-only-model"
 
   [[providers.models]]
   id = "minimax-m3"
@@ -505,7 +721,7 @@ api_key = "ollama-secret"
             )
 
             resolved = {}
-            for model_id in ("glm-5.2", "kimi-k2.6", "minimax-m3", "kimi-k2.7-code"):
+            for model_id in ("glm-5.2", "runtime-only-model", "minimax-m3", "kimi-k2.7-code"):
                 configured, unqualified = resolve_ollama_cloud_model(
                     model_id, providers_path=path, require_api_key=False
                 )
@@ -516,18 +732,13 @@ api_key = "ollama-secret"
                 self.assertTrue(qualified_configured)
                 resolved[model_id] = (unqualified, qualified)
 
-        for model_id in ("glm-5.2", "kimi-k2.6"):
-            with self.subTest(model_id=model_id):
-                unqualified, qualified = resolved[model_id]
-                self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
-                self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
-        for model_id in ("minimax-m3", "kimi-k2.7-code"):
+        for model_id in ("glm-5.2", "runtime-only-model", "minimax-m3", "kimi-k2.7-code"):
             with self.subTest(model_id=model_id):
                 unqualified, qualified = resolved[model_id]
                 self.assertEqual(unqualified["native_responses_tool_codec"], "none")
                 self.assertEqual(qualified["native_responses_tool_codec"], "none")
 
-    def test_explicit_runtime_model_none_overrides_the_bundled_ollama_codec_selection(self):
+    def test_explicit_runtime_model_none_preserves_the_fail_closed_codec_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -539,17 +750,17 @@ base_url = "https://ollama.example.test/v1"
 api_key = "ollama-secret"
 
   [[providers.models]]
-  id = "kimi-k2.6"
+  id = "runtime-only-model"
   native_responses_tool_codec = "none"
 """.lstrip(),
                 encoding="utf-8",
             )
 
             configured, unqualified = resolve_ollama_cloud_model(
-                "kimi-k2.6", providers_path=path, require_api_key=False
+                "runtime-only-model", providers_path=path, require_api_key=False
             )
             qualified_configured, qualified = resolve_ollama_cloud_model(
-                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
+                "ollama-cloud/runtime-only-model", providers_path=path, require_api_key=False
             )
 
         self.assertTrue(configured)
@@ -557,7 +768,7 @@ api_key = "ollama-secret"
         self.assertEqual(unqualified["native_responses_tool_codec"], "none")
         self.assertEqual(qualified["native_responses_tool_codec"], "none")
 
-    def test_explicit_runtime_provider_none_overrides_the_bundled_ollama_codec_selection(self):
+    def test_explicit_runtime_provider_none_preserves_the_fail_closed_codec_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -570,16 +781,16 @@ api_key = "ollama-secret"
 native_responses_tool_codec = "none"
 
   [[providers.models]]
-  id = "kimi-k2.6"
+  id = "runtime-only-model"
 """.lstrip(),
                 encoding="utf-8",
             )
 
             configured, unqualified = resolve_ollama_cloud_model(
-                "kimi-k2.6", providers_path=path, require_api_key=False
+                "runtime-only-model", providers_path=path, require_api_key=False
             )
             qualified_configured, qualified = resolve_ollama_cloud_model(
-                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
+                "ollama-cloud/runtime-only-model", providers_path=path, require_api_key=False
             )
 
         self.assertTrue(configured)
@@ -587,7 +798,7 @@ native_responses_tool_codec = "none"
         self.assertEqual(unqualified["native_responses_tool_codec"], "none")
         self.assertEqual(qualified["native_responses_tool_codec"], "none")
 
-    def test_inherited_ollama_strategy_prepares_a_deferred_core_tool_surface(self):
+    def test_inherited_ollama_profile_fails_closed_without_route_agnostic_tool_promotion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "providers.toml"
             path.write_text(
@@ -607,58 +818,15 @@ api_key = "ollama-secret"
                 "glm-5.2", providers_path=path, require_api_key=False
             )
 
-        shell_command = {
-            "type": "function",
-            "name": "shell_command",
-            "description": "Run a PowerShell command.",
-            "parameters": {"type": "object", "properties": {}},
-        }
-        apply_patch = {
-            "type": "custom",
-            "name": "apply_patch",
-            "description": "Apply a unified diff patch.",
-        }
-        namespace = {
-            "type": "namespace",
-            "name": "mcp__synthetic_namespace",
-            "description": "Synthetic namespace used to prove the prepared tool surface.",
-            "tools": [
-                {
-                    "type": "function",
-                    "name": f"synthetic_tool_{index:03d}",
-                    "parameters": {"type": "object", "properties": {}},
-                }
-                for index in range(200)
-            ],
-        }
-        from codex_proxy import compatible_request_body
-
-        prepared = json.loads(
-            compatible_request_body(
-                json.dumps(
-                    {
-                        "model": "glm-5.2",
-                        "input": "Use the visible core tools only.",
-                        "tools": [shell_command, apply_patch, namespace],
-                    }
-                ).encode("utf-8"),
-                {"name": resolved["upstream_name"], **resolved},
-            )
+        self.assertEqual(resolved["tool_surface_strategy"], "eager")
+        self.assertEqual(resolved["native_responses_tool_codec"], "none")
+        self.assertEqual(
+            resolved["capability_binding"]["qualification_state"],
+            "unqualified",
         )
-        prepared_tools = prepared["tools"]
-        prepared_names = {
-            tool["name"]
-            for tool in prepared_tools
-            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
-        }
-
-        self.assertEqual(resolved["tool_surface_strategy"], "deferred_core")
-        self.assertEqual(prepared_tools[:2], [shell_command, apply_patch])
-        self.assertFalse(any(tool.get("type") == "namespace" for tool in prepared_tools))
         self.assertFalse(
-            any(name.startswith("mcp__synthetic_namespace__synthetic_tool_") for name in prepared_names)
+            resolved["capability_binding"]["advanced_capabilities_enabled"]
         )
-        self.assertIn("tool_search", prepared_names)
 
     def test_runtime_omission_inherits_bundled_provider_strategy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1371,13 +1539,11 @@ enabled = true
                 "minimax-cn/MiniMax-M3",
                 "minimax-cn/minimax-m3",
                 "volc/glm-5.2",
-                "volc/kimi-k2.6",
             ],
         )
         self.assertNotIn("volc/minimax-m3", index)
         self.assertEqual(index["minimax-cn/MiniMax-M3"]["upstream_model"], "MiniMax-M3")
         self.assertEqual(index["minimax-cn/minimax-m3"]["alias"], "minimax-cn/MiniMax-M3")
-        self.assertEqual(index["volc/kimi-k2.6"]["upstream_model"], "kimi-k2.6")
         self.assertIsNone(volc_minimax)
 
     def test_default_policy_preserves_provider_qualified_catalog_models(self):
@@ -1389,7 +1555,7 @@ enabled = true
             {
                 "ollama-cloud/glm-5.2",
                 "ollama-cloud/minimax-m3",
-                "ollama-cloud/kimi-k2.6",
+                "ollama-cloud/kimi-k2.7-code",
                 "volc/ark-code-latest",
                 "volc/doubao-seed-2.0-code",
                 "volc/doubao-seed-2.0-pro",
@@ -1397,7 +1563,6 @@ enabled = true
                 "volc/glm-5.2",
                 "volc/deepseek-v4-pro",
                 "volc/deepseek-v4-flash",
-                "volc/kimi-k2.6",
                 "minimax-cn/MiniMax-M3",
             }.issubset(policy.allowed_provider_models)
         )

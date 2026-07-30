@@ -3,6 +3,8 @@ export interface Model {
   display_name?: string | null;
   upstream_model?: string | null;
   tool_surface_strategy?: ToolSurfaceStrategy | null;
+  capability_profiles?: CapabilityProfile[];
+  capability_binding?: CapabilityBinding | null;
   source_kind?: string | null;
   locked?: boolean;
   codex_enabled?: boolean;
@@ -47,6 +49,38 @@ export interface MetadataProvenance {
 export type UpstreamFormat = "auto" | "responses" | "chat_completions" | "anthropic_messages";
 export type ToolProtocol = "auto" | "responses_structured" | "chat_tools" | "text_compat" | "none";
 export type ToolSurfaceStrategy = "eager" | "deferred_core";
+export type QualificationState =
+  | "supported"
+  | "unsupported"
+  | "unqualified"
+  | "temporarily_unavailable"
+  | "degraded";
+
+export interface CapabilityProfile {
+  schema_version: number;
+  upstream_protocol: UpstreamFormat;
+  tool_profile: string;
+  collaboration_backend: string;
+  collaboration_version: string;
+  capability_manifest_version: string;
+  capability_manifest_hash: string;
+  qualification_state: QualificationState;
+}
+
+export interface CapabilityBinding {
+  schema_version: number;
+  provider: string;
+  model: string;
+  upstream_protocol: UpstreamFormat;
+  tool_profile?: string | null;
+  collaboration_backend?: string | null;
+  collaboration_version?: string | null;
+  capability_manifest_version?: string | null;
+  capability_manifest_hash?: string | null;
+  qualification_state: QualificationState;
+  advanced_capabilities_enabled: boolean;
+  rejection_reason?: string | null;
+}
 
 export interface Provider {
   id: string;

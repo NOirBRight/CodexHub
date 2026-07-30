@@ -1517,6 +1517,16 @@ mod tests {
                     ]),
                     default_reasoning_level: Some("high".to_string()),
                     tool_surface_strategy: Some(ToolSurfaceStrategy::DeferredCore),
+                    capability_profiles: vec![crate::CapabilityProfile {
+                        schema_version: 1,
+                        upstream_protocol: UpstreamFormat::Responses,
+                        tool_profile: "responses_beta1_candidate".to_string(),
+                        collaboration_backend: "codex_client".to_string(),
+                        collaboration_version: "v2".to_string(),
+                        capability_manifest_version: "0.1.8-beta.1".to_string(),
+                        capability_manifest_hash: format!("sha256:{}", "a".repeat(64)),
+                        qualification_state: crate::QualificationState::Unqualified,
+                    }],
                     sort_order: Some(1),
                     enabled: true,
                     ..Model::default()
@@ -1565,6 +1575,9 @@ mod tests {
         assert!(written.contains("\"xhigh\""));
         assert!(written.contains("default_reasoning_level = \"high\""));
         assert!(written.contains("tool_surface_strategy = \"deferred_core\""));
+        assert!(written.contains("[[providers.models.capability_profiles]]"));
+        assert!(written.contains("upstream_protocol = \"responses\""));
+        assert!(written.contains("qualification_state = \"unqualified\""));
     }
 
     #[test]

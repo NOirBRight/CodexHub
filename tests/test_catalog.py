@@ -29,7 +29,6 @@ class CatalogPolicyTests(unittest.TestCase):
                 "deepseek-v4-pro": "DeepSeek V4 Pro",
                 "deepseek-v4-flash": "DeepSeek V4 Flash",
                 "gemini-3-flash-preview": "Gemini 3 Flash Preview",
-                "kimi-k2.6": "Kimi K2.6",
             },
             official_models={"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"},
             allowed_ollama_cloud_models={
@@ -74,8 +73,25 @@ class CatalogPolicyTests(unittest.TestCase):
         policy = load_policy(POLICY_PATH)
 
         self.assertTrue(should_include_external_provider_model("volc/minimax-m3", policy))
+        self.assertTrue(
+            should_include_external_provider_model("ollama-cloud/kimi-k2.6", policy),
+            "generic discovery remains truthful even though K2.6 is no longer a bundled seed",
+        )
         self.assertFalse(should_include_external_provider_model("volc/qwen3-embedding", policy))
         self.assertFalse(should_include_external_provider_model("ollama-cloud/glm-5.1", policy))
+
+    def test_real_policy_uses_k27_without_a_static_k26_seed(self):
+        policy = load_policy(POLICY_PATH)
+
+        self.assertIn("kimi-k2.7-code", policy.allowed_ollama_cloud_models)
+        self.assertIn("ollama-cloud/kimi-k2.7-code", policy.allowed_provider_models)
+        self.assertNotIn("kimi-k2.6", policy.allowed_ollama_cloud_models)
+        self.assertFalse(
+            any("k2.6" in model_id or "kimik26" in model_id for model_id in policy.allowed_provider_models)
+        )
+        self.assertFalse(
+            any("k2.6" in model_id or "kimik26" in model_id for model_id in policy.display_names)
+        )
 
     def test_provider_namespace_tags_are_not_base_matched(self):
         policy = CatalogPolicy(

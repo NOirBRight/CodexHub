@@ -59,6 +59,57 @@ type ProviderCatalogActionOptions = {
   updateToastWithError: (toastId: string, err: unknown) => void;
 };
 
+type ProviderProtocolSwitch = {
+  providerId: string;
+  upstreamProtocol: Exclude<Provider["upstream_format"], null | undefined | "auto">;
+  modelIds: string[];
+};
+
+export function changedProviderProtocols(
+  currentProviders: Provider[],
+  nextProviders: Provider[],
+): ProviderProtocolSwitch[] {
+  const currentById = new Map(currentProviders.map((provider) => [provider.id, provider]));
+  return nextProviders.flatMap((provider) => {
+    const current = currentById.get(provider.id);
+    const upstreamProtocol = provider.upstream_format;
+    if (
+      !current
+      || current.upstream_format === upstreamProtocol
+      || !upstreamProtocol
+      || upstreamProtocol === "auto"
+    ) {
+      return [];
+    }
+    return [{
+      providerId: provider.id,
+      upstreamProtocol,
+      modelIds: provider.models
+        .filter((model) => model.enabled && model.gateway_exported !== false)
+        .map((model) => model.id),
+    }];
+  });
+}
+
+export function verifyCatalogProtocolBindings(
+  catalogModels: Model[],
+  protocolSwitches: ProviderProtocolSwitch[],
+) {
+  for (const protocolSwitch of protocolSwitches) {
+    for (const modelId of protocolSwitch.modelIds) {
+      const binding = catalogModels.find((model) => (
+        model.capability_binding?.provider === protocolSwitch.providerId
+        && model.capability_binding.model === modelId
+      ))?.capability_binding;
+      if (!binding || binding.upstream_protocol !== protocolSwitch.upstreamProtocol) {
+        throw new Error(
+          `Catalog readback did not bind ${protocolSwitch.providerId}/${modelId} to ${protocolSwitch.upstreamProtocol}`,
+        );
+      }
+    }
+  }
+}
+
 export function useProviderCatalogActions({
   form,
   officialModelOrderDraft,
@@ -98,9 +149,13 @@ export function useProviderCatalogActions({
   async function updateGatewayAfterCatalog(
     activeSettings?: Settings | null,
     toastId?: string,
-    options?: { catalogAlreadyPublished?: boolean },
+    options?: {
+      catalogAlreadyPublished?: boolean;
+      protocolSwitches?: ProviderProtocolSwitch[];
+    },
   ) {
     const catalogAlreadyPublished = options?.catalogAlreadyPublished ?? false;
+    const protocolSwitches = options?.protocolSwitches ?? [];
     if (toastId && !catalogAlreadyPublished) {
       updateToast(toastId, {
         action: null,
@@ -109,7 +164,8 @@ export function useProviderCatalogActions({
       });
     }
     if (!catalogAlreadyPublished) {
-      await api.generateCatalog();
+      const catalogModels = await api.generateCatalog();
+      verifyCatalogProtocolBindings(catalogModels, protocolSwitches);
     }
     const syncSettings = activeSettings ?? settingsDraft ?? settings;
     let syncResult: GatewayClientSyncSummary | null = null;
@@ -158,6 +214,7 @@ export function useProviderCatalogActions({
     toastId?: string,
   ) {
     setBusy("save");
+    const protocolSwitches = changedProviderProtocols(providers, next);
     const activeToastId = toastId ?? showToast(
       successMessage ? `${successMessage}...` : t("providers.updateProviderCatalog"),
       "loading",
@@ -167,11 +224,19 @@ export function useProviderCatalogActions({
       setProviders(saved);
       onProvidersChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
-      if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
+      const mustRegenerateCatalog = regenerateCatalog || protocolSwitches.length > 0;
+      if (mustRegenerateCatalog) {
+        syncResult = await updateGatewayAfterCatalog(
+          undefined,
+          activeToastId,
+          { protocolSwitches },
+        );
       }
+      const completedMessage = protocolSwitches.length
+        ? t("providers.protocolChangedRestartLongLivedCodex")
+        : successMessage ?? t("providers.providerCatalogUpdated");
       const toastMessage = catalogSyncToastMessage(
-        successMessage ?? t("providers.providerCatalogUpdated"),
+        completedMessage,
         syncResult,
       );
       if (syncResult?.failed) {
@@ -359,13 +424,19 @@ export function useProviderCatalogActions({
     );
     setProviders(nextProviders);
     try {
-      const saved = await api.saveProviders(nextProviders);
-      setProviders(saved);
-      onProvidersChanged?.(saved);
+      const detectedFormat = probeDetectedEndpointFormat(result);
+      await saveProviders(
+        nextProviders,
+        true,
+        detectedFormat
+          ? t("providers.probeCompleted", {
+            format: upstreamFormatLabel(detectedFormat, tr),
+          })
+          : t("providers.probeNoSupportedEndpoint"),
+        toastId,
+      );
       setError(null);
-      updateProbeToast(toastId, result);
     } catch (err) {
-      updateToastWithError(toastId, err);
       setError(messageFromError(err));
     }
   }

@@ -4,6 +4,8 @@ name = "Ollama Cloud"
 base_url = "https://ollama.com/v1"
 api_key = "{env:OLLAMA_API_KEY}"
 display_prefix = "Ollama"
+upstream_format = "responses"
+available_upstream_formats = ["responses", "chat_completions"]
 # Set true only when an external provider returns truthful cached-input-token counts.
 reports_cached_input_tokens = false
 sort_order = 1
@@ -24,17 +26,54 @@ enabled = true
   max_output_tokens = 131072
   sort_order = 2
   enabled = true
-  tool_surface_strategy = "deferred_core"
-  native_responses_tool_codec = "strict_apply_patch"
+
+    [[providers.models.capability_profiles]]
+    schema_version = 1
+    upstream_protocol = "responses"
+    tool_profile = "responses_beta1_candidate"
+    collaboration_backend = "codex_client"
+    collaboration_version = "v2"
+    capability_manifest_version = "0.1.8-beta.1"
+    capability_manifest_hash = "sha256:f3a627a5fd76fce2aae99cb3fe9585e0eb33387b38fad9ecaf2a51c4f3c6b60a"
+    qualification_state = "unqualified"
+
+    [[providers.models.capability_profiles]]
+    schema_version = 1
+    upstream_protocol = "chat_completions"
+    tool_profile = "chat_standard_tools"
+    collaboration_backend = "none"
+    collaboration_version = "none"
+    capability_manifest_version = "0.1.8-beta.2"
+    capability_manifest_hash = "sha256:0543e40bf64922a1f4c451bee077e9fbf244262689ffdc2b25cc7bf1d27dd567"
+    qualification_state = "unqualified"
 
   [[providers.models]]
-  id = "kimi-k2.6"
-  display_name = "Ollama Kimi K2.6"
-  context_window = 256000
+  id = "kimi-k2.7-code"
+  display_name = "Ollama Kimi K2.7 Code"
+  context_window = 262144
   max_output_tokens = 32768
   sort_order = 3
   enabled = true
-  native_responses_tool_codec = "strict_apply_patch"
+
+    [[providers.models.capability_profiles]]
+    schema_version = 1
+    upstream_protocol = "responses"
+    tool_profile = "responses_beta1_candidate"
+    collaboration_backend = "codex_client"
+    collaboration_version = "v2"
+    capability_manifest_version = "0.1.8-beta.1"
+    capability_manifest_hash = "sha256:7baa6d6cc39ba2ae9c4d45c94291c539c149816b7dd32f849cb25e9c10014e32"
+    qualification_state = "unqualified"
+
+    [[providers.models.capability_profiles]]
+    schema_version = 1
+    upstream_protocol = "chat_completions"
+    tool_profile = "chat_standard_tools"
+    collaboration_backend = "none"
+    collaboration_version = "none"
+    capability_manifest_version = "0.1.8-beta.2"
+    capability_manifest_hash = "sha256:ac797cd0e0821ff7aca60b2bfe8b4eb2dc946b2c6dce197996d50b24b2e92133"
+    qualification_state = "unqualified"
 
 [[providers]]
 id = "volc"
@@ -62,14 +101,6 @@ enabled = true
   max_output_tokens = 8192
   sort_order = 2
   enabled = false
-
-  [[providers.models]]
-  id = "kimi-k2.6"
-  display_name = "Volc Kimi K2.6"
-  context_window = 256000
-  max_output_tokens = 8192
-  sort_order = 3
-  enabled = true
 
 [[providers]]
 id = "minimax-cn"
@@ -136,78 +167,71 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "xopkimik26"
-  display_name = "Xunfei Kimi-K2.6"
-  context_window = 256000
-  sort_order = 6
-  enabled = true
-
-  [[providers.models]]
   id = "xopglm51"
   display_name = "Xunfei GLM-5.1"
   context_window = 200000
-  sort_order = 7
+  sort_order = 6
   enabled = true
 
   [[providers.models]]
   id = "xminimaxm25"
   display_name = "Xunfei MiniMax-M2.5"
   context_window = 128000
-  sort_order = 8
+  sort_order = 7
   enabled = true
 
   [[providers.models]]
   id = "xopkimik25"
   display_name = "Xunfei KIMI-K2.5"
   context_window = 128000
-  sort_order = 9
+  sort_order = 8
   enabled = true
 
   [[providers.models]]
   id = "xopdeepseekv32"
   display_name = "Xunfei DeepSeek-V3.2"
   context_window = 128000
-  sort_order = 10
+  sort_order = 9
   enabled = true
 
   [[providers.models]]
   id = "xsparkx2flash"
   display_name = "Xunfei Spark-X2-Flash"
   context_window = 256000
-  sort_order = 11
+  sort_order = 10
   enabled = true
 
   [[providers.models]]
   id = "xopqwen36v35b"
   display_name = "Xunfei Qwen3.6-35B-A3B"
   context_window = 128000
-  sort_order = 12
+  sort_order = 11
   enabled = true
 
   [[providers.models]]
   id = "xopglmv47flash"
   display_name = "Xunfei GLM-4.7-Flash"
   context_window = 128000
-  sort_order = 13
+  sort_order = 12
   enabled = true
 
   [[providers.models]]
   id = "xopqwen35v35b"
   display_name = "Xunfei Qwen3.5-35B-A3B"
   context_window = 128000
-  sort_order = 14
+  sort_order = 13
   enabled = true
 
   [[providers.models]]
   id = "xop3qwencodernext"
   display_name = "Xunfei Qwen3-Coder-Next-FP8"
   context_window = 256000
-  sort_order = 15
+  sort_order = 14
   enabled = true
 
   [[providers.models]]
   id = "xopqwen35397b"
   display_name = "Xunfei Qwen3.5-397B-A17B"
   context_window = 256000
-  sort_order = 16
+  sort_order = 15
   enabled = true

@@ -10,7 +10,13 @@ from urllib.error import HTTPError
 from catalog import CatalogPolicy
 import catalog_sync
 from catalog_sync import build_codex_catalog, diff_model_state, discover_ollama_ids
-from providers_config import ModelConfig, ProviderConfig
+from providers_config import (
+    CapabilityProfile,
+    ModelConfig,
+    ProviderConfig,
+    build_ollama_cloud_model_index,
+    capability_profile_manifest_hash,
+)
 
 
 class CatalogSyncTests(unittest.TestCase):
@@ -145,6 +151,115 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["input_modalities"], ["text", "image"])
         self.assertEqual(model["codex_proxy_metadata"]["context_source"], "providers_toml")
         self.assertEqual(model["codex_proxy_metadata"]["max_output_source"], "providers_toml")
+
+    def test_catalog_projects_only_the_active_route_capability_binding(self):
+        profiles = []
+        for protocol, tool_profile, backend, version in (
+            ("responses", "responses_beta1_candidate", "codex_client", "v2"),
+            ("chat_completions", "chat_standard_tools", "none", "none"),
+        ):
+            profile = CapabilityProfile(
+                schema_version=1,
+                upstream_protocol=protocol,
+                tool_profile=tool_profile,
+                collaboration_backend=backend,
+                collaboration_version=version,
+                capability_manifest_version="0.1.8-beta.1",
+                capability_manifest_hash="",
+                qualification_state="supported",
+            )
+            profile.capability_manifest_hash = capability_profile_manifest_hash(
+                "ollama-cloud",
+                "glm-5.2",
+                profile,
+            )
+            profiles.append(profile)
+
+        def build_for(protocol):
+            provider = ProviderConfig(
+                id="ollama-cloud",
+                name="Ollama Cloud",
+                base_url="https://ollama.example.test/v1",
+                api_key="secret",
+                upstream_format=protocol,
+                models=[
+                    ModelConfig(
+                        id="glm-5.2",
+                        capability_profiles=tuple(profiles),
+                    )
+                ],
+            )
+            runtime_model = build_ollama_cloud_model_index(
+                [provider],
+                require_api_key=False,
+            )[1]["glm-5.2"]
+            metadata = catalog_sync.ollama_provider_model_metadata([runtime_model])
+            catalog = build_codex_catalog(
+                [],
+                ["glm-5.2"],
+                self.policy,
+                "0.145.0",
+                ollama_model_metadata=metadata,
+                use_ollama_policy_allowlist=False,
+            )
+            return next(
+                model for model in catalog["models"] if model["slug"] == "glm-5.2"
+            )
+
+        responses = build_for("responses")
+        chat = build_for("chat_completions")
+
+        self.assertEqual(
+            responses["codex_proxy_metadata"]["capability_binding"]["upstream_protocol"],
+            "responses",
+        )
+        self.assertEqual(
+            responses["codex_proxy_metadata"]["capability_binding"]["collaboration_version"],
+            "v2",
+        )
+        self.assertEqual(
+            chat["codex_proxy_metadata"]["capability_binding"]["upstream_protocol"],
+            "chat_completions",
+        )
+        self.assertEqual(
+            chat["codex_proxy_metadata"]["capability_binding"]["collaboration_backend"],
+            "none",
+        )
+
+    def test_discovery_capabilities_cannot_promote_advanced_catalog_metadata(self):
+        catalog = build_codex_catalog(
+            [],
+            ["discovered-model"],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={},
+                auto_include_ollama_cloud=True,
+            ),
+            "0.145.0",
+            ollama_model_metadata={
+                "discovered-model": {
+                    "capabilities": [
+                        "vision",
+                        "code_mode",
+                        "tool_search",
+                        "collaboration_v2",
+                    ],
+                    "qualification_state": "supported",
+                    "advanced_capabilities_enabled": True,
+                }
+            },
+        )
+
+        model = catalog["models"][0]
+        self.assertEqual(model["input_modalities"], ["text", "image"])
+        binding = model["codex_proxy_metadata"]["capability_binding"]
+        self.assertEqual(binding["qualification_state"], "unqualified")
+        self.assertFalse(binding["advanced_capabilities_enabled"])
+        self.assertEqual(binding["rejection_reason"], "missing_route_profile")
+        self.assertNotIn("tool_mode", model)
+        self.assertNotIn("multi_agent_version", model)
+        self.assertFalse(model["supports_search_tool"])
 
     def test_build_catalog_applies_official_model_sort_order(self):
         official = [
@@ -1647,6 +1762,75 @@ class CatalogSyncTests(unittest.TestCase):
         catalog = written[catalog_sync.GENERATED_CATALOG_FILENAME]
         priorities_by_slug = {model["slug"]: model["priority"] for model in catalog["models"]}
         self.assertEqual(priorities_by_slug, {"volc/glm-5.2": 200, "volc/minimax-m3": 201})
+
+    def test_sync_catalog_writes_and_reads_back_the_switched_protocol_binding(self):
+        profile = CapabilityProfile(
+            schema_version=1,
+            upstream_protocol="chat_completions",
+            tool_profile="chat_standard_tools",
+            collaboration_backend="none",
+            collaboration_version="none",
+            capability_manifest_version="0.1.8-beta.2",
+            capability_manifest_hash="",
+            qualification_state="supported",
+        )
+        profile.capability_manifest_hash = capability_profile_manifest_hash(
+            "ollama-cloud",
+            "kimi-k2.7-code",
+            profile,
+        )
+        providers = [
+            ProviderConfig(
+                id="ollama-cloud",
+                name="Ollama Cloud",
+                base_url="https://ollama.example.test/v1",
+                api_key="",
+                upstream_format="chat_completions",
+                models=[
+                    ModelConfig(
+                        id="kimi-k2.7-code",
+                        capability_profiles=(profile,),
+                    )
+                ],
+            )
+        ]
+        policy = CatalogPolicy(
+            denied_models=set(),
+            denied_substrings=set(),
+            display_names={"kimi-k2.7-code": "Kimi K2.7 Code"},
+            allowed_provider_models=("ollama-cloud/kimi-k2.7-code",),
+        )
+        written: dict[str, dict] = {}
+
+        def capture_write(path: Path, data: dict) -> None:
+            written[path.name] = data
+
+        with (
+            patch("catalog_sync.catalog_cache_is_fresh", return_value=False),
+            patch("catalog_sync.load_policy", return_value=policy),
+            patch("catalog_sync.load_include_official_models", return_value=False),
+            patch("catalog_sync.load_official_model_sort_order", return_value=[]),
+            patch("catalog_sync.load_official_disabled_models", return_value=[]),
+            patch("catalog_sync.load_fallback_catalog_models", return_value=[]),
+            patch("catalog_sync.read_client_version", return_value="0.145.0"),
+            patch(
+                "catalog_sync.discover_ollama_ids",
+                return_value=(["kimi-k2.7-code"], "test", "ok", ""),
+            ),
+            patch("catalog_sync.load_providers", return_value=providers),
+            patch("catalog_sync.discover_ollama_model_metadata", return_value=({}, "")),
+            patch("catalog_sync.load_previous_visible_models", return_value=set()),
+            patch("catalog_sync.write_json", side_effect=capture_write),
+        ):
+            state = catalog_sync.sync_catalog()
+
+        self.assertEqual(state["visible_models"], ["kimi-k2.7-code"])
+        model = written[catalog_sync.GENERATED_CATALOG_FILENAME]["models"][0]
+        binding = model["codex_proxy_metadata"]["capability_binding"]
+        self.assertEqual(binding["upstream_protocol"], "chat_completions")
+        self.assertEqual(binding["tool_profile"], "chat_standard_tools")
+        self.assertEqual(binding["collaboration_backend"], "none")
+        self.assertTrue(binding["advanced_capabilities_enabled"])
 
     def test_dynamic_ollama_metadata_overrides_static_context_and_modalities(self):
         metadata = {

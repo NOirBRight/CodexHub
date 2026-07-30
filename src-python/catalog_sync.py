@@ -104,11 +104,6 @@ OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
         "max_output_tokens": 131072,
         "max_output_source": "https://docs.z.ai",
     },
-    "kimi-k2.6": {
-        "context_window": 262144,
-        "max_output_tokens": 32768,
-        "max_output_source": "https://ollama.com/library/kimi-k2.6",
-    },
     "kimi-k2.7-code": {
         "context_window": 262144,
         "max_output_tokens": 32768,
@@ -130,6 +125,22 @@ OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
         "max_output_source": "https://api-docs.deepseek.com/quick_start/pricing",
     },
 }
+
+
+def _unqualified_capability_binding(
+    provider: str,
+    model: str,
+    upstream_protocol: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "provider": provider,
+        "model": model,
+        "upstream_protocol": upstream_protocol,
+        "qualification_state": "unqualified",
+        "advanced_capabilities_enabled": False,
+        "rejection_reason": "missing_route_profile",
+    }
 
 
 MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
@@ -1091,6 +1102,10 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
         if isinstance(input_modalities, (list, tuple)) and input_modalities:
             entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
 
+        capability_binding = model.get("capability_binding")
+        if isinstance(capability_binding, dict):
+            entry["capability_binding"] = deepcopy(capability_binding)
+
         if entry:
             metadata[slug] = entry
     return metadata
@@ -1382,6 +1397,15 @@ def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: 
         model["input_modalities"] = ["text", "image"] if "vision" in capabilities else ["text"]
 
     proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
+    capability_binding = dynamic_metadata.get("capability_binding")
+    if isinstance(capability_binding, dict):
+        proxy_metadata["capability_binding"] = deepcopy(capability_binding)
+    else:
+        proxy_metadata["capability_binding"] = _unqualified_capability_binding(
+            "ollama-cloud",
+            slug,
+            "auto",
+        )
     if context_source:
         proxy_metadata["context_source"] = context_source
     if isinstance(max_output_source, str) and max_output_source:
@@ -1457,6 +1481,14 @@ def build_external_provider_model(
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "auto"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
+            "capability_binding": deepcopy(
+                external_model.get("capability_binding")
+                or _unqualified_capability_binding(
+                    external_model["provider_alias"],
+                    external_model["upstream_model"],
+                    external_model.get("upstream_format", "auto"),
+                )
+            ),
         }
     )
     context_source = external_model.get("context_source")

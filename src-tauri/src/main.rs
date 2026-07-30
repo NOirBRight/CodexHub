@@ -57,6 +57,10 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_profiles: Vec<CapabilityProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_binding: Option<CapabilityBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub source_kind: Option<String>,
     #[serde(default)]
@@ -94,6 +98,8 @@ impl Default for Model {
             display_name: None,
             upstream_model: None,
             tool_surface_strategy: None,
+            capability_profiles: Vec::new(),
+            capability_binding: None,
             aliases: Vec::new(),
             source_kind: None,
             locked: false,
@@ -135,6 +141,50 @@ pub struct MetadataProvenance {
     pub confidence: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityProfile {
+    pub schema_version: u32,
+    pub upstream_protocol: UpstreamFormat,
+    pub tool_profile: String,
+    pub collaboration_backend: String,
+    pub collaboration_version: String,
+    pub capability_manifest_version: String,
+    pub capability_manifest_hash: String,
+    pub qualification_state: QualificationState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityBinding {
+    pub schema_version: u32,
+    pub provider: String,
+    pub model: String,
+    pub upstream_protocol: UpstreamFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_manifest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_manifest_hash: Option<String>,
+    pub qualification_state: QualificationState,
+    pub advanced_capabilities_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationState {
+    Supported,
+    Unsupported,
+    Unqualified,
+    TemporarilyUnavailable,
+    Degraded,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -162,7 +212,7 @@ pub struct Provider {
     pub models: Vec<Model>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamFormat {
     Auto,

@@ -456,6 +456,7 @@ const zhCN = {
     providerNameRequired: "供应商名称必填",
     providerOrderSaved: "供应商顺序已保存",
     providerSaved: "{{name}} 已保存",
+    protocolChangedRestartLongLivedCodex: "供应商协议已更改，目录绑定已重新生成。请退出并重新打开 Codex App，并停止后重新启动任何正在运行的 codex app-server 进程。新启动的 Codex CLI 进程会立即使用新路由。",
     probeCompleted: "探测完成：{{format}}",
     probeNoSupportedEndpoint: "探测完成：未检测到可用端点",
     reasoningLevels: "推理级别",

@@ -457,6 +457,7 @@ const enUS = {
     providerNameRequired: "Provider name is required",
     providerOrderSaved: "Provider order saved",
     providerSaved: "{{name}} saved",
+    protocolChangedRestartLongLivedCodex: "Provider protocol changed and the catalog binding was regenerated. Quit and reopen Codex App, and stop and restart any running codex app-server process. New Codex CLI processes use the new route immediately.",
     probeCompleted: "Probe completed: {{format}}",
     probeNoSupportedEndpoint: "Probe completed: no supported endpoint detected",
     reasoningLevels: "Reasoning levels",
