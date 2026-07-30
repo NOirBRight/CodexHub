@@ -1012,7 +1012,7 @@ VISION_PROXY_DISABLED = "disabled"
 VISION_PROXY_CODEX_APP_ADAPTER = "codex_app_adapter"
 VISION_PROXY_TRANSPARENT_OVERLAY = "transparent_overlay"
 
-ROUTE_CAPABILITY_MANIFEST_VERSION = "codexhub.route-capabilities.v1"
+ROUTE_PLAN_SCHEMA_VERSION = "codexhub.route-plan.v1"
 
 
 class CapabilityState(str, Enum):
@@ -1024,7 +1024,14 @@ class CapabilityState(str, Enum):
 class RouteProtocol(str, Enum):
     RESPONSES = "responses"
     CHAT_COMPLETIONS = "chat_completions"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
     AUTO = "auto"
+    UNKNOWN = "unknown"
+
+
+class AttemptRequestBodyMode(str, Enum):
+    PREPARED_DIRECT = "prepared_direct"
+    CONVERT_RESPONSES_TO_CHAT = "convert_responses_to_chat"
 
 
 class AuthenticationStrategy(str, Enum):
@@ -1040,7 +1047,19 @@ class ToolExposureMode(str, Enum):
     OFFICIAL_NATIVE = "official_native"
     NATIVE_DEFERRED_SEARCH_CANDIDATE = "native_deferred_search_candidate"
     NATIVE_NO_SEARCH_CANDIDATE = "native_no_search_candidate"
+    UNSUPPORTED = "unsupported"
     UNKNOWN = "unknown"
+
+
+class VisionAction(str, Enum):
+    PASS_THROUGH = "pass_through"
+    PROXY = "proxy"
+    REJECT = "reject"
+
+
+class VisionNetworkAction(str, Enum):
+    NONE = "none"
+    IMAGE_PROXY = "image_proxy"
 
 
 class CollaborationBackend(str, Enum):
@@ -1085,6 +1104,9 @@ class RouteMutation(str, Enum):
     HARD_CODED_SCHEMA_INJECTION = "hard_coded_schema_injection"
     OFFICIAL_TOOL_SEARCH_PRESERVATION = "official_tool_search_preservation"
     SYNTHETIC_TERMINAL_FAILURE = "synthetic_terminal_failure"
+    IMAGE_CONTENT_REPLACEMENT = "image_content_replacement"
+    IMAGE_UNSUPPORTED_REJECTION = "image_unsupported_rejection"
+    UNSUPPORTED_PROTOCOL_REJECTION = "unsupported_protocol_rejection"
 
 
 RETRY_FAILURE_QUICK_TRANSIENT = "quick_transient"
@@ -1328,6 +1350,14 @@ IMAGE_PROXY_CACHE_LOCK = threading.Lock()
 
 class ImageProxyError(Exception):
     """Raised when an image proxy request cannot be prepared safely."""
+
+
+class UnsupportedRouteProtocolError(ValueError):
+    """Raised when a configured route has no executable protocol attempt."""
+
+
+class UnqualifiedRouteProtocolError(ValueError):
+    """Raised when a configured route protocol has no qualified identity."""
 
 
 class CompactEmptyResponseError(RuntimeError):
@@ -1738,18 +1768,6 @@ def gateway_image_proxy_model() -> str:
     if isinstance(settings_value, str) and settings_value.strip():
         return settings_value.strip()
     return os.environ.get("CODEX_PROXY_IMAGE_PROXY_MODEL", "").strip()
-
-
-def gateway_transparent_vision_proxy_enabled() -> bool:
-    settings_value = _runtime_settings_value("gateway_transparent_vision_proxy_enabled")
-    if isinstance(settings_value, bool):
-        return settings_value
-    if isinstance(settings_value, str):
-        return settings_value.strip().lower() not in {"0", "false", "no", "off", ""}
-    raw_value = os.environ.get("CODEX_PROXY_TRANSPARENT_VISION_PROXY_ENABLED")
-    if raw_value is not None:
-        return raw_value.strip().lower() not in {"0", "false", "no", "off", ""}
-    return gateway_image_proxy_enabled()
 
 
 def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
@@ -2318,6 +2336,7 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         ),
         "reports_cached_input_tokens": False,
         "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
+        **_route_capability_metadata(runtime_model),
     }
     if api_key:
         upstream["api_key"] = api_key
@@ -2348,6 +2367,19 @@ def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] 
         "upstream_model": upstream_model,
         "reports_cached_input_tokens": False,
     }
+
+
+def _route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "tool_exposure_mode",
+        "tool_capability_state",
+        "supports_search_tool",
+        "proven_tool_subset",
+        "capability_manifest_version",
+        "capability_manifest_hash",
+        "capability_manifest_state",
+    )
+    return {key: source[key] for key in keys if key in source}
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
@@ -2424,6 +2456,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
             "supported_reasoning_levels": tuple(external_model.get("supported_reasoning_levels") or ()),
             "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
+            **_route_capability_metadata(external_model),
         }
 
     if "/" in slug:
@@ -10932,30 +10965,68 @@ class ToolExposurePolicy:
     supports_search_tool: bool | None
     proven_tool_subset: tuple[str, ...]
     gateway_schema_injection: bool
+    strip_caller_tools: bool
+
+
+@dataclass(frozen=True)
+class VisionPlan:
+    policy: str
+    action: VisionAction
+    network_action: VisionNetworkAction
+    input_has_image: bool
+    target_accepts_images: bool
+    image_proxy_enabled: bool
+
+
+@dataclass(frozen=True)
+class RouteAttemptPlan:
+    index: int
+    upstream_protocol: RouteProtocol
+    selected_upstream_format: str
+    wire_format_adapter: str
+    request_body_mode: AttemptRequestBodyMode
+    request_mutation_policy: MutationPolicy
+    named_mutations: frozenset[RouteMutation]
+    fallback_http_statuses: frozenset[int]
+
+    @property
+    def mutation_summary(self) -> tuple[RouteMutation, ...]:
+        return tuple(sorted(self.named_mutations, key=lambda mutation: mutation.value))
+
+    def allows_protocol_fallback_status(self, status: int | None) -> bool:
+        return isinstance(status, int) and status in self.fallback_http_statuses
 
 
 @dataclass(frozen=True)
 class RoutePlan:
+    schema_version: str
     provider_id: str
     model_requested: str | None
     canonical_model: str | None
     upstream_model: str | None
     authentication_strategy: AuthenticationStrategy
     inbound_protocol: RouteProtocol
+    configured_upstream_protocol_name: str
     configured_upstream_protocol: RouteProtocol
     upstream_protocol: RouteProtocol
-    capability_manifest_version: str
+    protocol_capability_state: CapabilityState
+    protocol_failure_reason: str | None
+    attempts: tuple[RouteAttemptPlan, ...]
+    capability_manifest_version: str | None
+    capability_manifest_hash: str | None
+    capability_manifest_state: CapabilityState
     behavior_profile: str
     selected_upstream_format: str
     wire_format_adapter: str
     codex_semantic_adapter: str
     request_kind: str
+    raw_provider_probe: bool
     request_kind_policy: str
     retry_policy: str
     retry_eligibility: CapabilityState
     usage_policy: str
     repair_policy: str
-    vision_proxy_policy: str
+    vision: VisionPlan
     tool_exposure: ToolExposurePolicy
     codex_compatibility_policy: CodexCompatibilityPolicy
     collaboration_backend: CollaborationBackend
@@ -10975,17 +11046,24 @@ class RoutePlan:
     def mutation_summary(self) -> tuple[RouteMutation, ...]:
         return tuple(sorted(self.named_mutations, key=lambda mutation: mutation.value))
 
+    @property
+    def vision_proxy_policy(self) -> str:
+        return self.vision.policy
+
 
 def behavior_profile_for_request(
     upstream: Mapping[str, Any],
     request_context: Mapping[str, str],
     *,
     inbound_format: str,
+    official_http_passthrough_enabled: bool | None = None,
 ) -> str:
     if str(upstream.get("name")) != "official":
         return BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
+    if official_http_passthrough_enabled is None:
+        official_http_passthrough_enabled = gateway_official_http_passthrough_enabled()
     if (
-        gateway_official_http_passthrough_enabled()
+        official_http_passthrough_enabled
         and inbound_format == "responses"
         and _is_codex_app_context(request_context)
     ):
@@ -11003,11 +11081,11 @@ def _wire_format_adapter(inbound_format: str, upstream_format: str) -> str:
     return WIRE_TRANSPARENT
 
 
-def _route_protocol(value: Any, *, default: RouteProtocol) -> RouteProtocol:
+def _route_protocol(value: Any) -> RouteProtocol:
     try:
         return RouteProtocol(str(value))
     except ValueError:
-        return default
+        return RouteProtocol.UNKNOWN
 
 
 def _authentication_strategy(value: Any) -> AuthenticationStrategy:
@@ -11015,6 +11093,52 @@ def _authentication_strategy(value: Any) -> AuthenticationStrategy:
         return AuthenticationStrategy(str(value))
     except ValueError:
         return AuthenticationStrategy.UNKNOWN
+
+
+def _capability_state(value: Any, *, default: CapabilityState) -> CapabilityState:
+    try:
+        return CapabilityState(str(value))
+    except ValueError:
+        return default
+
+
+def _vision_plan_for_route(
+    *,
+    codex_app_external: bool,
+    input_has_image: bool,
+    target_accepts_images: bool,
+    image_proxy_enabled: bool,
+) -> VisionPlan:
+    if not input_has_image or target_accepts_images:
+        return VisionPlan(
+            policy=VISION_PROXY_DISABLED,
+            action=VisionAction.PASS_THROUGH,
+            network_action=VisionNetworkAction.NONE,
+            input_has_image=input_has_image,
+            target_accepts_images=target_accepts_images,
+            image_proxy_enabled=image_proxy_enabled,
+        )
+    if image_proxy_enabled:
+        return VisionPlan(
+            policy=(
+                VISION_PROXY_CODEX_APP_ADAPTER
+                if codex_app_external
+                else VISION_PROXY_TRANSPARENT_OVERLAY
+            ),
+            action=VisionAction.PROXY,
+            network_action=VisionNetworkAction.IMAGE_PROXY,
+            input_has_image=True,
+            target_accepts_images=False,
+            image_proxy_enabled=True,
+        )
+    return VisionPlan(
+        policy=VISION_PROXY_DISABLED,
+        action=VisionAction.REJECT,
+        network_action=VisionNetworkAction.NONE,
+        input_has_image=True,
+        target_accepts_images=False,
+        image_proxy_enabled=False,
+    )
 
 
 def _route_supports_transparent_metering(
@@ -11073,6 +11197,8 @@ def _tool_exposure_policy_for_route(
     *,
     upstream_name: str,
     behavior_profile: str,
+    request_kind: str,
+    raw_provider_probe: bool,
 ) -> ToolExposurePolicy:
     raw_requested_mode = upstream.get("tool_exposure_mode")
     if raw_requested_mode is None:
@@ -11104,6 +11230,14 @@ def _tool_exposure_policy_for_route(
             capability_state = CapabilityState(str(raw_state))
         except ValueError:
             capability_state = CapabilityState.UNQUALIFIED
+    if requested_mode in {
+        ToolExposureMode.NATIVE_DEFERRED_SEARCH_CANDIDATE,
+        ToolExposureMode.NATIVE_NO_SEARCH_CANDIDATE,
+        ToolExposureMode.UNKNOWN,
+    }:
+        capability_state = CapabilityState.UNQUALIFIED
+    elif requested_mode == ToolExposureMode.UNSUPPORTED:
+        capability_state = CapabilityState.UNSUPPORTED
 
     raw_subset = upstream.get("proven_tool_subset")
     proven_tool_subset = (
@@ -11127,6 +11261,16 @@ def _tool_exposure_policy_for_route(
     gateway_schema_injection = (
         upstream_name != "official"
         and effective_mode == ToolExposureMode.CURRENT_COMPATIBILITY
+        and request_kind != RETRY_REQUEST_COMPACT
+        and not raw_provider_probe
+    )
+    strip_caller_tools = (
+        request_kind == RETRY_REQUEST_COMPACT
+        and behavior_profile
+        not in {
+            BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        }
     )
     return ToolExposurePolicy(
         requested_mode=requested_mode,
@@ -11135,6 +11279,7 @@ def _tool_exposure_policy_for_route(
         supports_search_tool=supports_search_tool,
         proven_tool_subset=proven_tool_subset,
         gateway_schema_injection=gateway_schema_injection,
+        strip_caller_tools=strip_caller_tools,
     )
 
 
@@ -11147,11 +11292,37 @@ def route_plan_for_request(
     model_requested: str | None = None,
     canonical_route_model: str | None = None,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+    raw_provider_probe: bool = False,
+    input_has_image: bool = False,
+    target_accepts_images: bool = True,
+    image_proxy_enabled: bool = False,
+    official_http_passthrough_enabled: bool = True,
 ) -> RoutePlan:
     upstream_name = str(upstream.get("name") or "")
     configured_upstream_format = str(upstream.get("upstream_format") or "responses")
+    configured_upstream_protocol = _route_protocol(configured_upstream_format)
+    if configured_upstream_protocol == RouteProtocol.AUTO:
+        attempt_protocols = (
+            RouteProtocol.RESPONSES,
+            RouteProtocol.CHAT_COMPLETIONS,
+        )
+    elif configured_upstream_protocol in {
+        RouteProtocol.RESPONSES,
+        RouteProtocol.CHAT_COMPLETIONS,
+    }:
+        attempt_protocols = (configured_upstream_protocol,)
+    else:
+        attempt_protocols = ()
+    if attempt_protocols:
+        protocol_capability_state = CapabilityState.SUPPORTED
+    elif configured_upstream_protocol == RouteProtocol.ANTHROPIC_MESSAGES:
+        protocol_capability_state = CapabilityState.UNSUPPORTED
+    else:
+        protocol_capability_state = CapabilityState.UNQUALIFIED
     selected_upstream_format = (
-        "responses" if configured_upstream_format == "auto" else configured_upstream_format
+        attempt_protocols[0].value
+        if attempt_protocols
+        else configured_upstream_format
     )
     wire_adapter = _wire_format_adapter(inbound_format, selected_upstream_format)
     codex_app_external = upstream_name != "official" and _is_codex_app_context(request_context)
@@ -11181,6 +11352,7 @@ def route_plan_for_request(
             upstream,
             request_context,
             inbound_format=inbound_format,
+            official_http_passthrough_enabled=official_http_passthrough_enabled,
         )
 
     official_http_passthrough = (
@@ -11203,18 +11375,24 @@ def route_plan_for_request(
         RETRY_CONSERVATIVE_PRE_OUTPUT if transparent_metered else RETRY_GATEWAY_FULL
     )
     usage_policy = USAGE_ASYNC_TAP if transparent_metered else USAGE_SYNC_CAPTURE
-    repair_policy = REPAIR_CODEX_SUBAGENT if codex_app_external else REPAIR_NONE
-    if codex_app_external:
-        vision_proxy_policy = VISION_PROXY_CODEX_APP_ADAPTER
-    elif transparent_metered and gateway_transparent_vision_proxy_enabled():
-        vision_proxy_policy = VISION_PROXY_TRANSPARENT_OVERLAY
-    else:
-        vision_proxy_policy = VISION_PROXY_DISABLED
+    repair_policy = (
+        REPAIR_CODEX_SUBAGENT
+        if codex_app_external and not raw_provider_probe
+        else REPAIR_NONE
+    )
+    vision = _vision_plan_for_route(
+        codex_app_external=codex_app_external,
+        input_has_image=input_has_image,
+        target_accepts_images=target_accepts_images,
+        image_proxy_enabled=image_proxy_enabled,
+    )
 
     tool_exposure = _tool_exposure_policy_for_route(
         upstream,
         upstream_name=upstream_name,
         behavior_profile=behavior_profile,
+        request_kind=request_kind,
+        raw_provider_probe=raw_provider_probe,
     )
     if official_http_passthrough:
         codex_compatibility_policy = CodexCompatibilityPolicy.OFFICIAL_NATIVE
@@ -11236,19 +11414,68 @@ def route_plan_for_request(
         streaming_policy = StreamingPolicy.GATEWAY_ADAPTED
         mutation_policy = MutationPolicy.GATEWAY_COMPATIBILITY
 
-    named_mutations = {RouteMutation.MODEL_ALIAS}
-    if wire_adapter != WIRE_TRANSPARENT:
-        named_mutations.add(RouteMutation.WIRE_CONVERSION)
+    base_named_mutations = {RouteMutation.MODEL_ALIAS}
     if tool_exposure.gateway_schema_injection:
-        named_mutations.add(RouteMutation.HARD_CODED_SCHEMA_INJECTION)
+        base_named_mutations.add(RouteMutation.HARD_CODED_SCHEMA_INJECTION)
     if codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER:
-        named_mutations.add(RouteMutation.NAMESPACE_FLATTENING)
+        base_named_mutations.add(RouteMutation.NAMESPACE_FLATTENING)
     if repair_policy != REPAIR_NONE:
-        named_mutations.add(RouteMutation.SEMANTIC_REPAIR)
+        base_named_mutations.add(RouteMutation.SEMANTIC_REPAIR)
     if official_http_passthrough:
-        named_mutations.add(RouteMutation.OFFICIAL_TOOL_SEARCH_PRESERVATION)
+        base_named_mutations.add(RouteMutation.OFFICIAL_TOOL_SEARCH_PRESERVATION)
     elif not transparent_metered:
-        named_mutations.add(RouteMutation.SYNTHETIC_TERMINAL_FAILURE)
+        base_named_mutations.add(RouteMutation.SYNTHETIC_TERMINAL_FAILURE)
+    if vision.action == VisionAction.PROXY:
+        base_named_mutations.add(RouteMutation.IMAGE_CONTENT_REPLACEMENT)
+    elif vision.action == VisionAction.REJECT:
+        base_named_mutations.add(RouteMutation.IMAGE_UNSUPPORTED_REJECTION)
+    if not attempt_protocols:
+        base_named_mutations.add(RouteMutation.UNSUPPORTED_PROTOCOL_REJECTION)
+
+    attempts: list[RouteAttemptPlan] = []
+    for index, attempt_protocol in enumerate(attempt_protocols):
+        attempt_wire_adapter = _wire_format_adapter(
+            inbound_format,
+            attempt_protocol.value,
+        )
+        attempt_mutations = set(base_named_mutations)
+        if attempt_wire_adapter != WIRE_TRANSPARENT:
+            attempt_mutations.add(RouteMutation.WIRE_CONVERSION)
+        attempts.append(
+            RouteAttemptPlan(
+                index=index,
+                upstream_protocol=attempt_protocol,
+                selected_upstream_format=attempt_protocol.value,
+                wire_format_adapter=attempt_wire_adapter,
+                request_body_mode=(
+                    AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
+                    if (
+                        attempt_protocol == RouteProtocol.CHAT_COMPLETIONS
+                        and not (
+                            transparent_same_format
+                            and inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
+                        )
+                    )
+                    else AttemptRequestBodyMode.PREPARED_DIRECT
+                ),
+                request_mutation_policy=mutation_policy,
+                named_mutations=frozenset(attempt_mutations),
+                fallback_http_statuses=(
+                    frozenset(AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES)
+                    if (
+                        configured_upstream_protocol == RouteProtocol.AUTO
+                        and index == 0
+                        and len(attempt_protocols) > 1
+                    )
+                    else frozenset()
+                ),
+            )
+        )
+    named_mutations = (
+        attempts[0].named_mutations
+        if attempts
+        else frozenset(base_named_mutations)
+    )
 
     canonical_model = (
         canonical_model_id(canonical_route_model or model_requested)
@@ -11261,11 +11488,30 @@ def route_plan_for_request(
         if upstream_model_value
         else canonical_model
     )
-    manifest_version = str(
-        upstream.get("capability_manifest_version")
-        or ROUTE_CAPABILITY_MANIFEST_VERSION
+    manifest_version_value = upstream.get("capability_manifest_version")
+    manifest_version = (
+        manifest_version_value.strip()
+        if isinstance(manifest_version_value, str)
+        and manifest_version_value.strip()
+        else None
+    )
+    manifest_hash_value = upstream.get("capability_manifest_hash")
+    manifest_hash = (
+        manifest_hash_value.strip()
+        if isinstance(manifest_hash_value, str)
+        and manifest_hash_value.strip()
+        else None
+    )
+    manifest_state = (
+        _capability_state(
+            upstream.get("capability_manifest_state"),
+            default=CapabilityState.UNQUALIFIED,
+        )
+        if manifest_version is not None or manifest_hash is not None
+        else CapabilityState.UNQUALIFIED
     )
     return RoutePlan(
+        schema_version=ROUTE_PLAN_SCHEMA_VERSION,
         provider_id=upstream_name,
         model_requested=model_requested,
         canonical_model=canonical_model,
@@ -11273,19 +11519,28 @@ def route_plan_for_request(
         authentication_strategy=_authentication_strategy(
             upstream.get("auth") or "unknown"
         ),
-        inbound_protocol=_route_protocol(
-            inbound_format,
-            default=RouteProtocol.RESPONSES,
+        inbound_protocol=_route_protocol(inbound_format),
+        configured_upstream_protocol_name=configured_upstream_format,
+        configured_upstream_protocol=configured_upstream_protocol,
+        upstream_protocol=(
+            attempts[0].upstream_protocol
+            if attempts
+            else RouteProtocol.UNKNOWN
         ),
-        configured_upstream_protocol=_route_protocol(
-            configured_upstream_format,
-            default=RouteProtocol.RESPONSES,
+        protocol_capability_state=protocol_capability_state,
+        protocol_failure_reason=(
+            None
+            if attempts
+            else (
+                f"unsupported upstream protocol: {configured_upstream_format}"
+                if protocol_capability_state == CapabilityState.UNSUPPORTED
+                else f"unqualified upstream protocol: {configured_upstream_format}"
+            )
         ),
-        upstream_protocol=_route_protocol(
-            selected_upstream_format,
-            default=RouteProtocol.RESPONSES,
-        ),
+        attempts=tuple(attempts),
         capability_manifest_version=manifest_version,
+        capability_manifest_hash=manifest_hash,
+        capability_manifest_state=manifest_state,
         behavior_profile=behavior_profile,
         selected_upstream_format=selected_upstream_format,
         wire_format_adapter=wire_adapter,
@@ -11293,12 +11548,13 @@ def route_plan_for_request(
         request_kind=(
             RETRY_REQUEST_MAIN_GENERATION if transparent_metered else request_kind
         ),
+        raw_provider_probe=raw_provider_probe,
         request_kind_policy=request_kind_policy,
         retry_policy=retry_policy,
-        retry_eligibility=CapabilityState.SUPPORTED,
+        retry_eligibility=protocol_capability_state,
         usage_policy=usage_policy,
         repair_policy=repair_policy,
-        vision_proxy_policy=vision_proxy_policy,
+        vision=vision,
         tool_exposure=tool_exposure,
         codex_compatibility_policy=codex_compatibility_policy,
         collaboration_backend=collaboration_backend,
@@ -11322,18 +11578,43 @@ def route_plan_for_request(
 
 def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
     return {
+        "route_plan_schema_version": plan.schema_version,
+        "configured_upstream_protocol_name": plan.configured_upstream_protocol_name,
+        "configured_upstream_protocol": plan.configured_upstream_protocol.value,
+        "protocol_capability_state": plan.protocol_capability_state.value,
+        "protocol_failure_reason": plan.protocol_failure_reason,
+        "route_attempts": [
+            {
+                "index": attempt.index,
+                "upstream_protocol": attempt.upstream_protocol.value,
+                "wire_format_adapter": attempt.wire_format_adapter,
+                "request_body_mode": attempt.request_body_mode.value,
+                "request_mutation_policy": attempt.request_mutation_policy.value,
+                "fallback_http_statuses": sorted(attempt.fallback_http_statuses),
+                "mutation_summary": [
+                    mutation.value for mutation in attempt.mutation_summary
+                ],
+            }
+            for attempt in plan.attempts
+        ],
         "wire_format_adapter": plan.wire_format_adapter,
         "codex_semantic_adapter": plan.codex_semantic_adapter,
         "request_kind": plan.request_kind,
+        "raw_provider_probe": plan.raw_provider_probe,
         "request_kind_policy": plan.request_kind_policy,
         "retry_policy": plan.retry_policy,
         "retry_eligibility": plan.retry_eligibility.value,
         "usage_policy": plan.usage_policy,
         "repair_policy": plan.repair_policy,
         "capability_manifest_version": plan.capability_manifest_version,
+        "capability_manifest_hash": plan.capability_manifest_hash,
+        "capability_manifest_state": plan.capability_manifest_state.value,
         "authentication_strategy": plan.authentication_strategy.value,
+        "tool_requested_exposure_mode": plan.tool_exposure.requested_mode.value,
         "tool_exposure_mode": plan.tool_exposure.effective_mode.value,
         "tool_capability_state": plan.tool_exposure.capability_state.value,
+        "gateway_schema_injection": plan.tool_exposure.gateway_schema_injection,
+        "strip_caller_tools": plan.tool_exposure.strip_caller_tools,
         "codex_compatibility_policy": plan.codex_compatibility_policy.value,
         "collaboration_backend": plan.collaboration_backend.value,
         "execution_owner": plan.execution_owner.value,
@@ -11342,8 +11623,28 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
         "request_mutation_policy": plan.request_mutation_policy.value,
         "response_mutation_policy": plan.response_mutation_policy.value,
         "sse_mutation_policy": plan.sse_mutation_policy.value,
+        "vision_proxy_policy": plan.vision.policy,
+        "vision_action": plan.vision.action.value,
+        "vision_network_action": plan.vision.network_action.value,
+        "vision_input_has_image": plan.vision.input_has_image,
+        "vision_target_accepts_images": plan.vision.target_accepts_images,
         "mutation_summary": [
             mutation.value for mutation in plan.mutation_summary
+        ],
+    }
+
+
+def _route_attempt_event_fields(attempt: RouteAttemptPlan) -> dict[str, Any]:
+    return {
+        "route_attempt_index": attempt.index,
+        "route_attempt_protocol": attempt.upstream_protocol.value,
+        "route_attempt_wire_format_adapter": attempt.wire_format_adapter,
+        "route_attempt_request_body_mode": attempt.request_body_mode.value,
+        "route_attempt_fallback_http_statuses": sorted(
+            attempt.fallback_http_statuses
+        ),
+        "route_attempt_mutation_summary": [
+            mutation.value for mutation in attempt.mutation_summary
         ],
     }
 
@@ -12295,10 +12596,19 @@ def apply_image_proxy_to_responses_payload(
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
     progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
+    *,
+    image_proxy_enabled: bool | None = None,
+    target_accepts_images: bool | None = None,
 ) -> bool:
-    if not gateway_image_proxy_enabled():
+    if image_proxy_enabled is None:
+        image_proxy_enabled = gateway_image_proxy_enabled()
+    if not image_proxy_enabled:
         return False
-    if target_model and model_supports_image(target_model, target_upstream):
+    if target_accepts_images is None:
+        target_accepts_images = bool(
+            target_model and model_supports_image(target_model, target_upstream)
+        )
+    if target_accepts_images:
         return False
     if not _value_contains_image(payload.get("input")):
         return False
@@ -12358,10 +12668,19 @@ def apply_image_proxy_to_chat_payload(
     target_upstream: Mapping[str, Any],
     event_context: Mapping[str, Any] | None = None,
     progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
+    *,
+    image_proxy_enabled: bool | None = None,
+    target_accepts_images: bool | None = None,
 ) -> bool:
-    if not gateway_image_proxy_enabled():
+    if image_proxy_enabled is None:
+        image_proxy_enabled = gateway_image_proxy_enabled()
+    if not image_proxy_enabled:
         return False
-    if target_model and model_supports_image(target_model, target_upstream):
+    if target_accepts_images is None:
+        target_accepts_images = bool(
+            target_model and model_supports_image(target_model, target_upstream)
+        )
+    if target_accepts_images:
         return False
     if not _value_contains_image(payload.get("messages")):
         return False
@@ -12421,6 +12740,8 @@ def apply_vision_proxy_adapter(
     target_model: str | None,
     target_upstream: Mapping[str, Any],
     vision_proxy_policy: str,
+    image_proxy_enabled: bool | None = None,
+    target_accepts_images: bool | None = None,
     event_context: Mapping[str, Any] | None = None,
     progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
@@ -12434,6 +12755,8 @@ def apply_vision_proxy_adapter(
             target_upstream,
             event_context=proxy_context,
             progress_callback=progress_callback,
+            image_proxy_enabled=image_proxy_enabled,
+            target_accepts_images=target_accepts_images,
         )
     return apply_image_proxy_to_responses_payload(
         payload,
@@ -12441,6 +12764,8 @@ def apply_vision_proxy_adapter(
         target_upstream,
         event_context=proxy_context,
         progress_callback=progress_callback,
+        image_proxy_enabled=image_proxy_enabled,
+        target_accepts_images=target_accepts_images,
     )
 
 
@@ -12450,49 +12775,58 @@ def enforce_text_only_image_boundary(
     inbound_format: str,
     target_model: str | None,
     target_upstream: Mapping[str, Any],
+    vision_plan: VisionPlan,
     event_context: Mapping[str, Any] | None = None,
     progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> bool:
-    if target_model and model_supports_image(target_model, target_upstream):
+    if vision_plan.action == VisionAction.PASS_THROUGH:
         return False
-    image_root = payload.get("messages") if inbound_format == "chat_completions" else payload.get("input")
-    if not _value_contains_image(image_root):
-        return False
-
-    if gateway_image_proxy_enabled():
-        changed = (
-            apply_image_proxy_to_chat_payload(
-                payload,
-                target_model,
-                target_upstream,
-                event_context=event_context,
-                progress_callback=progress_callback,
-            )
-            if inbound_format == "chat_completions"
-            else apply_image_proxy_to_responses_payload(
-                payload,
-                target_model,
-                target_upstream,
-                event_context=event_context,
-                progress_callback=progress_callback,
-            )
+    if vision_plan.action == VisionAction.REJECT:
+        model_label = (
+            canonical_model_id(target_model)
+            if target_model
+            else "the target model"
         )
-        if changed:
-            _write_adapter_event(
-                event_context,
-                "image_proxy_boundary_guard_applied",
-                target_model=canonical_model_id(target_model) if target_model else None,
-                inbound_format=inbound_format,
-            )
-            return True
-        image_root = payload.get("messages") if inbound_format == "chat_completions" else payload.get("input")
-        if not _value_contains_image(image_root):
-            return False
+        raise ImageProxyError(
+            f"{model_label} does not support image input and Image Proxy is disabled."
+        )
+    if vision_plan.network_action != VisionNetworkAction.IMAGE_PROXY:
+        raise ImageProxyError(
+            "The planned Vision action has no executable network action."
+        )
 
-    model_label = canonical_model_id(target_model) if target_model else "the target model"
-    raise ImageProxyError(
-        f"{model_label} does not support image input and Image Proxy is disabled or could not replace the image."
+    changed = apply_vision_proxy_adapter(
+        payload,
+        inbound_format=inbound_format,
+        target_model=target_model,
+        target_upstream=target_upstream,
+        vision_proxy_policy=vision_plan.policy,
+        image_proxy_enabled=vision_plan.image_proxy_enabled,
+        target_accepts_images=vision_plan.target_accepts_images,
+        event_context=event_context,
+        progress_callback=progress_callback,
     )
+    image_root = (
+        payload.get("messages")
+        if inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
+        else payload.get("input")
+    )
+    if _value_contains_image(image_root):
+        raise ImageProxyError(
+            "Image Proxy could not replace the image for the text-only target model."
+        )
+    if changed:
+        _write_adapter_event(
+            event_context,
+            "image_proxy_boundary_guard_applied",
+            target_model=(
+                canonical_model_id(target_model)
+                if target_model
+                else None
+            ),
+            inbound_format=inbound_format,
+        )
+    return changed
 
 
 def _upstream_retry_status(exc: BaseException) -> int | None:
@@ -13245,20 +13579,6 @@ def _json_error_payload_for_inbound_format(
     return payload
 
 
-def _upstream_format_candidates(upstream_format: str) -> tuple[str, ...]:
-    if upstream_format == "chat_completions":
-        return ("chat_completions",)
-    if upstream_format == "anthropic_messages":
-        raise ValueError("Anthropic Messages upstream is detected but Gateway /v1/messages conversion is not implemented yet")
-    if upstream_format == "auto":
-        return ("responses", "chat_completions")
-    return ("responses",)
-
-
-def _auto_protocol_fallback_allowed(exc: HTTPError) -> bool:
-    return _upstream_retry_status(exc) in AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES
-
-
 @dataclass(frozen=True)
 class GatewayRequestInput:
     request_id: str
@@ -13850,6 +14170,12 @@ class _GatewayDownstreamStreamCommit:
             self._close_upstream_response(response)
             return
         self._upstream_response = response
+
+    def set_upstream_format(self, upstream_format: str) -> None:
+        """Update the active protocol before a planned fallback is opened."""
+        if self._downstream_output_started or self._terminal_committed:
+            return
+        self._upstream_format = upstream_format
 
     def mark_downstream_content_exposed(self) -> None:
         """Record that upstream response content has been produced for the client.
@@ -14477,7 +14803,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         route_reason: str | None = None
         route_plan: RoutePlan | None = None
         route_policy_event_fields: dict[str, Any] = {}
-        vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
         response_lifecycle_state: dict[str, str] = {}
         caller_body = b""
@@ -14609,6 +14934,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
             _validate_reasoning_effort_for_upstream(inbound_payload, upstream, model)
+            inbound_has_image = (
+                isinstance(inbound_payload, Mapping)
+                and _value_contains_image(inbound_payload)
+            )
+            target_accepts_images = bool(
+                model and model_supports_image(model, upstream)
+            )
+            image_proxy_enabled = gateway_image_proxy_enabled()
             route_plan = route_plan_for_request(
                 upstream,
                 request_context,
@@ -14617,13 +14950,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model_requested=model_requested,
                 canonical_route_model=model,
                 request_kind=request_kind,
+                raw_provider_probe=raw_provider_probe,
+                input_has_image=inbound_has_image,
+                target_accepts_images=target_accepts_images,
+                image_proxy_enabled=image_proxy_enabled,
+                official_http_passthrough_enabled=(
+                    gateway_official_http_passthrough_enabled()
+                ),
             )
             behavior_profile = route_plan.behavior_profile
-            upstream_format = (
-                route_plan.selected_upstream_format
-                if route_plan.transparent_metered
-                else route_plan.configured_upstream_protocol.value
-            )
+            upstream_format = route_plan.selected_upstream_format
             is_official_http_passthrough = route_plan.official_http_passthrough
             is_transparent_metered = route_plan.transparent_metered
             is_transparent_same_format = route_plan.transparent_same_format
@@ -14635,17 +14971,38 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 started_at,
                 request_kind,
             )
-            vision_proxy_policy = route_plan.vision_proxy_policy
             reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
                 **_route_plan_event_fields(route_plan),
-                "vision_proxy_policy": vision_proxy_policy,
+                **(
+                    _route_attempt_event_fields(route_plan.attempts[0])
+                    if route_plan.attempts
+                    else {}
+                ),
                 **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
             }
             proxy_request_context = {
                 **proxy_request_context,
                 **route_policy_event_fields,
             }
+            if not route_plan.attempts:
+                protocol_error = (
+                    UnsupportedRouteProtocolError
+                    if (
+                        route_plan.protocol_capability_state
+                        == CapabilityState.UNSUPPORTED
+                    )
+                    else UnqualifiedRouteProtocolError
+                )
+                raise protocol_error(
+                    route_plan.protocol_failure_reason
+                    or "configured upstream protocol is not executable"
+                )
+            if route_plan.vision.action == VisionAction.REJECT:
+                model_label = canonical_model_id(model) if model else "the target model"
+                raise ImageProxyError(
+                    f"{model_label} does not support image input and Image Proxy is disabled."
+                )
             model_canonical = canonical_model_id(model) if model else None
             # Create the request-scoped downstream stream-commit seam early so that
             # every production SSE header/body (status, retry, keepalive, converted
@@ -14661,9 +15018,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format=upstream_format,
             )
             if (
-                request_kind == RETRY_REQUEST_COMPACT
-                and not is_transparent_metered
-                and behavior_profile != BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+                route_plan.tool_exposure.strip_caller_tools
                 and isinstance(inbound_payload, dict)
                 and _strip_tools_for_compact_payload(
                     inbound_payload,
@@ -14811,15 +15166,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                         )
             else:
-                compatibility_upstream = upstream
-                if upstream_format == "auto":
-                    compatibility_upstream = {**upstream, "upstream_format": "responses"}
+                compatibility_upstream = {
+                    **upstream,
+                    "upstream_format": route_plan.attempts[0].selected_upstream_format,
+                }
                 body = compatible_request_body(
                     body,
                     compatibility_upstream,
                     model_id=model,
                     event_context=adapter_event_context,
-                    inject_codex_tools=request_kind != RETRY_REQUEST_COMPACT and not raw_provider_probe,
+                    inject_codex_tools=route_plan.tool_exposure.gateway_schema_injection,
                     behavior_profile=behavior_profile,
                 )
             vision_proxy_payload_format = (
@@ -14827,13 +15183,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if inbound_format == "chat_completions" and is_transparent_same_format
                 else "responses"
             )
-            inbound_has_image = isinstance(inbound_payload, Mapping) and _value_contains_image(inbound_payload)
-            target_accepts_images = bool(model and model_supports_image(model, upstream))
-            needs_image_payload_inspection = inbound_has_image and (
-                vision_proxy_policy != VISION_PROXY_DISABLED or not target_accepts_images
-            )
             image_proxy_payload: dict[str, Any] | None = None
-            if needs_image_payload_inspection:
+            if route_plan.vision.action == VisionAction.PROXY:
                 try:
                     parsed_image_proxy_payload = json.loads(body.decode("utf-8-sig"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -14841,36 +15192,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if isinstance(parsed_image_proxy_payload, dict):
                     image_proxy_payload = parsed_image_proxy_payload
             try:
-                if image_proxy_payload is not None and vision_proxy_policy != VISION_PROXY_DISABLED:
-                    if apply_vision_proxy_adapter(
+                if route_plan.vision.action == VisionAction.PROXY:
+                    if image_proxy_payload is None:
+                        raise ImageProxyError(
+                            "Image Proxy could not inspect the planned image payload."
+                        )
+                    image_proxy_changed = enforce_text_only_image_boundary(
                         image_proxy_payload,
                         inbound_format=vision_proxy_payload_format,
                         target_model=model,
                         target_upstream=upstream,
-                        vision_proxy_policy=vision_proxy_policy,
+                        vision_plan=route_plan.vision,
                         event_context=adapter_event_context,
                         progress_callback=emit_downstream_status if caller_stream else None,
-                    ):
+                    )
+                    if image_proxy_changed:
                         body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-                if image_proxy_payload is not None and enforce_text_only_image_boundary(
-                    image_proxy_payload,
-                    inbound_format=vision_proxy_payload_format,
-                    target_model=model,
-                    target_upstream=upstream,
-                    event_context=adapter_event_context,
-                    progress_callback=emit_downstream_status if caller_stream else None,
-                ):
-                    if vision_proxy_policy == VISION_PROXY_DISABLED:
-                        vision_proxy_policy = VISION_PROXY_TRANSPARENT_OVERLAY
-                        proxy_request_context = {
-                            **proxy_request_context,
-                            "vision_proxy_policy": vision_proxy_policy,
-                        }
-                        adapter_event_context = {
-                            **adapter_event_context,
-                            "vision_proxy_policy": vision_proxy_policy,
-                        }
-                    body = json.dumps(image_proxy_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             except DownstreamClosedDuringImageProxyError:
                 finish_downstream_write_failure()
                 return
@@ -14889,15 +15226,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 model_id=model,
             )
 
-            def upstream_body_for_format(selected_format: str) -> bytes:
-                if is_transparent_same_format:
-                    return body
-                if selected_format == "chat_completions":
-                    return _responses_request_to_chat_completion_body(responses_body)
-                return responses_body
+            def upstream_body_for_attempt(
+                attempt: RouteAttemptPlan,
+                prepared_body: bytes = responses_body,
+            ) -> bytes:
+                if (
+                    attempt.request_body_mode
+                    == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
+                ):
+                    return _responses_request_to_chat_completion_body(prepared_body)
+                if (
+                    attempt.request_body_mode
+                    == AttemptRequestBodyMode.PREPARED_DIRECT
+                ):
+                    return prepared_body
+                raise UnsupportedRouteProtocolError(
+                    f"unsupported planned request body mode: {attempt.request_body_mode}"
+                )
 
             upstream_request_observability = proxy_telemetry.enrich_request_observability(
-                body=upstream_body_for_format(upstream_format),
+                body=upstream_body_for_attempt(route_plan.attempts[0]),
                 codex_home=RUNTIME_CODEX_DIR,
                 upstream=upstream,
                 include_body_hmac=not is_official_http_passthrough,
@@ -14918,11 +15266,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 and gateway_downstream_retry_notice_enabled()
             )
 
-            def upstream_request_for_format(
-                selected_format: str,
+            def upstream_request_for_attempt(
+                attempt: RouteAttemptPlan,
                 lifecycle_final_retry_reason: str | None = None,
             ) -> Request:
-                request_body = body if is_transparent_same_format else responses_body
+                request_body = responses_body
                 if lifecycle_final_retry_reason and not is_transparent_same_format:
                     request_body = _responses_body_with_lifecycle_final_retry_guidance(
                         responses_body,
@@ -14932,31 +15280,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         adapter_event_context,
                         "lifecycle_final_retry_guidance_injected",
                         upstream=upstream_name,
-                        upstream_format=selected_format,
+                        upstream_format=attempt.selected_upstream_format,
                         reason=lifecycle_final_retry_reason,
                     )
-                if is_transparent_same_format:
-                    url = (
-                        _chat_completions_url(upstream)
-                        if selected_format == "chat_completions"
-                        else _responses_url(upstream, "/v1/responses")
-                    )
-                    return Request(
-                        url,
-                        data=request_body,
-                        headers=headers,
-                        method="POST",
-                    )
-                if selected_format == "chat_completions":
-                    return Request(
-                        _chat_completions_url(upstream),
-                        data=_responses_request_to_chat_completion_body(request_body),
-                        headers=headers,
-                        method="POST",
+                if attempt.upstream_protocol == RouteProtocol.CHAT_COMPLETIONS:
+                    url = _chat_completions_url(upstream)
+                elif attempt.upstream_protocol == RouteProtocol.RESPONSES:
+                    url = _responses_url(upstream, "/v1/responses")
+                else:
+                    raise UnsupportedRouteProtocolError(
+                        "planned attempt has no executable upstream protocol: "
+                        f"{attempt.upstream_protocol.value}"
                     )
                 return Request(
-                    _responses_url(upstream, "/v1/responses"),
-                    data=request_body,
+                    url,
+                    data=upstream_body_for_attempt(attempt, request_body),
                     headers=headers,
                     method="POST",
                 )
@@ -14998,9 +15336,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 nonlocal downstream_sse_started
                 downstream_sse_started = True
 
-            configured_upstream_format = upstream_format
             selected_upstream_format = upstream_format
-            upstream_format_options = _upstream_format_candidates(configured_upstream_format)
             official_open_attempt_budget = (
                 {
                     "max_attempts": official_upstream_open_attempts(),
@@ -15009,8 +15345,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if is_official_http_passthrough
                 else None
             )
-            for format_index, selected_upstream_format in enumerate(upstream_format_options):
+            for route_attempt in route_plan.attempts:
+                selected_upstream_format = route_attempt.selected_upstream_format
+                route_attempt_event_fields = _route_attempt_event_fields(route_attempt)
+                proxy_request_context.update(route_attempt_event_fields)
                 if isinstance(adapter_event_context, dict):
+                    adapter_event_context.update(route_attempt_event_fields)
                     adapter_event_context["tool_protocol"] = _external_tool_protocol(
                         {**upstream, "upstream_format": selected_upstream_format}
                     )
@@ -15030,8 +15370,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 lifecycle_final_retry_reason: str | None = None
                 try:
                     while relay_attempt <= max_relay_attempts:
-                        request = upstream_request_for_format(
-                            selected_upstream_format,
+                        seam = _handler_downstream_stream_commit(self)
+                        if seam is not None:
+                            seam.set_upstream_format(selected_upstream_format)
+                        request = upstream_request_for_attempt(
+                            route_attempt,
                             lifecycle_final_retry_reason,
                         )
                         try:
@@ -15273,13 +15616,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     upstream_format = selected_upstream_format
                     break
                 except HTTPError as exc:
-                    next_format_available = format_index + 1 < len(upstream_format_options)
+                    next_attempt_index = route_attempt.index + 1
+                    next_attempt = (
+                        route_plan.attempts[next_attempt_index]
+                        if next_attempt_index < len(route_plan.attempts)
+                        else None
+                    )
                     fallback_allowed = (
-                        configured_upstream_format == "auto"
-                        and selected_upstream_format == "responses"
-                        and next_format_available
+                        next_attempt is not None
                         and not downstream_sse_started
-                        and _auto_protocol_fallback_allowed(exc)
+                        and route_attempt.allows_protocol_fallback_status(
+                            getattr(exc, "code", None)
+                        )
                     )
                     if fallback_allowed:
                         fallback_model_access_path = _model_access_path_from_event_context(
@@ -15306,10 +15654,26 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 upstream=upstream_name,
                                 provider_id=upstream_name,
                                 provider_hint=provider_hint,
-                                upstream_format=configured_upstream_format,
+                                upstream_format=route_plan.configured_upstream_protocol_name,
                                 behavior_profile=behavior_profile,
                                 failed_upstream_format=selected_upstream_format,
-                                next_upstream_format=upstream_format_options[format_index + 1],
+                                next_upstream_format=next_attempt.selected_upstream_format,
+                                failed_route_attempt_index=route_attempt.index,
+                                failed_route_attempt_request_body_mode=(
+                                    route_attempt.request_body_mode.value
+                                ),
+                                failed_route_attempt_mutation_summary=[
+                                    mutation.value
+                                    for mutation in route_attempt.mutation_summary
+                                ],
+                                next_route_attempt_index=next_attempt.index,
+                                next_route_attempt_request_body_mode=(
+                                    next_attempt.request_body_mode.value
+                                ),
+                                next_route_attempt_mutation_summary=[
+                                    mutation.value
+                                    for mutation in next_attempt.mutation_summary
+                                ],
                                 status=getattr(exc, "code", 502),
                                 error="HTTPError",
                                 detail=safe_upstream_error_detail(

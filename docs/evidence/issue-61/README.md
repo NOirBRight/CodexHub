@@ -9,15 +9,23 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
 - `route_plan_for_request` is the single pure seam that produces the frozen
   `RoutePlan` before request mutation or upstream I/O.
 - The plan binds provider, requested/canonical/upstream model, authentication,
-  inbound/configured/selected protocol, capability-manifest version, Codex
-  compatibility, tool exposure/evidence, collaboration backend, execution
-  owner, streaming, retry, usage, Vision Proxy, transport, and named mutation
-  policies.
+  inbound/configured protocol, immutable ordered protocol attempts and their
+  body conversion/fallback/telemetry policy, optional route-qualified
+  capability-manifest identity, Codex compatibility, tool exposure/evidence,
+  collaboration backend, execution owner, streaming, retry, usage, Vision
+  Proxy, transport, and named mutation policies.
 - `Supported`, `Unsupported`, and `Unqualified` are typed capability states.
   Candidate native tool modes retain their evidence but resolve to current
   Gateway compatibility for third-party Codex App routes. They cannot enable
   passthrough or remove semantic repair.
-- `_proxy_post_request` consumes the plan's final route flags and policies.
+- The RoutePlan schema identity is independent of optional manifest
+  version/hash evidence; absent #250 metadata remains `Unqualified` rather
+  than receiving a fabricated manifest identity.
+- `_proxy_post_request` consumes plan-owned compact/raw/candidate injection,
+  ordered Responses-to-Chat fallback attempts, and the effective Vision action
+  and network plan. Recognized-but-unimplemented Anthropic routes fail
+  `Unsupported`; unknown configured protocols fail `Unqualified`; both stop
+  before upstream I/O.
   Existing request/response adapters, relay paths, retries, usage capture,
   Vision Proxy behavior, and official keepalive transport remain unchanged.
 
@@ -36,10 +44,12 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
 
 ## Candidate verification
 
-- `python -m pytest tests/test_routing.py tests/test_chat_completions_gateway.py tests/test_proxy_event_logging.py`
-  — 684 passed in 51.39 seconds after the final review fix.
+- `python -m pytest -q tests/test_routing.py tests/test_chat_completions_gateway.py tests/test_proxy_event_logging.py`
+  — 693 passed, 213 subtests passed in 43.65 seconds after the repair review.
 - `python -m pytest -q --ignore=tests/test_real_client_e2e.py`
-  — 1,461 passed, 1 skipped, 425 subtests passed in 101.52 seconds.
+  — 1,470 passed, 1 skipped, 438 subtests passed in 95.35 seconds with Python
+  3.13 first on `PATH` so nested PowerShell replay subprocesses use the
+  repository-required interpreter.
 - A literal `python -m pytest` was attempted because the issue text names it,
   then terminated without a test result when the current verification policy
   guardrail identified the separately governed synthetic real-client

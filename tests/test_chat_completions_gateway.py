@@ -1975,6 +1975,22 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
         self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(
+            request_start["vision_action"],
+            codex_proxy.VisionAction.PROXY.value,
+        )
+        self.assertEqual(
+            request_start["vision_network_action"],
+            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            request_start["mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            request_start["route_attempt_mutation_summary"],
+        )
 
     def test_provider_scoped_chat_text_only_image_request_fails_closed_502(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2040,6 +2056,27 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 502)
         written = b"".join(handler.wfile.writes)
         self.assertIn(b"does not support image input", written)
+        request_error = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_error"
+        )
+        self.assertEqual(
+            request_error["vision_action"],
+            codex_proxy.VisionAction.REJECT.value,
+        )
+        self.assertEqual(
+            request_error["vision_network_action"],
+            codex_proxy.VisionNetworkAction.NONE.value,
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            request_error["mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            request_error["route_attempt_mutation_summary"],
+        )
 
     def test_provider_scoped_chat_text_only_image_guard_uses_global_image_proxy_switch(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2129,6 +2166,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
         self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(
+            request_start["vision_action"],
+            codex_proxy.VisionAction.PROXY.value,
+        )
+        self.assertEqual(
+            request_start["vision_network_action"],
+            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+        )
 
     def test_transparent_vision_proxy_failure_still_records_request_start(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -4280,6 +4325,30 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertTrue(mock_urlopen.call_args.args[0].full_url.endswith("/responses"))
         result = json.loads(b"".join(handler.wfile.writes))
         self.assertEqual(result["choices"][0]["message"]["content"], "Responses OK")
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        request_complete = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        )
+        self.assertEqual(
+            [
+                attempt["upstream_protocol"]
+                for attempt in request_start["route_attempts"]
+            ],
+            ["responses", "chat_completions"],
+        )
+        for event in (request_start, request_complete):
+            self.assertEqual(event["route_attempt_index"], 0)
+            self.assertEqual(event["route_attempt_protocol"], "responses")
+            self.assertIn(
+                codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+                event["route_attempt_mutation_summary"],
+            )
 
     def test_auto_upstream_format_suppresses_chat_fallback_for_protocol_http_error(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -4333,6 +4402,17 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 and e["upstream_format"] == "responses"
                 for e in suppressed_events
             )
+        )
+        suppressed = suppressed_events[-1]
+        self.assertEqual(suppressed["route_attempt_index"], 0)
+        self.assertEqual(suppressed["route_attempt_protocol"], "responses")
+        self.assertEqual(
+            suppressed["route_attempt_fallback_http_statuses"],
+            [404, 405, 415, 422],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            suppressed["route_attempt_mutation_summary"],
         )
         result = json.loads(b"".join(handler.wfile.writes))
         self.assertEqual(result["error"]["type"], "upstream_error")
