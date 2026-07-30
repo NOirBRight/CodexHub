@@ -14,6 +14,7 @@ from dataclasses import replace
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
@@ -1076,6 +1077,8 @@ class RoutingTests(unittest.TestCase):
         plan = codex_proxy.route_plan_for_request(
             {
                 "name": "ollama_cloud",
+                "base_url": "https://ollama.example.test/v1",
+                "auth": "ollama_api_key",
                 "upstream_model": "glm-5.2",
                 "upstream_format": "auto",
             },
@@ -1105,6 +1108,33 @@ class RoutingTests(unittest.TestCase):
                 codex_proxy.AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT,
             ],
         )
+        self.assertEqual(
+            [attempt.endpoint_url for attempt in plan.attempts],
+            [
+                "https://ollama.example.test/v1/responses",
+                "https://ollama.example.test/v1/chat/completions",
+            ],
+        )
+        self.assertTrue(
+            all(
+                attempt.authentication_strategy
+                == codex_proxy.AuthenticationStrategy.OLLAMA_API_KEY
+                for attempt in plan.attempts
+            )
+        )
+        self.assertTrue(
+            all(
+                attempt.streaming_policy
+                == codex_proxy.StreamingPolicy.GATEWAY_ADAPTED
+                for attempt in plan.attempts
+            )
+        )
+        self.assertTrue(
+            all(
+                attempt.usage_policy == codex_proxy.UsagePolicy.SYNC_CAPTURE
+                for attempt in plan.attempts
+            )
+        )
         self.assertTrue(plan.attempts[0].allows_protocol_fallback_status(415))
         self.assertFalse(plan.attempts[0].allows_protocol_fallback_status(429))
         self.assertFalse(plan.attempts[1].fallback_http_statuses)
@@ -1118,6 +1148,407 @@ class RoutingTests(unittest.TestCase):
         )
         with self.assertRaises(AttributeError):
             plan.attempts[0].upstream_protocol = codex_proxy.RouteProtocol.CHAT_COMPLETIONS
+
+    def test_route_plan_attempt_retry_execution_uses_only_explicit_runtime_facts(self):
+        runtime_facts = codex_proxy.RouteRuntimeFacts(
+            request_timeout_seconds=41,
+            request_kind_base_attempts=7,
+            request_kind_attempts_configured=False,
+            failure_expansion_attempts=19,
+            official_open_attempts=2,
+            capacity_elapsed_limit_seconds=83.0,
+            stream_elapsed_limit_seconds=97.0,
+            downstream_retry_notice_enabled=True,
+            pre_response_budget_seconds=109.0,
+        )
+        with (
+            patch(
+                "codex_proxy.upstream_timeout_seconds",
+                side_effect=AssertionError("planner read request timeout"),
+            ),
+            patch(
+                "codex_proxy._upstream_retry_attempts",
+                side_effect=AssertionError("planner read retry attempts"),
+            ),
+            patch(
+                "codex_proxy.gateway_auto_retry_max_attempts",
+                side_effect=AssertionError("planner read retry expansion"),
+            ),
+            patch(
+                "codex_proxy.gateway_capacity_retry_elapsed_limit_seconds",
+                side_effect=AssertionError("planner read capacity budget"),
+            ),
+            patch(
+                "codex_proxy.gateway_stream_retry_elapsed_limit_seconds",
+                side_effect=AssertionError("planner read stream budget"),
+            ),
+        ):
+            plan = codex_proxy.route_plan_for_request(
+                {
+                    "name": "volcengine",
+                    "base_url": "https://ark.example.test/v1",
+                    "auth": "api_key",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "responses",
+                },
+                {"client_id": "codex-app"},
+                inbound_format="responses",
+                model_requested="volc/glm-5.2",
+                caller_stream=True,
+                runtime_facts=runtime_facts,
+            )
+
+        retry = plan.attempts[0].retry
+        self.assertEqual(retry.eligibility, codex_proxy.CapabilityState.SUPPORTED)
+        self.assertEqual(retry.policy, codex_proxy.RetryPolicy.GATEWAY_FULL)
+        self.assertEqual(retry.request_timeout_seconds, 41)
+        self.assertEqual(retry.base_open_attempts, 7)
+        self.assertEqual(retry.base_relay_attempts, 7)
+        self.assertEqual(
+            retry.open_attempts_for_failure_class(
+                codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE
+            ),
+            19,
+        )
+        self.assertEqual(
+            retry.relay_attempts_for_failure_class(
+                codex_proxy.RETRY_FAILURE_QUICK_TRANSIENT,
+                stream_failure=True,
+            ),
+            19,
+        )
+        self.assertTrue(retry.capacity_elapsed_limit_allows(80.0, 3))
+        self.assertFalse(retry.capacity_elapsed_limit_allows(80.1, 3))
+        self.assertTrue(retry.stream_elapsed_limit_allows(94.0, 3))
+        self.assertFalse(retry.stream_elapsed_limit_allows(94.1, 3))
+        self.assertEqual(retry.pre_response_budget_seconds, 109.0)
+        self.assertTrue(retry.emit_downstream_retry_notice)
+        self.assertIsNone(retry.open_attempt_budget)
+
+    def test_transparent_compact_route_uses_effective_main_generation_runtime_facts(self):
+        compact_facts = codex_proxy.RouteRuntimeFacts(
+            request_timeout_seconds=31,
+            request_kind_base_attempts=3,
+            request_kind_attempts_configured=True,
+            failure_expansion_attempts=19,
+            official_open_attempts=2,
+            capacity_elapsed_limit_seconds=83.0,
+            stream_elapsed_limit_seconds=97.0,
+            downstream_retry_notice_enabled=False,
+            pre_response_budget_seconds=109.0,
+        )
+        main_facts = replace(
+            compact_facts,
+            request_timeout_seconds=41,
+            request_kind_base_attempts=5,
+        )
+
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "volcengine",
+                "base_url": "https://ark.example.test/v1",
+                "auth": "api_key",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "chat_completions",
+            },
+            {"client_id": "zcode"},
+            inbound_format="chat_completions",
+            provider_hint="volc",
+            model_requested="volc/glm-5.2",
+            request_kind=codex_proxy.RETRY_REQUEST_COMPACT,
+            runtime_facts={
+                codex_proxy.RETRY_REQUEST_COMPACT: compact_facts,
+                codex_proxy.RETRY_REQUEST_MAIN_GENERATION: main_facts,
+            },
+        )
+
+        self.assertEqual(
+            plan.request_kind,
+            codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+        )
+        self.assertEqual(plan.attempts[0].retry.request_kind, plan.request_kind)
+        self.assertEqual(plan.attempts[0].retry.request_timeout_seconds, 41)
+        self.assertEqual(plan.attempts[0].retry.base_open_attempts, 5)
+        self.assertEqual(plan.attempts[0].retry.base_relay_attempts, 5)
+
+    def test_handler_consumes_attempt_execution_contract_without_rederiving_policy(self):
+        runtime_facts = codex_proxy.RouteRuntimeFacts(
+            request_timeout_seconds=41,
+            request_kind_base_attempts=7,
+            request_kind_attempts_configured=True,
+            failure_expansion_attempts=19,
+            official_open_attempts=2,
+            capacity_elapsed_limit_seconds=83.0,
+            stream_elapsed_limit_seconds=97.0,
+            downstream_retry_notice_enabled=False,
+            pre_response_budget_seconds=109.0,
+        )
+        planned = codex_proxy.route_plan_for_request(
+            {
+                "name": "volcengine",
+                "base_url": "https://ark.example.test/v1",
+                "auth": "api_key",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "responses",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="volc/glm-5.2",
+            runtime_facts=runtime_facts,
+        )
+        planned_attempt = replace(
+            planned.attempts[0],
+            endpoint_url="https://planned.example.test/only",
+        )
+        planned = replace(planned, attempts=(planned_attempt,))
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "hi"}
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, _fake = post_handler("/v1/responses", body)
+        relayed: list[dict[str, Any]] = []
+        handler._relay_upstream_response = (
+            lambda response, upstream_name, **kwargs:
+            relayed.append(kwargs) or 200
+        )
+
+        with (
+            patch("codex_proxy._route_runtime_facts", return_value=runtime_facts),
+            patch("codex_proxy.route_plan_for_request", return_value=planned),
+            patch(
+                "codex_proxy._responses_url",
+                side_effect=AssertionError("executor derived Responses URL"),
+            ),
+            patch(
+                "codex_proxy._chat_completions_url",
+                side_effect=AssertionError("executor derived Chat URL"),
+            ),
+            patch(
+                "codex_proxy._external_tool_protocol",
+                side_effect=AssertionError("executor derived tool protocol"),
+            ),
+            patch(
+                "codex_proxy._external_tool_surface_strategy",
+                side_effect=AssertionError(
+                    "executor derived tool surface strategy"
+                ),
+            ),
+            patch(
+                "codex_proxy._external_native_responses_tool_codec",
+                side_effect=AssertionError(
+                    "executor derived native tool codec"
+                ),
+            ),
+            patch(
+                "codex_proxy.upstream_timeout_seconds",
+                side_effect=AssertionError("executor read request timeout"),
+            ),
+            patch(
+                "codex_proxy._upstream_retry_attempts",
+                side_effect=AssertionError("executor read retry attempts"),
+            ),
+            patch(
+                "codex_proxy._retry_attempts_for_failure_class",
+                side_effect=AssertionError("executor derived retry count"),
+            ),
+            patch(
+                "codex_proxy.gateway_downstream_retry_notice_enabled",
+                side_effect=AssertionError("executor read retry notice setting"),
+            ),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(
+                    b'{"id":"resp_planned","output":[]}'
+                ),
+            ) as open_upstream,
+            patch(
+                "codex_proxy.upstream_headers",
+                wraps=codex_proxy.upstream_headers,
+            ) as build_headers,
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+            )
+
+        request = open_upstream.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://planned.example.test/only",
+        )
+        self.assertIs(
+            open_upstream.call_args.kwargs["retry_execution"],
+            planned_attempt.retry,
+        )
+        self.assertEqual(
+            open_upstream.call_args.kwargs["timeout"],
+            planned_attempt.retry.request_timeout_seconds,
+        )
+        self.assertEqual(
+            open_upstream.call_args.kwargs["transport_policy"],
+            planned_attempt.transport_policy,
+        )
+        self.assertEqual(
+            build_headers.call_args.kwargs["authentication_strategy"],
+            planned_attempt.authentication_strategy,
+        )
+        self.assertEqual(
+            build_headers.call_args.kwargs["request_mutation_policy"],
+            planned_attempt.request_mutation_policy,
+        )
+        self.assertNotIn("behavior_profile", build_headers.call_args.kwargs)
+        self.assertNotIn("request_kind", open_upstream.call_args.kwargs)
+        self.assertNotIn("behavior_profile", relayed[0])
+        self.assertEqual(
+            relayed[0]["streaming_policy"],
+            planned_attempt.streaming_policy,
+        )
+        self.assertEqual(
+            relayed[0]["usage_policy"],
+            planned_attempt.usage_policy,
+        )
+        self.assertEqual(
+            relayed[0]["response_mutation_policy"],
+            planned_attempt.response_mutation_policy,
+        )
+        self.assertEqual(
+            relayed[0]["sse_mutation_policy"],
+            planned_attempt.sse_mutation_policy,
+        )
+
+    def test_open_upstream_response_consumes_planned_retry_execution(self):
+        runtime_facts = codex_proxy.RouteRuntimeFacts(
+            request_timeout_seconds=41,
+            request_kind_base_attempts=2,
+            request_kind_attempts_configured=True,
+            failure_expansion_attempts=19,
+            official_open_attempts=2,
+            capacity_elapsed_limit_seconds=83.0,
+            stream_elapsed_limit_seconds=97.0,
+            downstream_retry_notice_enabled=False,
+            pre_response_budget_seconds=109.0,
+        )
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "volcengine",
+                "base_url": "https://ark.example.test/v1",
+                "auth": "api_key",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "responses",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="volc/glm-5.2",
+            request_kind=codex_proxy.RETRY_REQUEST_COMPACT,
+            runtime_facts=runtime_facts,
+        )
+        retry = plan.attempts[0].retry
+        request = codex_proxy.Request(
+            plan.attempts[0].endpoint_url,
+            data=b"{}",
+            method="POST",
+        )
+        response = FakeContextResponse(b'{"id":"resp_retry","output":[]}')
+
+        with (
+            patch(
+                "codex_proxy._upstream_retry_attempts",
+                side_effect=AssertionError("open path read retry attempts"),
+            ),
+            patch(
+                "codex_proxy._retry_attempts_for_failure_class",
+                side_effect=AssertionError("open path derived retry count"),
+            ),
+            patch(
+                "codex_proxy.gateway_retry_delay_seconds",
+                side_effect=AssertionError("open path derived retry delay"),
+            ),
+            patch(
+                "codex_proxy._capacity_retry_elapsed_limit_allows",
+                side_effect=AssertionError("open path read capacity budget"),
+            ),
+            patch(
+                "codex_proxy._open_upstream_once",
+                side_effect=[URLError(OSError("reset")), response],
+            ) as open_once,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation"),
+        ):
+            opened = codex_proxy._open_upstream_response(
+                request,
+                upstream_name="volcengine",
+                upstream_format="responses",
+                timeout=999,
+                request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                retry_execution=retry,
+            )
+
+        self.assertIs(opened, response)
+        self.assertEqual(open_once.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["timeout"] == retry.request_timeout_seconds
+                for call in open_once.call_args_list
+            )
+        )
+
+    def test_route_plan_chat_auto_attempts_report_actual_conversion_chain(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "volcengine",
+                "base_url": "https://ark.example.test/v1",
+                "auth": "api_key",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "auto",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="chat_completions",
+            model_requested="volc/glm-5.2",
+            request_kind=codex_proxy.RETRY_REQUEST_COMPACT,
+        )
+
+        self.assertEqual(
+            plan.caller_request_body_mode,
+            codex_proxy.CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES,
+        )
+        self.assertEqual(
+            [attempt.wire_format_adapter for attempt in plan.attempts],
+            [codex_proxy.WIRE_CHAT_TO_RESPONSES, codex_proxy.WIRE_TRANSPARENT],
+        )
+        self.assertEqual(
+            [attempt.request_conversion_steps for attempt in plan.attempts],
+            [
+                (codex_proxy.WIRE_CHAT_TO_RESPONSES,),
+                (
+                    codex_proxy.WIRE_CHAT_TO_RESPONSES,
+                    codex_proxy.WIRE_RESPONSES_TO_CHAT,
+                ),
+            ],
+        )
+        self.assertTrue(
+            all(
+                codex_proxy.RouteMutation.WIRE_CONVERSION
+                in attempt.named_mutations
+                for attempt in plan.attempts
+            )
+        )
+        self.assertTrue(
+            all(
+                codex_proxy.RouteMutation.CALLER_TOOL_STRIPPING
+                in attempt.named_mutations
+                for attempt in plan.attempts
+            )
+        )
+        self.assertEqual(
+            set(plan.mutation_summary),
+            set().union(
+                *(attempt.named_mutations for attempt in plan.attempts)
+            ),
+        )
 
     def test_route_plan_preserves_unsupported_protocol_identity_without_attempts(self):
         cases = (
@@ -1161,6 +1592,7 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(plan.attempts, ())
 
     def test_route_plan_separates_schema_identity_from_optional_manifest_evidence(self):
+        valid_manifest_hash = f"sha256:{'a' * 64}"
         unqualified = codex_proxy.route_plan_for_request(
             {
                 "name": "ollama_cloud",
@@ -1177,7 +1609,7 @@ class RoutingTests(unittest.TestCase):
                 "upstream_model": "glm-5.2",
                 "upstream_format": "responses",
                 "capability_manifest_version": "provider-capabilities.v3",
-                "capability_manifest_hash": "sha256:route-qualified",
+                "capability_manifest_hash": valid_manifest_hash,
                 "capability_manifest_state": codex_proxy.CapabilityState.SUPPORTED.value,
             },
             {"client_id": "codex-app"},
@@ -1206,12 +1638,121 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             qualified.capability_manifest_hash,
-            "sha256:route-qualified",
+            valid_manifest_hash,
         )
         self.assertEqual(
             qualified.capability_manifest_state,
             codex_proxy.CapabilityState.SUPPORTED,
         )
+
+    def test_route_plan_capability_manifest_identity_fails_closed_pairwise(self):
+        valid_hash = f"sha256:{'b' * 64}"
+        cases = (
+            {
+                "name": "missing_pair",
+                "version": None,
+                "hash": None,
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": None,
+                "expected_hash": None,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "version_only",
+                "version": "provider-capabilities.v3",
+                "hash": None,
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": None,
+                "expected_hash": None,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "hash_only",
+                "version": None,
+                "hash": valid_hash,
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": None,
+                "expected_hash": None,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "malformed_version",
+                "version": "../provider capabilities",
+                "hash": valid_hash,
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": None,
+                "expected_hash": None,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "malformed_hash",
+                "version": "provider-capabilities.v3",
+                "hash": "sha256:not-a-digest",
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": None,
+                "expected_hash": None,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "valid_pair_unqualified",
+                "version": "provider-capabilities.v3",
+                "hash": valid_hash,
+                "state": codex_proxy.CapabilityState.UNQUALIFIED.value,
+                "expected_version": "provider-capabilities.v3",
+                "expected_hash": valid_hash,
+                "expected_state": codex_proxy.CapabilityState.UNQUALIFIED,
+            },
+            {
+                "name": "valid_pair_unsupported",
+                "version": "provider-capabilities.v3",
+                "hash": valid_hash,
+                "state": codex_proxy.CapabilityState.UNSUPPORTED.value,
+                "expected_version": "provider-capabilities.v3",
+                "expected_hash": valid_hash,
+                "expected_state": codex_proxy.CapabilityState.UNSUPPORTED,
+            },
+            {
+                "name": "valid_supported_pair",
+                "version": "provider-capabilities.v3",
+                "hash": valid_hash,
+                "state": codex_proxy.CapabilityState.SUPPORTED.value,
+                "expected_version": "provider-capabilities.v3",
+                "expected_hash": valid_hash,
+                "expected_state": codex_proxy.CapabilityState.SUPPORTED,
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                upstream = {
+                    "name": "ollama_cloud",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "responses",
+                    "capability_manifest_state": case["state"],
+                }
+                if case["version"] is not None:
+                    upstream["capability_manifest_version"] = case["version"]
+                if case["hash"] is not None:
+                    upstream["capability_manifest_hash"] = case["hash"]
+                plan = codex_proxy.route_plan_for_request(
+                    upstream,
+                    {"client_id": "codex-app"},
+                    inbound_format="responses",
+                    model_requested="ollama-cloud/glm-5.2",
+                )
+
+                self.assertEqual(
+                    plan.capability_manifest_version,
+                    case["expected_version"],
+                )
+                self.assertEqual(
+                    plan.capability_manifest_hash,
+                    case["expected_hash"],
+                )
+                self.assertEqual(
+                    plan.capability_manifest_state,
+                    case["expected_state"],
+                )
 
     def test_route_plan_resolves_vision_network_and_mutation_before_execution(self):
         cases = (
@@ -1294,6 +1835,206 @@ class RoutingTests(unittest.TestCase):
                         self.assertIn(
                             case["expected_mutation"],
                             attempt.named_mutations,
+                        )
+
+    def test_handler_executes_planned_vision_matrix_before_main_upstream_io(self):
+        response_body = json.dumps(
+            {
+                "id": "resp_main",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }
+        ).encode("utf-8")
+        cases = (
+            {
+                "name": "proxy",
+                "has_image": True,
+                "target_accepts_image": False,
+                "proxy_enabled": True,
+                "vision_error": None,
+                "expected_action": codex_proxy.VisionAction.PROXY,
+                "expected_network": codex_proxy.VisionNetworkAction.IMAGE_PROXY,
+                "expected_vision_calls": 1,
+                "expected_main_calls": 1,
+                "expected_status": 200,
+                "expected_mutation": codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT,
+            },
+            {
+                "name": "proxy_failure",
+                "has_image": True,
+                "target_accepts_image": False,
+                "proxy_enabled": True,
+                "vision_error": codex_proxy.ImageProxyError("vision unavailable"),
+                "expected_action": codex_proxy.VisionAction.PROXY,
+                "expected_network": codex_proxy.VisionNetworkAction.IMAGE_PROXY,
+                "expected_vision_calls": 1,
+                "expected_main_calls": 0,
+                "expected_status": 502,
+                "expected_mutation": codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT,
+            },
+            {
+                "name": "reject",
+                "has_image": True,
+                "target_accepts_image": False,
+                "proxy_enabled": False,
+                "vision_error": None,
+                "expected_action": codex_proxy.VisionAction.REJECT,
+                "expected_network": codex_proxy.VisionNetworkAction.NONE,
+                "expected_vision_calls": 0,
+                "expected_main_calls": 0,
+                "expected_status": 502,
+                "expected_mutation": codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION,
+            },
+            {
+                "name": "native",
+                "has_image": True,
+                "target_accepts_image": True,
+                "proxy_enabled": True,
+                "vision_error": None,
+                "expected_action": codex_proxy.VisionAction.PASS_THROUGH,
+                "expected_network": codex_proxy.VisionNetworkAction.NONE,
+                "expected_vision_calls": 0,
+                "expected_main_calls": 1,
+                "expected_status": 200,
+                "expected_mutation": None,
+            },
+            {
+                "name": "no_image",
+                "has_image": False,
+                "target_accepts_image": False,
+                "proxy_enabled": True,
+                "vision_error": None,
+                "expected_action": codex_proxy.VisionAction.PASS_THROUGH,
+                "expected_network": codex_proxy.VisionNetworkAction.NONE,
+                "expected_vision_calls": 0,
+                "expected_main_calls": 1,
+                "expected_status": 200,
+                "expected_mutation": None,
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self.write_proxy_event.reset_mock()
+                self.external_model["input_modalities"] = (
+                    ("text", "image")
+                    if case["target_accepts_image"]
+                    else ("text",)
+                )
+                content: list[dict[str, Any]] = [
+                    {"type": "input_text", "text": "describe this"}
+                ]
+                if case["has_image"]:
+                    content.append(
+                        {
+                            "type": "input_image",
+                            "image_url": (
+                                "data:image/png;base64,"
+                                f"{case['name'].encode('utf-8').hex()}"
+                            ),
+                        }
+                    )
+                body = json.dumps(
+                    {
+                        "model": "volc/glm-5.2",
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": content,
+                            }
+                        ],
+                        "stream": False,
+                    }
+                ).encode("utf-8")
+                handler, fake = post_handler("/v1/responses", body)
+                vision_side_effect = case["vision_error"]
+                with (
+                    patch(
+                        "codex_proxy.gateway_image_proxy_enabled",
+                        return_value=case["proxy_enabled"],
+                    ),
+                    patch(
+                        "codex_proxy._image_proxy_vision_upstream",
+                        return_value=(
+                            "minimax-cn/MiniMax-M3",
+                            self.minimax_external_model,
+                        ),
+                    ),
+                    patch("codex_proxy._image_proxy_cache_lookup", return_value=None),
+                    patch("codex_proxy._image_proxy_cache_store"),
+                    patch(
+                        "codex_proxy._call_vision_model_for_image_description",
+                        return_value="a test image",
+                        side_effect=vision_side_effect,
+                    ) as vision_call,
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        return_value=FakeContextResponse(response_body),
+                    ) as main_open,
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format="responses",
+                    )
+
+                self.assertEqual(vision_call.call_count, case["expected_vision_calls"])
+                self.assertEqual(main_open.call_count, case["expected_main_calls"])
+                self.assertEqual(fake.status, case["expected_status"])
+                request_event = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args
+                    and call.args[0]
+                    in {
+                        "request_start",
+                        "request_error",
+                    }
+                )
+                self.assertEqual(
+                    request_event["vision_action"],
+                    case["expected_action"].value,
+                )
+                self.assertEqual(
+                    request_event["vision_network_action"],
+                    case["expected_network"].value,
+                )
+                planned_mutations = request_event["planned_mutation_summary"]
+                if case["expected_mutation"] is None:
+                    self.assertNotIn(
+                        codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+                        planned_mutations,
+                    )
+                    self.assertNotIn(
+                        codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+                        planned_mutations,
+                    )
+                else:
+                    self.assertIn(
+                        case["expected_mutation"].value,
+                        planned_mutations,
+                    )
+                if case["expected_main_calls"]:
+                    forwarded = json.loads(main_open.call_args.args[0].data)
+                    if case["name"] == "proxy":
+                        self.assertFalse(
+                            codex_proxy._value_contains_image(forwarded)
+                        )
+                    elif case["name"] == "native":
+                        self.assertTrue(
+                            codex_proxy._value_contains_image(forwarded)
                         )
 
     def test_route_plan_uses_only_explicit_runtime_facts(self):
@@ -1782,6 +2523,19 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.RouteMutation.HARD_CODED_SCHEMA_INJECTION.value,
             request_start["mutation_summary"],
         )
+        self.assertIn(
+            codex_proxy.RouteMutation.CALLER_TOOL_STRIPPING.value,
+            request_start["mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.CALLER_TOOL_STRIPPING.value,
+            request_start["route_attempt_mutation_summary"],
+        )
+        self.assertEqual(request_start["mutation_summary_scope"], "planned_union")
+        self.assertEqual(
+            request_start["planned_mutation_summary"],
+            request_start["mutation_summary"],
+        )
 
     def test_auto_compact_executes_planned_chat_fallback_and_updates_attempt_telemetry(self):
         self.external_model["upstream_format"] = "auto"
@@ -1883,6 +2637,184 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertIn(
             codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            request_complete["route_attempt_mutation_summary"],
+        )
+
+    def test_chat_auto_compact_fallback_telemetry_matches_executed_conversion_chain(self):
+        self.external_model["upstream_format"] = "auto"
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Create a detailed summary of the conversation so far. "
+                            "This is a compact summary. Respond with text only. "
+                            "The summary should include <summary>."
+                        ),
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "caller_tool",
+                            "description": "caller-owned tool",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, _fake = post_handler("/v1/chat/completions", body)
+        responses_error = HTTPError(
+            "https://ark.example.test/v1/responses",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"error":"unsupported endpoint"}'),
+        )
+        chat_response = FakeContextResponse(
+            json.dumps(
+                {
+                    "id": "chat_fallback",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "<summary>fallback summary</summary>",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"},
+                clear=False,
+            ),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[responses_error, chat_response],
+            ) as mock_urlopen,
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="chat_completions",
+            )
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        responses_request = mock_urlopen.call_args_list[0].args[0]
+        chat_request = mock_urlopen.call_args_list[1].args[0]
+        self.assertTrue(responses_request.full_url.endswith("/responses"))
+        self.assertTrue(chat_request.full_url.endswith("/chat/completions"))
+        responses_payload = json.loads(responses_request.data)
+        chat_payload = json.loads(chat_request.data)
+        self.assertIn("input", responses_payload)
+        self.assertNotIn("messages", responses_payload)
+        self.assertIn("messages", chat_payload)
+        self.assertNotIn("input", chat_payload)
+        self.assertNotIn("tools", responses_payload)
+        self.assertNotIn("tools", chat_payload)
+
+        request_start = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_start"
+        )
+        fallback = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_protocol_fallback"
+        )
+        request_complete = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_complete"
+        )
+
+        self.assertEqual(
+            request_start["caller_request_body_mode"],
+            codex_proxy.CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES.value,
+        )
+        self.assertEqual(
+            request_start["route_attempt_wire_format_adapter"],
+            codex_proxy.WIRE_CHAT_TO_RESPONSES,
+        )
+        self.assertEqual(
+            request_start["route_attempt_request_conversion_steps"],
+            [codex_proxy.WIRE_CHAT_TO_RESPONSES],
+        )
+        self.assertEqual(request_start["mutation_summary_scope"], "planned_union")
+        self.assertEqual(
+            request_start["planned_mutation_summary"],
+            request_start["mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            request_start["planned_mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.CALLER_TOOL_STRIPPING.value,
+            request_start["planned_mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            fallback["failed_route_attempt_mutation_summary"],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            fallback["next_route_attempt_mutation_summary"],
+        )
+        self.assertEqual(
+            fallback["failed_route_attempt_request_conversion_steps"],
+            [codex_proxy.WIRE_CHAT_TO_RESPONSES],
+        )
+        self.assertEqual(
+            fallback["next_route_attempt_request_conversion_steps"],
+            [
+                codex_proxy.WIRE_CHAT_TO_RESPONSES,
+                codex_proxy.WIRE_RESPONSES_TO_CHAT,
+            ],
+        )
+        self.assertEqual(request_complete["route_attempt_index"], 1)
+        self.assertEqual(
+            request_complete["execution_summary_scope"],
+            "selected_attempt_plan",
+        )
+        self.assertEqual(
+            request_complete["executed_upstream_protocol"],
+            codex_proxy.RouteProtocol.CHAT_COMPLETIONS.value,
+        )
+        self.assertEqual(
+            request_complete["executed_wire_format_adapter"],
+            codex_proxy.WIRE_TRANSPARENT,
+        )
+        self.assertEqual(
+            request_complete["route_attempt_wire_format_adapter"],
+            codex_proxy.WIRE_TRANSPARENT,
+        )
+        self.assertEqual(
+            request_complete["route_attempt_request_conversion_steps"],
+            [
+                codex_proxy.WIRE_CHAT_TO_RESPONSES,
+                codex_proxy.WIRE_RESPONSES_TO_CHAT,
+            ],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            request_complete["route_attempt_mutation_summary"],
+        )
+        self.assertEqual(
+            request_complete["executed_attempt_mutation_summary"],
             request_complete["route_attempt_mutation_summary"],
         )
 
@@ -2329,7 +3261,15 @@ class RoutingTests(unittest.TestCase):
         ):
             CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(open_response.call_args.kwargs.get("max_attempts"), codex_proxy.official_upstream_open_attempts())
+        retry_execution = open_response.call_args.kwargs["retry_execution"]
+        self.assertEqual(
+            retry_execution.open_attempt_budget,
+            codex_proxy.official_upstream_open_attempts(),
+        )
+        self.assertEqual(
+            retry_execution.base_open_attempts,
+            codex_proxy.official_upstream_open_attempts(),
+        )
         self.assertIsInstance(open_response.call_args.kwargs.get("pre_response_deadline"), float)
         self.assertEqual(
             open_response.call_args.kwargs.get("open_attempt_budget"),
@@ -2338,7 +3278,7 @@ class RoutingTests(unittest.TestCase):
                 "attempts_started": 0,
             },
         )
-        self.assertFalse(open_response.call_args.kwargs.get("retry_http_errors"))
+        self.assertFalse(retry_execution.retry_http_errors)
         self.assertTrue(relayed[0]["defer_stream_errors"])
         self.assert_no_official_passthrough_gateway_events()
 
