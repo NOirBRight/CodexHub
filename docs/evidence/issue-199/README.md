@@ -107,6 +107,43 @@ tested independently from the implementation. A forged owned journal with
 otherwise coherent source/recovery/final digests is rejected during sidecar
 read, before live publication or receipt creation.
 
+### Active-takeover context-guard re-anchor repair
+
+Final Spec review of `415a45f077dc03f0cc051b09b6121aad4bc14770`
+found that a successful context-guard update changed the active takeover's
+recovery backup but left `recovery_sha256` anchored to the previous bytes.
+The update reported success, while the next restore failed closed with
+`recovery backup is missing or diverged`.
+
+Context-guard backup updates now use the existing takeover metadata and
+lifecycle phase model under the same canonical per-config lock. The active
+anchor remains the base authority while a bounded
+`RECOVERY_REANCHOR_JOURNAL` records only the candidate recovery SHA-256.
+Journal readback is durable before the candidate backup is published; exact
+backup readback is durable before ordinary active metadata promotes the
+candidate digest. Resume accepts only the exact base or candidate bytes with
+the recorded original owner. Base bytes roll the journal back to the base
+anchor, candidate bytes promote the candidate anchor, and any third bytes or
+owner mismatch fail closed without changing or deleting recovery evidence.
+
+The context-guard state is durable before an enabled active-takeover update so
+a fresh retry retains the distinct prior live and backup values. The recovery
+backup and anchor commit before the live config, so every injected failure
+between journal, backup, and anchor publication leaves the live takeover bytes
+unchanged. A fresh CLI process resolves the typed journal, retries the requested
+enable or disable, and restores the original owner with the intended context
+settings while preserving provider, model, agents, comments, and unknown TOML.
+
+Tests cover before- and after-commit errors at journal publication, recovery
+backup publication, and candidate-anchor publication for both enable and
+disable (`12` crash-prefix subtests). Duplicate, future, unknown, malformed,
+mixed-phase, and same-owner re-anchor records fail before mutation. A valid
+journal with unknown third recovery bytes retains the live config, backup,
+metadata, and context state. Re-anchor metadata contains exactly version,
+owners, and the two fixed SHA-256 fields; bounded-size assertions prove it
+contains no agent config, collaboration setting, provider credential, or
+Gateway key.
+
 Completion receipts use the same strict absent/valid/invalid classification.
 Legacy or missing fields, truncated or unreadable JSON, duplicate keys,
 future/non-integral versions, unknown fields/owners/statuses, malformed
@@ -155,6 +192,23 @@ defaults for agent or collaboration V2 configuration.
 
 ## Local verification
 
+- Post-review active-takeover context-guard repair:
+  - ordinary enable and enable-then-disable lifecycle tests were red on
+    `415a45f077dc03f0cc051b09b6121aad4bc14770` because restore rejected the
+    stale recovery anchor; both are green after the typed re-anchor repair;
+  - committed-backup-error fresh-process retry was red before the journal and
+    green afterward;
+  - `py -3.13 -m pytest -q tests/test_config_overlay.py`
+    - `110 passed, 202 subtests passed in 94.01s`;
+  - subsequent parser-only delta:
+    `1 passed, 31 subtests passed in 6.64s`;
+  - `py -3.13 -m py_compile src-python/config_overlay.py
+    tests/test_config_overlay.py` and `py -3.13 -m compileall -q src-python
+    tests/test_config_overlay.py` passed;
+  - `git diff --check` passed;
+  - report-only quality gates exited `0` with `parse_errors: 0`; repository
+    baseline remained 2 unused imports, 83 dead-function reports, and 146
+    duplicate-name reports, with no changed-file finding.
 - `Python313\python.exe -m pytest -q tests/test_config_overlay.py`
   - `106 passed, 186 subtests passed in 43.83s`
 - `Python313\python.exe -m pytest -q --ignore=tests/test_real_client_e2e.py`

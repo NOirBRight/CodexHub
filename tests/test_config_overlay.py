@@ -3102,6 +3102,10 @@ class ConfigOverlayTests(unittest.TestCase):
             "cleanup_final_sha256": "2" * 64,
             "cleanup_status": "injected",
         }
+        valid_reanchor = {
+            **valid_active,
+            "reanchor_recovery_sha256": "2" * 64,
+        }
 
         def changed(payload: dict[str, object], **updates: object) -> str:
             candidate = dict(payload)
@@ -3170,6 +3174,33 @@ class ConfigOverlayTests(unittest.TestCase):
                 valid_journal,
                 cleanup_recovery_sha256="3" * 64,
             ),
+            "malformed_reanchor_digest": changed(
+                valid_reanchor,
+                reanchor_recovery_sha256="not-a-digest",
+            ),
+            "uppercase_reanchor_digest": changed(
+                valid_reanchor,
+                reanchor_recovery_sha256="A" * 64,
+            ),
+            "future_reanchor_version": changed(
+                valid_reanchor,
+                version=2,
+            ),
+            "unknown_reanchor_field": json.dumps(
+                {**valid_reanchor, "future_field": True},
+                sort_keys=True,
+            ),
+            "same_owner_reanchor": changed(
+                valid_reanchor,
+                original_owner="beta",
+            ),
+            "mixed_reanchor_and_cleanup_journals": json.dumps(
+                {
+                    **valid_journal,
+                    "reanchor_recovery_sha256": "3" * 64,
+                },
+                sort_keys=True,
+            ),
         }
         invalid_payloads.update(
             {
@@ -3184,6 +3215,10 @@ class ConfigOverlayTests(unittest.TestCase):
                             "cleanup_final_sha256",
                             "cleanup_status",
                         ),
+                    ),
+                    (
+                        valid_reanchor,
+                        ("reanchor_recovery_sha256",),
                     ),
                 )
                 for key in keys
@@ -3314,6 +3349,89 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), live_before)
             self.assertEqual(backup_path.read_bytes(), backup_before)
             self.assertEqual(metadata_path.read_bytes(), metadata_before)
+
+    def test_context_guard_reanchor_journal_rejects_unknown_backup_drift(self):
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'model = "ollama-cloud/glm-5.2"\n',
+            "",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            metadata_path = config_overlay.takeover_metadata_path(beta_backup_path)
+            completion_path = config_overlay.takeover_completion_path(beta_backup_path)
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(original, encoding="utf-8")
+            catalog_path = self._official_budget_catalog(tmp)
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            real_atomic_write = config_overlay.atomic_write_text
+
+            def stop_after_journal(
+                path: Path,
+                text: str,
+                *,
+                encoding: str = "utf-8",
+            ) -> None:
+                real_atomic_write(path, text, encoding=encoding)
+                if (
+                    path == metadata_path
+                    and '"reanchor_recovery_sha256"' in text
+                ):
+                    raise OSError("simulated durable re-anchor journal")
+
+            with patch("config_overlay.atomic_write_text", stop_after_journal):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "durable re-anchor journal",
+                ):
+                    set_context_guard(
+                        config_path,
+                        beta_backup_path,
+                        state_path,
+                        enabled=True,
+                        catalog_path=catalog_path,
+                    )
+
+            beta_backup_path.write_bytes(
+                beta_backup_path.read_bytes() + b"# unknown recovery drift\n"
+            )
+            live_before = config_path.read_bytes()
+            backup_before = beta_backup_path.read_bytes()
+            metadata_before = metadata_path.read_bytes()
+            state_before = state_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "recovery backup is missing or diverged",
+            ):
+                restore_overlay(
+                    config_path,
+                    beta_backup_path,
+                    unified_history=True,
+                )
+
+            self.assertEqual(config_path.read_bytes(), live_before)
+            self.assertEqual(beta_backup_path.read_bytes(), backup_before)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(completion_path.exists())
 
     def test_interrupted_takeover_rejects_raw_newline_backup_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4604,6 +4722,331 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("model_catalog_json", updated)
             self.assertNotIn("[model_providers.custom]", updated)
             self.assertIn("[features]", updated)
+
+    def test_context_guard_enable_during_active_takeover_preserves_restore_chain(self):
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'model = "ollama-cloud/glm-5.2"\n',
+            "",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(original, encoding="utf-8")
+            catalog_path = self._official_budget_catalog(tmp)
+            expected_agents = tomllib.loads(original)["agents"]
+
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+
+            enabled = set_context_guard(
+                config_path,
+                beta_backup_path,
+                state_path,
+                enabled=True,
+                catalog_path=catalog_path,
+            )
+            status = restore_overlay(
+                config_path,
+                beta_backup_path,
+                unified_history=True,
+            )
+            restored = config_path.read_text(encoding="utf-8")
+            readback = tomllib.loads(restored)
+
+            self.assertTrue(enabled["enabled"])
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_overlay.overlay_owner(restored), "release")
+            self.assertEqual(readback["model_context_window"], 272_000)
+            self.assertEqual(
+                readback["model_auto_compact_token_limit"],
+                240_000,
+            )
+            self.assertEqual(readback["agents"], expected_agents)
+
+    def test_context_guard_disable_during_active_takeover_preserves_restore_chain(self):
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'model = "ollama-cloud/glm-5.2"\n',
+            "",
+        ).replace(
+            "future_scheduler =",
+            "# context-guard-must-preserve-this-comment\nfuture_scheduler =",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(original, encoding="utf-8")
+            catalog_path = self._official_budget_catalog(tmp)
+            expected_agents = tomllib.loads(original)["agents"]
+
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                None,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            set_context_guard(
+                config_path,
+                beta_backup_path,
+                state_path,
+                enabled=True,
+                catalog_path=catalog_path,
+            )
+
+            disabled = set_context_guard(
+                config_path,
+                beta_backup_path,
+                state_path,
+                enabled=False,
+            )
+            status = restore_overlay(
+                config_path,
+                beta_backup_path,
+                unified_history=True,
+            )
+            restored = config_path.read_text(encoding="utf-8")
+            readback = tomllib.loads(restored)
+
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_overlay.overlay_owner(restored), "release")
+            self.assertNotIn("model_context_window", readback)
+            self.assertNotIn("model_auto_compact_token_limit", readback)
+            self.assertEqual(readback["agents"], expected_agents)
+            self.assertEqual(
+                restored.count("# context-guard-must-preserve-this-comment"),
+                1,
+            )
+
+    def test_context_guard_active_takeover_crash_prefixes_resume_in_fresh_process(self):
+        original = RUST_0_145_AGENTS_CONFIG.replace(
+            'model = "ollama-cloud/glm-5.2"\n',
+            "",
+        )
+        boundaries = (
+            ("journal_before", "journal", False),
+            ("journal_after", "journal", True),
+            ("backup_before", "backup", False),
+            ("backup_after", "backup", True),
+            ("anchor_before", "anchor", False),
+            ("anchor_after", "anchor", True),
+        )
+
+        for enabled in (True, False):
+            for name, artifact, commit in boundaries:
+                with (
+                    self.subTest(enabled=enabled, boundary=name),
+                    tempfile.TemporaryDirectory() as tmpdir,
+                ):
+                    tmp = Path(tmpdir)
+                    config_path = tmp / "config.toml"
+                    stable_backup_path = tmp / "stable.backup.toml"
+                    beta_backup_path = tmp / "beta.backup.toml"
+                    metadata_path = config_overlay.takeover_metadata_path(
+                        beta_backup_path
+                    )
+                    state_path = tmp / "context-guard-state.json"
+                    config_path.write_text(original, encoding="utf-8")
+                    catalog_path = self._official_budget_catalog(tmp)
+                    apply_overlay(
+                        config_path,
+                        stable_backup_path,
+                        None,
+                        "http://127.0.0.1:9099",
+                        owner="release",
+                    )
+                    apply_overlay(
+                        config_path,
+                        beta_backup_path,
+                        None,
+                        "http://127.0.0.1:9109",
+                        owner="beta",
+                        takeover=True,
+                    )
+                    if not enabled:
+                        set_context_guard(
+                            config_path,
+                            beta_backup_path,
+                            state_path,
+                            enabled=True,
+                            catalog_path=catalog_path,
+                        )
+
+                    live_base = config_path.read_bytes()
+                    recovery_base = beta_backup_path.read_bytes()
+                    metadata_base = config_overlay.read_takeover_metadata(
+                        beta_backup_path
+                    ).metadata
+                    self.assertIsNotNone(metadata_base)
+                    real_atomic_write = config_overlay.atomic_write_text
+
+                    def fail_at_boundary(
+                        path: Path,
+                        text: str,
+                        *,
+                        encoding: str = "utf-8",
+                    ) -> None:
+                        is_journal = (
+                            path == metadata_path
+                            and '"reanchor_recovery_sha256"' in text
+                        )
+                        is_anchor = (
+                            path == metadata_path
+                            and '"reanchor_recovery_sha256"' not in text
+                        )
+                        matches = (
+                            (artifact == "journal" and is_journal)
+                            or (artifact == "backup" and path == beta_backup_path)
+                            or (artifact == "anchor" and is_anchor)
+                        )
+                        if matches and not commit:
+                            raise OSError(f"simulated {name}")
+                        real_atomic_write(path, text, encoding=encoding)
+                        if matches:
+                            raise OSError(f"simulated {name}")
+
+                    with patch("config_overlay.atomic_write_text", fail_at_boundary):
+                        with self.assertRaisesRegex(OSError, f"simulated {name}"):
+                            set_context_guard(
+                                config_path,
+                                beta_backup_path,
+                                state_path,
+                                enabled=enabled,
+                                catalog_path=catalog_path if enabled else None,
+                            )
+
+                    self.assertEqual(config_path.read_bytes(), live_base)
+                    durable_recovery = beta_backup_path.read_bytes()
+                    durable_metadata = config_overlay.read_takeover_metadata(
+                        beta_backup_path
+                    ).metadata
+                    self.assertIsNotNone(durable_metadata)
+                    if artifact in {"journal", "backup"} and not (
+                        artifact == "backup" and commit
+                    ):
+                        self.assertEqual(durable_recovery, recovery_base)
+                    else:
+                        self.assertNotEqual(durable_recovery, recovery_base)
+                    if artifact == "journal" and not commit:
+                        self.assertIsNone(
+                            durable_metadata.reanchor_recovery_sha256
+                        )
+                    elif artifact == "anchor" and commit:
+                        self.assertIsNone(
+                            durable_metadata.reanchor_recovery_sha256
+                        )
+                        self.assertEqual(
+                            durable_metadata.recovery_sha256,
+                            config_overlay.takeover_text_sha256(
+                                beta_backup_path.read_text(encoding="utf-8")
+                            ),
+                        )
+                    else:
+                        self.assertIsNotNone(
+                            durable_metadata.reanchor_recovery_sha256
+                        )
+                        raw_journal = metadata_path.read_text(encoding="utf-8")
+                        self.assertEqual(
+                            set(json.loads(raw_journal)),
+                            {
+                                "version",
+                                "takeover_owner",
+                                "original_owner",
+                                "recovery_sha256",
+                                "reanchor_recovery_sha256",
+                            },
+                        )
+                        self.assertLess(len(raw_journal.encode("utf-8")), 320)
+                        self.assertNotIn("researcher.toml", raw_journal)
+                        self.assertNotIn("team_tools", raw_journal)
+
+                    retry = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "config_overlay",
+                            "context-guard-set",
+                            "--config",
+                            str(config_path),
+                            "--backup",
+                            str(beta_backup_path),
+                            "--state",
+                            str(state_path),
+                            "--catalog",
+                            str(catalog_path),
+                            "--enabled",
+                            str(enabled).lower(),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env=self._subprocess_env(),
+                        timeout=10,
+                    )
+
+                    self.assertEqual(retry.returncode, 0, retry.stderr)
+                    self.assertIs(
+                        json.loads(retry.stdout)["enabled"],
+                        enabled,
+                    )
+                    active = config_overlay.read_takeover_metadata(
+                        beta_backup_path
+                    ).metadata
+                    self.assertIsNotNone(active)
+                    self.assertIsNone(active.reanchor_recovery_sha256)
+                    self.assertEqual(
+                        active.recovery_sha256,
+                        config_overlay.takeover_text_sha256(
+                            beta_backup_path.read_text(encoding="utf-8")
+                        ),
+                    )
+                    self.assertEqual(
+                        restore_overlay(
+                            config_path,
+                            beta_backup_path,
+                            unified_history=True,
+                        ),
+                        "restored_takeover_backup",
+                    )
+                    restored = tomllib.loads(
+                        config_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(
+                        "model_context_window" in restored,
+                        enabled,
+                    )
+                    self.assertEqual(
+                        restored["agents"],
+                        tomllib.loads(original)["agents"],
+                    )
 
     def test_context_guard_updates_live_and_overlay_backup_then_restores_previous_values(self):
         original = "\n".join(
