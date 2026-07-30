@@ -436,7 +436,7 @@ def relay_upstream_response(
     response,
     upstream_name,
     *args,
-    relay_fixture: RelayPlanFixture = RELAY_GATEWAY,
+    relay_fixture: RelayPlanFixture,
     **kwargs,
 ):
     """Call the production relay with an explicit typed policy fixture."""
@@ -589,6 +589,82 @@ class RoutingTests(unittest.TestCase):
         event_names = {call.args[0] for call in self.write_proxy_event.call_args_list if call.args}
         self.assertFalse(blocked & event_names, blocked & event_names)
 
+    def test_relay_test_helper_requires_explicit_typed_fixture_at_every_call_site(
+        self,
+    ):
+        import ast
+
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "relay_upstream_response"
+        )
+        relay_fixture_index = next(
+            index
+            for index, argument in enumerate(helper.args.kwonlyargs)
+            if argument.arg == "relay_fixture"
+        )
+        violations = []
+        if helper.args.kw_defaults[relay_fixture_index] is not None:
+            violations.append("relay_fixture parameter has a default")
+
+        typed_fixture_names = {
+            "RELAY_GATEWAY",
+            "RELAY_GATEWAY_VERIFIED_CONVERSION",
+            "RELAY_OFFICIAL_PASSTHROUGH",
+            "RELAY_TRANSPARENT",
+            "RELAY_TRANSPARENT_CONVERTED",
+        }
+
+        def is_typed_fixture_expression(node):
+            if isinstance(node, ast.Name):
+                return node.id in typed_fixture_names
+            return (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "case"
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == "relay_fixture"
+            )
+
+        behavior_profile_calls = []
+        for function in (
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        ):
+            for call_node in (
+                node for node in ast.walk(function) if isinstance(node, ast.Call)
+            ):
+                if not (
+                    isinstance(call_node.func, ast.Name)
+                    and call_node.func.id == "relay_upstream_response"
+                ):
+                    continue
+                keywords = {
+                    keyword.arg: keyword.value
+                    for keyword in call_node.keywords
+                    if keyword.arg is not None
+                }
+                relay_fixture = keywords.get("relay_fixture")
+                if relay_fixture is None:
+                    violations.append(
+                        f"{function.name}:{call_node.lineno} omits relay_fixture"
+                    )
+                elif not is_typed_fixture_expression(relay_fixture):
+                    violations.append(
+                        f"{function.name}:{call_node.lineno} uses a non-typed relay_fixture"
+                    )
+                if "behavior_profile" in keywords:
+                    behavior_profile_calls.append(function.name)
+
+        self.assertEqual(
+            behavior_profile_calls,
+            ["test_relay_test_helper_rejects_legacy_behavior_profile_selection"],
+        )
+        self.assertEqual(violations, [])
+
     def test_relay_test_helper_rejects_legacy_behavior_profile_selection(self):
         with self.assertRaisesRegex(
             TypeError,
@@ -598,6 +674,7 @@ class RoutingTests(unittest.TestCase):
                 FakeHandler(),
                 FakeResponse(b'{"id":"resp_fixture_contract","output":[]}'),
                 "volcengine",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req-fixture-contract",
                 model="volc/glm-5.2",
                 upstream_format="responses",
@@ -13465,7 +13542,7 @@ class RoutingTests(unittest.TestCase):
         ]
         response = FakeSseResponse(lines)
 
-        relay_upstream_response(handler, response, "official")
+        relay_upstream_response(handler, response, "official", relay_fixture=RELAY_GATEWAY)
 
         self.assertEqual(handler.status, 200)
         self.assertTrue(handler.headers_ended)
@@ -13486,7 +13563,7 @@ class RoutingTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"CODEX_PROXY_SSE_KEEPALIVE_SECONDS": "0.01"}, clear=False):
-            relay_upstream_response(handler, response, "official")
+            relay_upstream_response(handler, response, "official", relay_fixture=RELAY_GATEWAY)
 
         written = b"".join(handler.wfile.writes)
         keepalive_index = written.index(b": codexhub.keepalive\n\n")
@@ -13518,6 +13595,7 @@ class RoutingTests(unittest.TestCase):
                     handler,
                     response,
                     "official",
+                    relay_fixture=RELAY_GATEWAY,
                     request_id="req_keepalive_fail",
                     model="openai/gpt-5.5",
                     upstream_format="responses",
@@ -13547,7 +13625,7 @@ class RoutingTests(unittest.TestCase):
         }
         response = FakeSseResponse([f"data: {json.dumps(event)}\n".encode("utf-8"), b"\n", b""])
 
-        relay_upstream_response(handler, response, "ollama_cloud")
+        relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
 
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
@@ -13566,7 +13644,7 @@ class RoutingTests(unittest.TestCase):
         }
         response = FakeSseResponse([f"data: {json.dumps(event)}\n".encode("utf-8"), b"\n", b""])
 
-        relay_upstream_response(handler, response, "volcengine")
+        relay_upstream_response(handler, response, "volcengine", relay_fixture=RELAY_GATEWAY)
 
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
@@ -13585,7 +13663,7 @@ class RoutingTests(unittest.TestCase):
         }
         response = FakeSseResponse([f"data: {json.dumps(event)}\n".encode("utf-8"), b"\n", b""])
 
-        relay_upstream_response(handler, response, "volcengine")
+        relay_upstream_response(handler, response, "volcengine", relay_fixture=RELAY_GATEWAY)
 
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
@@ -13611,7 +13689,7 @@ class RoutingTests(unittest.TestCase):
             ]
         )
 
-        status = relay_upstream_response(handler, response, "ollama_cloud")
+        status = relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
 
         data = b"".join(handler.wfile.writes)
         self.assertEqual(status, 502)
@@ -13640,6 +13718,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_named_reasoning_summary",
             model="ollama-cloud/glm-5.2",
             upstream_format="responses",
@@ -13678,7 +13757,7 @@ class RoutingTests(unittest.TestCase):
             b"",
         ])
 
-        relay_upstream_response(handler, response, "ollama_cloud")
+        relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
 
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
@@ -14046,7 +14125,7 @@ class RoutingTests(unittest.TestCase):
         body = b'{"ok":true}'
         response = FakeResponse(body)
 
-        relay_upstream_response(handler, response, "official")
+        relay_upstream_response(handler, response, "official", relay_fixture=RELAY_GATEWAY)
 
         self.assertEqual(handler.status, 200)
         self.assertEqual(handler.wfile.writes, [body])
@@ -14082,6 +14161,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
         )
 
@@ -14135,6 +14215,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             request_id="<sanitized-request-id>",
             model="<third-party-glm>",
             upstream_format="chat_completions",
@@ -14221,6 +14302,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             request_id="<sanitized-request-id>",
             model="<third-party-glm>",
             upstream_format="responses",
@@ -14792,6 +14874,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             event_context={
                 "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
@@ -14937,6 +15020,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
@@ -14997,6 +15081,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
         )
 
@@ -15045,6 +15130,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
         )
 
@@ -15134,6 +15220,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             event_context={
                 "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
@@ -15206,6 +15293,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
@@ -15251,6 +15339,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "volcengine",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
         )
 
@@ -15429,6 +15518,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_responses_passthrough",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -15455,6 +15545,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_chat_sse",
             model="ollama-cloud/glm-5.2",
             upstream_format="chat_completions",
@@ -15494,6 +15585,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_pre_output_idle",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15538,6 +15630,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_transport_idle",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15587,6 +15680,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_output_idle",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15653,6 +15747,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_tool_arg_idle",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15708,6 +15803,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_custom_tool_idle",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15736,7 +15832,7 @@ class RoutingTests(unittest.TestCase):
         ).encode("utf-8")
         response = FakeResponse(body)
 
-        relay_upstream_response(handler, response, "ollama_cloud")
+        relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
 
         payload = json.loads(handler.wfile.writes[0])
         self.assertNotIn("encrypted_content", payload["output"][0])
@@ -15757,7 +15853,7 @@ class RoutingTests(unittest.TestCase):
         ).encode("utf-8")
         response = FakeResponse(body)
 
-        relay_upstream_response(handler, response, "minimax")
+        relay_upstream_response(handler, response, "minimax", relay_fixture=RELAY_GATEWAY)
 
         payload = json.loads(handler.wfile.writes[0])
         self.assertEqual(payload["output"][0]["summary"], [])
@@ -15779,7 +15875,7 @@ class RoutingTests(unittest.TestCase):
         ).encode("utf-8")
         response = FakeResponse(body)
 
-        relay_upstream_response(handler, response, "volcengine")
+        relay_upstream_response(handler, response, "volcengine", relay_fixture=RELAY_GATEWAY)
 
         payload = json.loads(handler.wfile.writes[0])
         self.assertEqual(payload["output"][0]["type"], "message")
@@ -15799,6 +15895,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_buffer",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -15840,6 +15937,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_chat_convert",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -15864,6 +15962,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_chat_sse",
             model="ollama-cloud/glm-5.2",
             upstream_format="chat_completions",
@@ -15888,6 +15987,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_incomplete_responses_passthrough",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -15910,6 +16010,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_empty_responses_passthrough",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -15930,6 +16031,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "official",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_empty_responses_passthrough_retry",
                 model="openai/gpt-5.5",
                 upstream_format="responses",
@@ -15960,6 +16062,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "xunfei",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_sse_error_defer",
                 model="xunfei/xopglm52",
                 upstream_format="responses",
@@ -16563,6 +16666,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_incomplete_tool_input",
                 model="ollama-cloud/glm-5.2",
                 upstream_format="responses",
@@ -16587,6 +16691,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_reset_after_created",
                 model="ollama-cloud/glm-5.2",
                 upstream_format="responses",
@@ -16615,6 +16720,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req_reset_after_reasoning_start",
                 model="ollama-cloud/glm-5.2",
                 upstream_format="responses",
@@ -16643,6 +16749,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "xunfei",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_sse_error_final",
             model="xunfei/xopglm52",
             upstream_format="responses",
@@ -16683,6 +16790,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "xunfei",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_json_stream_fallback",
             model="xunfei/xopglm52",
             upstream_format="responses",
@@ -16718,6 +16826,7 @@ class RoutingTests(unittest.TestCase):
                 handler,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 upstream_format="responses",
                 inbound_format="chat_completions",
                 caller_stream=False,
@@ -16744,6 +16853,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "official",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_empty_non_compact",
             model="openai/gpt-5.5",
             upstream_format="responses",
@@ -20630,6 +20740,7 @@ Execution constraints:
             handler,
             empty_response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_diagnostic_empty",
             model="glm-5.2",
             upstream_format="responses",
@@ -20644,6 +20755,7 @@ Execution constraints:
             compact_handler,
             FakeResponse(empty_response.body),
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_diagnostic_compact",
             model="glm-5.2",
             upstream_format="responses",
@@ -22963,6 +23075,7 @@ Execution constraints:
             handler,
             self._chat_spawn_sse_response({"agent_type": "worker", "message": "delegate"}),
             "synthetic-provider",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=True,
@@ -23008,6 +23121,7 @@ Execution constraints:
                 handler,
                 self._chat_spawn_sse_response({"message": "delegate"}, call_id="chat-missing-selector"),
                 "synthetic-provider",
+                relay_fixture=RELAY_GATEWAY,
                 upstream_format="chat_completions",
                 inbound_format="responses",
                 caller_stream=True,
@@ -23033,6 +23147,7 @@ Execution constraints:
                     call_id="chat-unsupported-selector",
                 ),
                 "synthetic-provider",
+                relay_fixture=RELAY_GATEWAY,
                 upstream_format="chat_completions",
                 inbound_format="responses",
                 caller_stream=True,
@@ -23064,6 +23179,7 @@ Execution constraints:
                     call_id="chat-semantic-unsupported-selector",
                 ),
                 "synthetic-provider",
+                relay_fixture=RELAY_GATEWAY,
                 upstream_format="chat_completions",
                 inbound_format="responses",
                 caller_stream=True,
@@ -23088,6 +23204,7 @@ Execution constraints:
                 call_id="chat-semantic-general-selector",
             ),
             "synthetic-provider",
+            relay_fixture=RELAY_GATEWAY,
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=True,
@@ -23132,6 +23249,7 @@ Execution constraints:
                     tool_name="multi_agent_v1__wait_agent",
                 ),
                 "synthetic-provider",
+                relay_fixture=RELAY_GATEWAY,
                 upstream_format="chat_completions",
                 inbound_format="responses",
                 caller_stream=True,
@@ -25632,6 +25750,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 fake,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req-empty-retryable",
                 model="glm-5.2",
                 upstream_format="responses",
@@ -25659,6 +25778,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 fake,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req-hidden-reasoning-empty",
                 model="glm-5.2",
                 upstream_format="responses",
@@ -25685,6 +25805,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 fake,
                 response,
                 "ollama_cloud",
+                relay_fixture=RELAY_GATEWAY,
                 request_id="req-empty-final",
                 model="glm-5.2",
                 upstream_format="responses",
@@ -25729,6 +25850,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
             fake,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req-tool-only",
             model="glm-5.2",
             upstream_format="responses",
@@ -26145,6 +26267,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
             handler,
             response,
             "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
             request_id="req_synth_terminal",
             model="ollama-cloud/glm-5.2",
             upstream_format="responses",

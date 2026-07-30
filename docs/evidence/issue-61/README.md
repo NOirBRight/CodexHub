@@ -247,4 +247,21 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   rerun for this repair. The synthetic real-client partition remains not
   applicable because no listed contract-surface path changed.
 
+## Final relay-helper contract repair
+
+- RED: the new static contract reported the helper's `RELAY_GATEWAY` default
+  plus all 58 implicit call sites. GREEN requires the keyword-only
+  `RelayPlanFixture`, and all 109 helper calls now supply an explicit typed
+  fixture; the sole legacy `behavior_profile` call remains the deliberate
+  rejection regression.
+- Directed static-contract and legacy-rejection tests: 2 passed in 1.17
+  seconds. Full routing: `py -3.13 -m pytest -q tests/test_routing.py` —
+  595 passed, 223 subtests passed in 31.21 seconds.
+- `py -3.13 -m py_compile tests/test_routing.py` and `git diff --check`
+  passed; the latter emitted only the repository's CRLF warning. The
+  report-only quality scan remained at 2 unused imports, 83 dead functions,
+  146 duplicate names, and 0 parse errors.
+- This repair changes test contracts and evidence only; production behavior
+  is unchanged. No full core or synthetic real-client suite was rerun.
+
 No live-provider or manual Desktop evidence is required by issue #61.
