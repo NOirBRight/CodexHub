@@ -253,6 +253,7 @@ pub(crate) fn start_scheduled_refresh_loop() {
 }
 
 fn refresh(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     refresh_with_flight(refresh_flight(), trigger, refresh_once)
 }
 
@@ -354,16 +355,18 @@ fn publish_resolved_snapshot(
     now: u64,
     direct_success: bool,
 ) -> Result<PublicationOutcome, String> {
-    let outcome = finalize_published_snapshot(
-        state,
-        now,
-        direct_success,
-        || catalog::sync_catalog().map(|_| ()),
-        published_context_budgets_from_catalog,
-        config::republish_managed_codex_context_budget,
-    )?;
-    write_state(state_path, state)?;
-    Ok(outcome)
+    crate::provider_catalog_transaction::with_transaction_guard(|| {
+        let outcome = finalize_published_snapshot(
+            state,
+            now,
+            direct_success,
+            || catalog::sync_catalog_locked().map(|_| ()),
+            published_context_budgets_from_catalog,
+            config::republish_managed_codex_context_budget,
+        )?;
+        write_state(state_path, state)?;
+        Ok(outcome)
+    })
 }
 
 fn finalize_published_snapshot<SyncCatalog, ReadBudgets, ProjectRuntime>(

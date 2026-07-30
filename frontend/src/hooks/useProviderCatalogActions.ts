@@ -209,7 +209,7 @@ export function useProviderCatalogActions({
       let saved: Provider[];
       let catalogAlreadyPublished = false;
       if (mustRegenerateCatalog) {
-        const transaction = await api.persistProviderCatalogState(next);
+        const transaction = await api.persistProviderCatalogState(next, providers);
         const feedback = providerCatalogTransactionFeedback(transaction, t);
         saved = transaction.providers;
         setProviderCatalogRecoveryPending(transaction.outcome === "recovery_required");

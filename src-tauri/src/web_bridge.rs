@@ -26,6 +26,10 @@ struct InvokeRequest {
 
 pub fn run(args: &[String]) -> i32 {
     let addr = parse_addr(args).unwrap_or_else(default_addr);
+    if let Err(error) = crate::provider_catalog_transaction::initialize_startup_recovery() {
+        eprintln!("failed provider/catalog startup recovery before web bridge: {error}");
+        return 1;
+    }
     gateway::start_telemetry_ingester();
     match TcpListener::bind(&addr) {
         Ok(listener) => {
@@ -41,6 +45,7 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 pub fn start_background(app: AppHandle) -> Result<(), String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     if BACKGROUND_BRIDGE_STARTED.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
@@ -234,6 +239,7 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 }
 
 fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     match request.command.as_str() {
         "get_app_version" => to_value(Ok(app_updates::get_app_version(desktop_app(&app)?))),
         "check_app_update" => to_value(tauri::async_runtime::block_on(
@@ -288,8 +294,20 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                     .ok_or_else(|| "providers argument is required".to_string())?,
             )
             .map_err(|error| format!("invalid providers argument: {error}"))?;
+            let expected_providers = serde_json::from_value(
+                request
+                    .args
+                    .get("expectedProviders")
+                    .or_else(|| request.args.get("expected_providers"))
+                    .cloned()
+                    .ok_or_else(|| "expectedProviders argument is required".to_string())?,
+            )
+            .map_err(|error| format!("invalid expectedProviders argument: {error}"))?;
             to_value(
-                crate::provider_catalog_transaction::persist_provider_catalog_state(providers),
+                crate::provider_catalog_transaction::persist_provider_catalog_state(
+                    providers,
+                    expected_providers,
+                ),
             )
         }
         "provider_catalog_recovery_pending" => {
@@ -575,6 +593,17 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "open_codex_app" => to_value(crate::open_codex_app()),
         command => Err(format!("unknown CodexHub command: {command}")),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn dispatch_startup_recovery_probe() -> Result<Value, String> {
+    dispatch(
+        InvokeRequest {
+            command: "get_providers".to_string(),
+            args: Value::Null,
+        },
+        None,
+    )
 }
 
 fn desktop_app(app: &Option<AppHandle>) -> Result<AppHandle, String> {

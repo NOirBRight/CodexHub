@@ -83,7 +83,10 @@ mod flock_op {
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            format!("failed to create file directory {}: {error}", parent.display())
+            format!(
+                "failed to create file directory {}: {error}",
+                parent.display()
+            )
         })?;
     }
 
@@ -91,27 +94,50 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     write_text_locked(path, text, &lock)
 }
 
+pub(crate) fn write_private_text_atomic(
+    path: &Path,
+    text: &str,
+    boundary: &Path,
+) -> Result<(), String> {
+    validate_confined_path(path, boundary, true)?;
+    let lock = FileLock::acquire(path)?;
+    write_text_locked_impl(path, text, &lock, true)
+}
+
 /// Write `text` to `path` using a temp file and atomic rename while already
 /// holding an exclusive lock on `path`. Used for multi-step check-then-write
 /// operations that must remain atomic across processes.
-pub(crate) fn write_text_locked(
+pub(crate) fn write_text_locked(path: &Path, text: &str, lock: &FileLock) -> Result<(), String> {
+    write_text_locked_impl(path, text, lock, false)
+}
+
+fn write_text_locked_impl(
     path: &Path,
     text: &str,
     lock: &FileLock,
+    private: bool,
 ) -> Result<(), String> {
     if lock.target_path() != path {
         return Err("atomic write lock does not match target path".to_owned());
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            format!("failed to create file directory {}: {error}", parent.display())
+            format!(
+                "failed to create file directory {}: {error}",
+                parent.display()
+            )
         })?;
     }
 
     lock.verify_namespace_identity()?;
     let temp_path = unique_temp_path(path);
-    let mut temp_file = File::create(&temp_path)
+    let mut temp_file = create_new_temp_file(&temp_path, private)
         .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
+    if private {
+        apply_private_permissions(&temp_path).inspect_err(|_| {
+            let _ = fs::remove_file(&temp_path);
+        })?;
+    }
     temp_file
         .write_all(text.as_bytes())
         .and_then(|_| temp_file.sync_all())
@@ -121,20 +147,331 @@ pub(crate) fn write_text_locked(
         })?;
     drop(temp_file);
 
-    lock.verify_namespace_identity()
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&temp_path);
-        })?;
+    lock.verify_namespace_identity().inspect_err(|_| {
+        let _ = fs::remove_file(&temp_path);
+    })?;
     fs::rename(&temp_path, path).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
-        format!("failed to move temp file {} to {}: {error}", temp_path.display(), path.display())
+        format!(
+            "failed to move temp file {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
     })
+}
+
+fn create_new_temp_file(path: &Path, _private: bool) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if _private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+fn apply_private_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        format!(
+            "failed to set private file mode {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn apply_private_permissions(path: &Path) -> Result<(), String> {
+    let whoami = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .map_err(|error| format!("failed to resolve current Windows user SID: {error}"))?;
+    if !whoami.status.success() {
+        return Err("failed to resolve current Windows user SID".to_string());
+    }
+    let output = String::from_utf8_lossy(&whoami.stdout);
+    let sid = output
+        .split(',')
+        .nth(1)
+        .map(|value| value.trim().trim_matches('"'))
+        .filter(|value| value.starts_with("S-1-"))
+        .ok_or_else(|| "failed to parse current Windows user SID".to_string())?;
+    let owner_grant = format!("*{sid}:(F)");
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            owner_grant.as_str(),
+            "*S-1-5-18:(F)",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| {
+            format!(
+                "failed to set private Windows DACL on {}: {error}",
+                path.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "failed to set private Windows DACL on {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_confined_path(
+    path: &Path,
+    boundary: &Path,
+    allow_missing: bool,
+) -> Result<(), String> {
+    let boundary = fs::canonicalize(boundary).map_err(|error| {
+        format!(
+            "failed to resolve trusted path boundary {}: {error}",
+            boundary.display()
+        )
+    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "confined path has no parent".to_string())?;
+    let parent = fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "failed to resolve confined path parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    if !parent.starts_with(&boundary) {
+        return Err(format!(
+            "confined path parent {} escapes trusted boundary {}",
+            parent.display(),
+            boundary.display()
+        ));
+    }
+    validate_no_reparse_components(&parent, &boundary)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => validate_regular_single_link(&metadata, path),
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to inspect confined path {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+pub(crate) fn read_single_link_text(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<String, String> {
+    let mut file = open_read_no_follow(path)
+        .map_err(|error| format!("failed to open {label} without following links: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {label}: {error}"))?;
+    validate_regular_single_link(&metadata, path)?;
+    let opened_identity = lock_file_identity(&file)
+        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "{label} exceeds the size limit of {max_bytes} bytes"
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {label}: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "{label} exceeds the size limit of {max_bytes} bytes"
+        ));
+    }
+    let reopened = open_read_no_follow(path)
+        .map_err(|_| format!("{label} path identity changed while it was read"))?;
+    let current_identity = lock_file_identity(&reopened)
+        .map_err(|_| format!("{label} path identity changed while it was read"))?;
+    if opened_identity != current_identity {
+        return Err(format!("{label} path identity changed while it was read"));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))
+}
+
+#[cfg(unix)]
+fn open_read_no_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(test)]
+    invoke_test_pre_open_hook(path);
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(LOCK_NOFOLLOW);
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn open_read_no_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    #[cfg(test)]
+    invoke_test_pre_open_hook(path);
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(win32::SHARE_READ_WRITE_DELETE)
+        .custom_flags(win32::FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+fn validate_no_reparse_components(parent: &Path, boundary: &Path) -> Result<(), String> {
+    let relative = parent.strip_prefix(boundary).map_err(|_| {
+        format!(
+            "confined parent {} is outside {}",
+            parent.display(),
+            boundary.display()
+        )
+    })?;
+    let mut current = boundary.to_path_buf();
+    validate_not_reparse(
+        &fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "failed to inspect path component {}: {error}",
+                current.display()
+            )
+        })?,
+        &current,
+    )?;
+    for component in relative.components() {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "failed to inspect path component {}: {error}",
+                current.display()
+            )
+        })?;
+        validate_not_reparse(&metadata, &current)?;
+    }
+    Ok(())
+}
+
+fn validate_regular_single_link(metadata: &fs::Metadata, path: &Path) -> Result<(), String> {
+    validate_not_reparse(metadata, path)?;
+    if !metadata.is_file() || metadata_link_count(metadata, path) != 1 {
+        return Err(format!(
+            "confined path {} is not a regular single-link file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_not_reparse(metadata: &fs::Metadata, path: &Path) -> Result<(), String> {
+    if metadata.file_type().is_symlink() || metadata_is_reparse(metadata) {
+        return Err(format!(
+            "confined path {} is a symlink or reparse point",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn metadata_link_count(metadata: &fs::Metadata, _path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink()
+}
+
+#[cfg(windows)]
+fn metadata_link_count(_metadata: &fs::Metadata, path: &Path) -> u64 {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(win32::SHARE_READ_WRITE_DELETE)
+        .custom_flags(win32::FILE_FLAG_OPEN_REPARSE_POINT);
+    let Ok(file) = options.open(path) else {
+        return 0;
+    };
+    let mut information = ByHandleFileInformation::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return 0;
+    }
+    u64::from(information.number_of_links)
+}
+
+#[cfg(unix)]
+fn metadata_is_reparse(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn security_descriptor_sddl(path: &Path) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            1,
+            0x0000_0005,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 || descriptor.is_null() {
+        return Err(format!(
+            "failed to read Windows security descriptor: {status}"
+        ));
+    }
+    let mut text = std::ptr::null_mut();
+    let mut length = 0_u32;
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            1,
+            0x0000_0005,
+            &mut text,
+            &mut length,
+        )
+    };
+    if converted == 0 || text.is_null() {
+        unsafe {
+            LocalFree(descriptor);
+        }
+        return Err("failed to convert Windows security descriptor to SDDL".to_string());
+    }
+    let sddl = String::from_utf16_lossy(unsafe {
+        std::slice::from_raw_parts(text, usize::try_from(length).unwrap_or_default())
+    });
+    unsafe {
+        LocalFree(text.cast());
+        LocalFree(descriptor);
+    }
+    Ok(sddl)
 }
 
 fn unique_temp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         ".{}.{}.{}.tmp-codexhub",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("file"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file"),
         std::process::id(),
         timestamp_millis()
     ))
@@ -143,19 +480,41 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.lock",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("file")
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
     ))
 }
 
 fn timestamp_millis() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
 const LOCK_NOFOLLOW: i32 = 0x20000;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 const LOCK_NOFOLLOW: i32 = 0x100;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))
+))]
 const LOCK_NOFOLLOW: i32 = 0x100;
 
 fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
@@ -181,10 +540,20 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
 }
 
 fn namespace_lock_path(primary: &Path) -> PathBuf {
-    primary.with_file_name(format!("{}.guard", primary.file_name().and_then(|name| name.to_str()).unwrap_or("file")))
+    primary.with_file_name(format!(
+        "{}.guard",
+        primary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+    ))
 }
 
-fn acquire_namespace_guard(path: &Path, started: &Instant, hook: Option<&dyn Fn(&'static str)>) -> Result<File, String> {
+fn acquire_namespace_guard(
+    path: &Path,
+    started: &Instant,
+    hook: Option<&dyn Fn(&'static str)>,
+) -> Result<File, String> {
     loop {
         let file = match open_lock_file(path, true) {
             Ok(file) => file,
@@ -471,7 +840,8 @@ fn lock_path_identity(_path: &Path, metadata: &fs::Metadata) -> Result<(u64, u64
 
 #[cfg(windows)]
 fn lock_path_identity(path: &Path, _metadata: &fs::Metadata) -> Result<(u32, u64), String> {
-    let file = open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let file =
+        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
     lock_file_identity(&file)
 }
 
@@ -480,10 +850,14 @@ fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
     use std::os::windows::io::AsRawHandle;
     let mut information = ByHandleFileInformation::default();
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
-    if result == 0 || information.number_of_links != 1 || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if result == 0
+        || information.number_of_links != 1
+        || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
         return Err("atomic write lock is not a regular single-link file".to_owned());
     }
-    let index = (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
+    let index =
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
     Ok((information.volume_serial_number, index))
 }
 
@@ -495,8 +869,8 @@ fn validate_lock_handle(file: &File) -> Result<(), String> {
 #[cfg(unix)]
 fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let path_metadata = fs::symlink_metadata(path)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
     validate_lock_metadata(&path_metadata)?;
     let file_metadata = file
         .metadata()
@@ -510,15 +884,15 @@ fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
 
 #[cfg(windows)]
 fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
-    let path_metadata = fs::symlink_metadata(path)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
     validate_lock_metadata(&path_metadata)?;
-    let path_file = open_lock_file(path, false)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
-    let path_identity = lock_file_identity(&path_file)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
-    let file_identity = lock_file_identity(file)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_file =
+        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_identity =
+        lock_file_identity(&path_file).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let file_identity =
+        lock_file_identity(file).map_err(|_| "atomic write lock path changed".to_owned())?;
     if path_identity != file_identity {
         return Err("atomic write lock path changed".to_owned());
     }
@@ -527,7 +901,8 @@ fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
 
 fn prepare_lock_metadata(file: &mut File, created: bool) -> Result<(), LockMetadataError> {
     let mut text = String::new();
-    file.seek(SeekFrom::Start(0)).map_err(|_| LockMetadataError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LockMetadataError::Io)?;
     match file.read_to_string(&mut text) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -545,8 +920,10 @@ fn prepare_lock_metadata(file: &mut File, created: bool) -> Result<(), LockMetad
         return Err(LockMetadataError::Unrecoverable);
     }
     file.set_len(0).map_err(|_| LockMetadataError::Io)?;
-    file.seek(SeekFrom::Start(0)).map_err(|_| LockMetadataError::Io)?;
-    file.write_all(LOCK_PROTOCOL.as_bytes()).map_err(|_| LockMetadataError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LockMetadataError::Io)?;
+    file.write_all(LOCK_PROTOCOL.as_bytes())
+        .map_err(|_| LockMetadataError::Io)?;
     file.sync_all().map_err(|_| LockMetadataError::Io)
 }
 
@@ -562,7 +939,10 @@ fn lock_state(text: &str) -> LockState {
     if text.is_empty() {
         return LockState::Empty;
     }
-    if matches!(text, "codexhub-atomic-lock=1\n" | "codexhub-atomic-lock=1\r\n") {
+    if matches!(
+        text,
+        "codexhub-atomic-lock=1\n" | "codexhub-atomic-lock=1\r\n"
+    ) {
         return LockState::Protocol;
     }
     match parse_legacy_pid(text) {
@@ -591,9 +971,7 @@ fn parse_legacy_pid(text: &str) -> Option<i64> {
         let (key, value) = line.split_once('=')?;
         match key {
             "pid" if pid.is_none() => pid = parse_legacy_pid_value(value),
-            "acquired_at_millis" if timestamp.is_none() => {
-                timestamp = parse_decimal_u128(value)
-            }
+            "acquired_at_millis" if timestamp.is_none() => timestamp = parse_decimal_u128(value),
             _ => return None,
         }
     }
@@ -602,7 +980,9 @@ fn parse_legacy_pid(text: &str) -> Option<i64> {
 
 fn parse_legacy_pid_value(value: &str) -> Option<i64> {
     let parsed = parse_decimal_u128(value)?;
-    (1..=i32::MAX as u128).contains(&parsed).then_some(parsed as i64)
+    (1..=i32::MAX as u128)
+        .contains(&parsed)
+        .then_some(parsed as i64)
 }
 
 fn parse_decimal_u128(value: &str) -> Option<u128> {
@@ -646,7 +1026,10 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
     let result = unsafe { flock(file.as_raw_fd(), flock_op::LOCK_EX | flock_op::LOCK_NB) };
     if result == 0 {
         Ok(true)
-    } else if matches!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::WouldBlock) {
+    } else if matches!(
+        std::io::Error::last_os_error().kind(),
+        std::io::ErrorKind::WouldBlock
+    ) {
         Ok(false)
     } else {
         Err(())
@@ -656,7 +1039,11 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
 #[cfg(unix)]
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
-    if unsafe { flock(file.as_raw_fd(), flock_op::LOCK_UN) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if unsafe { flock(file.as_raw_fd(), flock_op::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(windows)]
@@ -673,17 +1060,25 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
             &mut overlapped,
         )
     };
-    if result != 0 { Ok(true) }
-    else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(code) if code == win32::ERROR_SHARING_VIOLATION || code == win32::ERROR_LOCK_VIOLATION) { Ok(false) }
-    else { Err(()) }
+    if result != 0 {
+        Ok(true)
+    } else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(code) if code == win32::ERROR_SHARING_VIOLATION || code == win32::ERROR_LOCK_VIOLATION)
+    {
+        Ok(false)
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(windows)]
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     let mut overlapped = Overlapped::default();
-    if unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) } != 0 { Ok(()) }
-    else { Err(std::io::Error::last_os_error()) }
+    if unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(unix)]
@@ -724,18 +1119,59 @@ struct Overlapped {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, information: *mut ByHandleFileInformation) -> i32;
-    fn LockFileEx(handle: *mut std::ffi::c_void, flags: u32, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
-    fn UnlockFileEx(handle: *mut std::ffi::c_void, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
+    fn GetFileInformationByHandle(
+        handle: *mut std::ffi::c_void,
+        information: *mut ByHandleFileInformation,
+    ) -> i32;
+    fn LockFileEx(
+        handle: *mut std::ffi::c_void,
+        flags: u32,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
+    fn UnlockFileEx(
+        handle: *mut std::ffi::c_void,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn GetExitCodeProcess(handle: *mut std::ffi::c_void, code: *mut u32) -> i32;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    #[cfg(test)]
+    fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[cfg(all(test, windows))]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn GetNamedSecurityInfoW(
+        object_name: *const u16,
+        object_type: u32,
+        security_information: u32,
+        owner: *mut *mut std::ffi::c_void,
+        group: *mut *mut std::ffi::c_void,
+        dacl: *mut *mut std::ffi::c_void,
+        sacl: *mut *mut std::ffi::c_void,
+        security_descriptor: *mut *mut std::ffi::c_void,
+    ) -> u32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        security_descriptor: *mut std::ffi::c_void,
+        revision: u32,
+        security_information: u32,
+        string_security_descriptor: *mut *mut u16,
+        string_security_descriptor_length: *mut u32,
+    ) -> i32;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic, write_text_locked,
+        clear_test_pre_open_hook, install_test_pre_open_hook, lock_state, parse_legacy_pid,
+        read_single_link_text, write_private_text_atomic, write_text_atomic, write_text_locked,
         FileLock, LockState, LOCK_PROTOCOL,
     };
     use std::{
@@ -748,10 +1184,74 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
-    fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("codexhub-safe-file-{name}-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()))
+    #[test]
+    fn private_atomic_write_rejects_existing_hardlink_without_modifying_its_peer() {
+        let root = test_root("private-hardlink");
+        fs::create_dir_all(&root).unwrap();
+        let peer = root.join("peer");
+        let target = root.join("secret.backup");
+        fs::write(&peer, "peer-content").unwrap();
+        fs::hard_link(&peer, &target).unwrap();
+
+        let error = write_private_text_atomic(&target, "new-secret", &root)
+            .expect_err("hard-linked destination must fail closed");
+
+        assert!(error.contains("single-link"));
+        assert_eq!(fs::read_to_string(peer).unwrap(), "peer-content");
     }
 
+    #[test]
+    fn secure_read_rejects_path_identity_replacement() {
+        let root = test_root("secure-read-replacement");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("source");
+        let replacement = root.join("replacement");
+        fs::write(&target, "original").unwrap();
+        fs::write(&replacement, "replacement").unwrap();
+        let opens = std::rc::Rc::new(std::cell::Cell::new(0));
+        let opens_for_hook = opens.clone();
+        let target_for_hook = target.clone();
+        let replacement_for_hook = replacement.clone();
+        install_test_pre_open_hook(move |path| {
+            if path == target_for_hook && opens_for_hook.get() == 1 {
+                fs::remove_file(&target_for_hook).unwrap();
+                fs::rename(&replacement_for_hook, &target_for_hook).unwrap();
+            }
+            opens_for_hook.set(opens_for_hook.get() + 1);
+        });
+
+        let error = read_single_link_text(&target, 1024, "secure source")
+            .expect_err("path replacement must fail closed");
+        clear_test_pre_open_hook();
+
+        assert!(error.contains("identity changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_atomic_write_publishes_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_root("private-mode");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("secret.backup");
+
+        write_private_text_atomic(&target, "sensitive", &root).unwrap();
+
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "codexhub-safe-file-{name}-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn write_text_atomic_keeps_persistent_versioned_lock() {
@@ -759,28 +1259,67 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let target = root.join("providers.toml");
         write_text_atomic(&target, "new").unwrap();
-        assert_eq!(fs::read_to_string(root.join("providers.toml.lock")).unwrap(), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(root.join("providers.toml.lock")).unwrap(),
+            "codexhub-atomic-lock=1\n"
+        );
     }
 
     #[test]
     fn legacy_recovery_is_never_based_on_age() {
-        assert!(matches!(lock_state("pid=0\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("acquired_at_millis=0\n"), LockState::Unknown));
+        assert!(matches!(
+            lock_state("pid=0\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("acquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
         assert!(matches!(lock_state("not-a-lock\n"), LockState::Unknown));
     }
 
     #[test]
     fn parser_accepts_only_the_shared_protocol_and_legacy_shape() {
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\n"), LockState::Protocol));
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\r\n"), LockState::Protocol));
-        assert_eq!(parse_legacy_pid("pid=1\r\nacquired_at_millis=0\r\n"), Some(1));
-        assert_eq!(parse_legacy_pid("pid=1\nacquired_at_millis=340282366920938463463374607431768211456\n"), None);
-        assert!(matches!(lock_state("codexhub-atomic-lock=1"), LockState::Unknown));
-        assert!(matches!(lock_state("codexhub-atomic-lock=2\n"), LockState::Unknown));
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\nextra=value\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=1\npid=2\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=-1\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=999999999999999999999999\nacquired_at_millis=0\n"), LockState::Unknown));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\n"),
+            LockState::Protocol
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\r\n"),
+            LockState::Protocol
+        ));
+        assert_eq!(
+            parse_legacy_pid("pid=1\r\nacquired_at_millis=0\r\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_legacy_pid("pid=1\nacquired_at_millis=340282366920938463463374607431768211456\n"),
+            None
+        );
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=2\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\nextra=value\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=1\npid=2\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=-1\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=999999999999999999999999\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
     }
 
     #[test]
@@ -803,7 +1342,11 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let target = root.join("settings.json");
         let lock = root.join("settings.json.lock");
-        let mut child = Command::new("python").arg("-c").arg("pass").spawn().unwrap();
+        let mut child = Command::new("python")
+            .arg("-c")
+            .arg("pass")
+            .spawn()
+            .unwrap();
         let dead_pid = child.id();
         assert!(child.wait().unwrap().success());
         fs::write(&lock, format!("pid={dead_pid}\nacquired_at_millis=0\n")).unwrap();
@@ -887,7 +1430,9 @@ mod tests {
         let lock_for_hook = lock.clone();
         let replacement_for_hook = replacement.clone();
         install_test_pre_open_hook(move |path| {
-            if path == lock_for_hook.as_path() && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if path == lock_for_hook.as_path()
+                && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 fs::remove_file(&lock_for_hook).unwrap();
                 fs::rename(&replacement_for_hook, &lock_for_hook).unwrap();
             }
@@ -921,7 +1466,9 @@ mod tests {
         let guard_for_hook = guard.clone();
         let replacement_for_hook = replacement.clone();
         install_test_pre_open_hook(move |path| {
-            if path == guard_for_hook.as_path() && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if path == guard_for_hook.as_path()
+                && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 fs::remove_file(&guard_for_hook).unwrap();
                 fs::rename(&replacement_for_hook, &guard_for_hook).unwrap();
             }
@@ -955,10 +1502,19 @@ mod tests {
         fs::write(&victim_file, "do not modify").unwrap();
         fs::write(&target, "old").unwrap();
         let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &lock.to_string_lossy(), &victim.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &lock.to_string_lossy(),
+                &victim.to_string_lossy(),
+            ])
             .status()
             .unwrap();
-        assert!(status.success(), "CI must provide a directory junction fixture");
+        assert!(
+            status.success(),
+            "CI must provide a directory junction fixture"
+        );
         let before = fs::symlink_metadata(&lock).unwrap();
 
         let error = write_text_atomic(&target, "new").unwrap_err();
@@ -1040,11 +1596,18 @@ mod tests {
                 }
             }
         });
-        PythonHolder { child, stdin, events: events_rx }
+        PythonHolder {
+            child,
+            stdin,
+            events: events_rx,
+        }
     }
 
     fn expect_handshake(events: &mpsc::Receiver<String>, expected: &str) {
-        assert_eq!(events.recv_timeout(Duration::from_secs(10)).unwrap(), expected);
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(10)).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -1065,7 +1628,9 @@ mod tests {
             let hook = |event: &'static str| {
                 events_tx.send(event.to_owned()).unwrap();
                 if event == "blocked" {
-                    replacement_verified_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    replacement_verified_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
                     events_tx.send("replacement-verified".to_owned()).unwrap();
                 }
             };
@@ -1178,7 +1743,10 @@ mod tests {
         let mut lock = FileLock::acquire(&target).unwrap();
         lock.release().unwrap();
         lock.release().unwrap();
-        assert_eq!(fs::read_to_string(root.join("settings.json.lock")).unwrap(), LOCK_PROTOCOL);
+        assert_eq!(
+            fs::read_to_string(root.join("settings.json.lock")).unwrap(),
+            LOCK_PROTOCOL
+        );
     }
 
     #[test]
@@ -1204,7 +1772,10 @@ mod tests {
         // The persisted record carries no timestamp: age alone can never
         // authorize a second writer, however long the first one holds.
         write_text_atomic(&target, "seed").unwrap();
-        assert_eq!(fs::read_to_string(root.join("settings.json.lock")).unwrap(), LOCK_PROTOCOL);
+        assert_eq!(
+            fs::read_to_string(root.join("settings.json.lock")).unwrap(),
+            LOCK_PROTOCOL
+        );
         fs::remove_file(&target).unwrap();
 
         let lock = FileLock::acquire(&target).unwrap();

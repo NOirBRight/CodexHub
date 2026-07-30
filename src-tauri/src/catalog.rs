@@ -7,14 +7,17 @@ const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const CODEX_TARGET_HOME_ENV: &str = "CODEXHUB_CODEX_TARGET_HOME";
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
-    models::generate_catalog()
+    crate::provider_catalog_transaction::with_transaction_guard(models::generate_catalog)
 }
 
 pub fn sync_catalog() -> Result<String, String> {
+    crate::provider_catalog_transaction::with_transaction_guard(sync_catalog_locked)
+}
+
+pub(crate) fn sync_catalog_locked() -> Result<String, String> {
     let paths = CatalogPaths::runtime()?;
     let python = config::find_python();
     let runner = ProcessCatalogSyncCommandRunner;
-
     sync_catalog_with_paths(&paths, &python, &runner)
 }
 

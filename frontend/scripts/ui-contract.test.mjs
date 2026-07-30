@@ -146,7 +146,7 @@ test("provider protocol switches regenerate, read back, and disclose exact Codex
   assert.match(tauriMainSource, /recover_before_gateway_start\(\)/);
   assert.match(webBridgeSource, /"persist_provider_catalog_state"/);
   assert.match(webBridgeSource, /"provider_catalog_recovery_pending"/);
-  assert.match(actionsSource, /if \(mustRegenerateCatalog\)[\s\S]*await api\.persistProviderCatalogState\(next\)/);
+  assert.match(actionsSource, /if \(mustRegenerateCatalog\)[\s\S]*await api\.persistProviderCatalogState\(next, providers\)/);
   assert.match(actionsSource, /catalogAlreadyPublished = true/);
   assert.match(actionsSource, /setProviderCatalogRecoveryPending\(transaction\.outcome === "recovery_required"\)/);
   assert.doesNotMatch(actionsSource, /verifyCatalogProtocolBindings/);
@@ -228,6 +228,14 @@ test("provider protocol transaction feedback reports committed and restored stat
     detail: "generation failed",
     catalogDisabled: false,
   }, t);
+  const conflict = providerCatalogTransactionFeedback({
+    outcome: "conflict",
+    providers: current,
+    models: [],
+    protocolChanged: false,
+    detail: "stale snapshot",
+    catalogDisabled: false,
+  }, t);
   const recoveryRequired = providerCatalogTransactionFeedback({
     outcome: "recovery_required",
     providers: next,
@@ -259,6 +267,11 @@ test("provider protocol transaction feedback reports committed and restored stat
     committed: false,
     tone: "error",
     text: "providers.protocolChangeRolledBack:generation failed",
+  });
+  assert.deepEqual(conflict, {
+    committed: false,
+    tone: "error",
+    text: "providers.providerCatalogConflict:stale snapshot",
   });
   assert.deepEqual(recoveryRequired, {
     committed: false,

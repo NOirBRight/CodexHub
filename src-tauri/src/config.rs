@@ -8,11 +8,12 @@ use std::process::Command;
 use std::{error::Error, fmt};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     get_providers_with_paths(&ConfigPaths::runtime()?)
 }
 
 pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    save_providers_with_paths(providers, &ConfigPaths::runtime()?)
+    crate::provider_catalog_transaction::save_providers(providers)
 }
 
 pub fn get_settings() -> Result<Settings, String> {
@@ -148,6 +149,10 @@ impl ConfigPaths {
 
     pub(crate) fn proxy_dir(&self) -> PathBuf {
         self.runtime_dir.join("proxy")
+    }
+
+    pub(crate) fn runtime_root(&self) -> &Path {
+        &self.runtime_dir
     }
 
     pub(crate) fn runtime_providers_path(&self) -> PathBuf {
@@ -569,12 +574,6 @@ pub(crate) fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provid
     }
 
     Ok(providers)
-}
-
-pub(crate) fn read_runtime_providers_with_paths(
-    paths: &ConfigPaths,
-) -> Result<Vec<Provider>, String> {
-    read_providers_document(&paths.runtime_providers_path())
 }
 
 fn read_providers_document(path: &Path) -> Result<Vec<Provider>, String> {

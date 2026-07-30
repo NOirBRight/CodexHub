@@ -74,6 +74,13 @@ export function providerCatalogTransactionFeedback(
       ),
     };
   }
+  if (result.outcome === "conflict") {
+    return {
+      committed: false,
+      tone: "error",
+      text: t("providers.providerCatalogConflict", { detail }),
+    };
+  }
   if (result.outcome === "recovery_required") {
     const key = result.protocolChanged
       ? result.catalogDisabled

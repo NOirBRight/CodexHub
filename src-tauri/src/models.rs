@@ -253,6 +253,7 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
 }
 
 pub fn list_models() -> Result<Vec<Model>, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     let paths = ModelPaths::runtime()?;
     let catalog_path = paths.existing_generated_catalog_path();
     if !catalog_path.exists() {
@@ -263,6 +264,7 @@ pub fn list_models() -> Result<Vec<Model>, String> {
 }
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     let paths = ModelPaths::runtime()?;
     let config_paths = config::ConfigPaths::runtime()?;
     let known_official_models = config::known_official_model_ids(&config_paths);
@@ -286,6 +288,7 @@ pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, S
 }
 
 pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     let paths = ModelPaths::runtime()?;
     let metadata = builtin_model_metadata();
     write_models_json(&paths.metadata_cache_path(), &metadata)?;
@@ -293,6 +296,7 @@ pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
 }
 
 pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
+    crate::provider_catalog_transaction::require_startup_recovery()?;
     let paths = ModelPaths::runtime()?;
     let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
     if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
@@ -1895,6 +1899,10 @@ pub(crate) fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     read_catalog_models_matching(path, |_| true)
 }
 
+pub(crate) fn read_catalog_models_text(text: &str, path: &Path) -> Result<Vec<Model>, String> {
+    read_catalog_models_matching_text(text, path, |_| true)
+}
+
 pub(crate) fn read_official_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
     read_catalog_models_matching(path, |item| {
         item.get("codex_proxy_metadata")
@@ -1912,7 +1920,15 @@ fn read_catalog_models_matching(
 ) -> Result<Vec<Model>, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("failed to read catalog JSON {}: {error}", path.display()))?;
-    let payload: Value = serde_json::from_str(&text)
+    read_catalog_models_matching_text(&text, path, include)
+}
+
+fn read_catalog_models_matching_text(
+    text: &str,
+    path: &Path,
+    include: impl Fn(&Value) -> bool,
+) -> Result<Vec<Model>, String> {
+    let payload: Value = serde_json::from_str(text)
         .map_err(|error| format!("failed to parse catalog JSON {}: {error}", path.display()))?;
     let items = payload
         .get("models")

@@ -197,9 +197,10 @@ export const api = {
   restartProxy: () => call<AppStatus>("restart_proxy"),
   getProviders: () => call<Provider[]>("get_providers"),
   saveProviders: (providers: Provider[]) => call<Provider[]>("save_providers", { providers }),
-  persistProviderCatalogState: (providers: Provider[]) =>
+  persistProviderCatalogState: (providers: Provider[], expectedProviders: Provider[]) =>
     call<ProviderCatalogTransactionResult>("persist_provider_catalog_state", {
       providers,
+      expectedProviders,
     }),
   providerCatalogRecoveryPending: () =>
     call<boolean>("provider_catalog_recovery_pending"),

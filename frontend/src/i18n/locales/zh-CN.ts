@@ -443,6 +443,7 @@ const zhCN = {
     pricingPartial: "价格信息不完整",
     pricingUnknown: "价格未知",
     providerCatalogUpdated: "供应商目录已更新",
+    providerCatalogConflict: "供应商目录在此编辑器加载后已发生变化，因此未应用更新。请重新加载供应商页面后重试。{{detail}}",
     providerCatalogUpdateFailed: "供应商目录更新失败",
     providerCatalogChangeUnchanged: "供应商目录更新未提交。之前的供应商配置和目录仍然有效。{{detail}}",
     providerCatalogChangeRolledBack: "供应商目录更新未提交。之前的供应商配置和目录已恢复。{{detail}}",

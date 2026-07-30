@@ -91,6 +91,7 @@ export interface ProviderProtocolSwitch {
 export type ProviderCatalogTransactionOutcome =
   | "committed"
   | "unchanged"
+  | "conflict"
   | "rolled_back"
   | "recovery_required";
 

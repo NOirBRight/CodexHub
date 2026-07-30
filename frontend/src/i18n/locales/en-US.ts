@@ -444,6 +444,7 @@ const enUS = {
     pricingPartial: "Pricing partial",
     pricingUnknown: "Pricing unknown",
     providerCatalogUpdated: "Provider catalog updated",
+    providerCatalogConflict: "Provider catalog update was not applied because it changed after this editor loaded. Reload Providers and try again. {{detail}}",
     providerCatalogUpdateFailed: "Provider catalog update failed",
     providerCatalogChangeUnchanged: "Provider catalog update was not committed. The previous provider configuration and catalog remain active. {{detail}}",
     providerCatalogChangeRolledBack: "Provider catalog update was not committed. The previous provider configuration and catalog were restored. {{detail}}",

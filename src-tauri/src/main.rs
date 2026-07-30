@@ -408,15 +408,16 @@ fn get_providers() -> Result<Vec<Provider>, String> {
 
 #[tauri::command]
 fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    config::save_providers(providers)
+    provider_catalog_transaction::save_providers(providers)
 }
 
 #[tauri::command]
 async fn persist_provider_catalog_state(
     providers: Vec<Provider>,
+    expected_providers: Vec<Provider>,
 ) -> Result<provider_catalog_transaction::ProviderCatalogTransactionResult, String> {
     run_blocking("persist_provider_catalog_state", move || {
-        provider_catalog_transaction::persist_provider_catalog_state(providers)
+        provider_catalog_transaction::persist_provider_catalog_state(providers, expected_providers)
     })
     .await
 }
@@ -612,6 +613,7 @@ fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<gateway::GatewayClientConfigPreview, String> {
+    provider_catalog_transaction::require_startup_recovery()?;
     gateway::preview_gateway_client_config(client_id, model)
 }
 
@@ -620,6 +622,7 @@ fn apply_gateway_client_config(
     client_id: String,
     model: Option<String>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
+    provider_catalog_transaction::require_startup_recovery()?;
     gateway::apply_gateway_client_config(client_id, model)
 }
 
@@ -627,6 +630,7 @@ fn apply_gateway_client_config(
 fn restore_gateway_client_config(
     client_id: String,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
+    provider_catalog_transaction::require_startup_recovery()?;
     gateway::restore_gateway_client_config(client_id)
 }
 
@@ -637,6 +641,7 @@ fn switch_gateway_client_route(
     model: Option<String>,
     force_takeover: Option<bool>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
+    provider_catalog_transaction::require_startup_recovery()?;
     gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
 }
 
@@ -644,6 +649,7 @@ fn switch_gateway_client_route(
 async fn sync_gateway_clients(
     model: Option<String>,
 ) -> Result<gateway::GatewayClientSyncSummary, String> {
+    provider_catalog_transaction::require_startup_recovery()?;
     run_blocking("sync_gateway_clients", move || {
         gateway::sync_gateway_clients(model)
     })
@@ -1106,6 +1112,7 @@ fn run_gui() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 runtime_paths::set_resource_root(resource_dir);
             }
+            provider_catalog_transaction::initialize_startup_recovery()?;
             #[cfg(desktop)]
             setup_tray(app)?;
             gateway::start_telemetry_ingester();
@@ -1216,7 +1223,6 @@ fn start_gateway_on_launch() {
         let start = || {
             proxy::start_after(|| {
                 launch_ready.signal();
-                provider_catalog_transaction::recover_before_gateway_start()?;
                 if let Err(error) = official_refresh::refresh_at_startup() {
                     log::warn!("startup Official model refresh failed: {error}");
                 }
@@ -1279,6 +1285,10 @@ fn main() {
             std::process::exit(web_bridge::run(&args[1..]));
         }
         if first_arg != "app" {
+            if let Err(error) = provider_catalog_transaction::initialize_startup_recovery() {
+                eprintln!("provider/catalog startup recovery failed: {error}");
+                std::process::exit(1);
+            }
             std::process::exit(cli::run(&args));
         }
     }
