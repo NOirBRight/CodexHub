@@ -394,43 +394,41 @@ class RelayPlanFixture:
         )
 
 
-RELAY_PLAN_FIXTURES = {
-    "gateway": RelayPlanFixture(
-        streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
-        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
-        response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
-        sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
-        verify_cross_protocol_source=False,
-    ),
-    "official_passthrough": RelayPlanFixture(
-        streaming_policy=codex_proxy.StreamingPolicy.OFFICIAL_PASSTHROUGH,
-        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
-        response_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
-        sse_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
-        verify_cross_protocol_source=False,
-    ),
-    "transparent": RelayPlanFixture(
-        streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT,
-        usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
-        response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
-        sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
-        verify_cross_protocol_source=False,
-    ),
-    "transparent_converted": RelayPlanFixture(
-        streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT_CONVERTED,
-        usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
-        response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
-        sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
-        verify_cross_protocol_source=True,
-    ),
-    "gateway_verified_conversion": RelayPlanFixture(
-        streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
-        usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
-        response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
-        sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
-        verify_cross_protocol_source=True,
-    ),
-}
+RELAY_GATEWAY = RelayPlanFixture(
+    streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+    usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+    response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+    sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+    verify_cross_protocol_source=False,
+)
+RELAY_OFFICIAL_PASSTHROUGH = RelayPlanFixture(
+    streaming_policy=codex_proxy.StreamingPolicy.OFFICIAL_PASSTHROUGH,
+    usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+    response_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
+    sse_mutation_policy=codex_proxy.MutationPolicy.OFFICIAL_PASSTHROUGH,
+    verify_cross_protocol_source=False,
+)
+RELAY_TRANSPARENT = RelayPlanFixture(
+    streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT,
+    usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
+    response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+    sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+    verify_cross_protocol_source=False,
+)
+RELAY_TRANSPARENT_CONVERTED = RelayPlanFixture(
+    streaming_policy=codex_proxy.StreamingPolicy.TRANSPARENT_CONVERTED,
+    usage_policy=codex_proxy.UsagePolicy.ASYNC_TAP,
+    response_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+    sse_mutation_policy=codex_proxy.MutationPolicy.TRANSPARENT,
+    verify_cross_protocol_source=True,
+)
+RELAY_GATEWAY_VERIFIED_CONVERSION = RelayPlanFixture(
+    streaming_policy=codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+    usage_policy=codex_proxy.UsagePolicy.SYNC_CAPTURE,
+    response_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+    sse_mutation_policy=codex_proxy.MutationPolicy.GATEWAY_COMPATIBILITY,
+    verify_cross_protocol_source=True,
+)
 
 
 def relay_upstream_response(
@@ -438,48 +436,24 @@ def relay_upstream_response(
     response,
     upstream_name,
     *args,
+    relay_fixture: RelayPlanFixture = RELAY_GATEWAY,
     **kwargs,
 ):
     """Call the production relay with an explicit typed policy fixture."""
 
-    legacy_fixture_profile = kwargs.pop("behavior_profile", None)
-    fixture_name = kwargs.pop(
-        "relay_fixture",
-        {
-            None: "gateway",
-            (
-                codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-            ): "official_passthrough",
-            (
-                codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-            ): "transparent",
-        }.get(legacy_fixture_profile),
-    )
-    if fixture_name is None:
-        raise AssertionError(
-            f"relay test requires an explicit fixture: {legacy_fixture_profile!r}"
-        )
     upstream_format = kwargs.pop("upstream_format", "responses")
     request_kind = kwargs.pop(
         "request_kind",
         codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
     )
-    fixture = RELAY_PLAN_FIXTURES[fixture_name]
-    verify_cross_protocol_source = kwargs.pop(
-        "verify_cross_protocol_source",
-        fixture.verify_cross_protocol_source,
-    )
     lifecycle_final_retry_enabled = kwargs.pop(
         "lifecycle_final_retry_enabled",
         False,
     )
-    relay_execution_plan = replace(
-        fixture.build(
-            selected_upstream_format=upstream_format,
-            request_kind=request_kind,
-            lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
-        ),
-        verify_cross_protocol_source=verify_cross_protocol_source,
+    relay_execution_plan = relay_fixture.build(
+        selected_upstream_format=upstream_format,
+        request_kind=request_kind,
+        lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
     )
     return CodexProxyHandler._relay_upstream_response(
         handler,
@@ -614,6 +588,25 @@ class RoutingTests(unittest.TestCase):
         }
         event_names = {call.args[0] for call in self.write_proxy_event.call_args_list if call.args}
         self.assertFalse(blocked & event_names, blocked & event_names)
+
+    def test_relay_test_helper_rejects_legacy_behavior_profile_selection(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "behavior_profile",
+        ):
+            relay_upstream_response(
+                FakeHandler(),
+                FakeResponse(b'{"id":"resp_fixture_contract","output":[]}'),
+                "volcengine",
+                request_id="req-fixture-contract",
+                model="volc/glm-5.2",
+                upstream_format="responses",
+                inbound_format="responses",
+                caller_stream=False,
+                behavior_profile=(
+                    codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+                ),
+            )
 
     def _write_official_publication_fence(
         self,
@@ -1502,13 +1495,6 @@ class RoutingTests(unittest.TestCase):
             {"client_id": "codex-app"},
             inbound_format="responses",
             model_requested="volc/glm-5.2",
-            operational_authentication=(
-                codex_proxy.materialize_operational_authentication(
-                    {},
-                    planned_upstream,
-                )
-            ),
-            incoming_headers={},
             runtime_facts=runtime_facts,
         )
         planned_attempt = replace(
@@ -1608,7 +1594,7 @@ class RoutingTests(unittest.TestCase):
             open_upstream.call_args.kwargs["transport_policy"],
             planned_attempt.transport_policy,
         )
-        build_headers.assert_not_called()
+        build_headers.assert_called_once()
         self.assertNotIn("request_kind", open_upstream.call_args.kwargs)
         self.assertNotIn("behavior_profile", relayed[0])
         relay_execution_plan = relayed[0]["relay_execution_plan"]
@@ -1629,7 +1615,7 @@ class RoutingTests(unittest.TestCase):
             planned_attempt.sse_mutation_policy,
         )
 
-    def test_handler_freezes_provider_auth_before_plan_returns_without_secret_exposure(self):
+    def test_handler_plans_before_materializing_and_freezes_provider_auth_without_secret_exposure(self):
         original_key = "route-plan-auth-sentinel-old"
         replacement_key = "route-plan-auth-sentinel-new"
         upstream = {
@@ -1654,16 +1640,35 @@ class RoutingTests(unittest.TestCase):
             lambda response, upstream_name, **kwargs: 200
         )
         plans: list[codex_proxy.RoutePlan] = []
+        bound_plans: list[codex_proxy.RoutePlan] = []
         opened_requests = []
+        execution_order: list[str] = []
         real_planner = codex_proxy.route_plan_for_request
+        real_materializer = codex_proxy.materialize_operational_authentication
+        real_binder = (
+            codex_proxy.bind_route_plan_operational_authentication
+        )
 
-        def plan_then_rotate_key(*args, **kwargs):
+        def record_plan(*args, **kwargs):
+            execution_order.append("plan")
             plan = real_planner(*args, **kwargs)
             plans.append(plan)
-            upstream["api_key"] = replacement_key
             return plan
 
+        def materialize_then_rotate_key(*args, **kwargs):
+            execution_order.append("materialize")
+            authentication = real_materializer(*args, **kwargs)
+            upstream["api_key"] = replacement_key
+            return authentication
+
+        def bind_authentication(*args, **kwargs):
+            execution_order.append("bind")
+            bound_plan = real_binder(*args, **kwargs)
+            bound_plans.append(bound_plan)
+            return bound_plan
+
         def open_upstream(request, **_kwargs):
+            execution_order.append("open")
             opened_requests.append(request)
             return FakeContextResponse(b'{"id":"resp_auth","output":[]}')
 
@@ -1671,7 +1676,23 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.choose_upstream", return_value=upstream),
             patch(
                 "codex_proxy.route_plan_for_request",
-                side_effect=plan_then_rotate_key,
+                side_effect=record_plan,
+            ),
+            patch(
+                "codex_proxy.materialize_operational_authentication",
+                side_effect=materialize_then_rotate_key,
+            ) as materialize_authentication,
+            patch(
+                "codex_proxy.bind_route_plan_operational_authentication",
+                side_effect=bind_authentication,
+            ) as bind_authentication,
+            patch(
+                "codex_proxy.upstream_headers",
+                wraps=codex_proxy.upstream_headers,
+            ) as build_headers,
+            patch(
+                "codex_proxy.codex_access_token",
+                side_effect=AssertionError("API-key route resolved Codex auth"),
             ),
             patch(
                 "codex_proxy._open_upstream_response",
@@ -1684,18 +1705,27 @@ class RoutingTests(unittest.TestCase):
             )
 
         self.assertEqual(
+            execution_order,
+            ["plan", "materialize", "bind", "open"],
+        )
+        materialize_authentication.assert_called_once()
+        bind_authentication.assert_called_once()
+        build_headers.assert_called_once()
+        self.assertEqual(
             opened_requests[0].get_header("Authorization"),
             f"Bearer {original_key}",
         )
-        rendered_plan = repr(plans[0])
-        rendered_copy = repr(asdict(plans[0]))
+        rendered_plan = repr((plans[0], bound_plans[0]))
+        rendered_copy = repr(
+            (asdict(plans[0]), asdict(bound_plans[0]))
+        )
         rendered_events = repr(self.write_proxy_event.call_args_list)
         for secret in (original_key, replacement_key):
             self.assertNotIn(secret, rendered_plan)
             self.assertNotIn(secret, rendered_copy)
             self.assertNotIn(secret, rendered_events)
 
-    def test_operational_auth_snapshot_refreshes_only_on_the_next_plan(self):
+    def test_operational_auth_snapshot_refreshes_only_on_the_next_request_binding(self):
         def planned_headers(upstream, incoming_headers):
             authentication = (
                 codex_proxy.materialize_operational_authentication(
@@ -1708,9 +1738,13 @@ class RoutingTests(unittest.TestCase):
                 {"client_id": "codex-app"},
                 inbound_format="responses",
                 model_requested="volc/glm-5.2",
-                operational_authentication=authentication,
-                incoming_headers=incoming_headers,
                 official_http_passthrough_enabled=False,
+            )
+            plan = codex_proxy.bind_route_plan_operational_authentication(
+                plan,
+                incoming_headers,
+                upstream,
+                authentication,
             )
             return plan, plan.attempts[0].request_headers.to_dict()
 
@@ -1793,18 +1827,30 @@ class RoutingTests(unittest.TestCase):
                 {},
                 inbound_format="responses",
                 model_requested="openai/gpt-5.6-sol",
-                operational_authentication=official_authentication,
-                incoming_headers={},
                 official_http_passthrough_enabled=False,
+            )
+            official_plan = (
+                codex_proxy.bind_route_plan_operational_authentication(
+                    official_plan,
+                    {},
+                    official_provider,
+                    official_authentication,
+                )
             )
             repeated_official_plan = codex_proxy.route_plan_for_request(
                 official_provider,
                 {},
                 inbound_format="responses",
                 model_requested="openai/gpt-5.6-sol",
-                operational_authentication=official_authentication,
-                incoming_headers={},
                 official_http_passthrough_enabled=False,
+            )
+            repeated_official_plan = (
+                codex_proxy.bind_route_plan_operational_authentication(
+                    repeated_official_plan,
+                    {},
+                    official_provider,
+                    official_authentication,
+                )
             )
         official_headers = (
             official_plan.attempts[0].request_headers.to_dict()
@@ -1836,13 +1882,6 @@ class RoutingTests(unittest.TestCase):
             {"client_id": "codex-app"},
             inbound_format="responses",
             model_requested="volc/glm-5.2",
-            operational_authentication=(
-                codex_proxy.materialize_operational_authentication(
-                    {},
-                    upstream,
-                )
-            ),
-            incoming_headers={},
         )
         future_policy_attempt = replace(
             planned.attempts[0],
@@ -2104,7 +2143,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format="responses",
                     inbound_format="responses",
                     caller_stream=caller_stream,
-                    verify_cross_protocol_source=True,
+                    relay_fixture=RELAY_GATEWAY_VERIFIED_CONVERSION,
                     usage_capture=usage_capture,
                 )
 
@@ -2818,6 +2857,260 @@ class RoutingTests(unittest.TestCase):
                     capability_state.value,
                 )
                 self.assertEqual(request_error["error"], error_name)
+                self.write_proxy_event.reset_mock()
+
+    def test_no_attempt_observation_preserves_compact_api_key_route_facts(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "volcengine",
+                "base_url": "https://ark.example.test/v1",
+                "auth": "api_key",
+                "api_key": "observation-only-secret",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "anthropic_messages",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="volc/glm-5.2",
+            request_kind=codex_proxy.RETRY_REQUEST_COMPACT,
+        )
+
+        self.assertEqual(plan.attempts, ())
+        fields = codex_proxy._route_plan_event_fields(plan)
+        self.assertEqual(
+            fields["request_kind"],
+            codex_proxy.RETRY_REQUEST_COMPACT,
+        )
+        self.assertEqual(
+            fields["authentication_strategy"],
+            codex_proxy.AuthenticationStrategy.API_KEY.value,
+        )
+        self.assertNotIn("observation-only-secret", repr(plan))
+        self.assertNotIn("observation-only-secret", repr(fields))
+
+    def test_stale_route_capability_binding_fails_closed_before_auth_mutation_or_io(self):
+        binding = {
+            "schema_version": 1,
+            "provider": "volc",
+            "model": "glm-5.2",
+            "upstream_protocol": "responses",
+            "qualification_state": "supported",
+            "advanced_capabilities_enabled": True,
+        }
+        self.external_model.update(
+            api_key="stale-binding-secret",
+            upstream_format="chat_completions",
+            capability_binding=binding,
+        )
+        upstream = choose_upstream("volc/glm-5.2")
+        self.assertEqual(upstream["capability_binding"], binding)
+        current_binding_upstream = {
+            **upstream,
+            "capability_binding": {
+                **upstream["capability_binding"],
+                "upstream_protocol": "chat_completions",
+            },
+        }
+        current_plan = codex_proxy.route_plan_for_request(
+            current_binding_upstream,
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="volc/glm-5.2",
+        )
+        self.assertEqual(
+            current_plan.capability_binding.route_scope_state,
+            codex_proxy.CapabilityState.SUPPORTED,
+        )
+        self.assertEqual(len(current_plan.attempts), 1)
+
+        plan = codex_proxy.route_plan_for_request(
+            upstream,
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="volc/glm-5.2",
+        )
+
+        self.assertEqual(
+            plan.configured_upstream_protocol,
+            codex_proxy.RouteProtocol.CHAT_COMPLETIONS,
+        )
+        self.assertEqual(
+            plan.capability_binding.binding_upstream_protocol,
+            codex_proxy.RouteProtocol.RESPONSES,
+        )
+        self.assertEqual(
+            plan.capability_binding.route_scope_state,
+            codex_proxy.CapabilityState.UNQUALIFIED,
+        )
+        self.assertEqual(
+            plan.protocol_capability_state,
+            codex_proxy.CapabilityState.UNQUALIFIED,
+        )
+        self.assertEqual(plan.attempts, ())
+        self.assertEqual(
+            plan.tool_exposure.effective_mode,
+            codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+        )
+        self.assertEqual(
+            plan.capability_binding.route_scope_failure_reason,
+            "binding_upstream_protocol_mismatch",
+        )
+
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+        with (
+            patch(
+                "codex_proxy.materialize_operational_authentication",
+                side_effect=AssertionError(
+                    "stale binding materialized authentication"
+                ),
+            ) as materialize_authentication,
+            patch(
+                "codex_proxy.compatible_request_body",
+                side_effect=AssertionError("stale binding mutated request"),
+            ) as mutate_request,
+            patch(
+                "codex_proxy._open_upstream_response",
+                side_effect=AssertionError(
+                    "stale binding reached upstream network"
+                ),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+            )
+
+        materialize_authentication.assert_not_called()
+        mutate_request.assert_not_called()
+        open_upstream.assert_not_called()
+        self.assertEqual(fake.status, 400)
+        request_error = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "request_error"
+        )
+        self.assertEqual(
+            request_error["capability_binding_route_scope_state"],
+            codex_proxy.CapabilityState.UNQUALIFIED.value,
+        )
+        self.assertEqual(
+            request_error["capability_binding_route_scope_failure_reason"],
+            "binding_upstream_protocol_mismatch",
+        )
+        self.assertNotIn("stale-binding-secret", repr(request_error))
+
+    def test_non_executable_official_routes_do_not_materialize_codex_auth_or_open_network(self):
+        official_upstream = {
+            "name": "official",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "auth": "codex_auth",
+            "upstream_model": "gpt-5.5",
+            "upstream_format": "responses",
+            "reports_cached_input_tokens": True,
+        }
+        cases = (
+            {
+                "name": "unsupported_anthropic",
+                "upstream_format": "anthropic_messages",
+                "input": [{"role": "user", "content": "hi"}],
+                "target_accepts_images": True,
+                "expected_error": "UnsupportedRouteProtocolError",
+                "expected_status": 400,
+            },
+            {
+                "name": "vision_reject",
+                "upstream_format": "responses",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,abc",
+                            }
+                        ],
+                    }
+                ],
+                "target_accepts_images": False,
+                "expected_error": "ImageProxyError",
+                "expected_status": 502,
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                upstream = {
+                    **official_upstream,
+                    "upstream_format": case["upstream_format"],
+                }
+                body = json.dumps(
+                    {
+                        "model": "openai/gpt-5.5",
+                        "input": case["input"],
+                        "stream": False,
+                    }
+                ).encode("utf-8")
+                handler, fake = post_handler("/v1/responses", body)
+
+                with (
+                    patch("codex_proxy.choose_upstream", return_value=upstream),
+                    patch(
+                        "codex_proxy.model_supports_image",
+                        return_value=case["target_accepts_images"],
+                    ),
+                    patch(
+                        "codex_proxy.gateway_image_proxy_enabled",
+                        return_value=False,
+                    ),
+                    patch(
+                        "codex_proxy.materialize_operational_authentication",
+                        side_effect=AssertionError(
+                            "non-executable route materialized authentication"
+                        ),
+                    ) as materialize_authentication,
+                    patch(
+                        "codex_proxy.codex_access_token",
+                        side_effect=AssertionError(
+                            "non-executable route resolved/refreshed Codex auth"
+                        ),
+                    ) as access_token,
+                    patch(
+                        "codex_proxy.codex_account_id",
+                        side_effect=AssertionError(
+                            "non-executable route read Codex account auth"
+                        ),
+                    ) as account_id,
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        side_effect=AssertionError(
+                            "non-executable route reached upstream network"
+                        ),
+                    ) as open_upstream,
+                ):
+                    CodexProxyHandler._proxy_post_request(
+                        handler,
+                        inbound_format="responses",
+                    )
+
+                materialize_authentication.assert_not_called()
+                access_token.assert_not_called()
+                account_id.assert_not_called()
+                open_upstream.assert_not_called()
+                self.assertEqual(fake.status, case["expected_status"])
+                request_error = next(
+                    call.kwargs
+                    for call in self.write_proxy_event.call_args_list
+                    if call.args and call.args[0] == "request_error"
+                )
+                self.assertEqual(request_error["error"], case["expected_error"])
                 self.write_proxy_event.reset_mock()
 
     def test_third_party_app_official_responses_uses_transparent_metered_runtime_path(self):
@@ -4439,7 +4732,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -4479,7 +4772,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture=usage_capture,
         )
 
@@ -4577,7 +4870,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture=usage_capture,
         )
 
@@ -4608,7 +4901,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=False,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture={},
         )
 
@@ -4735,7 +5028,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture={},
         )
 
@@ -4770,7 +5063,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture=usage_capture,
             )
 
@@ -4808,7 +5101,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture={},
         )
 
@@ -4841,7 +5134,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture=usage_capture,
             )
 
@@ -4874,7 +5167,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture={},
         )
 
@@ -4901,7 +5194,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -4943,7 +5236,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -4985,7 +5278,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -5024,7 +5317,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -5059,7 +5352,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -5093,7 +5386,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -5135,7 +5428,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                 usage_capture={},
             )
 
@@ -5170,7 +5463,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
             usage_capture={},
         )
 
@@ -5200,7 +5493,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
             usage_capture={},
         )
 
@@ -5237,7 +5530,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format="responses",
                     inbound_format="responses",
                     caller_stream=True,
-                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                     usage_capture={},
                 )
             thread.join(timeout=1)
@@ -5344,7 +5637,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format="responses",
                     inbound_format="responses",
                     caller_stream=True,
-                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                     usage_capture={},
                 )
             thread.join(timeout=1)
@@ -5397,7 +5690,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format="responses",
                     inbound_format="responses",
                     caller_stream=True,
-                    behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    relay_fixture=RELAY_OFFICIAL_PASSTHROUGH,
                     usage_capture={},
                 )
             thread.join(timeout=1)
@@ -5437,7 +5730,7 @@ class RoutingTests(unittest.TestCase):
                 "upstream_name": "official",
                 "upstream_format": "responses",
                 "inbound_format": "responses",
-                "behavior_profile": codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                "relay_fixture": RELAY_OFFICIAL_PASSTHROUGH,
                 "lines": response_events,
                 "terminal": b"response.completed",
             },
@@ -5446,7 +5739,7 @@ class RoutingTests(unittest.TestCase):
                 "upstream_name": "official",
                 "upstream_format": "responses",
                 "inbound_format": "chat_completions",
-                "behavior_profile": None,
+                "relay_fixture": RELAY_GATEWAY,
                 "lines": response_events,
                 "terminal": b"data: [DONE]",
             },
@@ -5455,7 +5748,7 @@ class RoutingTests(unittest.TestCase):
                 "upstream_name": "volcengine",
                 "upstream_format": "responses",
                 "inbound_format": "responses",
-                "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                "relay_fixture": RELAY_TRANSPARENT,
                 "lines": response_events,
                 "terminal": b"response.completed",
             },
@@ -5464,7 +5757,7 @@ class RoutingTests(unittest.TestCase):
                 "upstream_name": "ollama_cloud",
                 "upstream_format": "chat_completions",
                 "inbound_format": "chat_completions",
-                "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                "relay_fixture": RELAY_TRANSPARENT,
                 "lines": chat_events,
                 "terminal": b"data: [DONE]",
             },
@@ -5488,7 +5781,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format=case["upstream_format"],
                     inbound_format=case["inbound_format"],
                     caller_stream=True,
-                    behavior_profile=case["behavior_profile"],
+                    relay_fixture=case["relay_fixture"],
                     usage_capture={},
                 )
                 with result_lock:
@@ -5551,8 +5844,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -5591,8 +5883,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -5625,8 +5916,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -5681,8 +5971,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     caller_stream=True,
-                    behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                    relay_fixture="transparent_converted",
+                    relay_fixture=RELAY_TRANSPARENT_CONVERTED,
                     usage_capture={},
                 )
 
@@ -5738,7 +6027,7 @@ class RoutingTests(unittest.TestCase):
                     upstream_format=upstream_format,
                     inbound_format=inbound_format,
                     caller_stream=True,
-                    behavior_profile=None,
+                    relay_fixture=RELAY_GATEWAY,
                     usage_capture={},
                 )
 
@@ -5769,7 +6058,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=False,
-            behavior_profile=None,
+            relay_fixture=RELAY_GATEWAY,
             usage_capture={},
         )
 
@@ -5863,8 +6152,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=False,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -5940,8 +6228,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=False,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -5998,8 +6285,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=False,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -6075,8 +6361,7 @@ class RoutingTests(unittest.TestCase):
                         upstream_format=upstream_format,
                         inbound_format=inbound_format,
                         caller_stream=True,
-                        behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                        relay_fixture="transparent_converted",
+                        relay_fixture=RELAY_TRANSPARENT_CONVERTED,
                         usage_capture={},
                     )
                     self.assertEqual(status, 200)
@@ -6153,8 +6438,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             usage_capture={},
         )
 
@@ -6545,8 +6829,7 @@ class RoutingTests(unittest.TestCase):
                     "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
                     "subagent_lifecycle_complete": True,
                 },
-                behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
-                relay_fixture="gateway_verified_conversion",
+                relay_fixture=RELAY_GATEWAY_VERIFIED_CONVERSION,
                 lifecycle_final_retry_enabled=True,
             )
 
@@ -15003,8 +15286,7 @@ class RoutingTests(unittest.TestCase):
             inbound_format="responses",
             caller_stream=True,
             event_context={"client_id": "omp", "client_inference_source": "header"},
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
         )
 
         self.assertEqual(status, 499)
@@ -15713,7 +15995,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                relay_fixture=RELAY_TRANSPARENT,
                 defer_stream_errors=True,
             )
 
@@ -15752,7 +16034,7 @@ class RoutingTests(unittest.TestCase):
                 upstream_format="responses",
                 inbound_format="responses",
                 caller_stream=True,
-                behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                relay_fixture=RELAY_TRANSPARENT,
                 defer_stream_errors=True,
             )
 
@@ -15782,7 +16064,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -15825,7 +16107,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
             usage_capture=usage_capture,
         )
 
@@ -15876,7 +16158,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         body = b"".join(handler.wfile.writes)
@@ -15920,7 +16202,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         body = b"".join(handler.wfile.writes)
@@ -15953,7 +16235,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         events = SseEventAssembler().feed(b"".join(handler.wfile.writes))
@@ -15984,7 +16266,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -16014,7 +16296,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="responses",
             inbound_format="responses",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -16049,7 +16331,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -16091,7 +16373,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
             usage_capture=usage_capture,
         )
 
@@ -16139,7 +16421,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -16164,7 +16446,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -16249,7 +16531,7 @@ class RoutingTests(unittest.TestCase):
             upstream_format="chat_completions",
             inbound_format="chat_completions",
             caller_stream=True,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+            relay_fixture=RELAY_TRANSPARENT,
         )
 
         data = b"".join(handler.wfile.writes)
@@ -20393,8 +20675,7 @@ Execution constraints:
             inbound_format="responses",
             caller_stream=True,
             event_context=close_context,
-            behavior_profile=codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            relay_fixture="transparent_converted",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
         )
 
         diagnostic_names = {

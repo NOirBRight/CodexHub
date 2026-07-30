@@ -34,13 +34,15 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   frozen `RetryExecutionPlan`. Runtime settings are captured into
   `RouteRuntimeFacts` before planning; the handler/open/relay execution path
   consumes the attempt contract without re-reading routing or retry settings.
-- Production planning materializes authentication once per request and stores
-  the complete outbound header snapshot in `FrozenRequestHeaders` on every
-  attempt. Header values use redacted, deeply immutable wrappers excluded from
-  representation, equality, telemetry, and event evidence; they are expanded
-  only when the HTTP `Request` is constructed. Provider/config/auth changes
-  after planning cannot affect the active request, while the next request
-  takes a fresh snapshot.
+- Production planning is pure and emits unmaterialized attempt headers. After
+  all typed fail-closed decisions prove the route executable, the handler
+  materializes authentication exactly once and binds one complete outbound
+  `FrozenRequestHeaders` snapshot across the immutable attempt plan. Header
+  values use redacted, deeply immutable wrappers excluded from representation,
+  equality, telemetry, and event evidence; they are expanded only when the
+  HTTP `Request` is constructed. Provider/config/auth changes after binding
+  cannot affect the active request, while the next request takes a fresh
+  snapshot.
 - Success, streaming, and final `HTTPError` responses all consume the same
   required `RelayExecutionPlan`. The relay no longer accepts profile strings
   or optional policy arguments from which it could re-derive streaming, usage,
@@ -184,5 +186,65 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
 - `git diff --check` — passed apart from the repository's CRLF normalization
   warnings. The synthetic real-client partition was not run because none of
   its policy-listed contract-surface paths changed.
+
+## Sixth-review repair
+
+- Authentication ordering used a focused RED/GREEN slice. Before the repair,
+  the valid route had no post-plan binding seam and both the unsupported
+  official Anthropic route and Vision `REJECT` route materialized Codex
+  credentials before failing. The handler now plans first, rejects
+  non-executable routes before credential, mutation, or network work, then
+  materializes exactly once and binds one redacted immutable header snapshot.
+  A key-rotation assertion proves the active request cannot drift after
+  binding.
+- No-attempt plans now carry exactly one typed `RouteFailureObservation`
+  instead of deriving fallback defaults from an absent attempt. The RED
+  compact/API-key/Anthropic case reported `main_generation`; GREEN preserves
+  the true `compact` request kind and `api_key` authentication in both the plan
+  and safe event evidence.
+- Runtime model metadata now retains #250's nested `capability_binding` as a
+  typed `RouteCapabilityBinding`. A present malformed, stale, or protocol-
+  mismatched binding yields `Unqualified` with zero attempts before
+  authentication, request mutation, or upstream I/O. A valid current Chat
+  binding remains executable. Missing legacy metadata remains observable as
+  unqualified evidence without retroactively blocking pre-#250 catalogs.
+- Exact restart disclosure and the committed transaction/readback lifecycle
+  remain owned by #250 / PR #261. The #61 issue records that boundary and the
+  exact downstream requirement in
+  https://github.com/NOirBRight/CodexHub/issues/61#issuecomment-5127547716:
+  quit and reopen Codex App; stop and restart a running `codex app-server`;
+  newly started CLI processes apply immediately. This repair changes no #250
+  files and does not claim that downstream Toast integration is complete.
+- The relay test helper no longer accepts a legacy `behavior_profile` selector
+  or verification override. The exact 38 mapping-dependent callers were
+  converted to typed literal `RelayPlanFixture` objects, and a focused RED test
+  proves the removed selector is rejected.
+
+## Sixth-review repair verification
+
+- Focused auth ordering and non-executable route gate: 4 passed, 2 subtests
+  passed in 0.52 seconds.
+- Focused no-attempt observation, route-capability binding, and relay-helper
+  contract tests each passed after their corresponding RED failure.
+- Routing plus shutdown gate:
+  `py -3.13 -m pytest -q tests/test_routing.py tests/test_proxy_shutdown.py`
+  — 614 passed, 223 subtests passed in 35.08 seconds.
+- Chat/event gate:
+  `py -3.13 -m pytest -q tests/test_chat_completions_gateway.py
+  tests/test_proxy_event_logging.py` — 117 passed, 10 subtests passed in
+  17.43 seconds.
+- The five new review-matrix tests passed together (5 passed, 2 subtests);
+  the binding test also passed after switching its setup to the real
+  `choose_upstream` metadata-copy path.
+- `py -3.13 -m py_compile src-python/codex_proxy.py tests/test_routing.py
+  tests/test_proxy_shutdown.py tests/test_chat_completions_gateway.py
+  tests/test_proxy_event_logging.py` — passed.
+- `py -3.13 scripts/report_quality_gates.py --json` — report-only, exit 0:
+  2 unused imports, 83 dead functions, 146 duplicate names, 0 parse errors.
+- `git diff --check` — passed apart from the repository's CRLF normalization
+  warnings.
+- Per the strict delta policy, the previously green full Python core was not
+  rerun for this repair. The synthetic real-client partition remains not
+  applicable because no listed contract-surface path changed.
 
 No live-provider or manual Desktop evidence is required by issue #61.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -1075,7 +1075,7 @@ class SensitiveValue:
 
 
 class OperationalAuthentication:
-    """Request-scoped auth material captured before route planning completes."""
+    """Request-scoped auth material captured after route viability is proved."""
 
     __slots__ = (
         "strategy",
@@ -2600,6 +2600,7 @@ def _route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
         "capability_manifest_version",
         "capability_manifest_hash",
         "capability_manifest_state",
+        "capability_binding",
     )
     return {key: source[key] for key in keys if key in source}
 
@@ -11479,6 +11480,36 @@ class RouteAttemptPlan:
 
 
 @dataclass(frozen=True)
+class RouteFailureObservation:
+    """Plan-wide facts used only when no executable attempt exists."""
+
+    upstream_protocol: RouteProtocol
+    wire_format_adapter: str
+    authentication_strategy: AuthenticationStrategy
+    request_kind: str
+    retry_policy: RetryPolicy
+    retry_eligibility: CapabilityState
+    usage_policy: UsagePolicy
+    streaming_policy: StreamingPolicy
+    transport_policy: TransportPolicy
+    request_mutation_policy: MutationPolicy
+    response_mutation_policy: MutationPolicy
+    sse_mutation_policy: MutationPolicy
+
+
+@dataclass(frozen=True)
+class RouteCapabilityBinding:
+    source_present: bool
+    schema_version: int | None
+    provider_id: str | None
+    model_id: str | None
+    configured_upstream_protocol: RouteProtocol
+    binding_upstream_protocol: RouteProtocol
+    route_scope_state: CapabilityState
+    route_scope_failure_reason: str | None
+
+
+@dataclass(frozen=True)
 class RoutePlan:
     schema_version: str
     provider_id: str
@@ -11491,9 +11522,11 @@ class RoutePlan:
     protocol_capability_state: CapabilityState
     protocol_failure_reason: str | None
     attempts: tuple[RouteAttemptPlan, ...]
+    failure_observation: RouteFailureObservation | None
     capability_manifest_version: str | None
     capability_manifest_hash: str | None
     capability_manifest_state: CapabilityState
+    capability_binding: RouteCapabilityBinding
     behavior_profile: str
     caller_request_body_mode: CallerRequestBodyMode
     prepared_request_protocol: RouteProtocol
@@ -11513,6 +11546,17 @@ class RoutePlan:
     transparent_lightweight_fallback: bool
     transparent_tool_loop_guard: bool
 
+    def __post_init__(self) -> None:
+        if bool(self.attempts) == (self.failure_observation is not None):
+            raise ValueError(
+                "route plan must contain either attempts or one failure observation"
+            )
+
+    def _required_failure_observation(self) -> RouteFailureObservation:
+        if self.failure_observation is None:
+            raise RuntimeError("route plan has neither an attempt nor failure facts")
+        return self.failure_observation
+
     @property
     def mutation_summary(self) -> tuple[RouteMutation, ...]:
         return tuple(sorted(self.named_mutations, key=lambda mutation: mutation.value))
@@ -11531,7 +11575,7 @@ class RoutePlan:
         return (
             primary_attempt.retry.request_kind
             if primary_attempt is not None
-            else RETRY_REQUEST_MAIN_GENERATION
+            else self._required_failure_observation().request_kind
         )
 
     @property
@@ -11540,7 +11584,7 @@ class RoutePlan:
         return (
             primary_attempt.authentication_strategy
             if primary_attempt is not None
-            else AuthenticationStrategy.UNKNOWN
+            else self._required_failure_observation().authentication_strategy
         )
 
     @property
@@ -11549,7 +11593,7 @@ class RoutePlan:
         return (
             primary_attempt.upstream_protocol
             if primary_attempt is not None
-            else RouteProtocol.UNKNOWN
+            else self._required_failure_observation().upstream_protocol
         )
 
     @property
@@ -11567,7 +11611,7 @@ class RoutePlan:
         return (
             primary_attempt.wire_format_adapter
             if primary_attempt is not None
-            else WIRE_TRANSPARENT
+            else self._required_failure_observation().wire_format_adapter
         )
 
     @property
@@ -11576,7 +11620,7 @@ class RoutePlan:
         return (
             primary_attempt.retry.policy
             if primary_attempt is not None
-            else RetryPolicy.GATEWAY_FULL
+            else self._required_failure_observation().retry_policy
         )
 
     @property
@@ -11585,7 +11629,7 @@ class RoutePlan:
         return (
             primary_attempt.retry.eligibility
             if primary_attempt is not None
-            else self.protocol_capability_state
+            else self._required_failure_observation().retry_eligibility
         )
 
     @property
@@ -11594,7 +11638,7 @@ class RoutePlan:
         return (
             primary_attempt.usage_policy
             if primary_attempt is not None
-            else UsagePolicy.SYNC_CAPTURE
+            else self._required_failure_observation().usage_policy
         )
 
     @property
@@ -11602,45 +11646,35 @@ class RoutePlan:
         primary_attempt = self.primary_attempt
         if primary_attempt is not None:
             return primary_attempt.streaming_policy
-        if self.official_http_passthrough:
-            return StreamingPolicy.OFFICIAL_PASSTHROUGH
-        return StreamingPolicy.GATEWAY_ADAPTED
+        return self._required_failure_observation().streaming_policy
 
     @property
     def transport_policy(self) -> TransportPolicy:
         primary_attempt = self.primary_attempt
         if primary_attempt is not None:
             return primary_attempt.transport_policy
-        if self.official_http_passthrough:
-            return TransportPolicy.OFFICIAL_KEEPALIVE
-        return TransportPolicy.STANDARD
+        return self._required_failure_observation().transport_policy
 
     @property
     def request_mutation_policy(self) -> MutationPolicy:
         primary_attempt = self.primary_attempt
         if primary_attempt is not None:
             return primary_attempt.request_mutation_policy
-        if self.official_http_passthrough:
-            return MutationPolicy.OFFICIAL_PASSTHROUGH
-        return MutationPolicy.GATEWAY_COMPATIBILITY
+        return self._required_failure_observation().request_mutation_policy
 
     @property
     def response_mutation_policy(self) -> MutationPolicy:
         primary_attempt = self.primary_attempt
         if primary_attempt is not None:
             return primary_attempt.response_mutation_policy
-        if self.official_http_passthrough:
-            return MutationPolicy.OFFICIAL_PASSTHROUGH
-        return MutationPolicy.GATEWAY_COMPATIBILITY
+        return self._required_failure_observation().response_mutation_policy
 
     @property
     def sse_mutation_policy(self) -> MutationPolicy:
         primary_attempt = self.primary_attempt
         if primary_attempt is not None:
             return primary_attempt.sse_mutation_policy
-        if self.official_http_passthrough:
-            return MutationPolicy.OFFICIAL_PASSTHROUGH
-        return MutationPolicy.GATEWAY_COMPATIBILITY
+        return self._required_failure_observation().sse_mutation_policy
 
 
 def behavior_profile_for_request(
@@ -11776,6 +11810,97 @@ def _capability_manifest_identity(
             upstream.get("capability_manifest_state"),
             default=CapabilityState.UNQUALIFIED,
         ),
+    )
+
+
+CAPABILITY_BINDING_SCHEMA_VERSION = 1
+
+
+def _binding_text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _canonical_binding_provider(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return canonical_model_id(value).replace("_", "-").lower()
+
+
+def _canonical_binding_model(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return canonical_model_id(value).lower()
+
+
+def _route_capability_binding(
+    upstream: Mapping[str, Any],
+    *,
+    configured_upstream_protocol: RouteProtocol,
+    provider_id: str,
+    model_id: str | None,
+) -> RouteCapabilityBinding:
+    raw_binding = upstream.get("capability_binding")
+    if not isinstance(raw_binding, Mapping):
+        return RouteCapabilityBinding(
+            source_present=raw_binding is not None,
+            schema_version=None,
+            provider_id=None,
+            model_id=None,
+            configured_upstream_protocol=configured_upstream_protocol,
+            binding_upstream_protocol=RouteProtocol.UNKNOWN,
+            route_scope_state=CapabilityState.UNQUALIFIED,
+            route_scope_failure_reason=(
+                "malformed_capability_binding"
+                if raw_binding is not None
+                else "missing_capability_binding"
+            ),
+        )
+
+    schema_value = raw_binding.get("schema_version")
+    schema_version = (
+        schema_value
+        if isinstance(schema_value, int) and not isinstance(schema_value, bool)
+        else None
+    )
+    binding_provider = _binding_text(raw_binding.get("provider"))
+    binding_model = _binding_text(raw_binding.get("model"))
+    binding_protocol = _route_protocol(
+        raw_binding.get("upstream_protocol")
+    )
+
+    route_scope_failure_reason: str | None = None
+    if schema_version != CAPABILITY_BINDING_SCHEMA_VERSION:
+        route_scope_failure_reason = "unsupported_binding_schema_version"
+    elif (
+        _canonical_binding_provider(binding_provider)
+        != _canonical_binding_provider(provider_id)
+    ):
+        route_scope_failure_reason = "binding_provider_mismatch"
+    elif (
+        model_id is not None
+        and _canonical_binding_model(binding_model)
+        != _canonical_binding_model(model_id)
+    ):
+        route_scope_failure_reason = "binding_model_mismatch"
+    elif binding_protocol != configured_upstream_protocol:
+        route_scope_failure_reason = (
+            "binding_upstream_protocol_mismatch"
+        )
+
+    route_scope_state = (
+        CapabilityState.SUPPORTED
+        if route_scope_failure_reason is None
+        else CapabilityState.UNQUALIFIED
+    )
+    return RouteCapabilityBinding(
+        source_present=True,
+        schema_version=schema_version,
+        provider_id=binding_provider,
+        model_id=binding_model,
+        configured_upstream_protocol=configured_upstream_protocol,
+        binding_upstream_protocol=binding_protocol,
+        route_scope_state=route_scope_state,
+        route_scope_failure_reason=route_scope_failure_reason,
     )
 
 
@@ -12019,9 +12144,6 @@ def route_plan_for_request(
     image_proxy_enabled: bool = False,
     official_http_passthrough_enabled: bool = True,
     caller_stream: bool = True,
-    operational_authentication: OperationalAuthentication | None = None,
-    incoming_headers: Mapping[str, str] | Any | None = None,
-    drop_content_encoding: bool = False,
     runtime_facts: (
         RouteRuntimeFacts
         | Mapping[str, RouteRuntimeFacts]
@@ -12043,7 +12165,44 @@ def route_plan_for_request(
         attempt_protocols = (configured_upstream_protocol,)
     else:
         attempt_protocols = ()
-    if attempt_protocols:
+    requested_model_id = (
+        canonical_model_id(canonical_route_model or model_requested)
+        if canonical_route_model or model_requested
+        else ""
+    )
+    requested_provider, separator, requested_model = (
+        requested_model_id.partition("/")
+    )
+    binding_provider_id = str(
+        upstream.get("provider_id")
+        or upstream.get("provider_alias")
+        or (
+            requested_provider
+            if separator and upstream_name != "official"
+            else upstream_name
+        )
+    )
+    binding_model_id = str(
+        (requested_model if separator else requested_model_id)
+        or upstream.get("upstream_model")
+        or ""
+    )
+    capability_binding = _route_capability_binding(
+        upstream,
+        configured_upstream_protocol=configured_upstream_protocol,
+        provider_id=binding_provider_id,
+        model_id=binding_model_id or None,
+    )
+    binding_scope_failed = (
+        capability_binding.source_present
+        and capability_binding.route_scope_state
+        != CapabilityState.SUPPORTED
+    )
+    if binding_scope_failed:
+        attempt_protocols = ()
+    if binding_scope_failed:
+        protocol_capability_state = CapabilityState.UNQUALIFIED
+    elif attempt_protocols:
         protocol_capability_state = CapabilityState.SUPPORTED
     elif configured_upstream_protocol == RouteProtocol.ANTHROPIC_MESSAGES:
         protocol_capability_state = CapabilityState.UNSUPPORTED
@@ -12168,23 +12327,6 @@ def route_plan_for_request(
         upstream.get("auth") or "unknown"
     )
     request_headers = FrozenRequestHeaders.unmaterialized()
-    if operational_authentication is not None and attempt_protocols:
-        if operational_authentication.strategy != authentication_strategy:
-            raise ValueError(
-                "operational authentication strategy does not match route"
-            )
-        request_headers = FrozenRequestHeaders(
-            upstream_headers(
-                incoming_headers or {},
-                upstream,
-                drop_content_encoding=drop_content_encoding,
-                model_id=canonical_route_model or model_requested,
-                authentication_strategy=authentication_strategy,
-                request_mutation_policy=mutation_policy,
-                operational_authentication=operational_authentication,
-            ),
-            materialized=True,
-        )
     transport_policy = (
         TransportPolicy.OFFICIAL_KEEPALIVE
         if upstream_name == "official"
@@ -12399,15 +12541,41 @@ def route_plan_for_request(
             None
             if attempts
             else (
-                f"unsupported upstream protocol: {configured_upstream_format}"
-                if protocol_capability_state == CapabilityState.UNSUPPORTED
-                else f"unqualified upstream protocol: {configured_upstream_format}"
+                (
+                    "unqualified route capability binding: "
+                    f"{capability_binding.route_scope_failure_reason}"
+                )
+                if binding_scope_failed
+                else (
+                    f"unsupported upstream protocol: {configured_upstream_format}"
+                    if protocol_capability_state == CapabilityState.UNSUPPORTED
+                    else f"unqualified upstream protocol: {configured_upstream_format}"
+                )
             )
         ),
         attempts=tuple(attempts),
+        failure_observation=(
+            None
+            if attempts
+            else RouteFailureObservation(
+                upstream_protocol=configured_upstream_protocol,
+                wire_format_adapter=wire_adapter,
+                authentication_strategy=authentication_strategy,
+                request_kind=effective_request_kind,
+                retry_policy=retry_policy,
+                retry_eligibility=protocol_capability_state,
+                usage_policy=usage_policy,
+                streaming_policy=streaming_policy,
+                transport_policy=transport_policy,
+                request_mutation_policy=mutation_policy,
+                response_mutation_policy=mutation_policy,
+                sse_mutation_policy=mutation_policy,
+            )
+        ),
         capability_manifest_version=manifest_version,
         capability_manifest_hash=manifest_hash,
         capability_manifest_state=manifest_state,
+        capability_binding=capability_binding,
         behavior_profile=behavior_profile,
         caller_request_body_mode=caller_request_body_mode,
         prepared_request_protocol=(
@@ -12485,6 +12653,28 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
         "capability_manifest_version": plan.capability_manifest_version,
         "capability_manifest_hash": plan.capability_manifest_hash,
         "capability_manifest_state": plan.capability_manifest_state.value,
+        "capability_binding_source_present": (
+            plan.capability_binding.source_present
+        ),
+        "capability_binding_schema_version": (
+            plan.capability_binding.schema_version
+        ),
+        "capability_binding_provider_id": (
+            plan.capability_binding.provider_id
+        ),
+        "capability_binding_model_id": plan.capability_binding.model_id,
+        "capability_binding_configured_upstream_protocol": (
+            plan.capability_binding.configured_upstream_protocol.value
+        ),
+        "capability_binding_upstream_protocol": (
+            plan.capability_binding.binding_upstream_protocol.value
+        ),
+        "capability_binding_route_scope_state": (
+            plan.capability_binding.route_scope_state.value
+        ),
+        "capability_binding_route_scope_failure_reason": (
+            plan.capability_binding.route_scope_failure_reason
+        ),
         "authentication_strategy": (
             primary_attempt.authentication_strategy.value
             if primary_attempt is not None
@@ -12842,6 +13032,57 @@ def upstream_headers(
         raise ValueError(f"unsupported upstream auth mode: {auth_mode}")
 
     return outgoing
+
+
+def bind_route_plan_operational_authentication(
+    plan: RoutePlan,
+    incoming_headers: Mapping[str, str] | Any,
+    upstream: Mapping[str, Any],
+    operational_authentication: OperationalAuthentication,
+    *,
+    drop_content_encoding: bool = False,
+) -> RoutePlan:
+    """Return a new plan whose attempts freeze one request-scoped auth snapshot."""
+
+    if not plan.attempts:
+        raise ValueError(
+            "cannot materialize authentication for a route plan without attempts"
+        )
+    primary_attempt = plan.attempts[0]
+    if any(
+        attempt.request_headers.materialized
+        for attempt in plan.attempts
+    ):
+        raise ValueError("route attempt authentication was already materialized")
+    if any(
+        attempt.authentication_strategy
+        != operational_authentication.strategy
+        or attempt.request_mutation_policy
+        != primary_attempt.request_mutation_policy
+        for attempt in plan.attempts
+    ):
+        raise ValueError(
+            "route attempts do not share one authentication/header policy"
+        )
+    request_headers = FrozenRequestHeaders(
+        upstream_headers(
+            incoming_headers,
+            upstream,
+            drop_content_encoding=drop_content_encoding,
+            model_id=plan.canonical_model or plan.model_requested,
+            authentication_strategy=primary_attempt.authentication_strategy,
+            request_mutation_policy=primary_attempt.request_mutation_policy,
+            operational_authentication=operational_authentication,
+        ),
+        materialized=True,
+    )
+    return replace(
+        plan,
+        attempts=tuple(
+            replace(attempt, request_headers=request_headers)
+            for attempt in plan.attempts
+        ),
+    )
 
 
 def current_catalog_data() -> dict[str, Any]:
@@ -16054,12 +16295,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )
-            operational_authentication = (
-                materialize_operational_authentication(
-                    self.headers,
-                    upstream,
-                )
-            )
             route_plan = route_plan_for_request(
                 upstream,
                 request_context,
@@ -16076,9 +16311,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     gateway_official_http_passthrough_enabled()
                 ),
                 caller_stream=caller_stream,
-                operational_authentication=operational_authentication,
-                incoming_headers=self.headers,
-                drop_content_encoding=content_decoded,
                 runtime_facts=route_runtime_facts,
             )
             primary_route_attempt = route_plan.primary_attempt
@@ -16124,6 +16356,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 raise ImageProxyError(
                     f"{model_label} does not support image input and Image Proxy is disabled."
                 )
+            operational_authentication = (
+                materialize_operational_authentication(
+                    self.headers,
+                    upstream,
+                )
+            )
+            route_plan = bind_route_plan_operational_authentication(
+                route_plan,
+                self.headers,
+                upstream,
+                operational_authentication,
+                drop_content_encoding=content_decoded,
+            )
+            primary_route_attempt = route_plan.attempts[0]
             model_canonical = canonical_model_id(model) if model else None
             # Create the request-scoped downstream stream-commit seam early so that
             # every production SSE header/body (status, retry, keepalive, converted
