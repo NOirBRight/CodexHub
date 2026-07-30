@@ -3256,6 +3256,66 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn rollback_keeps_the_durable_marker_when_evidence_path_is_repopulated_before_handle_delete() {
+        let root = temp_root("rollback-evidence-handle-delete-race");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_provider_bytes = fs::read(paths.runtime_providers_path()).unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &base_catalog);
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let mut candidate = provider(UpstreamFormat::ChatCompletions);
+        candidate.api_key = Some("candidate-secret-before-handle-delete".to_string());
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate))
+            .unwrap();
+        store.save_providers(vec![candidate]).unwrap();
+        let observed_evidence =
+            std::rc::Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let observed_evidence_for_hook = observed_evidence.clone();
+        crate::safe_file::install_test_pre_private_evidence_handle_delete_hook(move |path| {
+            let moved_owned = path.with_file_name("owned-provider-evidence-before-delete");
+            fs::rename(path, moved_owned).unwrap();
+            fs::write(path, "unowned-evidence-after-verification").unwrap();
+            *observed_evidence_for_hook.borrow_mut() = Some(path.to_path_buf());
+        });
+
+        let error = store
+            .restore_pending()
+            .expect_err("evidence pathname replacement must retain the recovery marker");
+        crate::safe_file::clear_test_pre_private_evidence_handle_delete_hook();
+        let evidence = observed_evidence
+            .borrow()
+            .clone()
+            .expect("provider rollback must reach evidence cleanup");
+
+        assert!(error.contains("evidence pathname mismatch"));
+        assert_eq!(
+            fs::read(paths.runtime_providers_path()).unwrap(),
+            base_provider_bytes
+        );
+        assert_eq!(
+            fs::read_to_string(paths.generated_catalog_path()).unwrap(),
+            base_catalog
+        );
+        assert_eq!(
+            fs::read_to_string(evidence).unwrap(),
+            "unowned-evidence-after-verification"
+        );
+        assert!(
+            paths.provider_catalog_recovery_path().exists(),
+            "cleanup mismatch must keep the durable recovery marker"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn rollback_never_deletes_unjournaled_bytes_for_an_absent_base_snapshot() {
         let root = temp_root("rollback-absent-snapshot-owner-cas");

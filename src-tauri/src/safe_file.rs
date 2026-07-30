@@ -29,6 +29,15 @@ thread_local! {
     ))]
     static TEST_PRE_PRIVATE_EVIDENCE_ISOLATE_HOOK: RefCell<Option<TestPreOpenHook>> =
         RefCell::new(None);
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    static TEST_POST_PRIVATE_EVIDENCE_SCRUB_HOOK: RefCell<Option<TestPreOpenHook>> =
+        RefCell::new(None);
+    #[cfg(windows)]
+    static TEST_PRE_PRIVATE_EVIDENCE_HANDLE_DELETE_HOOK: RefCell<Option<TestPreOpenHook>> =
+        RefCell::new(None);
     #[cfg(any(
         windows,
         all(
@@ -160,6 +169,60 @@ fn invoke_test_pre_private_evidence_isolate_hook(path: &Path) {
 
 #[cfg(all(
     test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn install_test_post_private_evidence_scrub_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_POST_PRIVATE_EVIDENCE_SCRUB_HOOK
+        .with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn clear_test_post_private_evidence_scrub_hook() {
+    TEST_POST_PRIVATE_EVIDENCE_SCRUB_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn invoke_test_post_private_evidence_scrub_hook(path: &Path) {
+    TEST_POST_PRIVATE_EVIDENCE_SCRUB_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn install_test_pre_private_evidence_handle_delete_hook(
+    hook: impl Fn(&Path) + 'static,
+) {
+    TEST_PRE_PRIVATE_EVIDENCE_HANDLE_DELETE_HOOK
+        .with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn clear_test_pre_private_evidence_handle_delete_hook() {
+    TEST_PRE_PRIVATE_EVIDENCE_HANDLE_DELETE_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(all(test, windows))]
+fn invoke_test_pre_private_evidence_handle_delete_hook(path: &Path) {
+    TEST_PRE_PRIVATE_EVIDENCE_HANDLE_DELETE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(
+    test,
     any(
         windows,
         all(
@@ -271,6 +334,7 @@ mod flock_op {
 mod unix_private_io {
     pub(crate) const O_RDONLY: i32 = 0;
     pub(crate) const O_WRONLY: i32 = 0x0001;
+    pub(crate) const O_RDWR: i32 = 0x0002;
     pub(crate) const O_CREAT: i32 = 0x0040;
     pub(crate) const O_EXCL: i32 = 0x0080;
     pub(crate) const O_DIRECTORY: i32 = 0x1_0000;
@@ -659,7 +723,8 @@ where
             evidence.display()
         ));
     }
-    delete_opened_file_windows(&mut displaced, label)
+    drop(current_evidence);
+    remove_verified_private_evidence_windows(&parent, displaced, evidence, label)
 }
 
 #[cfg(all(
@@ -696,6 +761,7 @@ where
     if current == replacement {
         return finish_private_evidence_linux(
             &parent,
+            path,
             evidence,
             max_bytes,
             label,
@@ -707,6 +773,7 @@ where
             "{label} changed before conditional restore; live bytes were preserved"
         ));
     }
+    next_private_rollback_tombstone_linux(&parent, path, label)?;
     let opened_identity = lock_file_identity(&opened)
         .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
 
@@ -784,7 +851,7 @@ where
             evidence.display()
         ));
     }
-    remove_opened_file_linux(&parent, &displaced, evidence, label)
+    remove_opened_file_linux(&parent, &displaced, evidence, path, label)
 }
 
 #[cfg(not(any(
@@ -910,7 +977,8 @@ where
             evidence.display()
         ));
     }
-    delete_opened_file_windows(&mut displaced, label)
+    drop(opened);
+    remove_verified_private_evidence_windows(&parent, displaced, evidence, label)
 }
 
 #[cfg(all(
@@ -941,6 +1009,7 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return finish_private_evidence_linux(
                 &parent,
+                path,
                 evidence,
                 max_bytes,
                 label,
@@ -959,6 +1028,7 @@ where
             "{label} changed before conditional removal; live bytes were preserved"
         ));
     }
+    next_private_rollback_tombstone_linux(&parent, path, label)?;
     let opened_identity = lock_file_identity(&opened)
         .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
     if evidence.try_exists().map_err(|error| {
@@ -1001,7 +1071,7 @@ where
             evidence.display()
         ));
     }
-    remove_opened_file_linux(&parent, &displaced, evidence, label)
+    remove_opened_file_linux(&parent, &displaced, evidence, path, label)
 }
 
 #[cfg(not(any(
@@ -1246,6 +1316,36 @@ impl PinnedPrivateParent {
                 self.directory.as_raw_fd(),
                 name.as_ptr(),
                 unix_private_io::O_RDONLY | unix_private_io::O_NOFOLLOW,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn open_existing_for_update(&self, path: &Path) -> std::io::Result<File> {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let fd = unsafe {
+            openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                unix_private_io::O_RDWR
+                    | unix_private_io::O_NOFOLLOW
+                    | unix_private_io::O_CLOEXEC,
                 0,
             )
         };
@@ -2093,12 +2193,41 @@ fn unique_temp_path(path: &Path) -> PathBuf {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn retained_evidence_path(path: &Path) -> PathBuf {
+// Failure-only temp cleanup uses its unique temp name. Successful rollback
+// evidence never uses this path; it is constrained to the fixed slots below.
+fn retained_temp_evidence_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         ".{}.retained-codexhub-evidence",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("rollback-evidence")
+    ))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const PRIVATE_ROLLBACK_TOMBSTONE_SLOTS: usize = 4;
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const PRIVATE_ROLLBACK_TOMBSTONE_CAPACITY_EXHAUSTED: &str =
+    "rollback tombstone capacity exhausted";
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn rollback_tombstone_path(target: &Path, slot: usize) -> PathBuf {
+    target.with_file_name(format!(
+        ".{}.rollback-tombstone-{slot}.codexhub",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("private-file")
     ))
 }
 
@@ -2132,7 +2261,7 @@ where
             evidence.display()
         ));
     }
-    delete_opened_file_windows(&mut displaced, label)
+    remove_verified_private_evidence_windows(parent, displaced, evidence, label)
 }
 
 #[cfg(all(
@@ -2141,6 +2270,7 @@ where
 ))]
 fn finish_private_evidence_linux<Expected>(
     parent: &PinnedPrivateParent,
+    target: &Path,
     evidence: &Path,
     max_bytes: u64,
     label: &str,
@@ -2149,29 +2279,66 @@ fn finish_private_evidence_linux<Expected>(
 where
     Expected: Fn(&str) -> bool,
 {
+    use std::os::unix::fs::MetadataExt;
+
     let mut displaced = match parent.open_existing(evidence) {
         Ok(displaced) => displaced,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let retained = retained_evidence_path(evidence);
-            let mut retained_file = match parent.open_existing(&retained) {
-                Ok(retained_file) => retained_file,
-                Err(retained_error)
-                    if retained_error.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    return Ok(());
+            let mut exact_candidate = None;
+            let mut mismatched_tombstone = None;
+            for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+                let tombstone = rollback_tombstone_path(target, slot);
+                let mut tombstone_file = match parent.open_existing(&tombstone) {
+                    Ok(tombstone_file) => tombstone_file,
+                    Err(tombstone_error)
+                        if tombstone_error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(tombstone_error) => {
+                        return Err(format!(
+                            "failed to open bounded {label} rollback tombstone: {tombstone_error}"
+                        ));
+                    }
+                };
+                let tombstone_text = read_opened_single_link_text(
+                    &mut tombstone_file,
+                    &tombstone,
+                    max_bytes,
+                    label,
+                )?;
+                if tombstone_text.is_empty() {
+                    let tombstone_metadata = tombstone_file.metadata().map_err(|error| {
+                        format!("failed to inspect bounded {label} rollback tombstone: {error}")
+                    })?;
+                    if tombstone_metadata.mode() & 0o777 != 0o600 {
+                        mismatched_tombstone = Some(tombstone);
+                    }
+                    continue;
                 }
-                Err(retained_error) => {
-                    return Err(format!(
-                        "failed to open retained {label} rollback evidence: {retained_error}"
-                    ));
+                if expected(&tombstone_text) {
+                    if exact_candidate.is_some() {
+                        return Err(format!(
+                            "multiple bounded {label} rollback tombstones contain candidate bytes; recovery remains fail-closed"
+                        ));
+                    }
+                    exact_candidate = Some((tombstone_file, tombstone));
+                } else {
+                    mismatched_tombstone = Some(tombstone);
                 }
-            };
-            let retained_text =
-                read_opened_single_link_text(&mut retained_file, &retained, max_bytes, label)?;
-            if !expected(&retained_text) {
+            }
+            if let Some((candidate, tombstone)) = exact_candidate {
+                scrub_verified_private_evidence_linux(
+                    parent,
+                    &candidate,
+                    &tombstone,
+                    label,
+                )?;
+            }
+            if let Some(tombstone) = mismatched_tombstone {
                 return Err(format!(
-                    "retained {label} rollback evidence mismatched at {}; recovery remains fail-closed",
-                    retained.display()
+                    "bounded {label} rollback tombstone mismatched at {}; recovery remains fail-closed",
+                    tombstone.display()
                 ));
             }
             return Ok(());
@@ -2190,7 +2357,35 @@ where
             evidence.display()
         ));
     }
-    remove_opened_file_linux(parent, &displaced, evidence, label)
+    remove_opened_file_linux(parent, &displaced, evidence, target, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn next_private_rollback_tombstone_linux(
+    parent: &PinnedPrivateParent,
+    target: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+        let tombstone = rollback_tombstone_path(target, slot);
+        match parent.open_existing(&tombstone) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(tombstone);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect bounded {label} rollback tombstone capacity: {error}"
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "{label} {PRIVATE_ROLLBACK_TOMBSTONE_CAPACITY_EXHAUSTED}; live and evidence bytes were preserved and recovery remains fail-closed"
+    ))
 }
 
 #[cfg(all(
@@ -2201,8 +2396,10 @@ fn remove_opened_file_linux(
     parent: &PinnedPrivateParent,
     opened: &File,
     path: &Path,
+    target: &Path,
     label: &str,
 ) -> Result<(), String> {
+    let tombstone = next_private_rollback_tombstone_linux(parent, target, label)?;
     let opened_identity = lock_file_identity(opened)
         .map_err(|_| format!("verified {label} evidence is not a stable file"))?;
     let current = parent.open_existing(path).map_err(|error| {
@@ -2220,12 +2417,11 @@ fn remove_opened_file_linux(
     drop(current);
     #[cfg(test)]
     invoke_test_pre_private_evidence_isolate_hook(path);
-    let retained = retained_evidence_path(path);
     parent
-        .rename_path_noreplace(path, &retained)
+        .rename_path_noreplace(path, &tombstone)
         .map_err(|error| {
             format!(
-                "failed to isolate verified {label} evidence without deleting pathname bytes: {error}"
+                "failed to isolate verified {label} evidence into a bounded tombstone without deleting pathname bytes: {error}"
             )
         })?;
     match parent.open_existing(path) {
@@ -2242,10 +2438,10 @@ fn remove_opened_file_linux(
             ));
         }
     }
-    let isolated = parent.open_existing(&retained).map_err(|error| {
+    let isolated = parent.open_existing(&tombstone).map_err(|error| {
         format!(
             "failed to open isolated {label} evidence at {}: {error}",
-            retained.display()
+            tombstone.display()
         )
     })?;
     let isolated_identity = lock_file_identity(&isolated)
@@ -2253,9 +2449,69 @@ fn remove_opened_file_linux(
     if isolated_identity != opened_identity {
         return Err(format!(
             "{label} evidence changed before atomic isolation; replacement evidence was preserved at {}",
-            retained.display()
+            tombstone.display()
         ));
     }
+    scrub_verified_private_evidence_linux(parent, &isolated, &tombstone, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn scrub_verified_private_evidence_linux(
+    parent: &PinnedPrivateParent,
+    opened: &File,
+    tombstone: &Path,
+    label: &str,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let opened_identity = lock_file_identity(opened)
+        .map_err(|_| format!("verified {label} tombstone is not a stable file"))?;
+    let scrubber = parent
+        .open_existing_for_update(tombstone)
+        .map_err(|error| {
+            format!(
+                "failed to open verified {label} tombstone for in-place scrub: {error}"
+            )
+        })?;
+    let scrubber_identity = lock_file_identity(&scrubber)
+        .map_err(|_| format!("writable {label} tombstone is not a stable file"))?;
+    if scrubber_identity != opened_identity {
+        return Err(format!(
+            "{label} tombstone changed before in-place scrub; replacement bytes were preserved"
+        ));
+    }
+    scrubber
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .and_then(|_| scrubber.set_len(0))
+        .and_then(|_| scrubber.sync_all())
+        .map_err(|error| format!("failed to durably scrub verified {label} tombstone: {error}"))?;
+    #[cfg(test)]
+    invoke_test_post_private_evidence_scrub_hook(tombstone);
+
+    let scrubbed = parent.open_existing(tombstone).map_err(|error| {
+        format!("failed to re-open scrubbed {label} tombstone through its pinned parent: {error}")
+    })?;
+    let scrubbed_identity = lock_file_identity(&scrubbed)
+        .map_err(|_| format!("scrubbed {label} tombstone is not a stable file"))?;
+    let scrubbed_metadata = scrubbed
+        .metadata()
+        .map_err(|error| format!("failed to inspect scrubbed {label} tombstone: {error}"))?;
+    if scrubbed_identity != opened_identity
+        || scrubbed_metadata.len() != 0
+        || scrubbed_metadata.mode() & 0o777 != 0o600
+    {
+        return Err(format!(
+            "{label} tombstone mismatch after in-place scrub; recovery remains fail-closed"
+        ));
+    }
+    // Linux has no handle-bound unlink. Keep this transaction-owned,
+    // fixed-slot, zero-byte 0600 artifact as a bounded tombstone. The four
+    // per-target slots are never pathname-deleted or overwritten here;
+    // exhaustion requires stopped-operator cleanup or a future broker with a
+    // stronger ownership boundary.
     Ok(())
 }
 
@@ -2283,6 +2539,31 @@ fn delete_opened_file_windows(file: &mut File, label: &str) -> Result<(), String
         ));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+const PRIVATE_EVIDENCE_PATHNAME_MISMATCH: &str = "evidence pathname mismatch";
+
+#[cfg(windows)]
+fn remove_verified_private_evidence_windows(
+    parent: &PinnedPrivateParent,
+    mut file: File,
+    evidence: &Path,
+    label: &str,
+) -> Result<(), String> {
+    #[cfg(test)]
+    invoke_test_pre_private_evidence_handle_delete_hook(evidence);
+    delete_opened_file_windows(&mut file, label)?;
+    drop(file);
+    match parent.open_existing(evidence) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} after handle-bound cleanup; recovery remains fail-closed"
+        )),
+        Err(error) => Err(format!(
+            "failed to verify {label} evidence pathname absence after handle-bound cleanup: {error}"
+        )),
+    }
 }
 
 #[cfg(any(
@@ -2380,7 +2661,7 @@ impl Drop for TempPathCleanup<'_> {
             any(target_arch = "x86_64", target_arch = "aarch64")
         ))]
         {
-            let retained = retained_evidence_path(&self.path);
+            let retained = retained_temp_evidence_path(&self.path);
             if self
                 .parent
                 .rename_path_noreplace(&self.path, &retained)
@@ -3202,8 +3483,11 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     use super::{
+        clear_test_post_private_evidence_scrub_hook,
         clear_test_pre_private_evidence_isolate_hook,
-        install_test_pre_private_evidence_isolate_hook,
+        install_test_post_private_evidence_scrub_hook,
+        install_test_pre_private_evidence_isolate_hook, rollback_tombstone_path,
+        PRIVATE_ROLLBACK_TOMBSTONE_SLOTS,
     };
     #[cfg(any(
         windows,
@@ -3216,6 +3500,11 @@ mod tests {
         clear_test_pre_private_temp_cleanup_hook, install_test_pre_private_temp_cleanup_hook,
         remove_private_text_if_unchanged, replace_private_text_if_unchanged,
         PrivateTextReplacement,
+    };
+    #[cfg(windows)]
+    use super::{
+        clear_test_pre_private_evidence_handle_delete_hook,
+        install_test_pre_private_evidence_handle_delete_hook,
     };
     use std::{
         fs,
@@ -3343,6 +3632,124 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_conditional_replace_fails_closed_when_evidence_path_is_repopulated_before_handle_delete(
+    ) {
+        let root = test_root("conditional-replace-handle-delete-race");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let moved_owned_evidence = root.join("providers.rollback-evidence-owned");
+        fs::write(&live, "journaled-candidate").unwrap();
+        let moved_owned_evidence_for_hook = moved_owned_evidence.clone();
+        install_test_pre_private_evidence_handle_delete_hook(move |path| {
+            fs::rename(path, &moved_owned_evidence_for_hook).unwrap();
+            fs::write(path, "unowned-evidence-after-verification").unwrap();
+        });
+
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: "base-snapshot",
+                max_bytes: 1024,
+                label: "replace evidence handle-delete race",
+            },
+            |current| current == "journaled-candidate",
+            || {},
+        )
+        .expect_err("repopulated evidence pathname must keep recovery fail-closed");
+        clear_test_pre_private_evidence_handle_delete_hook();
+
+        assert!(error.contains("evidence pathname mismatch"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), "base-snapshot");
+        assert_eq!(
+            fs::read_to_string(&evidence).unwrap(),
+            "unowned-evidence-after-verification"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_conditional_remove_fails_closed_when_evidence_path_is_repopulated_before_handle_delete(
+    ) {
+        let root = test_root("conditional-remove-handle-delete-race");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let moved_owned_evidence = root.join("providers.rollback-evidence-owned");
+        fs::write(&live, "journaled-candidate").unwrap();
+        let moved_owned_evidence_for_hook = moved_owned_evidence.clone();
+        install_test_pre_private_evidence_handle_delete_hook(move |path| {
+            fs::rename(path, &moved_owned_evidence_for_hook).unwrap();
+            fs::write(path, "unowned-evidence-after-verification").unwrap();
+        });
+
+        let error = remove_private_text_if_unchanged(
+            &live,
+            &evidence,
+            &root,
+            1024,
+            "remove evidence handle-delete race",
+            |current| current == "journaled-candidate",
+            || {},
+        )
+        .expect_err("repopulated evidence pathname must keep recovery fail-closed");
+        clear_test_pre_private_evidence_handle_delete_hook();
+
+        assert!(error.contains("evidence pathname mismatch"));
+        assert!(!live.exists());
+        assert_eq!(
+            fs::read_to_string(&evidence).unwrap(),
+            "unowned-evidence-after-verification"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_completed_rollback_fails_closed_when_evidence_path_is_repopulated_before_handle_delete(
+    ) {
+        let root = test_root("completed-rollback-handle-delete-race");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let moved_owned_evidence = root.join("providers.rollback-evidence-owned");
+        fs::write(&live, "base-snapshot").unwrap();
+        fs::write(&evidence, "journaled-candidate").unwrap();
+        let moved_owned_evidence_for_hook = moved_owned_evidence.clone();
+        install_test_pre_private_evidence_handle_delete_hook(move |path| {
+            fs::rename(path, &moved_owned_evidence_for_hook).unwrap();
+            fs::write(path, "unowned-evidence-after-verification").unwrap();
+        });
+
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: "base-snapshot",
+                max_bytes: 1024,
+                label: "completed rollback evidence handle-delete race",
+            },
+            |current| current == "journaled-candidate",
+            || {},
+        )
+        .expect_err("repopulated completed evidence must keep recovery fail-closed");
+        clear_test_pre_private_evidence_handle_delete_hook();
+
+        assert!(error.contains("evidence pathname mismatch"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), "base-snapshot");
+        assert_eq!(
+            fs::read_to_string(&evidence).unwrap(),
+            "unowned-evidence-after-verification"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_temp_cleanup_deletes_only_its_opened_inode_after_entry_replacement() {
         let root = test_root("conditional-temp-cleanup-race");
         let parent = root.join("owned");
@@ -3404,6 +3811,243 @@ mod tests {
     #[test]
     fn linux_conditional_private_rollback_primitives_restore_and_remove_exact_owner() {
         assert_conditional_private_rollback_primitives();
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_successful_rollback_leaves_only_zero_byte_tombstones_without_candidate_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("conditional-rollback-secret-scrub");
+        fs::create_dir_all(&root).unwrap();
+        let candidate =
+            "provider = \"external\"\napi_key = \"linux-api-key-secret-sentinel\"\n";
+        let replacement_live = root.join("existing-providers.toml");
+        let replacement_evidence = root.join("existing.rollback-evidence");
+        fs::write(&replacement_live, candidate).unwrap();
+
+        replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &replacement_live,
+                evidence: &replacement_evidence,
+                boundary: &root,
+                contents: "provider = \"base\"\n",
+                max_bytes: 1024,
+                label: "secret-bearing replacement rollback",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .unwrap();
+
+        let removal_live = root.join("absent-base-providers.toml");
+        let removal_evidence = root.join("absent-base.rollback-evidence");
+        fs::write(&removal_live, candidate).unwrap();
+        remove_private_text_if_unchanged(
+            &removal_live,
+            &removal_evidence,
+            &root,
+            1024,
+            "secret-bearing removal rollback",
+            |current| current == candidate,
+            || {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&replacement_live).unwrap(),
+            "provider = \"base\"\n"
+        );
+        assert!(!removal_live.exists());
+        assert!(!replacement_evidence.exists());
+        assert!(!removal_evidence.exists());
+        for retained in [
+            rollback_tombstone_path(&replacement_live, 0),
+            rollback_tombstone_path(&removal_live, 0),
+        ] {
+            let metadata = fs::metadata(&retained).unwrap();
+            assert_eq!(
+                metadata.len(),
+                0,
+                "retained owned evidence must be a bounded zero-byte tombstone"
+            );
+            assert_eq!(
+                metadata.permissions().mode() & 0o777,
+                0o600,
+                "bounded rollback tombstones must remain private"
+            );
+            assert!(
+                !retained
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("linux-api-key-secret-sentinel"),
+                "bounded tombstone names must never contain secret material"
+            );
+        }
+        for entry in fs::read_dir(&root).unwrap().filter_map(Result::ok) {
+            let bytes = fs::read(entry.path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(candidate.len())
+                    .any(|window| window == candidate.as_bytes()),
+                "successful rollback must not leave complete candidate bytes in live, evidence, retained, or tombstone files"
+            );
+            assert!(
+                !bytes
+                    .windows(b"linux-api-key-secret-sentinel".len())
+                    .any(|window| window == b"linux-api-key-secret-sentinel"),
+                "successful rollback must not leave candidate API-key bytes in live, evidence, retained, or tombstone files"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_rollback_tombstone_capacity_is_bounded_and_exhaustion_preserves_live_bytes() {
+        let root = test_root("conditional-rollback-bounded-tombstones");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let candidate = "api_key = \"bounded-slot-secret\"\n";
+
+        for transaction in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+            let evidence = root.join(format!("providers.rollback-{transaction}.quarantine"));
+            fs::write(&live, candidate).unwrap();
+            replace_private_text_if_unchanged(
+                PrivateTextReplacement {
+                    path: &live,
+                    evidence: &evidence,
+                    boundary: &root,
+                    contents: "provider = \"base\"\n",
+                    max_bytes: 1024,
+                    label: "bounded rollback slot",
+                },
+                |current| current == candidate,
+                || {},
+            )
+            .unwrap();
+            assert!(!evidence.exists());
+            assert_eq!(
+                fs::metadata(rollback_tombstone_path(&live, transaction))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+
+        let tombstones_before = (0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS)
+            .filter(|slot| rollback_tombstone_path(&live, *slot).exists())
+            .count();
+        let exhausted_evidence = root.join("providers.rollback-exhausted.quarantine");
+        fs::write(&live, candidate).unwrap();
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &exhausted_evidence,
+                boundary: &root,
+                contents: "provider = \"base\"\n",
+                max_bytes: 1024,
+                label: "bounded rollback slot",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("the bounded tombstone ring must fail closed before mutation");
+        let tombstones_after = (0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS)
+            .filter(|slot| rollback_tombstone_path(&live, *slot).exists())
+            .count();
+        let exhausted_removal_evidence =
+            root.join("providers.rollback-exhausted-removal.quarantine");
+        let removal_error = remove_private_text_if_unchanged(
+            &live,
+            &exhausted_removal_evidence,
+            &root,
+            1024,
+            "bounded rollback slot removal",
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("removal must also fail before mutation when tombstone capacity is exhausted");
+        let tombstones_final = (0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS)
+            .filter(|slot| rollback_tombstone_path(&live, *slot).exists())
+            .count();
+
+        assert!(error.contains("rollback tombstone capacity exhausted"));
+        assert!(removal_error.contains("rollback tombstone capacity exhausted"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), candidate);
+        assert!(!exhausted_evidence.exists());
+        assert!(!exhausted_removal_evidence.exists());
+        assert_eq!(tombstones_before, PRIVATE_ROLLBACK_TOMBSTONE_SLOTS);
+        assert_eq!(tombstones_after, tombstones_before);
+        assert_eq!(tombstones_final, tombstones_before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_post_scrub_replacement_is_preserved_and_keeps_recovery_fail_closed() {
+        let root = test_root("conditional-rollback-post-scrub-race");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-race.quarantine");
+        let owned_tombstone = root.join("owned-zero-tombstone");
+        let candidate = "api_key = \"post-scrub-secret\"\n";
+        fs::write(&live, candidate).unwrap();
+        let owned_tombstone_for_hook = owned_tombstone.clone();
+        install_test_post_private_evidence_scrub_hook(move |path| {
+            fs::rename(path, &owned_tombstone_for_hook).unwrap();
+            fs::write(path, "unowned-tombstone-replacement").unwrap();
+        });
+
+        let error = remove_private_text_if_unchanged(
+            &live,
+            &evidence,
+            &root,
+            1024,
+            "post-scrub replacement race",
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("post-scrub pathname replacement must remain fail-closed");
+        clear_test_post_private_evidence_scrub_hook();
+        let retry_error = remove_private_text_if_unchanged(
+            &live,
+            &evidence,
+            &root,
+            1024,
+            "post-scrub replacement race retry",
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("restart must retain the post-scrub mismatch");
+        let tombstone = rollback_tombstone_path(&live, 0);
+
+        assert!(error.contains("tombstone mismatch"));
+        assert!(retry_error.contains("tombstone mismatched"));
+        assert!(!live.exists());
+        assert!(!evidence.exists());
+        assert_eq!(
+            fs::read_to_string(&tombstone).unwrap(),
+            "unowned-tombstone-replacement"
+        );
+        assert_eq!(fs::metadata(&owned_tombstone).unwrap().len(), 0);
+        assert!(
+            !fs::read(&owned_tombstone)
+                .unwrap()
+                .windows(b"post-scrub-secret".len())
+                .any(|window| window == b"post-scrub-secret")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(all(
