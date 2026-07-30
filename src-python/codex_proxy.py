@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from enum import Enum
 import gzip
 import hashlib
 import hmac
@@ -1010,6 +1011,81 @@ REPAIR_NONE = "none"
 VISION_PROXY_DISABLED = "disabled"
 VISION_PROXY_CODEX_APP_ADAPTER = "codex_app_adapter"
 VISION_PROXY_TRANSPARENT_OVERLAY = "transparent_overlay"
+
+ROUTE_CAPABILITY_MANIFEST_VERSION = "codexhub.route-capabilities.v1"
+
+
+class CapabilityState(str, Enum):
+    SUPPORTED = "Supported"
+    UNSUPPORTED = "Unsupported"
+    UNQUALIFIED = "Unqualified"
+
+
+class RouteProtocol(str, Enum):
+    RESPONSES = "responses"
+    CHAT_COMPLETIONS = "chat_completions"
+    AUTO = "auto"
+
+
+class AuthenticationStrategy(str, Enum):
+    CODEX_AUTH = "codex_auth"
+    API_KEY = "api_key"
+    OLLAMA_API_KEY = "ollama_api_key"
+    INCOMING = "incoming"
+    UNKNOWN = "unknown"
+
+
+class ToolExposureMode(str, Enum):
+    CURRENT_COMPATIBILITY = "current_compatibility"
+    OFFICIAL_NATIVE = "official_native"
+    NATIVE_DEFERRED_SEARCH_CANDIDATE = "native_deferred_search_candidate"
+    NATIVE_NO_SEARCH_CANDIDATE = "native_no_search_candidate"
+    UNKNOWN = "unknown"
+
+
+class CollaborationBackend(str, Enum):
+    CODEX_RUNTIME = "codex_runtime"
+    CLIENT_RUNTIME = "client_runtime"
+    GATEWAY_COMPATIBILITY = "gateway_compatibility"
+
+
+class CodexCompatibilityPolicy(str, Enum):
+    OFFICIAL_NATIVE = "official_native"
+    CURRENT_COMPATIBILITY = "current_compatibility"
+    NONE = "none"
+
+
+class ExecutionOwner(str, Enum):
+    CODEX_CLIENT = "codex_client"
+
+
+class StreamingPolicy(str, Enum):
+    OFFICIAL_PASSTHROUGH = "official_passthrough"
+    TRANSPARENT = "transparent"
+    TRANSPARENT_CONVERTED = "transparent_converted"
+    GATEWAY_ADAPTED = "gateway_adapted"
+
+
+class TransportPolicy(str, Enum):
+    OFFICIAL_KEEPALIVE = "official_keepalive"
+    STANDARD = "standard"
+
+
+class MutationPolicy(str, Enum):
+    OFFICIAL_PASSTHROUGH = "official_passthrough"
+    TRANSPARENT = "transparent"
+    GATEWAY_COMPATIBILITY = "gateway_compatibility"
+
+
+class RouteMutation(str, Enum):
+    MODEL_ALIAS = "model_alias"
+    NAMESPACE_FLATTENING = "namespace_flattening"
+    WIRE_CONVERSION = "wire_conversion"
+    SEMANTIC_REPAIR = "semantic_repair"
+    HARD_CODED_SCHEMA_INJECTION = "hard_coded_schema_injection"
+    OFFICIAL_TOOL_SEARCH_PRESERVATION = "official_tool_search_preservation"
+    SYNTHETIC_TERMINAL_FAILURE = "synthetic_terminal_failure"
+
 
 RETRY_FAILURE_QUICK_TRANSIENT = "quick_transient"
 RETRY_FAILURE_PROVIDER_THROTTLE = "provider_throttle"
@@ -10849,15 +10925,55 @@ def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]
 
 
 @dataclass(frozen=True)
-class RouteDecision:
+class ToolExposurePolicy:
+    requested_mode: ToolExposureMode
+    effective_mode: ToolExposureMode
+    capability_state: CapabilityState
+    supports_search_tool: bool | None
+    proven_tool_subset: tuple[str, ...]
+    gateway_schema_injection: bool
+
+
+@dataclass(frozen=True)
+class RoutePlan:
+    provider_id: str
+    model_requested: str | None
+    canonical_model: str | None
+    upstream_model: str | None
+    authentication_strategy: AuthenticationStrategy
+    inbound_protocol: RouteProtocol
+    configured_upstream_protocol: RouteProtocol
+    upstream_protocol: RouteProtocol
+    capability_manifest_version: str
     behavior_profile: str
     selected_upstream_format: str
     wire_format_adapter: str
     codex_semantic_adapter: str
+    request_kind: str
     request_kind_policy: str
     retry_policy: str
+    retry_eligibility: CapabilityState
     usage_policy: str
     repair_policy: str
+    vision_proxy_policy: str
+    tool_exposure: ToolExposurePolicy
+    codex_compatibility_policy: CodexCompatibilityPolicy
+    collaboration_backend: CollaborationBackend
+    execution_owner: ExecutionOwner
+    streaming_policy: StreamingPolicy
+    transport_policy: TransportPolicy
+    request_mutation_policy: MutationPolicy
+    response_mutation_policy: MutationPolicy
+    sse_mutation_policy: MutationPolicy
+    named_mutations: frozenset[RouteMutation]
+    official_http_passthrough: bool
+    transparent_metered: bool
+    transparent_same_format: bool
+    transparent_lightweight_fallback: bool
+
+    @property
+    def mutation_summary(self) -> tuple[RouteMutation, ...]:
+        return tuple(sorted(self.named_mutations, key=lambda mutation: mutation.value))
 
 
 def behavior_profile_for_request(
@@ -10887,101 +11003,348 @@ def _wire_format_adapter(inbound_format: str, upstream_format: str) -> str:
     return WIRE_TRANSPARENT
 
 
-def route_decision_for_request(
+def _route_protocol(value: Any, *, default: RouteProtocol) -> RouteProtocol:
+    try:
+        return RouteProtocol(str(value))
+    except ValueError:
+        return default
+
+
+def _authentication_strategy(value: Any) -> AuthenticationStrategy:
+    try:
+        return AuthenticationStrategy(str(value))
+    except ValueError:
+        return AuthenticationStrategy.UNKNOWN
+
+
+def _route_supports_transparent_metering(
+    *,
+    upstream_name: str,
+    configured_upstream_format: str,
+    selected_upstream_format: str,
+    inbound_format: str,
+    wire_format_adapter: str,
+    request_context: Mapping[str, str],
+    provider_hint: str | None,
+) -> bool:
+    if _is_codex_app_context(request_context):
+        return False
+    explicit_client = _has_explicit_third_party_client_identity(request_context)
+    provider_scoped = provider_hint is not None
+    standard_external = provider_hint is None and upstream_name != "official" and explicit_client
+    official_responses = provider_hint is None and upstream_name == "official" and explicit_client
+    if not (provider_scoped or standard_external or official_responses):
+        return False
+
+    if official_responses:
+        return selected_upstream_format == "responses" and (
+            (inbound_format == "responses" and wire_format_adapter == WIRE_TRANSPARENT)
+            or (inbound_format == "chat_completions" and wire_format_adapter == WIRE_CHAT_TO_RESPONSES)
+        )
+
+    return (
+        (
+            inbound_format == "chat_completions"
+            and selected_upstream_format == "chat_completions"
+            and wire_format_adapter == WIRE_TRANSPARENT
+        )
+        or (
+            inbound_format == "chat_completions"
+            and configured_upstream_format == "responses"
+            and selected_upstream_format == "responses"
+            and wire_format_adapter == WIRE_CHAT_TO_RESPONSES
+        )
+        or (
+            inbound_format == "responses"
+            and selected_upstream_format == "responses"
+            and wire_format_adapter == WIRE_TRANSPARENT
+        )
+        or (
+            inbound_format == "responses"
+            and configured_upstream_format == "chat_completions"
+            and selected_upstream_format == "chat_completions"
+            and wire_format_adapter == WIRE_RESPONSES_TO_CHAT
+        )
+    )
+
+
+def _tool_exposure_policy_for_route(
+    upstream: Mapping[str, Any],
+    *,
+    upstream_name: str,
+    behavior_profile: str,
+) -> ToolExposurePolicy:
+    raw_requested_mode = upstream.get("tool_exposure_mode")
+    if raw_requested_mode is None:
+        if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+            requested_mode = ToolExposureMode.OFFICIAL_NATIVE
+        elif behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+            requested_mode = ToolExposureMode.UNKNOWN
+        else:
+            requested_mode = ToolExposureMode.CURRENT_COMPATIBILITY
+    else:
+        try:
+            requested_mode = ToolExposureMode(str(raw_requested_mode))
+        except ValueError:
+            requested_mode = ToolExposureMode.UNKNOWN
+
+    raw_state = upstream.get("tool_capability_state")
+    if raw_state is None:
+        capability_state = (
+            CapabilityState.SUPPORTED
+            if requested_mode
+            in {
+                ToolExposureMode.CURRENT_COMPATIBILITY,
+                ToolExposureMode.OFFICIAL_NATIVE,
+            }
+            else CapabilityState.UNQUALIFIED
+        )
+    else:
+        try:
+            capability_state = CapabilityState(str(raw_state))
+        except ValueError:
+            capability_state = CapabilityState.UNQUALIFIED
+
+    raw_subset = upstream.get("proven_tool_subset")
+    proven_tool_subset = (
+        tuple(item for item in raw_subset if isinstance(item, str) and item)
+        if isinstance(raw_subset, (list, tuple))
+        else ()
+    )
+    supports_search_tool = upstream.get("supports_search_tool")
+    if not isinstance(supports_search_tool, bool):
+        supports_search_tool = None
+
+    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+        effective_mode = ToolExposureMode.OFFICIAL_NATIVE
+    elif behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
+        effective_mode = ToolExposureMode.UNKNOWN
+    else:
+        # #57/#58 have not authorized either native candidate. Keeping their
+        # evidence visible while executing the compatibility mode is the
+        # behavior-preserving fail-closed boundary.
+        effective_mode = ToolExposureMode.CURRENT_COMPATIBILITY
+    gateway_schema_injection = (
+        upstream_name != "official"
+        and effective_mode == ToolExposureMode.CURRENT_COMPATIBILITY
+    )
+    return ToolExposurePolicy(
+        requested_mode=requested_mode,
+        effective_mode=effective_mode,
+        capability_state=capability_state,
+        supports_search_tool=supports_search_tool,
+        proven_tool_subset=proven_tool_subset,
+        gateway_schema_injection=gateway_schema_injection,
+    )
+
+
+def route_plan_for_request(
     upstream: Mapping[str, Any],
     request_context: Mapping[str, str],
     *,
     inbound_format: str,
     provider_hint: str | None = None,
-) -> RouteDecision:
+    model_requested: str | None = None,
+    canonical_route_model: str | None = None,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+) -> RoutePlan:
     upstream_name = str(upstream.get("name") or "")
-    upstream_format = str(upstream.get("upstream_format") or "responses")
-    if upstream_format == "auto":
-        upstream_format = "responses"
-    wire_adapter = _wire_format_adapter(inbound_format, upstream_format)
-
-    if upstream_name != "official" and _is_codex_app_context(request_context):
-        return RouteDecision(
-            behavior_profile=BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
-            selected_upstream_format=upstream_format,
-            wire_format_adapter=wire_adapter,
-            codex_semantic_adapter=CODEX_SEMANTIC_EXTERNAL_ADAPTER,
-            request_kind_policy=REQUEST_KIND_GATEWAY,
-            retry_policy=RETRY_GATEWAY_FULL,
-            usage_policy=USAGE_SYNC_CAPTURE,
-            repair_policy=REPAIR_CODEX_SUBAGENT,
-        )
-
-    if upstream_name == "official" and request_context.get("client_id") == "unknown":
-        return RouteDecision(
-            behavior_profile=behavior_profile_for_request(
-                upstream,
-                request_context,
-                inbound_format=inbound_format,
-            ),
-            selected_upstream_format=upstream_format,
-            wire_format_adapter=wire_adapter,
-            codex_semantic_adapter=CODEX_SEMANTIC_NONE,
-            request_kind_policy=REQUEST_KIND_GATEWAY,
-            retry_policy=RETRY_GATEWAY_FULL,
-            usage_policy=USAGE_SYNC_CAPTURE,
-            repair_policy=REPAIR_NONE,
-        )
-
-    if (
+    configured_upstream_format = str(upstream.get("upstream_format") or "responses")
+    selected_upstream_format = (
+        "responses" if configured_upstream_format == "auto" else configured_upstream_format
+    )
+    wire_adapter = _wire_format_adapter(inbound_format, selected_upstream_format)
+    codex_app_external = upstream_name != "official" and _is_codex_app_context(request_context)
+    compatibility_external = (
         upstream_name != "official"
         and provider_hint is None
         and not _is_codex_app_context(request_context)
         and not _has_explicit_third_party_client_identity(request_context)
-    ):
-        return RouteDecision(
-            behavior_profile=BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
-            selected_upstream_format=upstream_format,
-            wire_format_adapter=wire_adapter,
-            codex_semantic_adapter=CODEX_SEMANTIC_EXTERNAL_ADAPTER,
-            request_kind_policy=REQUEST_KIND_GATEWAY,
-            retry_policy=RETRY_GATEWAY_FULL,
-            usage_policy=USAGE_SYNC_CAPTURE,
-            repair_policy=REPAIR_NONE,
-        )
-
-    if not _is_codex_app_context(request_context):
-        return RouteDecision(
-            behavior_profile=BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-            selected_upstream_format=upstream_format,
-            wire_format_adapter=wire_adapter,
-            codex_semantic_adapter=CODEX_SEMANTIC_NONE,
-            request_kind_policy=REQUEST_KIND_TRANSPARENT,
-            retry_policy=RETRY_CONSERVATIVE_PRE_OUTPUT,
-            usage_policy=USAGE_ASYNC_TAP,
-            repair_policy=REPAIR_NONE,
-        )
-
-    behavior_profile = behavior_profile_for_request(
-        upstream,
-        request_context,
+    )
+    transparent_metered = _route_supports_transparent_metering(
+        upstream_name=upstream_name,
+        configured_upstream_format=configured_upstream_format,
+        selected_upstream_format=selected_upstream_format,
         inbound_format=inbound_format,
-    )
-    return RouteDecision(
-        behavior_profile=behavior_profile,
-        selected_upstream_format=upstream_format,
         wire_format_adapter=wire_adapter,
-        codex_semantic_adapter=CODEX_SEMANTIC_NONE,
-        request_kind_policy=REQUEST_KIND_GATEWAY,
-        retry_policy=RETRY_GATEWAY_FULL,
-        usage_policy=USAGE_SYNC_CAPTURE,
-        repair_policy=REPAIR_NONE,
+        request_context=request_context,
+        provider_hint=provider_hint,
+    )
+    if codex_app_external:
+        behavior_profile = BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
+    elif compatibility_external:
+        behavior_profile = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
+    elif transparent_metered:
+        behavior_profile = BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+    else:
+        behavior_profile = behavior_profile_for_request(
+            upstream,
+            request_context,
+            inbound_format=inbound_format,
+        )
+
+    official_http_passthrough = (
+        behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
+    )
+    transparent_same_format = transparent_metered and wire_adapter == WIRE_TRANSPARENT
+    transparent_lightweight_fallback = transparent_metered and wire_adapter in {
+        WIRE_CHAT_TO_RESPONSES,
+        WIRE_RESPONSES_TO_CHAT,
+    }
+    codex_semantic_adapter = (
+        CODEX_SEMANTIC_EXTERNAL_ADAPTER
+        if codex_app_external or compatibility_external
+        else CODEX_SEMANTIC_NONE
+    )
+    request_kind_policy = (
+        REQUEST_KIND_TRANSPARENT if transparent_metered else REQUEST_KIND_GATEWAY
+    )
+    retry_policy = (
+        RETRY_CONSERVATIVE_PRE_OUTPUT if transparent_metered else RETRY_GATEWAY_FULL
+    )
+    usage_policy = USAGE_ASYNC_TAP if transparent_metered else USAGE_SYNC_CAPTURE
+    repair_policy = REPAIR_CODEX_SUBAGENT if codex_app_external else REPAIR_NONE
+    if codex_app_external:
+        vision_proxy_policy = VISION_PROXY_CODEX_APP_ADAPTER
+    elif transparent_metered and gateway_transparent_vision_proxy_enabled():
+        vision_proxy_policy = VISION_PROXY_TRANSPARENT_OVERLAY
+    else:
+        vision_proxy_policy = VISION_PROXY_DISABLED
+
+    tool_exposure = _tool_exposure_policy_for_route(
+        upstream,
+        upstream_name=upstream_name,
+        behavior_profile=behavior_profile,
+    )
+    if official_http_passthrough:
+        codex_compatibility_policy = CodexCompatibilityPolicy.OFFICIAL_NATIVE
+        collaboration_backend = CollaborationBackend.CODEX_RUNTIME
+        streaming_policy = StreamingPolicy.OFFICIAL_PASSTHROUGH
+        mutation_policy = MutationPolicy.OFFICIAL_PASSTHROUGH
+    elif transparent_metered:
+        codex_compatibility_policy = CodexCompatibilityPolicy.NONE
+        collaboration_backend = CollaborationBackend.CLIENT_RUNTIME
+        streaming_policy = (
+            StreamingPolicy.TRANSPARENT
+            if transparent_same_format
+            else StreamingPolicy.TRANSPARENT_CONVERTED
+        )
+        mutation_policy = MutationPolicy.TRANSPARENT
+    else:
+        codex_compatibility_policy = CodexCompatibilityPolicy.CURRENT_COMPATIBILITY
+        collaboration_backend = CollaborationBackend.GATEWAY_COMPATIBILITY
+        streaming_policy = StreamingPolicy.GATEWAY_ADAPTED
+        mutation_policy = MutationPolicy.GATEWAY_COMPATIBILITY
+
+    named_mutations = {RouteMutation.MODEL_ALIAS}
+    if wire_adapter != WIRE_TRANSPARENT:
+        named_mutations.add(RouteMutation.WIRE_CONVERSION)
+    if tool_exposure.gateway_schema_injection:
+        named_mutations.add(RouteMutation.HARD_CODED_SCHEMA_INJECTION)
+    if codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER:
+        named_mutations.add(RouteMutation.NAMESPACE_FLATTENING)
+    if repair_policy != REPAIR_NONE:
+        named_mutations.add(RouteMutation.SEMANTIC_REPAIR)
+    if official_http_passthrough:
+        named_mutations.add(RouteMutation.OFFICIAL_TOOL_SEARCH_PRESERVATION)
+    elif not transparent_metered:
+        named_mutations.add(RouteMutation.SYNTHETIC_TERMINAL_FAILURE)
+
+    canonical_model = (
+        canonical_model_id(canonical_route_model or model_requested)
+        if canonical_route_model or model_requested
+        else None
+    )
+    upstream_model_value = upstream.get("upstream_model")
+    upstream_model = (
+        canonical_model_id(str(upstream_model_value))
+        if upstream_model_value
+        else canonical_model
+    )
+    manifest_version = str(
+        upstream.get("capability_manifest_version")
+        or ROUTE_CAPABILITY_MANIFEST_VERSION
+    )
+    return RoutePlan(
+        provider_id=upstream_name,
+        model_requested=model_requested,
+        canonical_model=canonical_model,
+        upstream_model=upstream_model,
+        authentication_strategy=_authentication_strategy(
+            upstream.get("auth") or "unknown"
+        ),
+        inbound_protocol=_route_protocol(
+            inbound_format,
+            default=RouteProtocol.RESPONSES,
+        ),
+        configured_upstream_protocol=_route_protocol(
+            configured_upstream_format,
+            default=RouteProtocol.RESPONSES,
+        ),
+        upstream_protocol=_route_protocol(
+            selected_upstream_format,
+            default=RouteProtocol.RESPONSES,
+        ),
+        capability_manifest_version=manifest_version,
+        behavior_profile=behavior_profile,
+        selected_upstream_format=selected_upstream_format,
+        wire_format_adapter=wire_adapter,
+        codex_semantic_adapter=codex_semantic_adapter,
+        request_kind=(
+            RETRY_REQUEST_MAIN_GENERATION if transparent_metered else request_kind
+        ),
+        request_kind_policy=request_kind_policy,
+        retry_policy=retry_policy,
+        retry_eligibility=CapabilityState.SUPPORTED,
+        usage_policy=usage_policy,
+        repair_policy=repair_policy,
+        vision_proxy_policy=vision_proxy_policy,
+        tool_exposure=tool_exposure,
+        codex_compatibility_policy=codex_compatibility_policy,
+        collaboration_backend=collaboration_backend,
+        execution_owner=ExecutionOwner.CODEX_CLIENT,
+        streaming_policy=streaming_policy,
+        transport_policy=(
+            TransportPolicy.OFFICIAL_KEEPALIVE
+            if upstream_name == "official"
+            else TransportPolicy.STANDARD
+        ),
+        request_mutation_policy=mutation_policy,
+        response_mutation_policy=mutation_policy,
+        sse_mutation_policy=mutation_policy,
+        named_mutations=frozenset(named_mutations),
+        official_http_passthrough=official_http_passthrough,
+        transparent_metered=transparent_metered,
+        transparent_same_format=transparent_same_format,
+        transparent_lightweight_fallback=transparent_lightweight_fallback,
     )
 
 
-def _route_decision_event_fields(decision: RouteDecision) -> dict[str, str]:
+def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
     return {
-        "wire_format_adapter": decision.wire_format_adapter,
-        "codex_semantic_adapter": decision.codex_semantic_adapter,
-        "request_kind_policy": decision.request_kind_policy,
-        "retry_policy": decision.retry_policy,
-        "usage_policy": decision.usage_policy,
-        "repair_policy": decision.repair_policy,
+        "wire_format_adapter": plan.wire_format_adapter,
+        "codex_semantic_adapter": plan.codex_semantic_adapter,
+        "request_kind": plan.request_kind,
+        "request_kind_policy": plan.request_kind_policy,
+        "retry_policy": plan.retry_policy,
+        "retry_eligibility": plan.retry_eligibility.value,
+        "usage_policy": plan.usage_policy,
+        "repair_policy": plan.repair_policy,
+        "capability_manifest_version": plan.capability_manifest_version,
+        "authentication_strategy": plan.authentication_strategy.value,
+        "tool_exposure_mode": plan.tool_exposure.effective_mode.value,
+        "tool_capability_state": plan.tool_exposure.capability_state.value,
+        "codex_compatibility_policy": plan.codex_compatibility_policy.value,
+        "collaboration_backend": plan.collaboration_backend.value,
+        "execution_owner": plan.execution_owner.value,
+        "streaming_policy": plan.streaming_policy.value,
+        "transport_policy": plan.transport_policy.value,
+        "request_mutation_policy": plan.request_mutation_policy.value,
+        "response_mutation_policy": plan.response_mutation_policy.value,
+        "sse_mutation_policy": plan.sse_mutation_policy.value,
+        "mutation_summary": [
+            mutation.value for mutation in plan.mutation_summary
+        ],
     }
 
 
@@ -10999,21 +11362,6 @@ def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -
         elif key == "prompt_cache_key_hash":
             renamed[f"{prefix}_prompt_cache_key_hash"] = value
     return renamed
-
-
-def vision_proxy_policy_for_route(decision: RouteDecision, behavior_profile: str | None = None) -> str:
-    active_behavior_profile = behavior_profile or decision.behavior_profile
-    if (
-        active_behavior_profile == BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
-        and decision.codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER
-    ):
-        return VISION_PROXY_CODEX_APP_ADAPTER
-    if (
-        active_behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-        and gateway_transparent_vision_proxy_enabled()
-    ):
-        return VISION_PROXY_TRANSPARENT_OVERLAY
-    return VISION_PROXY_DISABLED
 
 
 def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
@@ -13032,8 +13380,14 @@ def _open_upstream_once(
     *,
     upstream_name: str,
     timeout: int | float,
+    transport_policy: TransportPolicy | None = None,
 ) -> Any:
-    if upstream_name == "official":
+    selected_transport = transport_policy or (
+        TransportPolicy.OFFICIAL_KEEPALIVE
+        if upstream_name == "official"
+        else TransportPolicy.STANDARD
+    )
+    if selected_transport == TransportPolicy.OFFICIAL_KEEPALIVE:
         return _official_urlopen(request, timeout=timeout)
     return urlopen(request, timeout=timeout)
 
@@ -13050,6 +13404,7 @@ def _open_upstream_response(
     max_attempts: int | None = None,
     retry_policy: str = RETRY_GATEWAY_FULL,
     retry_http_errors: bool = True,
+    transport_policy: TransportPolicy | None = None,
     downstream_exposed: Callable[[], bool] | None = None,
     pre_response_deadline: float | None = None,
     open_attempt_budget: dict[str, int] | None = None,
@@ -13106,6 +13461,7 @@ def _open_upstream_response(
                 request,
                 upstream_name=upstream_name,
                 timeout=attempt_timeout,
+                transport_policy=transport_policy,
             )
             remaining_budget = _remaining_pre_response_budget_seconds(pre_response_deadline)
             if remaining_budget is not None and remaining_budget <= 0:
@@ -14119,7 +14475,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         reports_cached_input_tokens = False
         behavior_profile = None
         route_reason: str | None = None
-        route_decision: RouteDecision | None = None
+        route_plan: RoutePlan | None = None
         route_policy_event_fields: dict[str, Any] = {}
         vision_proxy_policy = VISION_PROXY_DISABLED
         downstream_sse_started = False
@@ -14253,127 +14609,36 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
             _validate_reasoning_effort_for_upstream(inbound_payload, upstream, model)
-            route_decision = route_decision_for_request(
+            route_plan = route_plan_for_request(
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
                 provider_hint=provider_hint,
+                model_requested=model_requested,
+                canonical_route_model=model,
+                request_kind=request_kind,
             )
-            configured_upstream_format_for_route = str(upstream.get("upstream_format", "responses"))
-            is_provider_transparent_metered = (
-                provider_hint is not None
-                and not _is_codex_app_context(request_context)
-                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                and (
-                    (
-                        inbound_format == "chat_completions"
-                        and route_decision.selected_upstream_format == "chat_completions"
-                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-                    )
-                    or (
-                        inbound_format == "chat_completions"
-                        and configured_upstream_format_for_route == "responses"
-                        and route_decision.selected_upstream_format == "responses"
-                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
-                    )
-                    or (
-                        inbound_format == "responses"
-                        and route_decision.selected_upstream_format == "responses"
-                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-                    )
-                    or (
-                        inbound_format == "responses"
-                        and configured_upstream_format_for_route == "chat_completions"
-                        and route_decision.selected_upstream_format == "chat_completions"
-                        and route_decision.wire_format_adapter == WIRE_RESPONSES_TO_CHAT
-                    )
-                )
+            behavior_profile = route_plan.behavior_profile
+            upstream_format = (
+                route_plan.selected_upstream_format
+                if route_plan.transparent_metered
+                else route_plan.configured_upstream_protocol.value
             )
-            is_standard_third_party_transparent_metered = (
-                provider_hint is None
-                and upstream_name != "official"
-                and not _is_codex_app_context(request_context)
-                and _has_explicit_third_party_client_identity(request_context)
-                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                and (
-                    (
-                        inbound_format == "chat_completions"
-                        and route_decision.selected_upstream_format == "chat_completions"
-                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-                    )
-                    or (
-                        inbound_format == "chat_completions"
-                        and configured_upstream_format_for_route == "responses"
-                        and route_decision.selected_upstream_format == "responses"
-                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
-                    )
-                    or (
-                        inbound_format == "responses"
-                        and route_decision.selected_upstream_format == "responses"
-                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-                    )
-                    or (
-                        inbound_format == "responses"
-                        and configured_upstream_format_for_route == "chat_completions"
-                        and route_decision.selected_upstream_format == "chat_completions"
-                        and route_decision.wire_format_adapter == WIRE_RESPONSES_TO_CHAT
-                    )
-                )
-            )
-            is_official_responses_transparent_metered = (
-                provider_hint is None
-                and upstream_name == "official"
-                and not _is_codex_app_context(request_context)
-                and request_context.get("client_id") != "unknown"
-                and route_decision.behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                and route_decision.selected_upstream_format == "responses"
-                and (
-                    (
-                        inbound_format == "responses"
-                        and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-                    )
-                    or (
-                        inbound_format == "chat_completions"
-                        and route_decision.wire_format_adapter == WIRE_CHAT_TO_RESPONSES
-                    )
-                )
-            )
-            enable_transparent_metered = (
-                is_provider_transparent_metered
-                or is_standard_third_party_transparent_metered
-                or is_official_responses_transparent_metered
-            )
-            enable_codex_app_external_adapter = (
-                route_decision.codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER
-            )
-            behavior_profile = (
-                route_decision.behavior_profile
-                if enable_transparent_metered or enable_codex_app_external_adapter
-                else behavior_profile_for_request(
-                    upstream,
-                    request_context,
-                    inbound_format=inbound_format,
-                )
-            )
-            upstream_format = route_decision.selected_upstream_format if enable_transparent_metered else upstream_format
-            is_official_http_passthrough = behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-            is_transparent_metered = behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-            is_transparent_same_format = is_transparent_metered and route_decision.wire_format_adapter == WIRE_TRANSPARENT
-            is_transparent_lightweight_fallback = (
-                is_transparent_metered
-                and route_decision.wire_format_adapter in {WIRE_CHAT_TO_RESPONSES, WIRE_RESPONSES_TO_CHAT}
-            )
-            if is_transparent_metered:
-                request_kind = RETRY_REQUEST_MAIN_GENERATION
+            is_official_http_passthrough = route_plan.official_http_passthrough
+            is_transparent_metered = route_plan.transparent_metered
+            is_transparent_same_format = route_plan.transparent_same_format
+            is_transparent_lightweight_fallback = route_plan.transparent_lightweight_fallback
+            if request_kind != route_plan.request_kind:
+                request_kind = route_plan.request_kind
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
             self._pre_response_deadline = _main_generation_pre_response_deadline(
                 started_at,
                 request_kind,
             )
-            vision_proxy_policy = vision_proxy_policy_for_route(route_decision, behavior_profile)
+            vision_proxy_policy = route_plan.vision_proxy_policy
             reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
-                **_route_decision_event_fields(route_decision),
+                **_route_plan_event_fields(route_plan),
                 "vision_proxy_policy": vision_proxy_policy,
                 **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
             }
@@ -14783,10 +15048,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     if official_open_attempt_budget is not None
                                     else None
                                 ),
-                                retry_policy=route_decision.retry_policy
-                                if enable_transparent_metered
-                                else RETRY_GATEWAY_FULL,
+                                retry_policy=route_plan.retry_policy,
                                 retry_http_errors=not is_official_http_passthrough,
+                                transport_policy=route_plan.transport_policy,
                                 downstream_exposed=lambda: _downstream_has_been_exposed(self),
                                 pre_response_deadline=(
                                     None if downstream_sse_started else self._pre_response_deadline

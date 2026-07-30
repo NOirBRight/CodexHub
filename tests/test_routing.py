@@ -624,9 +624,9 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
         )
 
-    def test_route_decision_codex_app_third_party_chat_upstream_uses_codex_adapter_and_wire_conversion(self):
+    def test_route_plan_codex_app_third_party_chat_upstream_uses_codex_adapter_and_wire_conversion(self):
         upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
-        decision = codex_proxy.route_decision_for_request(
+        decision = codex_proxy.route_plan_for_request(
             upstream,
             {"client_id": "codex-app"},
             inbound_format="responses",
@@ -639,9 +639,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
         self.assertEqual(decision.repair_policy, codex_proxy.REPAIR_CODEX_SUBAGENT)
 
-    def test_route_decision_third_party_app_provider_same_format_is_transparent_metered(self):
+    def test_route_plan_third_party_app_provider_same_format_is_transparent_metered(self):
         upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
-        decision = codex_proxy.route_decision_for_request(
+        decision = codex_proxy.route_plan_for_request(
             upstream,
             {"client_id": "zcode"},
             inbound_format="chat_completions",
@@ -655,9 +655,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
         self.assertEqual(decision.repair_policy, codex_proxy.REPAIR_NONE)
 
-    def test_route_decision_third_party_app_official_responses_is_transparent_metered(self):
+    def test_route_plan_third_party_app_official_responses_is_transparent_metered(self):
         upstream = {"name": "official", "upstream_format": "responses"}
-        decision = codex_proxy.route_decision_for_request(
+        decision = codex_proxy.route_plan_for_request(
             upstream,
             {"client_id": "opencode"},
             inbound_format="responses",
@@ -667,9 +667,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.wire_format_adapter, codex_proxy.WIRE_TRANSPARENT)
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
 
-    def test_route_decision_official_unknown_client_is_gateway_compat(self):
+    def test_route_plan_official_unknown_client_is_gateway_compat(self):
         upstream = {"name": "official", "upstream_format": "responses"}
-        decision = codex_proxy.route_decision_for_request(
+        decision = codex_proxy.route_plan_for_request(
             upstream,
             {"client_id": "unknown"},
             inbound_format="responses",
@@ -682,9 +682,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
         self.assertEqual(decision.repair_policy, codex_proxy.REPAIR_NONE)
 
-    def test_route_decision_third_party_standard_unknown_client_uses_gateway_profile(self):
+    def test_route_plan_third_party_standard_unknown_client_uses_gateway_profile(self):
         upstream = {"name": "volcengine", "upstream_format": "chat_completions"}
-        decision = codex_proxy.route_decision_for_request(
+        decision = codex_proxy.route_plan_for_request(
             upstream,
             {"client_id": "unknown"},
             inbound_format="chat_completions",
@@ -695,6 +695,284 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.request_kind_policy, codex_proxy.REQUEST_KIND_GATEWAY)
         self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+
+    def test_route_plan_fixtures_are_route_qualified_and_decision_complete(self):
+        cases = (
+            {
+                "name": "official_passthrough",
+                "upstream": {
+                    "name": "official",
+                    "auth": "codex_auth",
+                    "upstream_model": "gpt-5.5",
+                    "upstream_format": "responses",
+                },
+                "context": {"client_id": "codex-app"},
+                "inbound_format": "responses",
+                "provider_hint": None,
+                "expected": {
+                    "behavior_profile": codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+                    "provider_id": "official",
+                    "canonical_model": "openai/gpt-5.5",
+                    "upstream_model": "gpt-5.5",
+                    "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "upstream_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "wire_format_adapter": codex_proxy.WIRE_TRANSPARENT,
+                    "tool_mode": codex_proxy.ToolExposureMode.OFFICIAL_NATIVE,
+                    "effective_tool_mode": codex_proxy.ToolExposureMode.OFFICIAL_NATIVE,
+                    "tool_state": codex_proxy.CapabilityState.SUPPORTED,
+                    "supports_search_tool": None,
+                    "codex_compatibility_policy": codex_proxy.CodexCompatibilityPolicy.OFFICIAL_NATIVE,
+                    "collaboration_backend": codex_proxy.CollaborationBackend.CODEX_RUNTIME,
+                    "streaming_policy": codex_proxy.StreamingPolicy.OFFICIAL_PASSTHROUGH,
+                    "transport_policy": codex_proxy.TransportPolicy.OFFICIAL_KEEPALIVE,
+                    "mutations": (
+                        codex_proxy.RouteMutation.MODEL_ALIAS,
+                        codex_proxy.RouteMutation.OFFICIAL_TOOL_SEARCH_PRESERVATION,
+                    ),
+                },
+            },
+            {
+                "name": "codex_app_external_compatibility_without_search",
+                "upstream": {
+                    "name": "ollama_cloud",
+                    "auth": "ollama_api_key",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "responses",
+                    "supports_search_tool": False,
+                },
+                "context": {"client_id": "codex-app"},
+                "inbound_format": "responses",
+                "provider_hint": None,
+                "expected": {
+                    "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+                    "provider_id": "ollama_cloud",
+                    "canonical_model": "ollama-cloud/glm-5.2",
+                    "upstream_model": "glm-5.2",
+                    "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "upstream_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "wire_format_adapter": codex_proxy.WIRE_TRANSPARENT,
+                    "tool_mode": codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+                    "effective_tool_mode": codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+                    "tool_state": codex_proxy.CapabilityState.SUPPORTED,
+                    "supports_search_tool": False,
+                    "codex_compatibility_policy": codex_proxy.CodexCompatibilityPolicy.CURRENT_COMPATIBILITY,
+                    "collaboration_backend": codex_proxy.CollaborationBackend.GATEWAY_COMPATIBILITY,
+                    "streaming_policy": codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+                    "transport_policy": codex_proxy.TransportPolicy.STANDARD,
+                    "mutations": (
+                        codex_proxy.RouteMutation.HARD_CODED_SCHEMA_INJECTION,
+                        codex_proxy.RouteMutation.MODEL_ALIAS,
+                        codex_proxy.RouteMutation.NAMESPACE_FLATTENING,
+                        codex_proxy.RouteMutation.SEMANTIC_REPAIR,
+                        codex_proxy.RouteMutation.SYNTHETIC_TERMINAL_FAILURE,
+                    ),
+                },
+            },
+            {
+                "name": "provider_scoped_responses_to_chat",
+                "upstream": {
+                    "name": "volcengine",
+                    "auth": "api_key",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "chat_completions",
+                },
+                "context": {"client_id": "zcode"},
+                "inbound_format": "responses",
+                "provider_hint": "volc",
+                "expected": {
+                    "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                    "provider_id": "volcengine",
+                    "canonical_model": "volc/glm-5.2",
+                    "upstream_model": "glm-5.2",
+                    "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "upstream_protocol": codex_proxy.RouteProtocol.CHAT_COMPLETIONS,
+                    "wire_format_adapter": codex_proxy.WIRE_RESPONSES_TO_CHAT,
+                    "tool_mode": codex_proxy.ToolExposureMode.UNKNOWN,
+                    "effective_tool_mode": codex_proxy.ToolExposureMode.UNKNOWN,
+                    "tool_state": codex_proxy.CapabilityState.UNQUALIFIED,
+                    "supports_search_tool": None,
+                    "codex_compatibility_policy": codex_proxy.CodexCompatibilityPolicy.NONE,
+                    "collaboration_backend": codex_proxy.CollaborationBackend.CLIENT_RUNTIME,
+                    "streaming_policy": codex_proxy.StreamingPolicy.TRANSPARENT_CONVERTED,
+                    "transport_policy": codex_proxy.TransportPolicy.STANDARD,
+                    "mutations": (
+                        codex_proxy.RouteMutation.MODEL_ALIAS,
+                        codex_proxy.RouteMutation.WIRE_CONVERSION,
+                    ),
+                },
+            },
+            {
+                "name": "provider_scoped_responses_same_format",
+                "upstream": {
+                    "name": "volcengine",
+                    "auth": "api_key",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "responses",
+                },
+                "context": {"client_id": "zcode"},
+                "inbound_format": "responses",
+                "provider_hint": "volc",
+                "expected": {
+                    "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+                    "provider_id": "volcengine",
+                    "canonical_model": "volc/glm-5.2",
+                    "upstream_model": "glm-5.2",
+                    "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "upstream_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "wire_format_adapter": codex_proxy.WIRE_TRANSPARENT,
+                    "tool_mode": codex_proxy.ToolExposureMode.UNKNOWN,
+                    "effective_tool_mode": codex_proxy.ToolExposureMode.UNKNOWN,
+                    "tool_state": codex_proxy.CapabilityState.UNQUALIFIED,
+                    "supports_search_tool": None,
+                    "codex_compatibility_policy": codex_proxy.CodexCompatibilityPolicy.NONE,
+                    "collaboration_backend": codex_proxy.CollaborationBackend.CLIENT_RUNTIME,
+                    "streaming_policy": codex_proxy.StreamingPolicy.TRANSPARENT,
+                    "transport_policy": codex_proxy.TransportPolicy.STANDARD,
+                    "mutations": (codex_proxy.RouteMutation.MODEL_ALIAS,),
+                },
+            },
+            {
+                "name": "codex_app_chat_to_responses_compatibility",
+                "upstream": {
+                    "name": "ollama_cloud",
+                    "auth": "ollama_api_key",
+                    "upstream_model": "glm-5.2",
+                    "upstream_format": "responses",
+                    "supports_search_tool": False,
+                },
+                "context": {"client_id": "codex-app"},
+                "inbound_format": "chat_completions",
+                "provider_hint": None,
+                "expected": {
+                    "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+                    "provider_id": "ollama_cloud",
+                    "canonical_model": "ollama-cloud/glm-5.2",
+                    "upstream_model": "glm-5.2",
+                    "inbound_protocol": codex_proxy.RouteProtocol.CHAT_COMPLETIONS,
+                    "upstream_protocol": codex_proxy.RouteProtocol.RESPONSES,
+                    "wire_format_adapter": codex_proxy.WIRE_CHAT_TO_RESPONSES,
+                    "tool_mode": codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+                    "effective_tool_mode": codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+                    "tool_state": codex_proxy.CapabilityState.SUPPORTED,
+                    "supports_search_tool": False,
+                    "codex_compatibility_policy": codex_proxy.CodexCompatibilityPolicy.CURRENT_COMPATIBILITY,
+                    "collaboration_backend": codex_proxy.CollaborationBackend.GATEWAY_COMPATIBILITY,
+                    "streaming_policy": codex_proxy.StreamingPolicy.GATEWAY_ADAPTED,
+                    "transport_policy": codex_proxy.TransportPolicy.STANDARD,
+                    "mutations": (
+                        codex_proxy.RouteMutation.HARD_CODED_SCHEMA_INJECTION,
+                        codex_proxy.RouteMutation.MODEL_ALIAS,
+                        codex_proxy.RouteMutation.NAMESPACE_FLATTENING,
+                        codex_proxy.RouteMutation.SEMANTIC_REPAIR,
+                        codex_proxy.RouteMutation.SYNTHETIC_TERMINAL_FAILURE,
+                        codex_proxy.RouteMutation.WIRE_CONVERSION,
+                    ),
+                },
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                plan = codex_proxy.route_plan_for_request(
+                    case["upstream"],
+                    case["context"],
+                    inbound_format=case["inbound_format"],
+                    provider_hint=case["provider_hint"],
+                    model_requested=case["expected"]["canonical_model"],
+                )
+
+                expected = case["expected"]
+                self.assertEqual(plan.behavior_profile, expected["behavior_profile"])
+                self.assertEqual(plan.provider_id, expected["provider_id"])
+                self.assertEqual(plan.canonical_model, expected["canonical_model"])
+                self.assertEqual(plan.upstream_model, expected["upstream_model"])
+                self.assertEqual(plan.inbound_protocol, expected["inbound_protocol"])
+                self.assertEqual(plan.upstream_protocol, expected["upstream_protocol"])
+                self.assertEqual(plan.wire_format_adapter, expected["wire_format_adapter"])
+                self.assertEqual(plan.capability_manifest_version, "codexhub.route-capabilities.v1")
+                self.assertEqual(plan.tool_exposure.requested_mode, expected["tool_mode"])
+                self.assertEqual(plan.tool_exposure.effective_mode, expected["effective_tool_mode"])
+                self.assertEqual(plan.tool_exposure.capability_state, expected["tool_state"])
+                self.assertEqual(plan.tool_exposure.supports_search_tool, expected["supports_search_tool"])
+                self.assertEqual(
+                    plan.tool_exposure.gateway_schema_injection,
+                    expected["effective_tool_mode"] == codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+                )
+                self.assertEqual(plan.codex_compatibility_policy, expected["codex_compatibility_policy"])
+                self.assertEqual(plan.collaboration_backend, expected["collaboration_backend"])
+                self.assertEqual(plan.execution_owner, codex_proxy.ExecutionOwner.CODEX_CLIENT)
+                self.assertEqual(plan.streaming_policy, expected["streaming_policy"])
+                self.assertEqual(plan.retry_eligibility, codex_proxy.CapabilityState.SUPPORTED)
+                self.assertEqual(plan.request_kind, codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
+                self.assertEqual(plan.transport_policy, expected["transport_policy"])
+                self.assertIsInstance(plan.request_mutation_policy, codex_proxy.MutationPolicy)
+                self.assertIsInstance(plan.response_mutation_policy, codex_proxy.MutationPolicy)
+                self.assertIsInstance(plan.sse_mutation_policy, codex_proxy.MutationPolicy)
+                self.assertEqual(plan.mutation_summary, expected["mutations"])
+
+    def test_route_plan_candidate_and_unknown_tool_modes_fail_closed_to_compatibility(self):
+        cases = (
+            (
+                codex_proxy.ToolExposureMode.NATIVE_DEFERRED_SEARCH_CANDIDATE.value,
+                codex_proxy.CapabilityState.UNQUALIFIED,
+                (),
+            ),
+            (
+                codex_proxy.ToolExposureMode.NATIVE_NO_SEARCH_CANDIDATE.value,
+                codex_proxy.CapabilityState.UNQUALIFIED,
+                ("function", "custom"),
+            ),
+            (
+                codex_proxy.ToolExposureMode.UNKNOWN.value,
+                codex_proxy.CapabilityState.UNSUPPORTED,
+                (),
+            ),
+        )
+
+        for requested_mode, capability_state, proven_tool_subset in cases:
+            with self.subTest(requested_mode=requested_mode):
+                plan = codex_proxy.route_plan_for_request(
+                    {
+                        "name": "ollama_cloud",
+                        "auth": "ollama_api_key",
+                        "upstream_model": "glm-5.2",
+                        "upstream_format": "responses",
+                        "tool_exposure_mode": requested_mode,
+                        "tool_capability_state": capability_state.value,
+                        "proven_tool_subset": proven_tool_subset,
+                    },
+                    {"client_id": "codex-app"},
+                    inbound_format="responses",
+                    model_requested="ollama-cloud/glm-5.2",
+                )
+
+                self.assertEqual(plan.tool_exposure.requested_mode.value, requested_mode)
+                self.assertEqual(plan.tool_exposure.effective_mode, codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY)
+                self.assertEqual(plan.tool_exposure.capability_state, capability_state)
+                self.assertEqual(plan.tool_exposure.proven_tool_subset, proven_tool_subset)
+                self.assertTrue(plan.tool_exposure.gateway_schema_injection)
+                self.assertEqual(plan.behavior_profile, codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER)
+                self.assertEqual(plan.repair_policy, codex_proxy.REPAIR_CODEX_SUBAGENT)
+                self.assertIn(codex_proxy.RouteMutation.SEMANTIC_REPAIR, plan.named_mutations)
+                self.assertFalse(plan.official_http_passthrough)
+                self.assertFalse(plan.transparent_metered)
+
+    def test_route_plan_and_nested_tool_policy_are_immutable(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "responses",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="ollama-cloud/glm-5.2",
+        )
+
+        with self.assertRaises(AttributeError):
+            plan.behavior_profile = codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+        with self.assertRaises(AttributeError):
+            plan.tool_exposure.gateway_schema_injection = False
 
     def test_third_party_app_official_responses_uses_transparent_metered_runtime_path(self):
         body = json.dumps(
@@ -746,8 +1024,17 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["codex_semantic_adapter"], codex_proxy.CODEX_SEMANTIC_NONE)
             self.assertEqual(fields["request_kind_policy"], codex_proxy.REQUEST_KIND_TRANSPARENT)
             self.assertEqual(fields["retry_policy"], codex_proxy.RETRY_CONSERVATIVE_PRE_OUTPUT)
+            self.assertEqual(fields["retry_eligibility"], codex_proxy.CapabilityState.SUPPORTED.value)
             self.assertEqual(fields["usage_policy"], codex_proxy.USAGE_ASYNC_TAP)
             self.assertEqual(fields["repair_policy"], codex_proxy.REPAIR_NONE)
+            self.assertEqual(fields["capability_manifest_version"], "codexhub.route-capabilities.v1")
+            self.assertEqual(fields["tool_exposure_mode"], codex_proxy.ToolExposureMode.UNKNOWN.value)
+            self.assertEqual(fields["tool_capability_state"], codex_proxy.CapabilityState.UNQUALIFIED.value)
+            self.assertEqual(fields["collaboration_backend"], codex_proxy.CollaborationBackend.CLIENT_RUNTIME.value)
+            self.assertEqual(fields["execution_owner"], codex_proxy.ExecutionOwner.CODEX_CLIENT.value)
+            self.assertEqual(fields["streaming_policy"], codex_proxy.StreamingPolicy.TRANSPARENT.value)
+            self.assertEqual(fields["transport_policy"], codex_proxy.TransportPolicy.OFFICIAL_KEEPALIVE.value)
+            self.assertEqual(fields["mutation_summary"], [codex_proxy.RouteMutation.MODEL_ALIAS.value])
 
     def test_third_party_app_official_responses_nonstream_buffers_forced_sse(self):
         body = json.dumps(
