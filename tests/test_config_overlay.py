@@ -5,9 +5,11 @@ import io
 import json
 import tempfile
 from pathlib import Path
+import tomllib
 import unittest
 from unittest.mock import patch
 
+import config_overlay
 from config_overlay import (
     MARKER_BEGIN,
     _selected_official_context_budget,
@@ -25,6 +27,33 @@ from config_overlay import (
     top_level_value,
 )
 from model_limits import FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE
+
+
+RUST_0_145_AGENTS_CONFIG = """\
+model = "ollama-cloud/glm-5.2"
+model_provider = "openai"
+model_reasoning_effort = "xhigh"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 7
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "high"
+future_scheduler = { strategy = "breadth", burst_limit = 11 }
+
+[agents.researcher]
+description = "Research-focused role."
+config_file = "./agents/researcher.toml"
+nickname_candidates = ["Herodotus", "Ibn Battuta"]
+
+[agents.reviewer]
+description = "Review-focused role."
+config_file = "./agents/reviewer.toml"
+
+[features]
+multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 5, tool_namespace = "team_tools" }
+hooks = true
+"""
 
 
 class DeterministicCompactionReplay:
@@ -803,6 +832,211 @@ class ConfigOverlayTests(unittest.TestCase):
                 apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
             self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_interrupted_beta_takeover_leaves_stable_agents_config_and_restore_chain_exact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            original = RUST_0_145_AGENTS_CONFIG.replace("\n", "\r\n").encode()
+            expected = tomllib.loads(RUST_0_145_AGENTS_CONFIG)
+            config_path.write_bytes(original)
+
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            stable_active = config_path.read_bytes()
+            stable_semantics = tomllib.loads(stable_active.decode())
+            self.assertEqual(stable_semantics["agents"], expected["agents"])
+            self.assertEqual(
+                stable_semantics["features"]["multi_agent_v2"],
+                expected["features"]["multi_agent_v2"],
+            )
+
+            real_atomic_write = config_overlay.atomic_write_text
+
+            def interrupt_live_config_write(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+                if path == config_path:
+                    raise OSError("simulated interrupted beta config update")
+                real_atomic_write(path, text, encoding=encoding)
+
+            with patch("config_overlay.atomic_write_text", interrupt_live_config_write):
+                with self.assertRaisesRegex(OSError, "interrupted beta config update"):
+                    apply_overlay(
+                        config_path,
+                        beta_backup_path,
+                        catalog_path,
+                        "http://127.0.0.1:9109",
+                        owner="beta",
+                        takeover=True,
+                    )
+
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertEqual(beta_backup_path.read_bytes(), stable_active)
+            self.assertTrue(config_overlay.takeover_metadata_path(beta_backup_path).exists())
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+
+            self.assertEqual(status, "interrupted_takeover_discarded")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+            self.assertFalse(beta_backup_path.exists())
+            self.assertFalse(config_overlay.takeover_metadata_path(beta_backup_path).exists())
+
+            restore_overlay(config_path, stable_backup_path)
+            self.assertEqual(config_path.read_bytes(), original)
+
+    def test_agents_config_survives_connect_restart_readback_and_restore_for_supported_shapes(self):
+        legacy_enabled = RUST_0_145_AGENTS_CONFIG.replace(
+            "max_concurrent_threads_per_session = 7",
+            "max_threads = 7",
+        ).replace(
+            "multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 5, tool_namespace = \"team_tools\" }",
+            "multi_agent_v2 = { enabled = true, max_concurrent_threads_per_session = 9, tool_namespace = \"team_tools\" }",
+        )
+        no_backend_or_defaults = RUST_0_145_AGENTS_CONFIG.replace(
+            "max_concurrent_threads_per_session = 7",
+            "max_threads = 3",
+        ).replace(
+            'default_subagent_model = "gpt-5.6-terra"\n',
+            "",
+        ).replace(
+            'default_subagent_reasoning_effort = "high"\n',
+            "",
+        ).replace(
+            'multi_agent_v2 = { enabled = false, max_concurrent_threads_per_session = 5, tool_namespace = "team_tools" }\n',
+            "",
+        )
+        cases = (
+            ("canonical_structured_disabled", RUST_0_145_AGENTS_CONFIG, False),
+            ("legacy_alias_structured_enabled", legacy_enabled, True),
+            ("legacy_alias_without_backend_or_defaults", no_backend_or_defaults, None),
+        )
+
+        for name, original, expected_v2_enabled in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                config_path = tmp / "config.toml"
+                backup_path = tmp / "config.backup.toml"
+                catalog_path = tmp / "catalog.json"
+                original_bytes = original.encode()
+                expected = tomllib.loads(original)
+                config_path.write_bytes(original_bytes)
+
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    catalog_path,
+                    "http://127.0.0.1:9099",
+                )
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    catalog_path,
+                    "http://127.0.0.1:9099",
+                )
+
+                readback = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(readback["agents"], expected["agents"])
+                self.assertEqual(backup_path.read_bytes(), original_bytes)
+                if expected_v2_enabled is None:
+                    self.assertNotIn("multi_agent_v2", readback["features"])
+                    self.assertNotIn("default_subagent_model", readback["agents"])
+                    self.assertNotIn("default_subagent_reasoning_effort", readback["agents"])
+                else:
+                    self.assertEqual(
+                        readback["features"]["multi_agent_v2"],
+                        expected["features"]["multi_agent_v2"],
+                    )
+                    self.assertIs(
+                        readback["features"]["multi_agent_v2"]["enabled"],
+                        expected_v2_enabled,
+                    )
+
+                restore_overlay(config_path, backup_path)
+                self.assertEqual(config_path.read_bytes(), original_bytes)
+
+    def test_successful_stable_beta_takeover_preserves_one_agents_tree_and_each_owner_restore(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            stable_backup_path = tmp / "stable.backup.toml"
+            beta_backup_path = tmp / "beta.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            original = RUST_0_145_AGENTS_CONFIG.encode()
+            expected = tomllib.loads(RUST_0_145_AGENTS_CONFIG)
+            config_path.write_bytes(original)
+
+            apply_overlay(
+                config_path,
+                stable_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                owner="release",
+            )
+            stable_active = config_path.read_bytes()
+
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+                takeover=True,
+            )
+            apply_overlay(
+                config_path,
+                beta_backup_path,
+                catalog_path,
+                "http://127.0.0.1:9109",
+                owner="beta",
+            )
+
+            beta_text = config_path.read_text(encoding="utf-8")
+            beta_readback = tomllib.loads(beta_text)
+            self.assertEqual(beta_readback["agents"], expected["agents"])
+            self.assertEqual(
+                beta_readback["features"]["multi_agent_v2"],
+                expected["features"]["multi_agent_v2"],
+            )
+            self.assertEqual(beta_text.count("[agents]"), 1)
+            self.assertEqual(beta_text.count("[agents.researcher]"), 1)
+            self.assertEqual(beta_text.count("[agents.reviewer]"), 1)
+
+            status = restore_overlay(config_path, beta_backup_path, unified_history=True)
+            self.assertEqual(status, "restored_takeover_backup")
+            self.assertEqual(config_path.read_bytes(), stable_active)
+
+            restore_overlay(config_path, stable_backup_path)
+            self.assertEqual(config_path.read_bytes(), original)
+
+    def test_connect_without_agents_or_multi_agent_v2_does_not_invent_user_choices(self):
+        original = '[features]\nhooks = true\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+            )
+
+            readback = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("agents", readback)
+            self.assertNotIn("multi_agent_v2", readback["features"])
 
             restore_overlay(config_path, backup_path)
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)

@@ -667,23 +667,39 @@ def write_takeover_metadata(backup_path: Path, takeover_owner: str, original_own
     )
 
 
-def is_active_takeover_backup(config_text: str, backup_text: str, backup_path: Path) -> bool:
+def takeover_owners(backup_path: Path) -> tuple[str, str | None] | None:
     metadata_path = takeover_metadata_path(backup_path)
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return False
+        return None
     if metadata.get("version") != 1:
-        return False
+        return None
     takeover_owner = metadata.get("takeover_owner")
     original_owner = metadata.get("original_owner")
     if takeover_owner not in {"release", "beta"}:
-        return False
+        return None
     if original_owner not in {None, "release", "beta"}:
-        return False
+        return None
     if original_owner == takeover_owner:
+        return None
+    return takeover_owner, original_owner
+
+
+def is_active_takeover_backup(config_text: str, backup_text: str, backup_path: Path) -> bool:
+    owners = takeover_owners(backup_path)
+    if owners is None:
         return False
+    takeover_owner, original_owner = owners
     return overlay_owner(config_text) == takeover_owner and overlay_owner(backup_text) == original_owner
+
+
+def is_interrupted_takeover(config_text: str, backup_text: str, backup_path: Path) -> bool:
+    owners = takeover_owners(backup_path)
+    if owners is None:
+        return False
+    _, original_owner = owners
+    return overlay_owner(config_text) == original_owner and overlay_owner(backup_text) == original_owner
 
 
 def build_provider_section(base_url: str, gateway_key: str) -> str:
@@ -763,6 +779,10 @@ def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool 
         restored = read_text_preserving_newlines(backup_path)
         current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
         restore_from_backup = True
+        if is_interrupted_takeover(current, restored, backup_path):
+            backup_path.unlink()
+            takeover_metadata_path(backup_path).unlink()
+            return "interrupted_takeover_discarded"
         if is_active_takeover_backup(current, restored, backup_path):
             restored_owner = overlay_owner(restored)
             if not unified_history or restored_owner is not None:
