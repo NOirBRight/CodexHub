@@ -34,15 +34,32 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   frozen `RetryExecutionPlan`. Runtime settings are captured into
   `RouteRuntimeFacts` before planning; the handler/open/relay execution path
   consumes the attempt contract without re-reading routing or retry settings.
+- Production planning materializes authentication once per request and stores
+  the complete outbound header snapshot in `FrozenRequestHeaders` on every
+  attempt. Header values use redacted, deeply immutable wrappers excluded from
+  representation, equality, telemetry, and event evidence; they are expanded
+  only when the HTTP `Request` is constructed. Provider/config/auth changes
+  after planning cannot affect the active request, while the next request
+  takes a fresh snapshot.
+- Success, streaming, and final `HTTPError` responses all consume the same
+  required `RelayExecutionPlan`. The relay no longer accepts profile strings
+  or optional policy arguments from which it could re-derive streaming, usage,
+  response/SSE mutation, verification, lifecycle, or request-kind behavior.
 - Planned telemetry is explicitly scoped as a `planned_union`, while selected
   attempt telemetry reports the actual executed protocol, net wire adapter,
   conversion chain, and mutations. In particular, a Chat caller on an `auto`
   route truthfully records Chat-to-Responses for attempt 0 and
   Chat-to-Responses followed by Responses-to-Chat for the fallback attempt.
+  Safe request-body observations are recomputed from each real attempt body;
+  fallback evidence describes the failed body and final evidence describes the
+  last executed body. Planned, selected, fallback, and final aliases derive
+  from one canonical attempt telemetry snapshot.
 - Caller-tool stripping is a named `caller_tool_stripping` mutation. Optional
   capability-manifest state now fails closed unless version and cryptographic
-  hash form a complete valid pair; only a valid pair with an explicit
-  `Supported` state is reported as supported.
+  hash form a complete valid pair using the supported
+  `provider-capabilities.v3` schema; future/unknown versions remain
+  `Unqualified`. Only a supported pair with an explicit `Supported` state is
+  reported as supported.
 
 ## TDD and review
 
@@ -56,6 +73,12 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   removed the legacy `RouteDecision` middle-man so there is one planning
   interface. The report-only scan then identified the obsolete
   `vision_proxy_policy_for_route` helper; it was removed before publication.
+- Independent fourth-review repair used four vertical red/green slices:
+  future manifest `v999` was incorrectly `Supported`; a provider key changed
+  after planning altered the active request; Chat auto fallback final HMAC
+  described attempt 0; and final `HTTPError` lacked the future-policy relay
+  sentinel. Each test failed on `76b02adf` before its corresponding repair and
+  passed afterward.
 
 ## Candidate verification
 
@@ -65,6 +88,21 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   Coverage includes the attempt execution contract, actual Chat `auto` 404
   fallback bodies/telemetry, manifest identity pairs, caller-tool stripping,
   and handler-level Vision Proxy pass/proxy/reject/failure I/O behavior.
+- Fourth-review repair focused gate:
+  `python -m pytest -q tests/test_routing.py tests/test_chat_completions_gateway.py tests/test_proxy_event_logging.py`
+  — 704 passed, 227 subtests passed in 52.12 seconds with Python 3.13.
+- After moving generated Codex request identities into the immutable
+  materialization input, the affected focused suites plus the shutdown
+  cancellation contract passed again: 705 passed, 227 subtests passed in
+  47.30 seconds.
+- Fourth-review repair Python core candidate:
+  `python -m pytest -q --ignore=tests/test_real_client_e2e.py`
+  — 1,481 passed, 1 skipped, 452 subtests passed in 86.65 seconds with Python
+  3.13.11 first on `PATH`. Before correcting the inherited `PATH`, a
+  non-candidate run had two nested issue-108 PowerShell replay failures, one
+  shared diagnostic-tail ordering failure, and one shutdown test that still
+  mocked the superseded header-building seam (1,477 passed, 1 skipped). The
+  affected tests all passed after interpreter/seam correction.
 - `python -m pytest -q --ignore=tests/test_real_client_e2e.py`
   — 1,477 passed, 1 skipped, 451 subtests passed in 100.23 seconds with Python
   3.13 first on `PATH` so nested PowerShell replay subprocesses use the
@@ -79,8 +117,8 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   guardrail identified the separately governed synthetic real-client
   partition. None of that partition's listed contract-surface paths changed,
   so it is not applicable to this PR.
-- `python -m py_compile src-python/codex_proxy.py tests/test_routing.py` —
-  passed.
+- `python -m py_compile src-python/codex_proxy.py tests/test_routing.py tests/test_proxy_shutdown.py`
+  — passed.
 - `git diff --check` — passed (Git emitted only the repository's CRLF
   normalization warning).
 - `python scripts/report_quality_gates.py --json` — report-only, exit 0:

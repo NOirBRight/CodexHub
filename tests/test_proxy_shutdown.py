@@ -433,12 +433,12 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             patch.object(
                 codex_proxy,
                 "codex_access_token",
-                side_effect=AssertionError("shutdown cancellation must not read Codex auth"),
+                return_value="test-token",
             ) as access_token,
             patch.object(
                 codex_proxy,
                 "codex_account_id",
-                side_effect=AssertionError("shutdown cancellation must not read Codex auth"),
+                return_value="test-account",
             ) as account_id,
             patch.object(codex_proxy, "_open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
             patch.object(codex_proxy, "write_proxy_event") as write_event,
@@ -462,8 +462,8 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             }
             assert open_upstream.call_count == 1
             build_upstream_headers.assert_called_once()
-            access_token.assert_not_called()
-            account_id.assert_not_called()
+            access_token.assert_called_once_with()
+            account_id.assert_called_once_with()
             shutdown_event = next(
                 call.kwargs
                 for call in write_event.call_args_list

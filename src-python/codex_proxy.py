@@ -1047,6 +1047,212 @@ class AuthenticationStrategy(str, Enum):
     UNKNOWN = "unknown"
 
 
+class SensitiveValue:
+    """An immutable secret whose representation and equality never expose value."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str):
+        object.__setattr__(self, "_value", value)
+
+    def __setattr__(self, name: str, value: Any) -> NoReturn:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "SensitiveValue(<redacted>)"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, SensitiveValue)
+
+    def __hash__(self) -> int:
+        return hash(SensitiveValue)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> SensitiveValue:
+        return self
+
+
+class OperationalAuthentication:
+    """Request-scoped auth material captured before route planning completes."""
+
+    __slots__ = (
+        "strategy",
+        "_authorization",
+        "_account_id",
+        "_generated_session_id",
+        "_generated_client_request_id",
+    )
+
+    def __init__(
+        self,
+        strategy: AuthenticationStrategy,
+        *,
+        authorization: str | None,
+        account_id: str | None = None,
+        generated_session_id: str | None = None,
+        generated_client_request_id: str | None = None,
+    ):
+        object.__setattr__(self, "strategy", strategy)
+        object.__setattr__(
+            self,
+            "_authorization",
+            SensitiveValue(authorization) if authorization else None,
+        )
+        object.__setattr__(
+            self,
+            "_account_id",
+            SensitiveValue(account_id) if account_id else None,
+        )
+        object.__setattr__(
+            self,
+            "_generated_session_id",
+            (
+                SensitiveValue(generated_session_id)
+                if generated_session_id
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_generated_client_request_id",
+            (
+                SensitiveValue(generated_client_request_id)
+                if generated_client_request_id
+                else None
+            ),
+        )
+
+    def __setattr__(self, name: str, value: Any) -> NoReturn:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    @property
+    def authorization(self) -> str | None:
+        return (
+            self._authorization.reveal()
+            if self._authorization is not None
+            else None
+        )
+
+    @property
+    def account_id(self) -> str | None:
+        return (
+            self._account_id.reveal()
+            if self._account_id is not None
+            else None
+        )
+
+    @property
+    def generated_session_id(self) -> str | None:
+        return (
+            self._generated_session_id.reveal()
+            if self._generated_session_id is not None
+            else None
+        )
+
+    @property
+    def generated_client_request_id(self) -> str | None:
+        return (
+            self._generated_client_request_id.reveal()
+            if self._generated_client_request_id is not None
+            else None
+        )
+
+    def __repr__(self) -> str:
+        return (
+            "OperationalAuthentication("
+            f"strategy={self.strategy!r}, materialized=True)"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, OperationalAuthentication)
+            and self.strategy == other.strategy
+        )
+
+    def __hash__(self) -> int:
+        return hash((OperationalAuthentication, self.strategy))
+
+    def __deepcopy__(
+        self,
+        memo: dict[int, Any],
+    ) -> OperationalAuthentication:
+        return self
+
+
+class FrozenRequestHeaders:
+    """Deeply immutable outbound headers with redacted values."""
+
+    __slots__ = ("_items", "_materialized")
+
+    def __init__(
+        self,
+        headers: Mapping[str, str] | None = None,
+        *,
+        materialized: bool,
+    ):
+        object.__setattr__(
+            self,
+            "_items",
+            tuple(
+                (str(name), SensitiveValue(str(value)))
+                for name, value in (headers or {}).items()
+            ),
+        )
+        object.__setattr__(self, "_materialized", materialized)
+
+    def __setattr__(self, name: str, value: Any) -> NoReturn:
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    @classmethod
+    def unmaterialized(cls) -> FrozenRequestHeaders:
+        return cls(materialized=False)
+
+    @property
+    def materialized(self) -> bool:
+        return self._materialized
+
+    def to_dict(self) -> dict[str, str]:
+        if not self._materialized:
+            raise RuntimeError(
+                "route attempt headers were not materialized before execution"
+            )
+        return {
+            name: sensitive_value.reveal()
+            for name, sensitive_value in self._items
+        }
+
+    def __repr__(self) -> str:
+        return (
+            "FrozenRequestHeaders("
+            f"materialized={self._materialized}, count={len(self._items)})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, FrozenRequestHeaders)
+            and self._materialized == other._materialized
+            and tuple(name.lower() for name, _value in self._items)
+            == tuple(name.lower() for name, _value in other._items)
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                FrozenRequestHeaders,
+                self._materialized,
+                tuple(name.lower() for name, _value in self._items),
+            )
+        )
+
+    def __deepcopy__(
+        self,
+        memo: dict[int, Any],
+    ) -> FrozenRequestHeaders:
+        return self
+
+
 class ToolExposureMode(str, Enum):
     CURRENT_COMPATIBILITY = "current_compatibility"
     OFFICIAL_NATIVE = "official_native"
@@ -11146,6 +11352,45 @@ class RetryExecutionPlan:
             "attempts_started": 0,
         }
 
+    def telemetry_snapshot(self) -> dict[str, Any]:
+        return {
+            "eligibility": self.eligibility.value,
+            "policy": self.policy.value,
+            "request_kind": self.request_kind,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "base_open_attempts": self.base_open_attempts,
+            "base_relay_attempts": self.base_relay_attempts,
+            "failure_expansion_attempts": self.failure_expansion_attempts,
+            "retry_http_errors": self.retry_http_errors,
+            "open_attempt_budget": self.open_attempt_budget,
+            "capacity_elapsed_limit_seconds": (
+                self.capacity_elapsed_limit_seconds
+            ),
+            "stream_elapsed_limit_seconds": (
+                self.stream_elapsed_limit_seconds
+            ),
+            "emit_downstream_retry_notice": (
+                self.emit_downstream_retry_notice
+            ),
+            "pre_response_budget_seconds": (
+                self.pre_response_budget_seconds
+            ),
+            "lifecycle_final_retry_eligible": (
+                self.lifecycle_final_retry_eligible
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class RelayExecutionPlan:
+    request_kind: str
+    streaming_policy: StreamingPolicy
+    usage_policy: UsagePolicy
+    response_mutation_policy: MutationPolicy
+    sse_mutation_policy: MutationPolicy
+    verify_cross_protocol_source: bool
+    lifecycle_final_retry_enabled: bool
+
 
 @dataclass(frozen=True)
 class RouteAttemptPlan:
@@ -11157,6 +11402,7 @@ class RouteAttemptPlan:
     request_conversion_steps: tuple[str, ...]
     request_body_mode: AttemptRequestBodyMode
     authentication_strategy: AuthenticationStrategy
+    request_headers: FrozenRequestHeaders
     streaming_policy: StreamingPolicy
     usage_policy: UsagePolicy
     transport_policy: TransportPolicy
@@ -11177,6 +11423,62 @@ class RouteAttemptPlan:
 
     def allows_protocol_fallback_status(self, status: int | None) -> bool:
         return isinstance(status, int) and status in self.fallback_http_statuses
+
+    def relay_execution_plan(
+        self,
+        *,
+        lifecycle_final_retry_enabled: bool,
+    ) -> RelayExecutionPlan:
+        return RelayExecutionPlan(
+            request_kind=self.retry.request_kind,
+            streaming_policy=self.streaming_policy,
+            usage_policy=self.usage_policy,
+            response_mutation_policy=self.response_mutation_policy,
+            sse_mutation_policy=self.sse_mutation_policy,
+            verify_cross_protocol_source=(
+                self.verify_cross_protocol_source
+            ),
+            lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
+        )
+
+    def telemetry_snapshot(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "upstream_protocol": self.upstream_protocol.value,
+            "wire_format_adapter": self.wire_format_adapter,
+            "request_conversion_steps": list(
+                self.request_conversion_steps
+            ),
+            "request_body_mode": self.request_body_mode.value,
+            "authentication_strategy": (
+                self.authentication_strategy.value
+            ),
+            "streaming_policy": self.streaming_policy.value,
+            "usage_policy": self.usage_policy.value,
+            "transport_policy": self.transport_policy.value,
+            "request_mutation_policy": (
+                self.request_mutation_policy.value
+            ),
+            "response_mutation_policy": (
+                self.response_mutation_policy.value
+            ),
+            "sse_mutation_policy": self.sse_mutation_policy.value,
+            "verify_cross_protocol_source": (
+                self.verify_cross_protocol_source
+            ),
+            "tool_protocol": self.tool_protocol,
+            "tool_surface_strategy": self.tool_surface_strategy,
+            "native_responses_tool_codec": (
+                self.native_responses_tool_codec
+            ),
+            "retry": self.retry.telemetry_snapshot(),
+            "fallback_http_statuses": sorted(
+                self.fallback_http_statuses
+            ),
+            "mutation_summary": [
+                mutation.value for mutation in self.mutation_summary
+            ],
+        }
 
     def request_body(self, prepared_body: bytes) -> bytes:
         if self.request_body_mode == AttemptRequestBodyMode.PREPARED_DIRECT:
@@ -11246,6 +11548,10 @@ class RoutePlan:
     @property
     def vision_proxy_policy(self) -> str:
         return self.vision.policy
+
+    @property
+    def primary_attempt(self) -> RouteAttemptPlan | None:
+        return self.attempts[0] if self.attempts else None
 
 
 def behavior_profile_for_request(
@@ -11324,6 +11630,9 @@ def _capability_state(value: Any, *, default: CapabilityState) -> CapabilityStat
 CAPABILITY_MANIFEST_VERSION_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?"
 )
+SUPPORTED_CAPABILITY_MANIFEST_VERSIONS = frozenset(
+    {"provider-capabilities.v3"}
+)
 CAPABILITY_MANIFEST_HASH_LENGTHS = {
     "sha256": 64,
     "sha384": 96,
@@ -11332,7 +11641,10 @@ CAPABILITY_MANIFEST_HASH_LENGTHS = {
 
 
 def _valid_capability_manifest_version(value: str) -> bool:
-    return CAPABILITY_MANIFEST_VERSION_RE.fullmatch(value) is not None
+    return (
+        CAPABILITY_MANIFEST_VERSION_RE.fullmatch(value) is not None
+        and value in SUPPORTED_CAPABILITY_MANIFEST_VERSIONS
+    )
 
 
 def _valid_capability_manifest_hash(value: str) -> bool:
@@ -11618,6 +11930,9 @@ def route_plan_for_request(
     image_proxy_enabled: bool = False,
     official_http_passthrough_enabled: bool = True,
     caller_stream: bool = True,
+    operational_authentication: OperationalAuthentication | None = None,
+    incoming_headers: Mapping[str, str] | Any | None = None,
+    drop_content_encoding: bool = False,
     runtime_facts: (
         RouteRuntimeFacts
         | Mapping[str, RouteRuntimeFacts]
@@ -11763,6 +12078,24 @@ def route_plan_for_request(
     authentication_strategy = _authentication_strategy(
         upstream.get("auth") or "unknown"
     )
+    request_headers = FrozenRequestHeaders.unmaterialized()
+    if operational_authentication is not None and attempt_protocols:
+        if operational_authentication.strategy != authentication_strategy:
+            raise ValueError(
+                "operational authentication strategy does not match route"
+            )
+        request_headers = FrozenRequestHeaders(
+            upstream_headers(
+                incoming_headers or {},
+                upstream,
+                drop_content_encoding=drop_content_encoding,
+                model_id=canonical_route_model or model_requested,
+                authentication_strategy=authentication_strategy,
+                request_mutation_policy=mutation_policy,
+                operational_authentication=operational_authentication,
+            ),
+            materialized=True,
+        )
     transport_policy = (
         TransportPolicy.OFFICIAL_KEEPALIVE
         if upstream_name == "official"
@@ -11899,6 +12232,7 @@ def route_plan_for_request(
                 request_conversion_steps=tuple(request_conversion_steps),
                 request_body_mode=request_body_mode,
                 authentication_strategy=authentication_strategy,
+                request_headers=request_headers,
                 streaming_policy=streaming_policy,
                 usage_policy=usage_policy,
                 transport_policy=transport_policy,
@@ -12033,6 +12367,7 @@ def route_plan_for_request(
 
 
 def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
+    primary_attempt = plan.primary_attempt
     return {
         "route_plan_schema_version": plan.schema_version,
         "route_plan_summary_scope": "planned",
@@ -12041,79 +12376,17 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
         "protocol_capability_state": plan.protocol_capability_state.value,
         "protocol_failure_reason": plan.protocol_failure_reason,
         "route_attempts": [
-            {
-                "index": attempt.index,
-                "upstream_protocol": attempt.upstream_protocol.value,
-                "wire_format_adapter": attempt.wire_format_adapter,
-                "request_conversion_steps": list(
-                    attempt.request_conversion_steps
-                ),
-                "request_body_mode": attempt.request_body_mode.value,
-                "authentication_strategy": (
-                    attempt.authentication_strategy.value
-                ),
-                "streaming_policy": attempt.streaming_policy.value,
-                "usage_policy": attempt.usage_policy.value,
-                "transport_policy": attempt.transport_policy.value,
-                "request_mutation_policy": attempt.request_mutation_policy.value,
-                "response_mutation_policy": (
-                    attempt.response_mutation_policy.value
-                ),
-                "sse_mutation_policy": attempt.sse_mutation_policy.value,
-                "verify_cross_protocol_source": (
-                    attempt.verify_cross_protocol_source
-                ),
-                "tool_protocol": attempt.tool_protocol,
-                "tool_surface_strategy": attempt.tool_surface_strategy,
-                "native_responses_tool_codec": (
-                    attempt.native_responses_tool_codec
-                ),
-                "retry": {
-                    "eligibility": attempt.retry.eligibility.value,
-                    "policy": attempt.retry.policy.value,
-                    "request_kind": attempt.retry.request_kind,
-                    "request_timeout_seconds": (
-                        attempt.retry.request_timeout_seconds
-                    ),
-                    "base_open_attempts": attempt.retry.base_open_attempts,
-                    "base_relay_attempts": (
-                        attempt.retry.base_relay_attempts
-                    ),
-                    "failure_expansion_attempts": (
-                        attempt.retry.failure_expansion_attempts
-                    ),
-                    "retry_http_errors": (
-                        attempt.retry.retry_http_errors
-                    ),
-                    "open_attempt_budget": (
-                        attempt.retry.open_attempt_budget
-                    ),
-                    "capacity_elapsed_limit_seconds": (
-                        attempt.retry.capacity_elapsed_limit_seconds
-                    ),
-                    "stream_elapsed_limit_seconds": (
-                        attempt.retry.stream_elapsed_limit_seconds
-                    ),
-                    "emit_downstream_retry_notice": (
-                        attempt.retry.emit_downstream_retry_notice
-                    ),
-                    "pre_response_budget_seconds": (
-                        attempt.retry.pre_response_budget_seconds
-                    ),
-                    "lifecycle_final_retry_eligible": (
-                        attempt.retry.lifecycle_final_retry_eligible
-                    ),
-                },
-                "fallback_http_statuses": sorted(attempt.fallback_http_statuses),
-                "mutation_summary": [
-                    mutation.value for mutation in attempt.mutation_summary
-                ],
-            }
-            for attempt in plan.attempts
+            attempt.telemetry_snapshot() for attempt in plan.attempts
         ],
-        "wire_format_adapter": plan.wire_format_adapter,
+        "wire_format_adapter": (
+            primary_attempt.wire_format_adapter
+            if primary_attempt is not None
+            else plan.wire_format_adapter
+        ),
         "route_plan_primary_wire_format_adapter": (
-            plan.wire_format_adapter
+            primary_attempt.wire_format_adapter
+            if primary_attempt is not None
+            else plan.wire_format_adapter
         ),
         "caller_request_body_mode": plan.caller_request_body_mode.value,
         "prepared_request_protocol": plan.prepared_request_protocol.value,
@@ -12121,14 +12394,30 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
         "request_kind": plan.request_kind,
         "raw_provider_probe": plan.raw_provider_probe,
         "request_kind_policy": plan.request_kind_policy,
-        "retry_policy": plan.retry_policy.value,
-        "retry_eligibility": plan.retry_eligibility.value,
-        "usage_policy": plan.usage_policy.value,
+        "retry_policy": (
+            primary_attempt.retry.policy.value
+            if primary_attempt is not None
+            else plan.retry_policy.value
+        ),
+        "retry_eligibility": (
+            primary_attempt.retry.eligibility.value
+            if primary_attempt is not None
+            else plan.retry_eligibility.value
+        ),
+        "usage_policy": (
+            primary_attempt.usage_policy.value
+            if primary_attempt is not None
+            else plan.usage_policy.value
+        ),
         "repair_policy": plan.repair_policy,
         "capability_manifest_version": plan.capability_manifest_version,
         "capability_manifest_hash": plan.capability_manifest_hash,
         "capability_manifest_state": plan.capability_manifest_state.value,
-        "authentication_strategy": plan.authentication_strategy.value,
+        "authentication_strategy": (
+            primary_attempt.authentication_strategy.value
+            if primary_attempt is not None
+            else plan.authentication_strategy.value
+        ),
         "tool_requested_exposure_mode": plan.tool_exposure.requested_mode.value,
         "tool_exposure_mode": plan.tool_exposure.effective_mode.value,
         "tool_capability_state": plan.tool_exposure.capability_state.value,
@@ -12137,11 +12426,31 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
         "codex_compatibility_policy": plan.codex_compatibility_policy.value,
         "collaboration_backend": plan.collaboration_backend.value,
         "execution_owner": plan.execution_owner.value,
-        "streaming_policy": plan.streaming_policy.value,
-        "transport_policy": plan.transport_policy.value,
-        "request_mutation_policy": plan.request_mutation_policy.value,
-        "response_mutation_policy": plan.response_mutation_policy.value,
-        "sse_mutation_policy": plan.sse_mutation_policy.value,
+        "streaming_policy": (
+            primary_attempt.streaming_policy.value
+            if primary_attempt is not None
+            else plan.streaming_policy.value
+        ),
+        "transport_policy": (
+            primary_attempt.transport_policy.value
+            if primary_attempt is not None
+            else plan.transport_policy.value
+        ),
+        "request_mutation_policy": (
+            primary_attempt.request_mutation_policy.value
+            if primary_attempt is not None
+            else plan.request_mutation_policy.value
+        ),
+        "response_mutation_policy": (
+            primary_attempt.response_mutation_policy.value
+            if primary_attempt is not None
+            else plan.response_mutation_policy.value
+        ),
+        "sse_mutation_policy": (
+            primary_attempt.sse_mutation_policy.value
+            if primary_attempt is not None
+            else plan.sse_mutation_policy.value
+        ),
         "vision_proxy_policy": plan.vision.policy,
         "vision_action": plan.vision.action.value,
         "vision_network_action": plan.vision.network_action.value,
@@ -12159,71 +12468,69 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
 
 
 def _route_attempt_event_fields(attempt: RouteAttemptPlan) -> dict[str, Any]:
+    snapshot = attempt.telemetry_snapshot()
+    retry = snapshot["retry"]
     return {
         "execution_summary_scope": "selected_attempt_plan",
-        "executed_upstream_protocol": attempt.upstream_protocol.value,
-        "executed_wire_format_adapter": attempt.wire_format_adapter,
-        "executed_request_conversion_steps": list(
-            attempt.request_conversion_steps
-        ),
-        "executed_attempt_mutation_summary": [
-            mutation.value for mutation in attempt.mutation_summary
+        "executed_upstream_protocol": snapshot["upstream_protocol"],
+        "executed_wire_format_adapter": snapshot["wire_format_adapter"],
+        "executed_request_conversion_steps": snapshot[
+            "request_conversion_steps"
         ],
-        "route_attempt_index": attempt.index,
-        "route_attempt_protocol": attempt.upstream_protocol.value,
-        "route_attempt_wire_format_adapter": attempt.wire_format_adapter,
-        "route_attempt_request_conversion_steps": list(
-            attempt.request_conversion_steps
-        ),
-        "route_attempt_request_body_mode": attempt.request_body_mode.value,
+        "executed_attempt_mutation_summary": snapshot[
+            "mutation_summary"
+        ],
+        "route_attempt_index": snapshot["index"],
+        "route_attempt_protocol": snapshot["upstream_protocol"],
+        "route_attempt_wire_format_adapter": snapshot[
+            "wire_format_adapter"
+        ],
+        "route_attempt_request_conversion_steps": snapshot[
+            "request_conversion_steps"
+        ],
+        "route_attempt_request_body_mode": snapshot["request_body_mode"],
         "route_attempt_mutation_summary_scope": "attempt_plan",
-        "route_attempt_authentication_strategy": (
-            attempt.authentication_strategy.value
-        ),
-        "route_attempt_streaming_policy": attempt.streaming_policy.value,
-        "route_attempt_usage_policy": attempt.usage_policy.value,
-        "route_attempt_transport_policy": attempt.transport_policy.value,
-        "route_attempt_retry_policy": attempt.retry.policy.value,
-        "route_attempt_retry_eligibility": (
-            attempt.retry.eligibility.value
-        ),
-        "route_attempt_base_open_attempts": (
-            attempt.retry.base_open_attempts
-        ),
-        "route_attempt_base_relay_attempts": (
-            attempt.retry.base_relay_attempts
-        ),
-        "route_attempt_open_attempt_budget": (
-            attempt.retry.open_attempt_budget
-        ),
-        "route_attempt_request_timeout_seconds": (
-            attempt.retry.request_timeout_seconds
-        ),
-        "route_attempt_request_mutation_policy": (
-            attempt.request_mutation_policy.value
-        ),
-        "route_attempt_response_mutation_policy": (
-            attempt.response_mutation_policy.value
-        ),
-        "route_attempt_sse_mutation_policy": (
-            attempt.sse_mutation_policy.value
-        ),
-        "route_attempt_verify_cross_protocol_source": (
-            attempt.verify_cross_protocol_source
-        ),
-        "route_attempt_tool_protocol": attempt.tool_protocol,
-        "route_attempt_tool_surface_strategy": (
-            attempt.tool_surface_strategy
-        ),
-        "route_attempt_native_responses_tool_codec": (
-            attempt.native_responses_tool_codec
-        ),
-        "route_attempt_fallback_http_statuses": sorted(
-            attempt.fallback_http_statuses
-        ),
-        "route_attempt_mutation_summary": [
-            mutation.value for mutation in attempt.mutation_summary
+        "route_attempt_authentication_strategy": snapshot[
+            "authentication_strategy"
         ],
+        "route_attempt_streaming_policy": snapshot["streaming_policy"],
+        "route_attempt_usage_policy": snapshot["usage_policy"],
+        "route_attempt_transport_policy": snapshot["transport_policy"],
+        "route_attempt_retry_policy": retry["policy"],
+        "route_attempt_retry_eligibility": retry["eligibility"],
+        "route_attempt_base_open_attempts": retry["base_open_attempts"],
+        "route_attempt_base_relay_attempts": retry[
+            "base_relay_attempts"
+        ],
+        "route_attempt_open_attempt_budget": retry[
+            "open_attempt_budget"
+        ],
+        "route_attempt_request_timeout_seconds": retry[
+            "request_timeout_seconds"
+        ],
+        "route_attempt_request_mutation_policy": snapshot[
+            "request_mutation_policy"
+        ],
+        "route_attempt_response_mutation_policy": snapshot[
+            "response_mutation_policy"
+        ],
+        "route_attempt_sse_mutation_policy": snapshot[
+            "sse_mutation_policy"
+        ],
+        "route_attempt_verify_cross_protocol_source": snapshot[
+            "verify_cross_protocol_source"
+        ],
+        "route_attempt_tool_protocol": snapshot["tool_protocol"],
+        "route_attempt_tool_surface_strategy": snapshot[
+            "tool_surface_strategy"
+        ],
+        "route_attempt_native_responses_tool_codec": snapshot[
+            "native_responses_tool_codec"
+        ],
+        "route_attempt_fallback_http_statuses": snapshot[
+            "fallback_http_statuses"
+        ],
+        "route_attempt_mutation_summary": snapshot["mutation_summary"],
     }
 
 
@@ -12284,6 +12591,45 @@ def _filtered_response_headers(
     return outgoing
 
 
+def materialize_operational_authentication(
+    incoming_headers: Mapping[str, str] | Any,
+    upstream: Mapping[str, Any],
+) -> OperationalAuthentication:
+    strategy = _authentication_strategy(upstream.get("auth") or "unknown")
+    if strategy == AuthenticationStrategy.INCOMING:
+        return OperationalAuthentication(
+            strategy,
+            authorization=_get_header(incoming_headers, "Authorization"),
+        )
+    if strategy == AuthenticationStrategy.OLLAMA_API_KEY:
+        api_key = os.environ.get("OLLAMA_API_KEY")
+        return OperationalAuthentication(
+            strategy,
+            authorization=f"Bearer {api_key}" if api_key else None,
+        )
+    if strategy == AuthenticationStrategy.API_KEY:
+        api_key = upstream.get("api_key")
+        return OperationalAuthentication(
+            strategy,
+            authorization=f"Bearer {api_key}" if api_key else None,
+        )
+    if strategy == AuthenticationStrategy.CODEX_AUTH:
+        return OperationalAuthentication(
+            strategy,
+            authorization=f"Bearer {codex_access_token()}",
+            account_id=codex_account_id(),
+            generated_session_id=(
+                _get_header(incoming_headers, "Session-id")
+                or str(uuid.uuid4())
+            ),
+            generated_client_request_id=(
+                _get_header(incoming_headers, "X-client-request-id")
+                or str(uuid.uuid4())
+            ),
+        )
+    return OperationalAuthentication(strategy, authorization=None)
+
+
 def upstream_headers(
     incoming_headers: Mapping[str, str] | Any,
     upstream: Mapping[str, Any],
@@ -12292,9 +12638,12 @@ def upstream_headers(
     model_id: str | None = None,
     authentication_strategy: AuthenticationStrategy | None = None,
     request_mutation_policy: MutationPolicy | None = None,
+    operational_authentication: OperationalAuthentication | None = None,
 ) -> dict[str, str]:
     auth_mode = (
-        authentication_strategy.value
+        operational_authentication.strategy.value
+        if operational_authentication is not None
+        else authentication_strategy.value
         if authentication_strategy is not None
         else upstream.get("auth")
     )
@@ -12319,19 +12668,41 @@ def upstream_headers(
         outgoing[key] = value
 
     if auth_mode == "incoming":
-        incoming_auth = _get_header(incoming_headers, "Authorization")
+        incoming_auth = (
+            operational_authentication.authorization
+            if operational_authentication is not None
+            else _get_header(incoming_headers, "Authorization")
+        )
         if incoming_auth:
             outgoing["Authorization"] = incoming_auth
     elif auth_mode == "ollama_api_key":
-        api_key = os.environ.get("OLLAMA_API_KEY")
-        if not api_key:
-            raise ValueError("OLLAMA_API_KEY is not set")
-        outgoing["Authorization"] = f"Bearer {api_key}"
+        if operational_authentication is not None:
+            authorization = operational_authentication.authorization
+            if authorization is None:
+                raise ValueError("OLLAMA_API_KEY is not set")
+        else:
+            api_key = os.environ.get("OLLAMA_API_KEY")
+            if not api_key:
+                raise ValueError("OLLAMA_API_KEY is not set")
+            authorization = f"Bearer {api_key}"
+        outgoing["Authorization"] = authorization
     elif auth_mode == "api_key":
-        api_key = upstream.get("api_key")
-        if not api_key:
-            raise ValueError(f"API key is not set for upstream: {upstream.get('name', 'unknown')}")
-        outgoing["Authorization"] = f"Bearer {api_key}"
+        if operational_authentication is not None:
+            authorization = operational_authentication.authorization
+            if authorization is None:
+                raise ValueError(
+                    "API key is not set for upstream: "
+                    f"{upstream.get('name', 'unknown')}"
+                )
+        else:
+            api_key = upstream.get("api_key")
+            if not api_key:
+                raise ValueError(
+                    "API key is not set for upstream: "
+                    f"{upstream.get('name', 'unknown')}"
+                )
+            authorization = f"Bearer {api_key}"
+        outgoing["Authorization"] = authorization
     elif auth_mode == "codex_auth":
         strict_official_passthrough = (
             request_mutation_policy
@@ -12340,12 +12711,20 @@ def upstream_headers(
             else behavior_profile
             == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
         )
-        token = codex_access_token()
-        outgoing["Authorization"] = f"Bearer {token}"
+        authorization = (
+            operational_authentication.authorization
+            if operational_authentication is not None
+            else f"Bearer {codex_access_token()}"
+        )
+        outgoing["Authorization"] = authorization
         # The chatgpt.com backend requires the account id header to identify
         # the subscription. Inject it from auth.json when not already present.
         if not _get_header(outgoing, "Chatgpt-account-id"):
-            account = codex_account_id()
+            account = (
+                operational_authentication.account_id
+                if operational_authentication is not None
+                else codex_account_id()
+            )
             if account:
                 outgoing["Chatgpt-account-id"] = account
         if not strict_official_passthrough:
@@ -12362,14 +12741,31 @@ def upstream_headers(
             # UUIDs when the caller doesn't supply them.
             session_id = _get_header(outgoing, "Session-id")
             if not session_id:
-                session_id = str(uuid.uuid4())
+                session_id = (
+                    operational_authentication.generated_session_id
+                    if operational_authentication is not None
+                    else str(uuid.uuid4())
+                )
+                if not session_id:
+                    raise ValueError(
+                        "materialized Codex auth is missing session identity"
+                    )
                 outgoing["Session-id"] = session_id
             if not _get_header(outgoing, "Thread-id"):
                 outgoing["Thread-id"] = session_id
             if not _get_header(outgoing, "X-codex-window-id"):
                 outgoing["X-codex-window-id"] = f"{session_id}:1"
             if not _get_header(outgoing, "X-client-request-id"):
-                outgoing["X-client-request-id"] = str(uuid.uuid4())
+                client_request_id = (
+                    operational_authentication.generated_client_request_id
+                    if operational_authentication is not None
+                    else str(uuid.uuid4())
+                )
+                if not client_request_id:
+                    raise ValueError(
+                        "materialized Codex auth is missing request identity"
+                    )
+                outgoing["X-client-request-id"] = client_request_id
     else:
         raise ValueError(f"unsupported upstream auth mode: {auth_mode}")
 
@@ -15430,6 +15826,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         behavior_profile = None
         route_reason: str | None = None
         route_plan: RoutePlan | None = None
+        active_route_attempt: RouteAttemptPlan | None = None
+        relay_execution_plan: RelayExecutionPlan | None = None
         route_policy_event_fields: dict[str, Any] = {}
         downstream_sse_started = False
         response_lifecycle_state: dict[str, str] = {}
@@ -15584,6 +15982,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )
+            operational_authentication = (
+                materialize_operational_authentication(
+                    self.headers,
+                    upstream,
+                )
+            )
             route_plan = route_plan_for_request(
                 upstream,
                 request_context,
@@ -15600,24 +16004,28 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     gateway_official_http_passthrough_enabled()
                 ),
                 caller_stream=caller_stream,
+                operational_authentication=operational_authentication,
+                incoming_headers=self.headers,
+                drop_content_encoding=content_decoded,
                 runtime_facts=route_runtime_facts,
             )
+            primary_route_attempt = route_plan.primary_attempt
             behavior_profile = route_plan.behavior_profile
             upstream_format = route_plan.selected_upstream_format
             if request_kind != route_plan.request_kind:
                 request_kind = route_plan.request_kind
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
             self._pre_response_deadline = (
-                route_plan.attempts[0].retry.pre_response_deadline(started_at)
-                if route_plan.attempts
+                primary_route_attempt.retry.pre_response_deadline(started_at)
+                if primary_route_attempt is not None
                 else None
             )
             reasoning_policy = _reasoning_policy_for_request(inbound_payload, upstream, model)
             route_policy_event_fields = {
                 **_route_plan_event_fields(route_plan),
                 **(
-                    _route_attempt_event_fields(route_plan.attempts[0])
-                    if route_plan.attempts
+                    _route_attempt_event_fields(primary_route_attempt)
+                    if primary_route_attempt is not None
                     else {}
                 ),
                 **({"reasoning_policy": reasoning_policy} if reasoning_policy else {}),
@@ -15626,7 +16034,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
                 **route_policy_event_fields,
             }
-            if not route_plan.attempts:
+            if primary_route_attempt is None:
                 protocol_error = (
                     UnsupportedRouteProtocolError
                     if (
@@ -15820,7 +16228,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             else:
                 compatibility_upstream = {
                     **upstream,
-                    "upstream_format": route_plan.attempts[0].selected_upstream_format,
+                    "upstream_format": primary_route_attempt.selected_upstream_format,
                 }
                 body = compatible_request_body(
                     body,
@@ -15829,13 +16237,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     event_context=adapter_event_context,
                     inject_codex_tools=route_plan.tool_exposure.gateway_schema_injection,
                     tool_protocol_override=(
-                        route_plan.attempts[0].tool_protocol
+                        primary_route_attempt.tool_protocol
                     ),
                     tool_surface_strategy_override=(
-                        route_plan.attempts[0].tool_surface_strategy
+                        primary_route_attempt.tool_surface_strategy
                     ),
                     native_responses_tool_codec_override=(
-                        route_plan.attempts[0].native_responses_tool_codec
+                        primary_route_attempt.native_responses_tool_codec
                     ),
                 )
             vision_proxy_payload_format = (
@@ -15876,53 +16284,62 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             responses_body = body
-            headers = upstream_headers(
-                self.headers,
-                upstream,
-                drop_content_encoding=content_decoded,
-                model_id=model,
-                authentication_strategy=(
-                    route_plan.attempts[0].authentication_strategy
-                ),
-                request_mutation_policy=(
-                    route_plan.attempts[0].request_mutation_policy
-                ),
-            )
-
             def upstream_body_for_attempt(
                 attempt: RouteAttemptPlan,
                 prepared_body: bytes = responses_body,
             ) -> bytes:
                 return attempt.request_body(prepared_body)
 
-            upstream_request_observability = proxy_telemetry.enrich_request_observability(
-                body=upstream_body_for_attempt(route_plan.attempts[0]),
-                codex_home=RUNTIME_CODEX_DIR,
-                upstream=upstream,
-                include_body_hmac=(
-                    route_plan.request_mutation_policy
-                    != MutationPolicy.OFFICIAL_PASSTHROUGH
-                ),
-                prompt_cache_key=prompt_cache_key,
-                extract_prompt_cache_key=(
-                    route_plan.request_mutation_policy
-                    != MutationPolicy.OFFICIAL_PASSTHROUGH
-                ),
+            def request_observability_for_attempt(
+                attempt: RouteAttemptPlan,
+                attempt_body: bytes,
+            ) -> dict[str, Any]:
+                upstream_observability = (
+                    proxy_telemetry.enrich_request_observability(
+                        body=attempt_body,
+                        codex_home=RUNTIME_CODEX_DIR,
+                        upstream=upstream,
+                        include_body_hmac=(
+                            attempt.request_mutation_policy
+                            != MutationPolicy.OFFICIAL_PASSTHROUGH
+                        ),
+                        prompt_cache_key=prompt_cache_key,
+                        extract_prompt_cache_key=(
+                            attempt.request_mutation_policy
+                            != MutationPolicy.OFFICIAL_PASSTHROUGH
+                        ),
+                    )
+                )
+                return {
+                    **upstream_observability,
+                    **_request_observability_with_prefix(
+                        caller_request_observability,
+                        "caller",
+                    ),
+                    **_request_observability_with_prefix(
+                        upstream_observability,
+                        "upstream",
+                    ),
+                    "request_observability_scope": "executed_attempt",
+                    "request_observability_attempt_index": attempt.index,
+                    "request_observability_upstream_protocol": (
+                        attempt.upstream_protocol.value
+                    ),
+                }
+
+            request_observability = request_observability_for_attempt(
+                primary_route_attempt,
+                upstream_body_for_attempt(primary_route_attempt),
             )
-            request_observability = {
-                **upstream_request_observability,
-                **_request_observability_with_prefix(caller_request_observability, "caller"),
-                **_request_observability_with_prefix(upstream_request_observability, "upstream"),
-            }
             emit_request_start_once(request_observability)
             emit_retry_to_downstream = (
-                route_plan.attempts[0].retry.emit_downstream_retry_notice
+                primary_route_attempt.retry.emit_downstream_retry_notice
             )
 
             def upstream_request_for_attempt(
                 attempt: RouteAttemptPlan,
                 lifecycle_final_retry_reason: str | None = None,
-            ) -> Request:
+            ) -> tuple[Request, dict[str, Any]]:
                 request_body = responses_body
                 if lifecycle_final_retry_reason:
                     request_body = _responses_body_with_lifecycle_final_retry_guidance(
@@ -15936,11 +16353,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=attempt.selected_upstream_format,
                         reason=lifecycle_final_retry_reason,
                     )
-                return Request(
-                    attempt.endpoint_url,
-                    data=upstream_body_for_attempt(attempt, request_body),
-                    headers=headers,
-                    method="POST",
+                attempt_body = upstream_body_for_attempt(
+                    attempt,
+                    request_body,
+                )
+                return (
+                    Request(
+                        attempt.endpoint_url,
+                        data=attempt_body,
+                        headers=attempt.request_headers.to_dict(),
+                        method="POST",
+                    ),
+                    request_observability_for_attempt(
+                        attempt,
+                        attempt_body,
+                    ),
                 )
 
             def emit_downstream_retry(payload: Mapping[str, Any]) -> bool:
@@ -15982,9 +16409,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
             selected_upstream_format = upstream_format
             open_attempt_budget = (
-                route_plan.attempts[0].retry.new_open_attempt_budget()
+                primary_route_attempt.retry.new_open_attempt_budget()
             )
             for route_attempt in route_plan.attempts:
+                active_route_attempt = route_attempt
                 selected_upstream_format = route_attempt.selected_upstream_format
                 route_attempt_event_fields = _route_attempt_event_fields(route_attempt)
                 proxy_request_context.update(route_attempt_event_fields)
@@ -16000,6 +16428,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         adapter_event_context
                     )
                 )
+                relay_execution_plan = route_attempt.relay_execution_plan(
+                    lifecycle_final_retry_enabled=(
+                        lifecycle_final_extra_attempts > 0
+                    )
+                )
                 max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
                 relay_attempt = 1
                 lifecycle_final_retry_reason: str | None = None
@@ -16008,10 +16441,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         seam = _handler_downstream_stream_commit(self)
                         if seam is not None:
                             seam.set_upstream_format(selected_upstream_format)
-                        request = upstream_request_for_attempt(
+                        request, request_observability = upstream_request_for_attempt(
                             route_attempt,
                             lifecycle_final_retry_reason,
                         )
+                        emit_request_start_once(request_observability)
                         try:
                             with _open_upstream_response(
                                 request,
@@ -16044,26 +16478,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                     event_context=adapter_event_context,
                                     usage_capture=usage_capture,
                                     headers_already_sent=downstream_sse_started,
-                                    request_kind=request_kind,
                                     defer_stream_errors=relay_attempt < relay_attempts,
                                     mark_downstream_sse_started=mark_downstream_sse_started,
                                     response_lifecycle_state=response_lifecycle_state,
-                                    streaming_policy=(
-                                        route_attempt.streaming_policy
-                                    ),
-                                    usage_policy=route_attempt.usage_policy,
-                                    response_mutation_policy=(
-                                        route_attempt.response_mutation_policy
-                                    ),
-                                    sse_mutation_policy=(
-                                        route_attempt.sse_mutation_policy
-                                    ),
-                                    verify_cross_protocol_source=(
-                                        route_attempt.verify_cross_protocol_source
-                                    ),
-                                    lifecycle_final_retry_enabled=(
-                                        lifecycle_final_extra_attempts > 0
-                                    ),
+                                    relay_execution_plan=relay_execution_plan,
                                 )
                             break
                         except DownstreamClosedBeforeRetryError:
@@ -16302,6 +16720,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             failure_phase="response_headers",
                         )
                         if fallback_retry_safety_class not in _SUPPRESSED_RETRY_SAFETY_CLASSES:
+                            failed_attempt_snapshot = (
+                                route_attempt.telemetry_snapshot()
+                            )
+                            next_attempt_snapshot = (
+                                next_attempt.telemetry_snapshot()
+                            )
                             write_proxy_event(
                                 "upstream_protocol_fallback",
                                 request_id=request_id,
@@ -16315,38 +16739,49 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 behavior_profile=behavior_profile,
                                 failed_upstream_format=selected_upstream_format,
                                 next_upstream_format=next_attempt.selected_upstream_format,
-                                failed_route_attempt_index=route_attempt.index,
+                                failed_route_attempt_index=(
+                                    failed_attempt_snapshot["index"]
+                                ),
                                 failed_route_attempt_request_body_mode=(
-                                    route_attempt.request_body_mode.value
+                                    failed_attempt_snapshot[
+                                        "request_body_mode"
+                                    ]
                                 ),
                                 failed_route_attempt_request_conversion_steps=(
-                                    list(
-                                        route_attempt.request_conversion_steps
-                                    )
+                                    failed_attempt_snapshot[
+                                        "request_conversion_steps"
+                                    ]
                                 ),
-                                failed_route_attempt_mutation_summary=[
-                                    mutation.value
-                                    for mutation in route_attempt.mutation_summary
-                                ],
-                                next_route_attempt_index=next_attempt.index,
+                                failed_route_attempt_mutation_summary=(
+                                    failed_attempt_snapshot[
+                                        "mutation_summary"
+                                    ]
+                                ),
+                                next_route_attempt_index=(
+                                    next_attempt_snapshot["index"]
+                                ),
                                 next_route_attempt_request_body_mode=(
-                                    next_attempt.request_body_mode.value
+                                    next_attempt_snapshot[
+                                        "request_body_mode"
+                                    ]
                                 ),
                                 next_route_attempt_request_conversion_steps=(
-                                    list(
-                                        next_attempt.request_conversion_steps
-                                    )
+                                    next_attempt_snapshot[
+                                        "request_conversion_steps"
+                                    ]
                                 ),
-                                next_route_attempt_mutation_summary=[
-                                    mutation.value
-                                    for mutation in next_attempt.mutation_summary
-                                ],
+                                next_route_attempt_mutation_summary=(
+                                    next_attempt_snapshot[
+                                        "mutation_summary"
+                                    ]
+                                ),
                                 status=getattr(exc, "code", 502),
                                 error="HTTPError",
                                 detail=safe_upstream_error_detail(
                                     exc,
                                     redact_identity=_retry_identity_from_context(adapter_event_context),
                                 ),
+                                **request_observability,
                                 **proxy_request_context,
                             )
                             continue
@@ -16547,8 +16982,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             json_error_type = "invalid_request_error" if is_apply_patch_adapter_error else error_code
             sse_error_type = "invalid_request_error" if is_apply_patch_adapter_error else "upstream_error"
             selected_native_responses_tool_codec = (
-                upstream.get("native_responses_tool_codec", "none")
-                if isinstance(upstream, Mapping)
+                active_route_attempt.native_responses_tool_codec
+                if active_route_attempt is not None
                 else "none"
             )
             write_proxy_event(
@@ -16698,6 +17133,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
+                if relay_execution_plan is None:
+                    raise RuntimeError(
+                        "upstream response arrived without a planned relay "
+                        "execution contract"
+                    ) from exc
                 previous_retry_identity = (
                     adapter_event_context.get("_retry_attempt_identity")
                     if isinstance(adapter_event_context, Mapping)
@@ -16721,7 +17161,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     caller_stream=caller_stream,
                     event_context=adapter_event_context,
                     usage_capture=usage_capture,
-                    behavior_profile=behavior_profile,
+                    relay_execution_plan=relay_execution_plan,
                 )
             except OSError as relay_exc:
                 self.close_connection = True
@@ -17131,6 +17571,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_OFFICIAL_CONTROL)
         upstream = official_upstream()
         upstream_name = upstream["name"]
+        relay_execution_plan = RelayExecutionPlan(
+            request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
+            streaming_policy=StreamingPolicy.GATEWAY_ADAPTED,
+            usage_policy=UsagePolicy.SYNC_CAPTURE,
+            response_mutation_policy=MutationPolicy.GATEWAY_COMPATIBILITY,
+            sse_mutation_policy=MutationPolicy.GATEWAY_COMPATIBILITY,
+            verify_cross_protocol_source=False,
+            lifecycle_final_retry_enabled=False,
+        )
 
         try:
             headers = upstream_headers(self.headers, upstream)
@@ -17159,7 +17608,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 event_context=adapter_event_context,
                 request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
             ) as response:
-                status = self._relay_upstream_response(response, upstream_name, request_id=request_id, model=None)
+                status = self._relay_upstream_response(
+                    response,
+                    upstream_name,
+                    request_id=request_id,
+                    model=None,
+                    relay_execution_plan=relay_execution_plan,
+                )
             write_proxy_event(
                 "request_complete",
                 request_id=request_id,
@@ -17173,7 +17628,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
         except HTTPError as exc:
             try:
-                status = self._relay_upstream_response(exc, upstream_name, request_id=request_id, model=None)
+                status = self._relay_upstream_response(
+                    exc,
+                    upstream_name,
+                    request_id=request_id,
+                    model=None,
+                    relay_execution_plan=relay_execution_plan,
+                )
             except OSError as relay_exc:
                 self.close_connection = True
                 write_proxy_event(
@@ -18372,6 +18833,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self,
         response: Any,
         upstream_name: str,
+        relay_execution_plan: RelayExecutionPlan,
         request_id: str | None = None,
         model: str | None = None,
         upstream_format: str = "responses",
@@ -18380,69 +18842,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         event_context: Mapping[str, Any] | None = None,
         usage_capture: dict[str, Any] | None = None,
         headers_already_sent: bool = False,
-        request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
         defer_stream_errors: bool = False,
         mark_downstream_sse_started: Callable[[], None] | None = None,
         response_lifecycle_state: dict[str, str] | None = None,
-        behavior_profile: str | None = None,
-        streaming_policy: StreamingPolicy | None = None,
-        usage_policy: UsagePolicy | None = None,
-        response_mutation_policy: MutationPolicy | None = None,
-        sse_mutation_policy: MutationPolicy | None = None,
-        verify_cross_protocol_source: bool | None = None,
-        lifecycle_final_retry_enabled: bool | None = None,
     ) -> int:
-        if streaming_policy is None:
-            if (
-                behavior_profile
-                == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-            ):
-                streaming_policy = StreamingPolicy.OFFICIAL_PASSTHROUGH
-            elif (
-                behavior_profile
-                == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-            ):
-                streaming_policy = (
-                    StreamingPolicy.TRANSPARENT
-                    if upstream_format == inbound_format
-                    else StreamingPolicy.TRANSPARENT_CONVERTED
-                )
-            else:
-                streaming_policy = StreamingPolicy.GATEWAY_ADAPTED
-        if usage_policy is None:
-            usage_policy = (
-                UsagePolicy.ASYNC_TAP
-                if (
-                    behavior_profile
-                    == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                )
-                else UsagePolicy.SYNC_CAPTURE
-            )
-        if response_mutation_policy is None:
-            response_mutation_policy = (
-                MutationPolicy.TRANSPARENT
-                if (
-                    behavior_profile
-                    == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
-                )
-                else (
-                    MutationPolicy.OFFICIAL_PASSTHROUGH
-                    if (
-                        behavior_profile
-                        == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
-                    )
-                    else MutationPolicy.GATEWAY_COMPATIBILITY
-                )
-            )
-        if sse_mutation_policy is None:
-            sse_mutation_policy = response_mutation_policy
-        if lifecycle_final_retry_enabled is None:
-            lifecycle_final_retry_enabled = (
-                lifecycle_empty_final_resample_enabled(
-                    event_context,
-                    request_kind,
-                )
-            )
+        request_kind = relay_execution_plan.request_kind
+        streaming_policy = relay_execution_plan.streaming_policy
+        usage_policy = relay_execution_plan.usage_policy
+        response_mutation_policy = (
+            relay_execution_plan.response_mutation_policy
+        )
+        sse_mutation_policy = relay_execution_plan.sse_mutation_policy
+        verify_cross_protocol_source = (
+            relay_execution_plan.verify_cross_protocol_source
+        )
+        lifecycle_final_retry_enabled = (
+            relay_execution_plan.lifecycle_final_retry_enabled
+        )
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         is_event_stream = _is_event_stream(response.headers)
         # When the caller spoke Chat Completions, the response must be converted
