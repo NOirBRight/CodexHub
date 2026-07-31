@@ -41,14 +41,13 @@ jobs:
         shell: pwsh
         run: |
           python -m venv .venv-ci
-          "$pwd\.venv-ci\Scripts" >> $env:GITHUB_PATH
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest
+        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
 
       - name: Run Python core partition
         run: |
-          python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
+          .\.venv-ci\Scripts\python.exe -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
 
       - name: Upload Python core JUnit evidence
         if: always()
@@ -77,10 +76,9 @@ jobs:
         shell: pwsh
         run: |
           python -m venv .venv-ci
-          "$pwd\.venv-ci\Scripts" >> $env:GITHUB_PATH
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest
+        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
 
       - name: Plan synthetic partition
         id: plan
@@ -106,7 +104,7 @@ jobs:
           if ($acquisitionFailed) {
             Remove-Item $changedFile -ErrorAction SilentlyContinue
           }
-          $plan = python scripts/ci/python_test_plan.py `
+          $plan = .\.venv-ci\Scripts\python.exe scripts/ci/python_test_plan.py `
             --event $event `
             $(if ($isPr) { '--is-pull-request' }) `
             --changed-paths-file $changedFile `
@@ -120,9 +118,9 @@ jobs:
           if ($plan.synthetic_status -eq 'not_applicable') {
             Write-Host 'Synthetic real-client contract: not applicable'
           } else {
-            python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
+            .\.venv-ci\Scripts\python.exe tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
               --timeout-seconds 3600 `
-              -- python -m pytest @($plan.synthetic_args)
+              -- .\.venv-ci\Scripts\python.exe -m pytest @($plan.synthetic_args)
           }
 
       - name: Upload synthetic JUnit evidence
