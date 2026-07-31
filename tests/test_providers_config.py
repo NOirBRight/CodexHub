@@ -57,14 +57,18 @@ class ProvidersConfigTests(unittest.TestCase):
         ]
 
         self.assertTrue(configured)
-        self.assertEqual(configured_models, ["glm-5.2", "kimi-k2.6"])
+        self.assertEqual(configured_models, ["glm-5.2"])
         self.assertEqual(index["glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
         self.assertEqual(index["ollama-cloud/glm-5.2"]["native_responses_tool_codec"], "strict_apply_patch")
-        self.assertEqual(index["kimi-k2.6"]["native_responses_tool_codec"], "strict_apply_patch")
+        self.assertEqual(index["kimi-k2.7-code"]["native_responses_tool_codec"], "none")
         self.assertEqual(
-            index["ollama-cloud/kimi-k2.6"]["native_responses_tool_codec"],
-            "strict_apply_patch",
+            index["ollama-cloud/kimi-k2.7-code"]["native_responses_tool_codec"],
+            "none",
         )
+        self.assertEqual(index["kimi-k2.7-code"]["context_window"], 262144)
+        self.assertEqual(index["kimi-k2.7-code"]["max_output_tokens"], 32768)
+        self.assertNotIn("kimi-k2.6", index)
+        self.assertNotIn("ollama-cloud/kimi-k2.6", index)
         self.assertEqual(index["minimax-m3"]["native_responses_tool_codec"], "none")
 
         external_index = build_external_model_index(providers, require_api_key=False)
@@ -516,12 +520,12 @@ api_key = "ollama-secret"
                 self.assertTrue(qualified_configured)
                 resolved[model_id] = (unqualified, qualified)
 
-        for model_id in ("glm-5.2", "kimi-k2.6"):
+        for model_id in ("glm-5.2",):
             with self.subTest(model_id=model_id):
                 unqualified, qualified = resolved[model_id]
                 self.assertEqual(unqualified["native_responses_tool_codec"], "strict_apply_patch")
                 self.assertEqual(qualified["native_responses_tool_codec"], "strict_apply_patch")
-        for model_id in ("minimax-m3", "kimi-k2.7-code"):
+        for model_id in ("minimax-m3", "kimi-k2.6", "kimi-k2.7-code"):
             with self.subTest(model_id=model_id):
                 unqualified, qualified = resolved[model_id]
                 self.assertEqual(unqualified["native_responses_tool_codec"], "none")
@@ -539,17 +543,17 @@ base_url = "https://ollama.example.test/v1"
 api_key = "ollama-secret"
 
   [[providers.models]]
-  id = "kimi-k2.6"
+  id = "glm-5.2"
   native_responses_tool_codec = "none"
 """.lstrip(),
                 encoding="utf-8",
             )
 
             configured, unqualified = resolve_ollama_cloud_model(
-                "kimi-k2.6", providers_path=path, require_api_key=False
+                "glm-5.2", providers_path=path, require_api_key=False
             )
             qualified_configured, qualified = resolve_ollama_cloud_model(
-                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
+                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
             )
 
         self.assertTrue(configured)
@@ -570,16 +574,16 @@ api_key = "ollama-secret"
 native_responses_tool_codec = "none"
 
   [[providers.models]]
-  id = "kimi-k2.6"
+  id = "glm-5.2"
 """.lstrip(),
                 encoding="utf-8",
             )
 
             configured, unqualified = resolve_ollama_cloud_model(
-                "kimi-k2.6", providers_path=path, require_api_key=False
+                "glm-5.2", providers_path=path, require_api_key=False
             )
             qualified_configured, qualified = resolve_ollama_cloud_model(
-                "ollama-cloud/kimi-k2.6", providers_path=path, require_api_key=False
+                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
             )
 
         self.assertTrue(configured)
@@ -1390,6 +1394,7 @@ enabled = true
                 "ollama-cloud/glm-5.2",
                 "ollama-cloud/minimax-m3",
                 "ollama-cloud/kimi-k2.6",
+                "ollama-cloud/kimi-k2.7-code",
                 "volc/ark-code-latest",
                 "volc/doubao-seed-2.0-code",
                 "volc/doubao-seed-2.0-pro",
