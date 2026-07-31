@@ -1435,6 +1435,51 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             &self.paths.generated_catalog_path(),
             &record.transaction_id,
         )?;
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        {
+            #[cfg(test)]
+            {
+                if provider_rollback_owner.is_some() {
+                    invoke_test_pre_restore_target_commit_hook(
+                        &self.paths.runtime_providers_path(),
+                    );
+                }
+                if catalog_rollback_owner.is_some() {
+                    invoke_test_pre_restore_target_commit_hook(
+                        &self.paths.generated_catalog_path(),
+                    );
+                }
+            }
+            let provider_plan = plan_restore_file_linux(
+                &self.paths.runtime_providers_path(),
+                &self.paths.provider_catalog_providers_backup_path(),
+                &provider_evidence,
+                &record.providers,
+                provider_backup.as_deref(),
+                provider_rollback_owner,
+                "provider configuration",
+            )?;
+            let catalog_plan = plan_restore_file_linux(
+                &self.paths.generated_catalog_path(),
+                &self.paths.provider_catalog_catalog_backup_path(),
+                &catalog_evidence,
+                &record.catalog,
+                catalog_backup.as_deref(),
+                catalog_rollback_owner,
+                "generated catalog",
+            )?;
+            safe_file::commit_private_text_rollback(provider_plan)?;
+            transaction_fault("after-provider-restore")?;
+            safe_file::commit_private_text_rollback(catalog_plan)?;
+        }
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        {
         restore_file(
             &self.paths.runtime_providers_path(),
             &self.paths.provider_catalog_providers_backup_path(),
@@ -1454,6 +1499,7 @@ impl ProviderCatalogStore for RuntimeProviderCatalogStore {
             catalog_rollback_owner,
             "generated catalog",
         )?;
+        }
         verify_snapshot_target(
             &self.paths.runtime_providers_path(),
             &record.providers,
@@ -1742,6 +1788,56 @@ fn common_ancestor<'a>(left: &'a Path, right: &'a Path) -> Option<&'a Path> {
     left_parent
         .ancestors()
         .find(|candidate| right_parent.starts_with(candidate))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn plan_restore_file_linux(
+    path: &Path,
+    backup_path: &Path,
+    evidence_path: &Path,
+    snapshot: &FileSnapshot,
+    validated_backup: Option<&str>,
+    rollback_owner: Option<(&str, u64, u64)>,
+    label: &str,
+) -> Result<safe_file::LinuxPrivateRollbackPlan, String> {
+    let max_bytes = if label.contains("provider") {
+        MAX_PROVIDER_SNAPSHOT_BYTES
+    } else {
+        MAX_CATALOG_SNAPSHOT_BYTES
+    };
+    let replacement = if snapshot.existed {
+        Some(validated_backup.ok_or_else(|| {
+            format!("validated {label} recovery backup was not loaded before restore")
+        })?)
+    } else {
+        if validated_backup.is_some() {
+            return Err(format!(
+                "validated {label} recovery backup exists for an absent snapshot"
+            ));
+        }
+        None
+    };
+    let boundary = common_ancestor(path, backup_path)
+        .ok_or_else(|| format!("failed to resolve trusted boundary for restored {label}"))?;
+    safe_file::plan_private_text_rollback(
+        safe_file::LinuxPrivateRollbackRequest {
+            path,
+            evidence: evidence_path,
+            boundary,
+            replacement,
+            max_bytes,
+            label,
+        },
+        |current| {
+            rollback_owner.is_some_and(|(expected_hash, expected_bytes, _)| {
+                current.len() as u64 == expected_bytes
+                    && hash_bytes(current.as_bytes()) == expected_hash
+            })
+        },
+    )
 }
 
 fn restore_file(
@@ -3198,6 +3294,162 @@ mod tests {
             fs::read_to_string(paths.generated_catalog_path()).unwrap(),
             base_catalog,
             "rollback must publish only the catalog bytes validated before the hook"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn aggregate_restore_plans_both_targets_before_provider_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("aggregate-restore-capacity-preflight");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &base_catalog);
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let mut candidate_provider = provider(UpstreamFormat::ChatCompletions);
+        candidate_provider.api_key = Some("aggregate-provider-candidate-secret".to_string());
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate_provider))
+            .unwrap();
+        store.save_providers(vec![candidate_provider]).unwrap();
+        let candidate_provider_bytes = fs::read(paths.runtime_providers_path()).unwrap();
+        let candidate_catalog =
+            capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+        store
+            .mark_catalog_write_pending(&candidate_catalog)
+            .unwrap();
+        write_fixture(&paths.generated_catalog_path(), &candidate_catalog);
+
+        let marker_path = paths.provider_catalog_recovery_path();
+        let marker_before = fs::read(&marker_path).unwrap();
+        let provider_path = paths.runtime_providers_path();
+        let catalog_path = paths.generated_catalog_path();
+        let record = store
+            .read_recovery()
+            .unwrap()
+            .expect("restore marker must remain durable");
+        let provider_evidence = store
+            .rollback_evidence_path(&provider_path, &record.transaction_id)
+            .unwrap();
+        let catalog_evidence = store
+            .rollback_evidence_path(&catalog_path, &record.transaction_id)
+            .unwrap();
+
+        for slot in 0..3 {
+            let tombstone = crate::safe_file::rollback_tombstone_path(&catalog_path, slot);
+            fs::write(&tombstone, b"").unwrap();
+            fs::set_permissions(&tombstone, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let final_catalog_slot =
+            crate::safe_file::rollback_tombstone_path(&catalog_path, 3);
+        let catalog_path_for_hook = catalog_path.clone();
+        super::install_test_pre_restore_target_commit_hook(move |target| {
+            if target == catalog_path_for_hook {
+                fs::write(&final_catalog_slot, b"").unwrap();
+                fs::set_permissions(
+                    &final_catalog_slot,
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
+        });
+
+        let error = store
+            .restore_pending()
+            .expect_err("catalog capacity must fail before the provider plan commits");
+        super::clear_test_pre_restore_target_commit_hook();
+
+        assert!(
+            error.contains("rollback tombstone capacity exhausted"),
+            "unexpected aggregate preflight error: {error}"
+        );
+        assert_eq!(
+            fs::read(&provider_path).unwrap(),
+            candidate_provider_bytes,
+            "provider bytes must remain at the candidate until every plan succeeds"
+        );
+        assert_eq!(
+            fs::read_to_string(&catalog_path).unwrap(),
+            candidate_catalog
+        );
+        assert!(!provider_evidence.exists());
+        assert!(!catalog_evidence.exists());
+        assert_eq!(
+            fs::read(&marker_path).unwrap(),
+            marker_before,
+            "failed aggregate planning must preserve the durable marker byte-for-byte"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn aggregate_restore_allows_a_full_completed_target_while_restoring_the_other() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("aggregate-restore-full-noop-target");
+        let paths = isolated_paths(&root);
+        config::save_providers_with_paths(
+            vec![provider(UpstreamFormat::Responses)],
+            &paths,
+        )
+        .unwrap();
+        let base_provider_bytes = fs::read(paths.runtime_providers_path()).unwrap();
+        let base_catalog = capability_catalog_text(UpstreamFormat::Responses, false);
+        write_fixture(&paths.generated_catalog_path(), &base_catalog);
+
+        let mut store = RuntimeProviderCatalogStore::new(paths.clone());
+        store.prepare_recovery().unwrap();
+        let candidate_provider = provider(UpstreamFormat::ChatCompletions);
+        store
+            .mark_provider_write_pending(std::slice::from_ref(&candidate_provider))
+            .unwrap();
+        store.save_providers(vec![candidate_provider]).unwrap();
+        let candidate_catalog =
+            capability_catalog_text(UpstreamFormat::ChatCompletions, false);
+        store
+            .mark_catalog_write_pending(&candidate_catalog)
+            .unwrap();
+        write_fixture(&paths.generated_catalog_path(), &candidate_catalog);
+
+        let provider_path = paths.runtime_providers_path();
+        let catalog_path = paths.generated_catalog_path();
+        fs::write(&provider_path, &base_provider_bytes).unwrap();
+        for slot in 0..4 {
+            let tombstone = crate::safe_file::rollback_tombstone_path(&provider_path, slot);
+            fs::write(&tombstone, b"").unwrap();
+            fs::set_permissions(&tombstone, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        store
+            .restore_pending()
+            .expect("full tombstone capacity on a completed target must not block catalog restore");
+
+        assert_eq!(fs::read(&provider_path).unwrap(), base_provider_bytes);
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), base_catalog);
+        assert_eq!(
+            fs::metadata(crate::safe_file::rollback_tombstone_path(
+                &catalog_path,
+                0,
+            ))
+            .unwrap()
+            .len(),
+            0
         );
         let _ = fs::remove_dir_all(root);
     }

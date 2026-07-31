@@ -33,6 +33,12 @@ thread_local! {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    static TEST_POST_PRIVATE_ROLLBACK_SLOT_SELECTION_HOOK: RefCell<Option<TestPreOpenHook>> =
+        RefCell::new(None);
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     static TEST_POST_PRIVATE_EVIDENCE_SCRUB_HOOK: RefCell<Option<TestPreOpenHook>> =
         RefCell::new(None);
     #[cfg(windows)]
@@ -161,6 +167,40 @@ pub(crate) fn clear_test_pre_private_evidence_isolate_hook() {
 ))]
 fn invoke_test_pre_private_evidence_isolate_hook(path: &Path) {
     TEST_PRE_PRIVATE_EVIDENCE_ISOLATE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn install_test_post_private_rollback_slot_selection_hook(
+    hook: impl Fn(&Path) + 'static,
+) {
+    TEST_POST_PRIVATE_ROLLBACK_SLOT_SELECTION_HOOK
+        .with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn clear_test_post_private_rollback_slot_selection_hook() {
+    TEST_POST_PRIVATE_ROLLBACK_SLOT_SELECTION_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn invoke_test_post_private_rollback_slot_selection_hook(path: &Path) {
+    TEST_POST_PRIVATE_ROLLBACK_SLOT_SELECTION_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow().as_ref() {
             hook(path);
         }
@@ -535,11 +575,20 @@ pub(crate) fn quarantine_private_text(
     )))]
     {
         let _ = replacement;
-        if quarantine.exists() {
-            return Err(format!(
-                "private quarantine destination already exists: {}",
-                quarantine.display()
-            ));
+        match parent.open_existing(quarantine) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "private quarantine destination already exists: {}",
+                    quarantine.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect private quarantine destination {} through its pinned parent: {error}",
+                    quarantine.display()
+                ));
+            }
         }
         parent.rename_existing(&mut opened, source, quarantine)?;
         let quarantined = parent.open_existing(quarantine).map_err(|error| {
@@ -610,16 +659,7 @@ where
                     "{label} changed before conditional restore; live bytes were preserved"
                 ));
             }
-            if evidence.try_exists().map_err(|error| {
-                format!(
-                    "failed to inspect conditional restore evidence {}: {error}",
-                    evidence.display()
-                )
-            })? {
-                return Err(format!(
-                    "conditional restore evidence already exists while live {label} still requires replacement"
-                ));
-            }
+            parent.require_child_absent(evidence, label)?;
             (opened, true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -748,110 +788,19 @@ where
         max_bytes,
         label,
     } = replacement;
-    if path.parent() != evidence.parent() {
-        return Err("conditional private replacement paths must share one parent".to_string());
-    }
-    validate_confined_path(path, boundary, false)?;
-    validate_confined_path(evidence, boundary, true)?;
-    let parent = PinnedPrivateParent::open(path, boundary)?;
-    let mut opened = parent
-        .open_existing(path)
-        .map_err(|error| format!("failed to open {label} before conditional restore: {error}"))?;
-    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
-    if current == replacement {
-        return finish_private_evidence_linux(
-            &parent,
+    before_commit();
+    let plan = plan_private_text_rollback(
+        LinuxPrivateRollbackRequest {
             path,
             evidence,
+            boundary,
+            replacement: Some(replacement),
             max_bytes,
             label,
-            &expected,
-        );
-    }
-    if !expected(&current) {
-        return Err(format!(
-            "{label} changed before conditional restore; live bytes were preserved"
-        ));
-    }
-    next_private_rollback_tombstone_linux(&parent, path, label)?;
-    let opened_identity = lock_file_identity(&opened)
-        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
-
-    let placeholder = match parent.open_existing(evidence) {
-        Ok(mut placeholder) => {
-            let contents = read_opened_single_link_text(
-                &mut placeholder,
-                evidence,
-                max_bytes,
-                "conditional restore placeholder",
-            )?;
-            if contents != replacement {
-                return Err(format!(
-                    "conditional restore evidence contains neither the exact placeholder nor a completed owner: {}",
-                    evidence.display()
-                ));
-            }
-            placeholder
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let temp_path = unique_temp_path(evidence);
-            let mut placeholder = parent.create_temp(&temp_path).map_err(|error| {
-                format!(
-                    "failed to create conditional restore placeholder temp {}: {error}",
-                    temp_path.display()
-                )
-            })?;
-            let mut cleanup = TempPathCleanup::new(&parent, &placeholder, temp_path.clone())?;
-            placeholder
-                .write_all(replacement.as_bytes())
-                .and_then(|_| placeholder.sync_all())
-                .map_err(|error| {
-                    format!(
-                        "failed to persist conditional restore placeholder temp {}: {error}",
-                        temp_path.display()
-                    )
-                })?;
-            parent.publish_new(&temp_path, evidence)?;
-            cleanup.disarm();
-            placeholder
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect conditional restore evidence {}: {error}",
-                evidence.display()
-            ));
-        }
-    };
-    let placeholder_identity = lock_file_identity(&placeholder)
-        .map_err(|_| "conditional restore placeholder is not a stable file".to_string())?;
-    before_commit();
-    parent.exchange_existing(path, evidence)?;
-
-    let mut live = parent.open_existing(path).map_err(|error| {
-        format!("failed to open restored {label} after conditional exchange: {error}")
-    })?;
-    let live_text = read_opened_single_link_text(&mut live, path, max_bytes, label)?;
-    let live_identity = lock_file_identity(&live)
-        .map_err(|_| format!("restored {label} is not a stable file"))?;
-    if live_text != replacement || live_identity != placeholder_identity {
-        return Err(format!(
-            "restored {label} did not match the exact replacement after conditional exchange"
-        ));
-    }
-    let mut displaced = parent.open_existing(evidence).map_err(|error| {
-        format!("failed to open displaced {label} after conditional exchange: {error}")
-    })?;
-    let displaced_text =
-        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
-    let displaced_identity = lock_file_identity(&displaced)
-        .map_err(|_| format!("displaced {label} is not a stable file"))?;
-    if displaced_identity != opened_identity || !expected(&displaced_text) {
-        return Err(format!(
-            "displaced {label} mismatch after conditional exchange; exact evidence remains at {}",
-            evidence.display()
-        ));
-    }
-    remove_opened_file_linux(&parent, &displaced, evidence, path, label)
+        },
+        expected,
+    )?;
+    commit_private_text_rollback(plan)
 }
 
 #[cfg(not(any(
@@ -937,16 +886,7 @@ where
     }
     let opened_identity = lock_file_identity(&opened)
         .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
-    if evidence.try_exists().map_err(|error| {
-        format!(
-            "failed to inspect conditional removal evidence {}: {error}",
-            evidence.display()
-        )
-    })? {
-        return Err(format!(
-            "conditional removal evidence already exists while live {label} remains"
-        ));
-    }
+    parent.require_child_absent(evidence, label)?;
     before_commit();
     parent.rename_existing(&mut opened, path, evidence)?;
 
@@ -998,80 +938,19 @@ where
     Expected: Fn(&str) -> bool,
     BeforeCommit: FnOnce(),
 {
-    if path.parent() != evidence.parent() {
-        return Err("conditional private removal paths must share one parent".to_string());
-    }
-    validate_confined_path(path, boundary, true)?;
-    validate_confined_path(evidence, boundary, true)?;
-    let parent = PinnedPrivateParent::open(path, boundary)?;
-    let mut opened = match parent.open_existing(path) {
-        Ok(opened) => opened,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return finish_private_evidence_linux(
-                &parent,
-                path,
-                evidence,
-                max_bytes,
-                label,
-                &expected,
-            );
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to open {label} before conditional removal: {error}"
-            ));
-        }
-    };
-    let current = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
-    if !expected(&current) {
-        return Err(format!(
-            "{label} changed before conditional removal; live bytes were preserved"
-        ));
-    }
-    next_private_rollback_tombstone_linux(&parent, path, label)?;
-    let opened_identity = lock_file_identity(&opened)
-        .map_err(|_| format!("{label} is not a stable regular single-link file"))?;
-    if evidence.try_exists().map_err(|error| {
-        format!(
-            "failed to inspect conditional removal evidence {}: {error}",
-            evidence.display()
-        )
-    })? {
-        return Err(format!(
-            "conditional removal evidence already exists while live {label} remains"
-        ));
-    }
     before_commit();
-    parent.rename_path_noreplace(path, evidence)?;
-
-    match parent.open_existing(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => {
-            return Err(format!(
-                "live {label} changed during conditional removal; displaced evidence remains at {}",
-                evidence.display()
-            ));
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to verify live {label} absence after conditional removal: {error}"
-            ));
-        }
-    }
-    let mut displaced = parent.open_existing(evidence).map_err(|error| {
-        format!("failed to open displaced {label} after conditional removal: {error}")
-    })?;
-    let displaced_text =
-        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
-    let displaced_identity = lock_file_identity(&displaced)
-        .map_err(|_| format!("displaced {label} is not a stable file"))?;
-    if displaced_identity != opened_identity || !expected(&displaced_text) {
-        return Err(format!(
-            "displaced {label} mismatch after conditional removal; exact evidence remains at {}",
-            evidence.display()
-        ));
-    }
-    remove_opened_file_linux(&parent, &displaced, evidence, path, label)
+    let plan = plan_private_text_rollback(
+        LinuxPrivateRollbackRequest {
+            path,
+            evidence,
+            boundary,
+            replacement: None,
+            max_bytes,
+            label,
+        },
+        expected,
+    )?;
+    commit_private_text_rollback(plan)
 }
 
 #[cfg(not(any(
@@ -1131,7 +1010,7 @@ fn read_opened_single_link_text(
     let metadata = file
         .metadata()
         .map_err(|error| format!("failed to inspect {label}: {error}"))?;
-    validate_regular_single_link(&metadata, path)?;
+    validate_opened_regular_single_link(file, &metadata, path)?;
     if metadata.len() > max_bytes {
         return Err(format!(
             "{label} exceeds the size limit of {max_bytes} bytes"
@@ -1150,6 +1029,26 @@ fn read_opened_single_link_text(
     String::from_utf8(bytes).map_err(|_| format!("{label} is not valid UTF-8"))
 }
 
+#[cfg(windows)]
+fn validate_opened_regular_single_link(
+    file: &File,
+    _metadata: &fs::Metadata,
+    path: &Path,
+) -> Result<(), String> {
+    lock_file_identity(file)
+        .map(|_| ())
+        .map_err(|_| format!("confined path {} is not a regular single-link file", path.display()))
+}
+
+#[cfg(not(windows))]
+fn validate_opened_regular_single_link(
+    _file: &File,
+    metadata: &fs::Metadata,
+    path: &Path,
+) -> Result<(), String> {
+    validate_regular_single_link(metadata, path)
+}
+
 /// Write `text` to `path` using a temp file and atomic rename while already
 /// holding an exclusive lock on `path`. Used for multi-step check-then-write
 /// operations that must remain atomic across processes.
@@ -1166,13 +1065,15 @@ fn write_text_locked_impl(
     if lock.target_path() != path {
         return Err("atomic write lock does not match target path".to_owned());
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create file directory {}: {error}",
-                parent.display()
-            )
-        })?;
+    if private_parent.is_none() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create file directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
     }
 
     lock.verify_namespace_identity()?;
@@ -1182,21 +1083,64 @@ fn write_text_locked_impl(
         None => create_new_temp_file(&temp_path, false),
     }
         .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
-    temp_file
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    let mut private_cleanup = match private_parent {
+        Some(parent) => Some(TempPathCleanup::new(
+            parent,
+            &temp_file,
+            temp_path.clone(),
+        )?),
+        None => None,
+    };
+    if let Err(error) = temp_file
         .write_all(text.as_bytes())
         .and_then(|_| temp_file.sync_all())
-        .map_err(|error| {
+    {
+        if private_parent.is_none() {
             let _ = fs::remove_file(&temp_path);
-            format!("failed to write temp file {}: {error}", temp_path.display())
-        })?;
-    lock.verify_namespace_identity().inspect_err(|_| {
-        let _ = fs::remove_file(&temp_path);
-    })?;
+        }
+        #[cfg(not(any(
+            windows,
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )))]
+        if private_parent.is_some() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        return Err(format!(
+            "failed to write temp file {}: {error}",
+            temp_path.display()
+        ));
+    }
+    if let Err(error) = lock.verify_namespace_identity() {
+        if private_parent.is_none() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        #[cfg(not(any(
+            windows,
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )))]
+        if private_parent.is_some() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        return Err(error);
+    }
     #[cfg(test)]
     if private_parent.is_some() {
         invoke_test_pre_private_publish_hook(path);
     }
-    match private_parent {
+    let publish_result = match private_parent {
         Some(parent) => parent.publish(&mut temp_file, &temp_path, path),
         None => {
             drop(temp_file);
@@ -1209,7 +1153,20 @@ fn write_text_locked_impl(
                 )
             })
         }
+    };
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    if publish_result.is_ok() {
+        if let Some(cleanup) = private_cleanup.as_mut() {
+            cleanup.disarm();
+        }
     }
+    publish_result
 }
 
 #[cfg(unix)]
@@ -1513,7 +1470,7 @@ impl PinnedPrivateParent {
         &self,
         source_path: &Path,
         target_path: &Path,
-    ) -> Result<(), String> {
+    ) -> std::io::Result<()> {
         use std::ffi::CString;
         use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
@@ -1521,17 +1478,17 @@ impl PinnedPrivateParent {
         let source_name = CString::new(
             source_path
                 .file_name()
-                .ok_or_else(|| "private isolate source has no file name".to_string())?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
                 .as_bytes(),
         )
-        .map_err(|_| "private isolate source name contains a NUL byte".to_string())?;
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let target_name = CString::new(
             target_path
                 .file_name()
-                .ok_or_else(|| "private isolate target has no file name".to_string())?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
                 .as_bytes(),
         )
-        .map_err(|_| "private isolate target name contains a NUL byte".to_string())?;
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let isolate_result = unsafe {
             syscall(
                 unix_private_io::SYS_RENAMEAT2,
@@ -1543,18 +1500,9 @@ impl PinnedPrivateParent {
             ) as i32
         };
         if isolate_result != 0 {
-            return Err(format!(
-                "failed to isolate private file without replacing evidence in pinned parent {}: {}",
-                self.parent_path.display(),
-                std::io::Error::last_os_error()
-            ));
+            return Err(std::io::Error::last_os_error());
         }
-        self.directory.sync_all().map_err(|error| {
-            format!(
-                "failed to flush private isolate parent {}: {error}",
-                self.parent_path.display()
-            )
-        })
+        self.directory.sync_all()
     }
 
     fn publish(
@@ -1620,6 +1568,65 @@ impl PinnedPrivateParent {
 }
 
 #[cfg(windows)]
+enum WindowsChildOpenError {
+    InvalidName(String),
+    NtStatus(i32),
+    InvalidHandle,
+}
+
+#[cfg(windows)]
+const STATUS_NO_SUCH_FILE: i32 = 0xC000_000F_u32 as i32;
+#[cfg(windows)]
+const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034_u32 as i32;
+#[cfg(windows)]
+const STATUS_OBJECT_PATH_NOT_FOUND: i32 = 0xC000_003A_u32 as i32;
+
+#[cfg(windows)]
+fn windows_child_status_is_absent(status: i32) -> bool {
+    matches!(
+        status,
+        STATUS_NO_SUCH_FILE | STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND
+    )
+}
+
+#[cfg(windows)]
+impl WindowsChildOpenError {
+    fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::InvalidName(message) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+            }
+            Self::NtStatus(status) if windows_child_status_is_absent(status) => {
+                std::io::Error::from(std::io::ErrorKind::NotFound)
+            }
+            Self::NtStatus(status) => {
+                let code = unsafe { RtlNtStatusToDosError(status) };
+                let translated =
+                    std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX));
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "relative NtCreateFile failed with NTSTATUS 0x{:08X} ({translated})",
+                        status as u32
+                    ),
+                )
+            }
+            Self::InvalidHandle => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "NtCreateFile returned success without a valid child handle",
+            ),
+        }
+    }
+}
+
+#[cfg(windows)]
+enum WindowsChildProbe {
+    Absent,
+    Present,
+    Indeterminate(i32),
+}
+
+#[cfg(windows)]
 struct PinnedPrivateParent {
     directory: File,
     parent_path: PathBuf,
@@ -1649,12 +1656,220 @@ impl PinnedPrivateParent {
     }
 
     fn create_temp(&self, temp_path: &Path) -> std::io::Result<File> {
-        let _ = &self.parent_path;
-        create_private_temp_file_windows(temp_path)
+        const SDDL_REVISION_1: u32 = 1;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+        const DELETE: u32 = 0x0001_0000;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+        const FILE_CREATE: u32 = 2;
+        const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+        const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const PRIVATE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
+
+        let wide_sddl = PRIVATE_SDDL
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = std::ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 || descriptor.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = self
+            .nt_create_child(
+                temp_path,
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_CREATE,
+                FILE_NON_DIRECTORY_FILE
+                    | FILE_SYNCHRONOUS_IO_NONALERT
+                    | FILE_OPEN_REPARSE_POINT,
+                descriptor,
+            )
+            .map_err(WindowsChildOpenError::into_io_error);
+        unsafe {
+            LocalFree(descriptor);
+        }
+        result
     }
 
     fn open_existing(&self, path: &Path) -> std::io::Result<File> {
-        open_existing_private_file_windows(path)
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const DELETE: u32 = 0x0001_0000;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_OPEN: u32 = 1;
+        const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+        const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        self.nt_create_child(
+            path,
+            GENERIC_READ | DELETE | SYNCHRONIZE,
+            0,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+        .map_err(WindowsChildOpenError::into_io_error)
+    }
+
+    fn child_leaf_name(&self, path: &Path) -> Result<Vec<u16>, WindowsChildOpenError> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::path::Component;
+
+        let relative = path.strip_prefix(&self.parent_path).map_err(|_| {
+            WindowsChildOpenError::InvalidName(
+                "private child path is outside its pinned parent".to_string(),
+            )
+        })?;
+        let mut components = relative.components();
+        let name = match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) => name,
+            _ => {
+                return Err(WindowsChildOpenError::InvalidName(
+                    "private child path must contain exactly one normal leaf component".to_string(),
+                ));
+            }
+        };
+        let leaf = name.encode_wide().collect::<Vec<_>>();
+        if leaf.is_empty()
+            || leaf.iter().any(|unit| {
+                matches!(
+                    *unit,
+                    unit if unit == u16::from(b'\0')
+                        || unit == u16::from(b'/')
+                        || unit == u16::from(b'\\')
+                        || unit == u16::from(b':')
+                )
+            })
+        {
+            return Err(WindowsChildOpenError::InvalidName(
+                "private child leaf contains a forbidden separator, NUL, or ADS delimiter"
+                    .to_string(),
+            ));
+        }
+        Ok(leaf)
+    }
+
+    fn nt_create_child(
+        &self,
+        path: &Path,
+        desired_access: u32,
+        file_attributes: u32,
+        create_disposition: u32,
+        create_options: u32,
+        security_descriptor: *mut std::ffi::c_void,
+    ) -> Result<File, WindowsChildOpenError> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+        let mut leaf = self.child_leaf_name(path)?;
+        let byte_length = leaf
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or_else(|| {
+                WindowsChildOpenError::InvalidName(
+                    "private child leaf exceeds the NT counted-string limit".to_string(),
+                )
+            })?;
+        let mut name = UnicodeString {
+            length: byte_length,
+            maximum_length: byte_length,
+            buffer: leaf.as_mut_ptr(),
+        };
+        let mut attributes = ObjectAttributes {
+            length: u32::try_from(std::mem::size_of::<ObjectAttributes>()).unwrap_or(u32::MAX),
+            root_directory: self.directory.as_raw_handle(),
+            object_name: std::ptr::addr_of_mut!(name),
+            attributes: 0x0000_0040,
+            security_descriptor,
+            security_quality_of_service: std::ptr::null_mut(),
+        };
+        let mut handle = std::ptr::null_mut();
+        let mut io_status = IoStatusBlock::default();
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                desired_access,
+                &mut attributes,
+                &mut io_status,
+                std::ptr::null_mut(),
+                file_attributes,
+                win32::SHARE_READ_WRITE_DELETE,
+                create_disposition,
+                create_options,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status < 0 {
+            return Err(WindowsChildOpenError::NtStatus(status));
+        }
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(WindowsChildOpenError::InvalidHandle);
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    fn probe_child(&self, path: &Path) -> Result<WindowsChildProbe, String> {
+        const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_OPEN: u32 = 1;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+        const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        match self.nt_create_child(
+            path,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            0,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        ) {
+            Ok(opened) => {
+                drop(opened);
+                Ok(WindowsChildProbe::Present)
+            }
+            Err(WindowsChildOpenError::NtStatus(status))
+                if windows_child_status_is_absent(status) =>
+            {
+                Ok(WindowsChildProbe::Absent)
+            }
+            Err(WindowsChildOpenError::NtStatus(status)) => {
+                Ok(WindowsChildProbe::Indeterminate(status))
+            }
+            Err(WindowsChildOpenError::InvalidName(message)) => Err(message),
+            Err(WindowsChildOpenError::InvalidHandle) => {
+                Err("NtCreateFile returned success without a valid child handle".to_string())
+            }
+        }
+    }
+
+    fn require_child_absent(&self, path: &Path, label: &str) -> Result<(), String> {
+        match self.probe_child(path) {
+            Ok(WindowsChildProbe::Absent) => Ok(()),
+            Ok(WindowsChildProbe::Present) => Err(format!(
+                "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH}; recovery remains fail-closed"
+            )),
+            Ok(WindowsChildProbe::Indeterminate(status)) => Err(format!(
+                "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} (NTSTATUS 0x{:08X}); recovery remains fail-closed",
+                status as u32
+            )),
+            Err(error) => Err(format!(
+                "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} ({error}); recovery remains fail-closed"
+            )),
+        }
     }
 
     fn rename_existing(
@@ -1685,14 +1900,15 @@ impl PinnedPrivateParent {
         target_path: &Path,
         replace_existing: bool,
     ) -> Result<(), String> {
-        use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::AsRawHandle;
 
-        let target_name = target_path
-            .file_name()
-            .ok_or_else(|| "private target path has no file name".to_string())?
-            .encode_wide()
-            .collect::<Vec<_>>();
+        let target_name = self.child_leaf_name(target_path).map_err(|error| {
+            format!(
+                "invalid private rename target {}: {}",
+                target_path.display(),
+                error.into_io_error()
+            )
+        })?;
         let total_bytes = std::mem::size_of::<FileRenameInformation>()
             + target_name.len() * std::mem::size_of::<u16>();
         let words = total_bytes.div_ceil(std::mem::size_of::<usize>());
@@ -1746,96 +1962,18 @@ fn create_new_temp_file(path: &Path, private: bool) -> std::io::Result<File> {
 
 #[cfg(windows)]
 fn create_new_temp_file(path: &Path, private: bool) -> std::io::Result<File> {
-    if !private {
-        return OpenOptions::new().write(true).create_new(true).open(path);
+    if private {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "private Windows temp creation requires a pinned parent",
+        ));
     }
-    create_private_temp_file_windows(path)
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn create_new_temp_file(path: &Path, _private: bool) -> std::io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-#[cfg(windows)]
-fn create_private_temp_file_windows(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::io::FromRawHandle;
-
-    const SDDL_REVISION_1: u32 = 1;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const DELETE: u32 = 0x0001_0000;
-    const CREATE_NEW: u32 = 1;
-    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-    const PRIVATE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
-
-    let wide_path = windows_wide_path(path)?;
-    let wide_sddl = PRIVATE_SDDL
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let mut descriptor = std::ptr::null_mut();
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            wide_sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    };
-    if converted == 0 || descriptor.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut attributes = SecurityAttributes {
-        length: u32::try_from(std::mem::size_of::<SecurityAttributes>()).unwrap_or(u32::MAX),
-        security_descriptor: descriptor,
-        inherit_handle: 0,
-    };
-    let handle = unsafe {
-        CreateFileW(
-            wide_path.as_ptr(),
-            GENERIC_WRITE | DELETE,
-            win32::SHARE_READ_WRITE_DELETE,
-            &mut attributes,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        )
-    };
-    let creation_error = (handle == INVALID_HANDLE_VALUE).then(std::io::Error::last_os_error);
-    unsafe {
-        LocalFree(descriptor);
-    }
-    if let Some(error) = creation_error {
-        return Err(error);
-    }
-    Ok(unsafe { File::from_raw_handle(handle) })
-}
-
-#[cfg(windows)]
-fn open_existing_private_file_windows(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::io::FromRawHandle;
-
-    const GENERIC_READ: u32 = 0x8000_0000;
-    const DELETE: u32 = 0x0001_0000;
-    const OPEN_EXISTING: u32 = 3;
-    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-
-    let wide_path = windows_wide_path(path)?;
-    let handle = unsafe {
-        CreateFileW(
-            wide_path.as_ptr(),
-            GENERIC_READ | DELETE,
-            win32::SHARE_READ_WRITE_DELETE,
-            std::ptr::null_mut(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
 #[cfg(windows)]
@@ -1859,7 +1997,7 @@ fn open_windows_directory(path: &Path) -> Result<(File, (u32, u64)), String> {
         CreateFileW(
             wide.as_ptr(),
             GENERIC_READ | FILE_READ_ATTRIBUTES,
-            0x0000_0001 | 0x0000_0002,
+            win32::SHARE_READ_WRITE_DELETE,
             std::ptr::null_mut(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -2221,7 +2359,7 @@ const PRIVATE_ROLLBACK_TOMBSTONE_CAPACITY_EXHAUSTED: &str =
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn rollback_tombstone_path(target: &Path, slot: usize) -> PathBuf {
+pub(crate) fn rollback_tombstone_path(target: &Path, slot: usize) -> PathBuf {
     target.with_file_name(format!(
         ".{}.rollback-tombstone-{slot}.codexhub",
         target
@@ -2242,16 +2380,25 @@ fn finish_private_evidence_windows<Expected>(
 where
     Expected: Fn(&str) -> bool,
 {
-    if !evidence.try_exists().map_err(|error| {
-        format!(
-            "failed to inspect completed {label} rollback evidence {}: {error}",
-            evidence.display()
-        )
-    })? {
-        return Ok(());
+    match parent.probe_child(evidence) {
+        Ok(WindowsChildProbe::Absent) => return Ok(()),
+        Ok(WindowsChildProbe::Present) => {}
+        Ok(WindowsChildProbe::Indeterminate(status)) => {
+            return Err(format!(
+                "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} (NTSTATUS 0x{:08X}); recovery remains fail-closed",
+                status as u32
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} ({error}); recovery remains fail-closed"
+            ));
+        }
     }
     let mut displaced = parent.open_existing(evidence).map_err(|error| {
-        format!("failed to open completed {label} rollback evidence: {error}")
+        format!(
+            "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} while opening completed rollback evidence: {error}; recovery remains fail-closed"
+        )
     })?;
     let displaced_text =
         read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
@@ -2268,123 +2415,169 @@ where
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn finish_private_evidence_linux<Expected>(
-    parent: &PinnedPrivateParent,
-    target: &Path,
-    evidence: &Path,
-    max_bytes: u64,
-    label: &str,
-    expected: &Expected,
-) -> Result<(), String>
-where
-    Expected: Fn(&str) -> bool,
-{
-    use std::os::unix::fs::MetadataExt;
-
-    let mut displaced = match parent.open_existing(evidence) {
-        Ok(displaced) => displaced,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut exact_candidate = None;
-            let mut mismatched_tombstone = None;
-            for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
-                let tombstone = rollback_tombstone_path(target, slot);
-                let mut tombstone_file = match parent.open_existing(&tombstone) {
-                    Ok(tombstone_file) => tombstone_file,
-                    Err(tombstone_error)
-                        if tombstone_error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        continue;
-                    }
-                    Err(tombstone_error) => {
-                        return Err(format!(
-                            "failed to open bounded {label} rollback tombstone: {tombstone_error}"
-                        ));
-                    }
-                };
-                let tombstone_text = read_opened_single_link_text(
-                    &mut tombstone_file,
-                    &tombstone,
-                    max_bytes,
-                    label,
-                )?;
-                if tombstone_text.is_empty() {
-                    let tombstone_metadata = tombstone_file.metadata().map_err(|error| {
-                        format!("failed to inspect bounded {label} rollback tombstone: {error}")
-                    })?;
-                    if tombstone_metadata.mode() & 0o777 != 0o600 {
-                        mismatched_tombstone = Some(tombstone);
-                    }
-                    continue;
-                }
-                if expected(&tombstone_text) {
-                    if exact_candidate.is_some() {
-                        return Err(format!(
-                            "multiple bounded {label} rollback tombstones contain candidate bytes; recovery remains fail-closed"
-                        ));
-                    }
-                    exact_candidate = Some((tombstone_file, tombstone));
-                } else {
-                    mismatched_tombstone = Some(tombstone);
-                }
-            }
-            if let Some((candidate, tombstone)) = exact_candidate {
-                scrub_verified_private_evidence_linux(
-                    parent,
-                    &candidate,
-                    &tombstone,
-                    label,
-                )?;
-            }
-            if let Some(tombstone) = mismatched_tombstone {
-                return Err(format!(
-                    "bounded {label} rollback tombstone mismatched at {}; recovery remains fail-closed",
-                    tombstone.display()
-                ));
-            }
-            return Ok(());
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to open completed {label} rollback evidence: {error}"
-            ));
-        }
-    };
-    let displaced_text =
-        read_opened_single_link_text(&mut displaced, evidence, max_bytes, label)?;
-    if !expected(&displaced_text) {
-        return Err(format!(
-            "completed {label} rollback has mismatched evidence at {}; recovery remains fail-closed",
-            evidence.display()
-        ));
-    }
-    remove_opened_file_linux(parent, &displaced, evidence, target, label)
+pub(crate) struct LinuxPrivateRollbackRequest<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) evidence: &'a Path,
+    pub(crate) boundary: &'a Path,
+    pub(crate) replacement: Option<&'a str>,
+    pub(crate) max_bytes: u64,
+    pub(crate) label: &'a str,
 }
 
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn next_private_rollback_tombstone_linux(
+struct LinuxPlannedFile {
+    opened: File,
+    identity: (u64, u64),
+    text: String,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+enum LinuxPlannedPath {
+    Absent,
+    Present(LinuxPlannedFile),
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+struct LinuxVacantRollbackSlot {
+    path: PathBuf,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+struct LinuxOwnedRollbackSlot {
+    path: PathBuf,
+    candidate: LinuxPlannedFile,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+enum LinuxPrivateRollbackAction {
+    Noop,
+    NeedsVacant {
+        slot: LinuxVacantRollbackSlot,
+        mutation: LinuxVacantRollbackMutation,
+    },
+    ResumeExisting {
+        slot: LinuxOwnedRollbackSlot,
+    },
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+enum LinuxVacantRollbackMutation {
+    Replace,
+    Remove,
+    CleanupEvidence,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) struct LinuxPrivateRollbackPlan {
+    parent: PinnedPrivateParent,
+    path: PathBuf,
+    evidence: PathBuf,
+    replacement: Option<String>,
+    max_bytes: u64,
+    label: String,
+    live: LinuxPlannedPath,
+    evidence_state: LinuxPlannedPath,
+    action: LinuxPrivateRollbackAction,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxRollbackEntryRole {
+    Absent,
+    Base,
+    Candidate,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+struct LinuxRollbackTombstoneScan {
+    first_vacant: Option<PathBuf>,
+    exact_candidate: Option<LinuxOwnedRollbackSlot>,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn open_planned_linux_path(
     parent: &PinnedPrivateParent,
-    target: &Path,
+    path: &Path,
+    max_bytes: u64,
     label: &str,
-) -> Result<PathBuf, String> {
-    for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
-        let tombstone = rollback_tombstone_path(target, slot);
-        match parent.open_existing(&tombstone) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(tombstone);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return Err(format!(
-                    "failed to inspect bounded {label} rollback tombstone capacity: {error}"
-                ));
-            }
+) -> Result<LinuxPlannedPath, String> {
+    let mut opened = match parent.open_existing(path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LinuxPlannedPath::Absent);
         }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect planned {label} path {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let text = read_opened_single_link_text(&mut opened, path, max_bytes, label)?;
+    let identity = lock_file_identity(&opened)
+        .map_err(|_| format!("planned {label} path is not a stable single-link file"))?;
+    Ok(LinuxPlannedPath::Present(LinuxPlannedFile {
+        opened,
+        identity,
+        text,
+    }))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn classify_linux_rollback_entry<Expected>(
+    entry: &LinuxPlannedPath,
+    replacement: Option<&str>,
+    expected: &Expected,
+    path_kind: &str,
+    label: &str,
+) -> Result<LinuxRollbackEntryRole, String>
+where
+    Expected: Fn(&str) -> bool,
+{
+    let LinuxPlannedPath::Present(entry) = entry else {
+        return Ok(LinuxRollbackEntryRole::Absent);
+    };
+    if replacement.is_some_and(|base| entry.text == base) {
+        return Ok(LinuxRollbackEntryRole::Base);
+    }
+    if expected(&entry.text) {
+        return Ok(LinuxRollbackEntryRole::Candidate);
     }
     Err(format!(
-        "{label} {PRIVATE_ROLLBACK_TOMBSTONE_CAPACITY_EXHAUSTED}; live and evidence bytes were preserved and recovery remains fail-closed"
+        "{label} {path_kind} bytes matched neither the rollback base nor the journaled candidate; recovery remains fail-closed"
     ))
 }
 
@@ -2392,44 +2585,344 @@ fn next_private_rollback_tombstone_linux(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn remove_opened_file_linux(
+fn scan_private_rollback_tombstones_linux<Expected>(
     parent: &PinnedPrivateParent,
-    opened: &File,
-    path: &Path,
     target: &Path,
+    max_bytes: u64,
     label: &str,
-) -> Result<(), String> {
-    let tombstone = next_private_rollback_tombstone_linux(parent, target, label)?;
-    let opened_identity = lock_file_identity(opened)
-        .map_err(|_| format!("verified {label} evidence is not a stable file"))?;
-    let current = parent.open_existing(path).map_err(|error| {
-        format!(
-            "failed to re-open verified {label} evidence before cleanup: {error}"
-        )
-    })?;
-    let current_identity = lock_file_identity(&current)
-        .map_err(|_| format!("current {label} evidence is not a stable file"))?;
-    if current_identity != opened_identity {
+    expected: &Expected,
+) -> Result<LinuxRollbackTombstoneScan, String>
+where
+    Expected: Fn(&str) -> bool,
+{
+    use std::os::unix::fs::MetadataExt;
+
+    let mut first_vacant = None;
+    let mut exact_candidate = None;
+    for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+        let tombstone = rollback_tombstone_path(target, slot);
+        let mut tombstone_file = match parent.open_existing(&tombstone) {
+            Ok(tombstone_file) => tombstone_file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if first_vacant.is_none() {
+                    first_vacant = Some(tombstone);
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect bounded {label} rollback tombstone capacity: {error}"
+                ));
+            }
+        };
+        let tombstone_text = read_opened_single_link_text(
+            &mut tombstone_file,
+            &tombstone,
+            max_bytes,
+            label,
+        )?;
+        let identity = lock_file_identity(&tombstone_file)
+            .map_err(|_| format!("bounded {label} rollback tombstone is not stable"))?;
+        let metadata = tombstone_file.metadata().map_err(|error| {
+            format!("failed to inspect bounded {label} rollback tombstone: {error}")
+        })?;
+        if metadata.mode() & 0o777 != 0o600 {
+            return Err(format!(
+                "bounded {label} rollback tombstone mismatched at {}; recovery remains fail-closed",
+                tombstone.display()
+            ));
+        }
+        if tombstone_text.is_empty() {
+            continue;
+        }
+        if !expected(&tombstone_text) {
+            return Err(format!(
+                "bounded {label} rollback tombstone mismatched at {}; recovery remains fail-closed",
+                tombstone.display()
+            ));
+        }
+        if exact_candidate.is_some() {
+            return Err(format!(
+                "multiple bounded {label} rollback tombstones contain candidate bytes; recovery remains fail-closed"
+            ));
+        }
+        exact_candidate = Some(LinuxOwnedRollbackSlot {
+            path: tombstone,
+            candidate: LinuxPlannedFile {
+                opened: tombstone_file,
+                identity,
+                text: tombstone_text,
+            },
+        });
+    }
+    Ok(LinuxRollbackTombstoneScan {
+        first_vacant,
+        exact_candidate,
+    })
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn take_vacant_linux_rollback_slot(
+    scan: &mut LinuxRollbackTombstoneScan,
+    label: &str,
+) -> Result<LinuxVacantRollbackSlot, String> {
+    scan.first_vacant
+        .take()
+        .map(|path| LinuxVacantRollbackSlot { path })
+        .ok_or_else(|| {
+            format!(
+                "{label} {PRIVATE_ROLLBACK_TOMBSTONE_CAPACITY_EXHAUSTED}; live and evidence bytes were preserved and recovery remains fail-closed"
+            )
+        })
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn plan_private_text_rollback<Expected>(
+    request: LinuxPrivateRollbackRequest<'_>,
+    expected: Expected,
+) -> Result<LinuxPrivateRollbackPlan, String>
+where
+    Expected: Fn(&str) -> bool,
+{
+    let LinuxPrivateRollbackRequest {
+        path,
+        evidence,
+        boundary,
+        replacement,
+        max_bytes,
+        label,
+    } = request;
+    if path.parent() != evidence.parent() {
+        return Err("conditional private rollback paths must share one parent".to_string());
+    }
+    validate_confined_path(path, boundary, true)?;
+    validate_confined_path(evidence, boundary, true)?;
+    let parent = PinnedPrivateParent::open(path, boundary)?;
+    let live = open_planned_linux_path(&parent, path, max_bytes, label)?;
+    let evidence_state = open_planned_linux_path(&parent, evidence, max_bytes, label)?;
+    let live_role =
+        classify_linux_rollback_entry(&live, replacement, &expected, "live", label)?;
+    let evidence_role = classify_linux_rollback_entry(
+        &evidence_state,
+        replacement,
+        &expected,
+        "evidence",
+        label,
+    )?;
+    let mut scan =
+        scan_private_rollback_tombstones_linux(&parent, path, max_bytes, label, &expected)?;
+    let tombstone_has_candidate = scan.exact_candidate.is_some();
+
+    let action = match replacement {
+        Some(_) => match (live_role, evidence_role, tombstone_has_candidate) {
+            (LinuxRollbackEntryRole::Base, LinuxRollbackEntryRole::Absent, false) => {
+                LinuxPrivateRollbackAction::Noop
+            }
+            (LinuxRollbackEntryRole::Base, LinuxRollbackEntryRole::Absent, true) => {
+                LinuxPrivateRollbackAction::ResumeExisting {
+                    slot: scan.exact_candidate.take().expect("candidate was classified"),
+                }
+            }
+            (LinuxRollbackEntryRole::Candidate, LinuxRollbackEntryRole::Absent, false)
+            | (LinuxRollbackEntryRole::Candidate, LinuxRollbackEntryRole::Base, false) => {
+                LinuxPrivateRollbackAction::NeedsVacant {
+                    slot: take_vacant_linux_rollback_slot(&mut scan, label)?,
+                    mutation: LinuxVacantRollbackMutation::Replace,
+                }
+            }
+            (LinuxRollbackEntryRole::Base, LinuxRollbackEntryRole::Candidate, false) => {
+                LinuxPrivateRollbackAction::NeedsVacant {
+                    slot: take_vacant_linux_rollback_slot(&mut scan, label)?,
+                    mutation: LinuxVacantRollbackMutation::CleanupEvidence,
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{label} rollback state contains duplicate or inconsistent candidate ownership; recovery remains fail-closed"
+                ));
+            }
+        },
+        None => match (live_role, evidence_role, tombstone_has_candidate) {
+            (LinuxRollbackEntryRole::Absent, LinuxRollbackEntryRole::Absent, false) => {
+                LinuxPrivateRollbackAction::Noop
+            }
+            (LinuxRollbackEntryRole::Absent, LinuxRollbackEntryRole::Absent, true) => {
+                LinuxPrivateRollbackAction::ResumeExisting {
+                    slot: scan.exact_candidate.take().expect("candidate was classified"),
+                }
+            }
+            (LinuxRollbackEntryRole::Candidate, LinuxRollbackEntryRole::Absent, false) => {
+                LinuxPrivateRollbackAction::NeedsVacant {
+                    slot: take_vacant_linux_rollback_slot(&mut scan, label)?,
+                    mutation: LinuxVacantRollbackMutation::Remove,
+                }
+            }
+            (LinuxRollbackEntryRole::Absent, LinuxRollbackEntryRole::Candidate, false) => {
+                LinuxPrivateRollbackAction::NeedsVacant {
+                    slot: take_vacant_linux_rollback_slot(&mut scan, label)?,
+                    mutation: LinuxVacantRollbackMutation::CleanupEvidence,
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{label} rollback state contains duplicate or inconsistent candidate ownership; recovery remains fail-closed"
+                ));
+            }
+        },
+    };
+
+    Ok(LinuxPrivateRollbackPlan {
+        parent,
+        path: path.to_path_buf(),
+        evidence: evidence.to_path_buf(),
+        replacement: replacement.map(ToOwned::to_owned),
+        max_bytes,
+        label: label.to_string(),
+        live,
+        evidence_state,
+        action,
+    })
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn revalidate_linux_planned_path(
+    parent: &PinnedPrivateParent,
+    path: &Path,
+    planned: &LinuxPlannedPath,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Option<File>, String> {
+    match planned {
+        LinuxPlannedPath::Absent => match parent.open_existing(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Ok(_) => Err(format!(
+                "{label} path changed after rollback planning; recovery remains fail-closed"
+            )),
+            Err(error) => Err(format!(
+                "failed to revalidate absent {label} path after rollback planning: {error}"
+            )),
+        },
+        LinuxPlannedPath::Present(planned) => {
+            if lock_file_identity(&planned.opened)
+                .map_err(|_| format!("planned {label} handle is no longer stable"))?
+                != planned.identity
+            {
+                return Err(format!(
+                    "{label} opened handle changed after rollback planning; recovery remains fail-closed"
+                ));
+            }
+            let mut current = parent.open_existing(path).map_err(|error| {
+                format!("failed to re-open planned {label} path before rollback commit: {error}")
+            })?;
+            let text = read_opened_single_link_text(&mut current, path, max_bytes, label)?;
+            let identity = lock_file_identity(&current)
+                .map_err(|_| format!("revalidated {label} path is not stable"))?;
+            if identity != planned.identity || text != planned.text {
+                return Err(format!(
+                    "{label} path changed after rollback planning; recovery remains fail-closed"
+                ));
+            }
+            Ok(Some(current))
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn revalidate_linux_owned_slot(
+    parent: &PinnedPrivateParent,
+    slot: &LinuxOwnedRollbackSlot,
+    max_bytes: u64,
+    label: &str,
+) -> Result<File, String> {
+    if lock_file_identity(&slot.candidate.opened)
+        .map_err(|_| format!("planned {label} rollback tombstone handle is no longer stable"))?
+        != slot.candidate.identity
+    {
         return Err(format!(
-            "{label} evidence changed before cleanup; replacement evidence was preserved"
+            "{label} rollback tombstone handle changed after planning; recovery remains fail-closed"
         ));
     }
-    drop(current);
+    let mut current = parent.open_existing(&slot.path).map_err(|error| {
+        format!("failed to re-open planned {label} rollback tombstone: {error}")
+    })?;
+    let text =
+        read_opened_single_link_text(&mut current, &slot.path, max_bytes, label)?;
+    let identity = lock_file_identity(&current)
+        .map_err(|_| format!("revalidated {label} rollback tombstone is not stable"))?;
+    if identity != slot.candidate.identity || text != slot.candidate.text {
+        return Err(format!(
+            "{label} rollback tombstone changed after planning; recovery remains fail-closed"
+        ));
+    }
+    Ok(current)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn revalidate_linux_vacant_slot(
+    parent: &PinnedPrivateParent,
+    slot: &LinuxVacantRollbackSlot,
+    label: &str,
+) -> Result<(), String> {
+    match parent.open_existing(&slot.path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "{label} selected rollback tombstone occupied after reservation; live and evidence bytes were preserved and recovery remains fail-closed"
+        )),
+        Err(error) => Err(format!(
+            "failed to revalidate selected {label} rollback tombstone before mutation: {error}"
+        )),
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn isolate_reserved_private_evidence_linux(
+    parent: &PinnedPrivateParent,
+    opened: &File,
+    evidence: &Path,
+    slot: LinuxVacantRollbackSlot,
+    label: &str,
+) -> Result<(), String> {
+    let opened_identity = lock_file_identity(opened)
+        .map_err(|_| format!("verified {label} evidence is not a stable file"))?;
     #[cfg(test)]
-    invoke_test_pre_private_evidence_isolate_hook(path);
-    parent
-        .rename_path_noreplace(path, &tombstone)
-        .map_err(|error| {
-            format!(
-                "failed to isolate verified {label} evidence into a bounded tombstone without deleting pathname bytes: {error}"
-            )
-        })?;
-    match parent.open_existing(path) {
+    invoke_test_pre_private_evidence_isolate_hook(evidence);
+    // A one-shot collision is caught atomically by RENAME_NOREPLACE. This does
+    // not claim safety against a continuously mutating same-principal writer;
+    // that stronger ownership boundary requires the future broker.
+    if let Err(error) = parent.rename_path_noreplace(evidence, &slot.path) {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(format!(
+                "{label} selected rollback tombstone occupied after reservation; evidence bytes were preserved and recovery remains fail-closed"
+            ));
+        }
+        return Err(format!(
+            "failed to isolate verified {label} evidence into the reserved bounded tombstone: {error}"
+        ));
+    }
+    match parent.open_existing(evidence) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {
             return Err(format!(
                 "{label} evidence was replaced during isolation; replacement bytes remain at {}",
-                path.display()
+                evidence.display()
             ));
         }
         Err(error) => {
@@ -2438,10 +2931,10 @@ fn remove_opened_file_linux(
             ));
         }
     }
-    let isolated = parent.open_existing(&tombstone).map_err(|error| {
+    let isolated = parent.open_existing(&slot.path).map_err(|error| {
         format!(
             "failed to open isolated {label} evidence at {}: {error}",
-            tombstone.display()
+            slot.path.display()
         )
     })?;
     let isolated_identity = lock_file_identity(&isolated)
@@ -2449,10 +2942,195 @@ fn remove_opened_file_linux(
     if isolated_identity != opened_identity {
         return Err(format!(
             "{label} evidence changed before atomic isolation; replacement evidence was preserved at {}",
-            tombstone.display()
+            slot.path.display()
         ));
     }
-    scrub_verified_private_evidence_linux(parent, &isolated, &tombstone, label)
+    scrub_verified_private_evidence_linux(parent, &isolated, &slot.path, label)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn commit_private_text_rollback(
+    plan: LinuxPrivateRollbackPlan,
+) -> Result<(), String> {
+    let LinuxPrivateRollbackPlan {
+        parent,
+        path,
+        evidence,
+        replacement,
+        max_bytes,
+        label,
+        live,
+        evidence_state,
+        action,
+    } = plan;
+    if let Some(slot) = match &action {
+        LinuxPrivateRollbackAction::NeedsVacant { slot, .. } => Some(&slot.path),
+        LinuxPrivateRollbackAction::Noop
+        | LinuxPrivateRollbackAction::ResumeExisting { .. } => None,
+    } {
+        #[cfg(test)]
+        invoke_test_post_private_rollback_slot_selection_hook(slot);
+    }
+    if let LinuxPrivateRollbackAction::NeedsVacant { slot, .. } = &action {
+        revalidate_linux_vacant_slot(&parent, slot, &label)?;
+    }
+    let current_live =
+        revalidate_linux_planned_path(&parent, &path, &live, max_bytes, &label)?;
+    let current_evidence = revalidate_linux_planned_path(
+        &parent,
+        &evidence,
+        &evidence_state,
+        max_bytes,
+        &label,
+    )?;
+
+    match action {
+        LinuxPrivateRollbackAction::Noop => Ok(()),
+        LinuxPrivateRollbackAction::ResumeExisting { slot } => {
+            let candidate =
+                revalidate_linux_owned_slot(&parent, &slot, max_bytes, &label)?;
+            scrub_verified_private_evidence_linux(&parent, &candidate, &slot.path, &label)
+        }
+        LinuxPrivateRollbackAction::NeedsVacant {
+            slot,
+            mutation: LinuxVacantRollbackMutation::CleanupEvidence,
+        } => {
+            let evidence_file = current_evidence.ok_or_else(|| {
+                format!("{label} evidence disappeared after rollback planning")
+            })?;
+            isolate_reserved_private_evidence_linux(
+                &parent,
+                &evidence_file,
+                &evidence,
+                slot,
+                &label,
+            )
+        }
+        LinuxPrivateRollbackAction::NeedsVacant {
+            slot,
+            mutation: LinuxVacantRollbackMutation::Remove,
+        } => {
+            let live_file = current_live
+                .ok_or_else(|| format!("{label} live candidate disappeared after planning"))?;
+            if current_evidence.is_some() {
+                return Err(format!(
+                    "{label} evidence appeared after rollback planning; recovery remains fail-closed"
+                ));
+            }
+            parent
+                .rename_path_noreplace(&path, &evidence)
+                .map_err(|error| {
+                    format!("failed to move planned {label} candidate into evidence: {error}")
+                })?;
+            match parent.open_existing(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "{label} live path was repopulated during planned removal; recovery remains fail-closed"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to verify {label} live path absence after planned removal: {error}"
+                    ));
+                }
+            }
+            let displaced = parent.open_existing(&evidence).map_err(|error| {
+                format!("failed to open displaced {label} after planned removal: {error}")
+            })?;
+            if lock_file_identity(&displaced)
+                .map_err(|_| format!("displaced {label} evidence is not stable"))?
+                != lock_file_identity(&live_file)
+                    .map_err(|_| format!("planned {label} live candidate is not stable"))?
+            {
+                return Err(format!(
+                    "{label} evidence mismatch after planned removal; recovery remains fail-closed"
+                ));
+            }
+            isolate_reserved_private_evidence_linux(
+                &parent,
+                &displaced,
+                &evidence,
+                slot,
+                &label,
+            )
+        }
+        LinuxPrivateRollbackAction::NeedsVacant {
+            slot,
+            mutation: LinuxVacantRollbackMutation::Replace,
+        } => {
+            let live_file = current_live
+                .ok_or_else(|| format!("{label} live candidate disappeared after planning"))?;
+            let replacement = replacement.ok_or_else(|| {
+                format!("{label} planned replacement bytes disappeared before commit")
+            })?;
+            let placeholder = match current_evidence {
+                Some(placeholder) => placeholder,
+                None => {
+                    let temp_path = unique_temp_path(&evidence);
+                    let mut placeholder = parent.create_temp(&temp_path).map_err(|error| {
+                        format!(
+                            "failed to create planned restore placeholder {}: {error}",
+                            temp_path.display()
+                        )
+                    })?;
+                    let mut cleanup =
+                        TempPathCleanup::new(&parent, &placeholder, temp_path.clone())?;
+                    placeholder
+                        .write_all(replacement.as_bytes())
+                        .and_then(|_| placeholder.sync_all())
+                        .map_err(|error| {
+                            format!(
+                                "failed to persist planned restore placeholder {}: {error}",
+                                temp_path.display()
+                            )
+                        })?;
+                    parent.publish_new(&temp_path, &evidence)?;
+                    cleanup.disarm();
+                    placeholder
+                }
+            };
+            let placeholder_identity = lock_file_identity(&placeholder)
+                .map_err(|_| format!("planned {label} restore placeholder is not stable"))?;
+            parent.exchange_existing(&path, &evidence)?;
+            let mut restored = parent.open_existing(&path).map_err(|error| {
+                format!("failed to open restored {label} after planned exchange: {error}")
+            })?;
+            let restored_text =
+                read_opened_single_link_text(&mut restored, &path, max_bytes, &label)?;
+            if restored_text != replacement
+                || lock_file_identity(&restored)
+                    .map_err(|_| format!("restored {label} is not stable"))?
+                    != placeholder_identity
+            {
+                return Err(format!(
+                    "restored {label} mismatch after planned exchange; recovery remains fail-closed"
+                ));
+            }
+            let displaced = parent.open_existing(&evidence).map_err(|error| {
+                format!("failed to open displaced {label} after planned exchange: {error}")
+            })?;
+            if lock_file_identity(&displaced)
+                .map_err(|_| format!("displaced {label} evidence is not stable"))?
+                != lock_file_identity(&live_file)
+                    .map_err(|_| format!("planned {label} live candidate is not stable"))?
+            {
+                return Err(format!(
+                    "displaced {label} mismatch after planned exchange; recovery remains fail-closed"
+                ));
+            }
+            isolate_reserved_private_evidence_linux(
+                &parent,
+                &displaced,
+                &evidence,
+                slot,
+                &label,
+            )
+        }
+    }
 }
 
 #[cfg(all(
@@ -2555,15 +3233,7 @@ fn remove_verified_private_evidence_windows(
     invoke_test_pre_private_evidence_handle_delete_hook(evidence);
     delete_opened_file_windows(&mut file, label)?;
     drop(file);
-    match parent.open_existing(evidence) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(format!(
-            "{label} {PRIVATE_EVIDENCE_PATHNAME_MISMATCH} after handle-bound cleanup; recovery remains fail-closed"
-        )),
-        Err(error) => Err(format!(
-            "failed to verify {label} evidence pathname absence after handle-bound cleanup: {error}"
-        )),
-    }
+    parent.require_child_absent(evidence, label)
 }
 
 #[cfg(any(
@@ -3063,6 +3733,7 @@ fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
     if result == 0
         || information.number_of_links != 1
+        || information.file_attributes & 0x0000_0010 != 0
         || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
         return Err("atomic write lock is not a regular single-link file".to_owned());
@@ -3371,6 +4042,25 @@ struct FileDispositionInformation {
 
 #[cfg(windows)]
 #[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32,
+    root_directory: *mut std::ffi::c_void,
+    object_name: *mut UnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
 #[derive(Default)]
 struct IoStatusBlock {
     status_or_pointer: usize,
@@ -3420,6 +4110,19 @@ unsafe extern "system" {
 #[cfg(windows)]
 #[link(name = "ntdll")]
 unsafe extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut *mut std::ffi::c_void,
+        desired_access: u32,
+        object_attributes: *mut ObjectAttributes,
+        io_status_block: *mut IoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
     fn NtSetInformationFile(
         file_handle: *mut std::ffi::c_void,
         io_status_block: *mut IoStatusBlock,
@@ -3483,8 +4186,10 @@ mod tests {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     use super::{
+        clear_test_post_private_rollback_slot_selection_hook,
         clear_test_post_private_evidence_scrub_hook,
         clear_test_pre_private_evidence_isolate_hook,
+        install_test_post_private_rollback_slot_selection_hook,
         install_test_post_private_evidence_scrub_hook,
         install_test_pre_private_evidence_isolate_hook, rollback_tombstone_path,
         PRIVATE_ROLLBACK_TOMBSTONE_SLOTS,
@@ -3506,6 +4211,32 @@ mod tests {
         clear_test_pre_private_evidence_handle_delete_hook,
         install_test_pre_private_evidence_handle_delete_hook,
     };
+    #[cfg(windows)]
+    fn open_renameable_windows_parent_for_test(path: &Path) -> fs::File {
+        use std::os::windows::io::FromRawHandle;
+
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+        const DELETE: u32 = 0x0001_0000;
+        const OPEN_EXISTING: u32 = 3;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let wide = super::windows_wide_path(path).unwrap();
+        let handle = unsafe {
+            super::CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | FILE_READ_ATTRIBUTES | DELETE,
+                super::win32::SHARE_READ_WRITE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, super::INVALID_HANDLE_VALUE);
+        unsafe { fs::File::from_raw_handle(handle) }
+    }
     use std::{
         fs,
         io::{BufRead, Read, Write},
@@ -3515,6 +4246,17 @@ mod tests {
         thread,
         time::{Duration, SystemTime},
     };
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn write_consumed_linux_rollback_tombstone(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, b"").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     #[cfg(any(
         windows,
@@ -3709,6 +4451,240 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_evidence_cleanup_probes_the_original_pinned_parent_after_parent_path_replacement() {
+        let root = test_root("evidence-cleanup-pinned-parent");
+        let parent_path = root.join("owned");
+        let moved_parent = root.join("owned-moved");
+        fs::create_dir_all(&parent_path).unwrap();
+        let evidence = parent_path.join("providers.rollback-evidence");
+        fs::write(&evidence, "journaled-candidate").unwrap();
+        let mut opened_parent = open_renameable_windows_parent_for_test(&parent_path);
+        let parent = super::PinnedPrivateParent {
+            directory: opened_parent.try_clone().unwrap(),
+            parent_path: parent_path.clone(),
+        };
+        let root_parent = super::PinnedPrivateParent {
+            directory: open_renameable_windows_parent_for_test(&root),
+            parent_path: root.clone(),
+        };
+
+        root_parent
+            .rename_opened_file(&mut opened_parent, &moved_parent, false)
+            .unwrap();
+        let opened = parent
+            .open_existing(&evidence)
+            .expect("the child must remain reachable through the pinned parent after rename");
+        fs::create_dir_all(&parent_path).unwrap();
+        fs::write(
+            parent_path.join("providers.rollback-evidence"),
+            "unowned-entry-in-replacement-parent",
+        )
+        .unwrap();
+
+        super::remove_verified_private_evidence_windows(
+            &parent,
+            opened,
+            &evidence,
+            "pinned-parent evidence",
+        )
+        .expect("cleanup must probe the child relative to the original pinned directory handle");
+
+        assert!(!moved_parent.join("providers.rollback-evidence").exists());
+        assert_eq!(
+            fs::read_to_string(parent_path.join("providers.rollback-evidence")).unwrap(),
+            "unowned-entry-in-replacement-parent"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_temp_creation_stays_in_the_original_pinned_parent_after_path_replacement() {
+        let root = test_root("private-temp-create-pinned-parent");
+        let parent_path = root.join("owned");
+        let moved_parent = root.join("owned-moved");
+        fs::create_dir_all(&parent_path).unwrap();
+        let mut opened_parent = open_renameable_windows_parent_for_test(&parent_path);
+        let parent = super::PinnedPrivateParent {
+            directory: opened_parent.try_clone().unwrap(),
+            parent_path: parent_path.clone(),
+        };
+        let root_parent = super::PinnedPrivateParent {
+            directory: open_renameable_windows_parent_for_test(&root),
+            parent_path: root.clone(),
+        };
+        root_parent
+            .rename_opened_file(&mut opened_parent, &moved_parent, false)
+            .unwrap();
+        fs::create_dir_all(&parent_path).unwrap();
+        fs::write(parent_path.join("sentinel"), "replacement-parent").unwrap();
+        let temp_path = parent_path.join("private.tmp");
+
+        let mut temp = parent
+            .create_temp(&temp_path)
+            .expect("private creation must remain rooted in the pinned directory handle");
+        temp.write_all(b"sensitive-temp-bytes").unwrap();
+        temp.sync_all().unwrap();
+        drop(temp);
+
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("private.tmp")).unwrap(),
+            "sensitive-temp-bytes"
+        );
+        assert!(!parent_path.join("private.tmp").exists());
+        assert_eq!(
+            fs::read_to_string(parent_path.join("sentinel")).unwrap(),
+            "replacement-parent"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_child_operations_reject_non_leaf_and_ads_names() {
+        let root = test_root("private-child-leaf-validation");
+        fs::create_dir_all(&root).unwrap();
+        let anchor = root.join("anchor");
+        fs::write(&anchor, "anchor").unwrap();
+        let parent = super::PinnedPrivateParent::open(&anchor, &root).unwrap();
+        let mut opened = parent.open_existing(&anchor).unwrap();
+
+        for invalid in [
+            root.join("nested").join("child"),
+            root.join("..").join("escaped"),
+            root.join("child:alternate-stream"),
+        ] {
+            let error = parent
+                .open_existing(&invalid)
+                .expect_err("non-leaf and ADS child names must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            let rename_error = parent
+                .rename_opened_file(&mut opened, &invalid, false)
+                .expect_err("relative rename must use the same strict leaf validator");
+            assert!(rename_error.contains("invalid private rename target"));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_open_maps_only_the_three_absence_statuses_to_not_found() {
+        for status in [
+            super::STATUS_NO_SUCH_FILE,
+            super::STATUS_OBJECT_NAME_NOT_FOUND,
+            super::STATUS_OBJECT_PATH_NOT_FOUND,
+        ] {
+            assert!(super::windows_child_status_is_absent(status));
+            assert_eq!(
+                super::WindowsChildOpenError::NtStatus(status)
+                    .into_io_error()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+
+        for status in [
+            0xC000_0022_u32 as i32, // STATUS_ACCESS_DENIED
+            0xC000_00BA_u32 as i32, // STATUS_FILE_IS_A_DIRECTORY
+            0xC000_050B_u32 as i32, // STATUS_REPARSE_POINT_ENCOUNTERED
+            0xC000_000D_u32 as i32, // STATUS_INVALID_PARAMETER
+        ] {
+            assert!(!super::windows_child_status_is_absent(status));
+            let error = super::WindowsChildOpenError::NtStatus(status).into_io_error();
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                error.to_string().contains("NTSTATUS"),
+                "non-absence raw status must remain typed and fail closed: {error}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_relative_child_probe_closes_every_successful_handle() {
+        let root = test_root("relative-child-probe-handle-lifetime");
+        fs::create_dir_all(&root).unwrap();
+        let evidence = root.join("evidence");
+        fs::write(&evidence, "present").unwrap();
+        let parent = super::PinnedPrivateParent::open(&evidence, &root).unwrap();
+
+        for _ in 0..128 {
+            assert!(matches!(
+                parent.probe_child(&evidence).unwrap(),
+                super::WindowsChildProbe::Present
+            ));
+        }
+        fs::remove_file(&evidence).unwrap();
+        for _ in 0..128 {
+            assert!(matches!(
+                parent.probe_child(&evidence).unwrap(),
+                super::WindowsChildProbe::Absent
+            ));
+        }
+        drop(parent);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nt_child_open_abi_matches_the_platform_layout() {
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(std::mem::size_of::<super::UnicodeString>(), 16);
+            assert_eq!(std::mem::align_of::<super::UnicodeString>(), 8);
+            assert_eq!(std::mem::size_of::<super::ObjectAttributes>(), 48);
+            assert_eq!(std::mem::align_of::<super::ObjectAttributes>(), 8);
+            assert_eq!(std::mem::size_of::<super::IoStatusBlock>(), 16);
+            assert_eq!(std::mem::align_of::<super::IoStatusBlock>(), 8);
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert_eq!(std::mem::size_of::<super::UnicodeString>(), 8);
+            assert_eq!(std::mem::align_of::<super::UnicodeString>(), 4);
+            assert_eq!(std::mem::size_of::<super::ObjectAttributes>(), 24);
+            assert_eq!(std::mem::align_of::<super::ObjectAttributes>(), 4);
+            assert_eq!(std::mem::size_of::<super::IoStatusBlock>(), 8);
+            assert_eq!(std::mem::align_of::<super::IoStatusBlock>(), 4);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_evidence_cleanup_reports_directory_repopulation_as_typed_pathname_mismatch() {
+        let root = test_root("evidence-cleanup-directory-repopulation");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let moved_owned_evidence = root.join("providers.rollback-evidence-owned");
+        fs::write(&live, "journaled-candidate").unwrap();
+        let moved_owned_evidence_for_hook = moved_owned_evidence.clone();
+        install_test_pre_private_evidence_handle_delete_hook(move |path| {
+            fs::rename(path, &moved_owned_evidence_for_hook).unwrap();
+            fs::create_dir(path).unwrap();
+        });
+
+        let error = remove_private_text_if_unchanged(
+            &live,
+            &evidence,
+            &root,
+            1024,
+            "directory-repopulated evidence",
+            |current| current == "journaled-candidate",
+            || {},
+        )
+        .expect_err("a directory at the evidence child must remain fail-closed");
+        clear_test_pre_private_evidence_handle_delete_hook();
+
+        assert!(
+            error.contains("evidence pathname mismatch"),
+            "unexpected cleanup error: {error}"
+        );
+        assert!(evidence.is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_completed_rollback_fails_closed_when_evidence_path_is_repopulated_before_handle_delete(
     ) {
         let root = test_root("completed-rollback-handle-delete-race");
@@ -3721,7 +4697,7 @@ mod tests {
         let moved_owned_evidence_for_hook = moved_owned_evidence.clone();
         install_test_pre_private_evidence_handle_delete_hook(move |path| {
             fs::rename(path, &moved_owned_evidence_for_hook).unwrap();
-            fs::write(path, "unowned-evidence-after-verification").unwrap();
+            fs::create_dir(path).unwrap();
         });
 
         let error = replace_private_text_if_unchanged(
@@ -3741,10 +4717,7 @@ mod tests {
 
         assert!(error.contains("evidence pathname mismatch"));
         assert_eq!(fs::read_to_string(&live).unwrap(), "base-snapshot");
-        assert_eq!(
-            fs::read_to_string(&evidence).unwrap(),
-            "unowned-evidence-after-verification"
-        );
+        assert!(evidence.is_dir());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3811,6 +4784,272 @@ mod tests {
     #[test]
     fn linux_conditional_private_rollback_primitives_restore_and_remove_exact_owner() {
         assert_conditional_private_rollback_primitives();
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_replace_rechecks_capacity_after_before_commit_without_mutating_live_or_evidence() {
+        let root = test_root("replace-capacity-filled-by-before-commit");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let candidate = "api_key = \"hook-filled-capacity\"\n";
+        fs::write(&live, candidate).unwrap();
+        for slot in 0..3 {
+            write_consumed_linux_rollback_tombstone(&rollback_tombstone_path(&live, slot));
+        }
+        let final_slot = rollback_tombstone_path(&live, 3);
+        let final_slot_for_hook = final_slot.clone();
+
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: "provider = \"base\"\n",
+                max_bytes: 1024,
+                label: "hook-filled replace capacity",
+            },
+            |current| current == candidate,
+            move || write_consumed_linux_rollback_tombstone(&final_slot_for_hook),
+        )
+        .expect_err("capacity filled by before_commit must fail before mutation");
+
+        assert!(error.contains("rollback tombstone capacity exhausted"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), candidate);
+        assert!(!evidence.exists());
+        for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+            assert_eq!(
+                fs::metadata(rollback_tombstone_path(&live, slot))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_remove_rechecks_capacity_after_before_commit_without_mutating_live_or_evidence() {
+        let root = test_root("remove-capacity-filled-by-before-commit");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let candidate = "api_key = \"remove-hook-filled-capacity\"\n";
+        fs::write(&live, candidate).unwrap();
+        for slot in 0..3 {
+            write_consumed_linux_rollback_tombstone(&rollback_tombstone_path(&live, slot));
+        }
+        let final_slot = rollback_tombstone_path(&live, 3);
+        let final_slot_for_hook = final_slot.clone();
+
+        let error = remove_private_text_if_unchanged(
+            &live,
+            &evidence,
+            &root,
+            1024,
+            "hook-filled remove capacity",
+            |current| current == candidate,
+            move || write_consumed_linux_rollback_tombstone(&final_slot_for_hook),
+        )
+        .expect_err("capacity filled by before_commit must fail before removal");
+
+        assert!(error.contains("rollback tombstone capacity exhausted"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), candidate);
+        assert!(!evidence.exists());
+        for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+            assert_eq!(
+                fs::metadata(rollback_tombstone_path(&live, slot))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_selected_vacant_slot_is_rechecked_before_live_or_evidence_mutation() {
+        let root = test_root("selected-slot-repopulated");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let base = "provider = \"base\"\n";
+        let candidate = "api_key = \"selected-slot-secret\"\n";
+        fs::write(&live, base).unwrap();
+        fs::write(&evidence, candidate).unwrap();
+        install_test_post_private_rollback_slot_selection_hook(|selected| {
+            write_consumed_linux_rollback_tombstone(selected);
+        });
+
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "selected slot collision",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("a selected slot collision must fail before cleanup");
+        clear_test_post_private_rollback_slot_selection_hook();
+
+        assert!(
+            error.contains("selected rollback tombstone occupied after reservation"),
+            "unexpected selected-slot error: {error}"
+        );
+        assert!(!error.contains("capacity exhausted"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), base);
+        assert_eq!(fs::read_to_string(&evidence).unwrap(), candidate);
+        assert_eq!(
+            fs::metadata(rollback_tombstone_path(&live, 0))
+                .unwrap()
+                .len(),
+            0
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_restart_states_resume_owned_candidate_and_allow_full_noop_capacity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("rollback-restart-state-machine");
+        fs::create_dir_all(&root).unwrap();
+        let base = "provider = \"base\"\n";
+        let candidate = "api_key = \"restart-owned-candidate\"\n";
+
+        let cleanup_live = root.join("cleanup-live.toml");
+        let cleanup_evidence = root.join("cleanup-live.rollback-evidence");
+        fs::write(&cleanup_live, base).unwrap();
+        fs::write(&cleanup_evidence, candidate).unwrap();
+        replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &cleanup_live,
+                evidence: &cleanup_evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "restart cleanup evidence",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&cleanup_live).unwrap(), base);
+        assert!(!cleanup_evidence.exists());
+
+        let resumed_live = root.join("resumed-live.toml");
+        let resumed_evidence = root.join("resumed-live.rollback-evidence");
+        fs::write(&resumed_live, base).unwrap();
+        let owned_slot = rollback_tombstone_path(&resumed_live, 0);
+        fs::write(&owned_slot, candidate).unwrap();
+        fs::set_permissions(&owned_slot, fs::Permissions::from_mode(0o600)).unwrap();
+        for slot in 1..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+            write_consumed_linux_rollback_tombstone(&rollback_tombstone_path(
+                &resumed_live,
+                slot,
+            ));
+        }
+        replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &resumed_live,
+                evidence: &resumed_evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "restart owned tombstone",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect("an owned candidate tombstone resumes without a fifth slot");
+        assert_eq!(fs::metadata(&owned_slot).unwrap().len(), 0);
+
+        let noop_live = root.join("noop-live.toml");
+        let noop_evidence = root.join("noop-live.rollback-evidence");
+        fs::write(&noop_live, base).unwrap();
+        for slot in 0..PRIVATE_ROLLBACK_TOMBSTONE_SLOTS {
+            write_consumed_linux_rollback_tombstone(&rollback_tombstone_path(&noop_live, slot));
+        }
+        replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &noop_live,
+                evidence: &noop_evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "full capacity noop",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect("a completed rollback must not consume tombstone capacity");
+        assert_eq!(fs::read_to_string(&noop_live).unwrap(), base);
+        assert!(!noop_evidence.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_tombstone_scan_checks_late_entries_and_private_mode_before_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (case, contents, mode) in [
+            ("late-unexpected-bytes", "unexpected-owner", 0o600),
+            ("late-candidate-wrong-mode", "journaled-candidate", 0o644),
+        ] {
+            let root = test_root(case);
+            fs::create_dir_all(&root).unwrap();
+            let live = root.join("providers.toml");
+            let evidence = root.join("providers.rollback-evidence");
+            fs::write(&live, "journaled-candidate").unwrap();
+            let late_slot = rollback_tombstone_path(&live, 1);
+            fs::write(&late_slot, contents).unwrap();
+            fs::set_permissions(&late_slot, fs::Permissions::from_mode(mode)).unwrap();
+
+            let error = remove_private_text_if_unchanged(
+                &live,
+                &evidence,
+                &root,
+                1024,
+                "late tombstone mismatch",
+                |current| current == "journaled-candidate",
+                || {},
+            )
+            .expect_err("a late mismatch must win over an earlier vacant slot");
+
+            assert!(error.contains("tombstone mismatched"));
+            assert_eq!(
+                fs::read_to_string(&live).unwrap(),
+                "journaled-candidate"
+            );
+            assert!(!evidence.exists());
+            assert!(!rollback_tombstone_path(&live, 0).exists());
+            assert_eq!(fs::read_to_string(&late_slot).unwrap(), contents);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[cfg(all(
@@ -4189,12 +5428,30 @@ mod tests {
         fs::create_dir_all(&parent).unwrap();
         let (start_tx, start_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let root_for_attacker = root.clone();
         let parent_for_attacker = parent.clone();
         let moved_for_attacker = moved_parent.clone();
         let attacker = thread::spawn(move || {
             start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let rename_result = fs::rename(&parent_for_attacker, &moved_for_attacker);
+            #[cfg(windows)]
+            let rename_result = {
+                let mut opened_parent =
+                    open_renameable_windows_parent_for_test(&parent_for_attacker);
+                let root_parent = super::PinnedPrivateParent {
+                    directory: open_renameable_windows_parent_for_test(&root_for_attacker),
+                    parent_path: root_for_attacker,
+                };
+                root_parent.rename_opened_file(
+                    &mut opened_parent,
+                    &moved_for_attacker,
+                    false,
+                )
+            };
             #[cfg(unix)]
+            let rename_result =
+                fs::rename(&parent_for_attacker, &moved_for_attacker)
+                    .map_err(|error| error.to_string());
             if rename_result.is_ok() {
                 fs::create_dir_all(&parent_for_attacker).unwrap();
                 fs::write(parent_for_attacker.join("sentinel"), "replacement").unwrap();
@@ -4207,12 +5464,12 @@ mod tests {
             #[cfg(windows)]
             assert!(
                 result.is_err(),
-                "the pinned Windows directory handle must deny parent rename/delete"
+                "Windows does not rebind a directory after child lock/temp handles are open"
             );
             #[cfg(unix)]
             assert!(
                 result.is_ok(),
-                "the Unix race fixture must actually rename the pathname"
+                "the Unix race fixture must actually rename and replace the parent pathname: {result:?}"
             );
         });
 
@@ -4252,44 +5509,56 @@ mod tests {
         fs::write(victim.join("catalog.json"), "victim-catalog").unwrap();
         let (start_tx, start_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let root_for_attacker = root.clone();
         let parent_for_attacker = parent.clone();
         let moved_for_attacker = moved_parent.clone();
         let victim_for_attacker = victim.clone();
         let attacker = thread::spawn(move || {
             start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let rename_result = fs::rename(&parent_for_attacker, &moved_for_attacker);
+            #[cfg(windows)]
+            let rename_result = {
+                let mut opened_parent =
+                    open_renameable_windows_parent_for_test(&parent_for_attacker);
+                let root_parent = super::PinnedPrivateParent {
+                    directory: open_renameable_windows_parent_for_test(&root_for_attacker),
+                    parent_path: root_for_attacker,
+                };
+                root_parent.rename_opened_file(
+                    &mut opened_parent,
+                    &moved_for_attacker,
+                    false,
+                )
+            };
+            #[cfg(unix)]
+            let rename_result =
+                fs::rename(&parent_for_attacker, &moved_for_attacker)
+                    .map_err(|error| error.to_string());
             if rename_result.is_ok() {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&victim_for_attacker, &parent_for_attacker).unwrap();
-                #[cfg(windows)]
-                {
-                    let status = Command::new("cmd")
-                        .args([
-                            "/C",
-                            "mklink",
-                            "/J",
-                            &parent_for_attacker.to_string_lossy(),
-                            &victim_for_attacker.to_string_lossy(),
-                        ])
-                        .status()
-                        .unwrap();
-                    assert!(status.success(), "junction swap fixture must be created");
-                }
+                fs::create_dir_all(&parent_for_attacker).unwrap();
+                fs::write(
+                    parent_for_attacker.join("catalog.json"),
+                    "replacement-catalog",
+                )
+                .unwrap();
+                fs::write(
+                    parent_for_attacker.join("catalog.json.recovery.quarantine"),
+                    "replacement-quarantine",
+                )
+                .unwrap();
+                assert_eq!(
+                    fs::read_to_string(victim_for_attacker.join("catalog.json")).unwrap(),
+                    "victim-catalog"
+                );
             }
             done_tx.send(rename_result).unwrap();
         });
         install_test_pre_private_quarantine_hook(move |_| {
             start_tx.send(()).unwrap();
             let result = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            #[cfg(windows)]
-            assert!(
-                result.is_err(),
-                "the retained Windows parent handle must deny a junction swap"
-            );
-            #[cfg(unix)]
             assert!(
                 result.is_ok(),
-                "the Unix fixture must replace the pathname after validation"
+                "the race fixture must replace the pathname after validation: {result:?}"
             );
         });
 
@@ -4311,21 +5580,25 @@ mod tests {
             "victim-catalog"
         );
         assert!(!victim.join("catalog.json.recovery.quarantine").exists());
-        #[cfg(windows)]
-        assert_eq!(
-            fs::read_to_string(&quarantine).unwrap(),
-            "transaction-owned-catalog"
-        );
-        #[cfg(unix)]
         assert_eq!(
             fs::read_to_string(moved_parent.join("catalog.json.recovery.quarantine")).unwrap(),
             "transaction-owned-catalog"
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("catalog.json")).unwrap(),
+            "replacement-catalog"
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("catalog.json.recovery.quarantine")).unwrap(),
+            "replacement-quarantine"
         );
         #[cfg(target_os = "linux")]
         assert_eq!(
             fs::read_to_string(moved_parent.join("catalog.json")).unwrap(),
             "disabled-sentinel"
         );
+        #[cfg(not(target_os = "linux"))]
+        assert!(!moved_parent.join("catalog.json").exists());
         let _ = fs::remove_dir_all(root);
     }
 
