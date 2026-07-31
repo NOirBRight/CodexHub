@@ -103,6 +103,9 @@ public static class CodexHubE2EJob
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
     [DllImport("kernel32.dll")]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll")]
     private static extern bool QueryInformationJobObject(
         IntPtr job,
         int informationClass,
@@ -162,6 +165,11 @@ public static class CodexHubE2EJob
         {
             Marshal.FreeHGlobal(pointer);
         }
+    }
+
+    public static bool Terminate(IntPtr job, uint exitCode)
+    {
+        return job != IntPtr.Zero && TerminateJobObject(job, exitCode);
     }
 
     public static void Close(IntPtr job)
@@ -364,9 +372,11 @@ function Invoke-RunnerSupervisor {
     [void](New-Item -ItemType Directory -Force -Path $supervisorOutput)
     $summaryPath = Join-Path $supervisorOutput 'summary.json'
     $statePath = Join-Path $supervisorOutput 'runner-watchdog-state'
+    $startGatePath = Join-Path $supervisorOutput 'runner-start-gate'
     $stdoutPath = Join-Path $supervisorOutput 'runner-watchdog.stdout'
     $stderrPath = Join-Path $supervisorOutput 'runner-watchdog.stderr'
     [System.IO.File]::WriteAllText($statePath, 'preflight', $script:Utf8NoBom)
+    Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue
     foreach ($path in @($stdoutPath, $stderrPath)) {
         [System.IO.File]::WriteAllText($path, '', $script:Utf8NoBom)
     }
@@ -402,6 +412,18 @@ function Invoke-RunnerSupervisor {
         [System.Text.Encoding]::UTF8.GetBytes($forwardedJson)
     )
     $workerBootstrap = @'
+& {
+  $gate = [string]$env:CODEXHUB_E2E_SUPERVISOR_START_GATE
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (-not (Test-Path -LiteralPath $gate -PathType Leaf)) {
+    if ([DateTime]::UtcNow -ge $deadline) {
+      exit 125
+    }
+
+    Start-Sleep -Milliseconds 10
+  }
+  Remove-Item -LiteralPath $gate -Force -ErrorAction SilentlyContinue
+}
 & $env:CODEXHUB_E2E_SUPERVISOR_SCRIPT `
   -CandidateSha '0000000000000000000000000000000000000000' `
   -DebugBuild '.' `
@@ -432,6 +454,7 @@ exit $LASTEXITCODE
         CODEXHUB_E2E_SUPERVISOR_TOKEN = $token
         CODEXHUB_E2E_SUPERVISOR_SCRIPT = $PSCommandPath
         CODEXHUB_E2E_SUPERVISOR_ARGUMENTS = $forwardedPayload
+        CODEXHUB_E2E_SUPERVISOR_START_GATE = $startGatePath
     }
     $previousEnvironment = @{}
     foreach ($entry in $supervisorEnvironment.GetEnumerator()) {
@@ -473,9 +496,28 @@ exit $LASTEXITCODE
             Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_process_supervision_unavailable')
             return 1
         }
+        # The worker waits on this file before invoking the real runner.  This
+        # closes the short Start-Process/AssignProcessToJobObject race: every
+        # candidate and client process is created only after the worker belongs
+        # to the kill-on-close job.
+        [System.IO.File]::WriteAllText($startGatePath, 'ready', $script:Utf8NoBom)
         $completed = $process.WaitForExit($OverallTimeoutSeconds * 1000)
         if (-not $completed) {
+            # Terminate first and keep the handle open long enough to observe
+            # the Job Object quiesce.  Closing the handle immediately makes
+            # Windows kill descendants asynchronously, which can expose a
+            # still-running PID to the caller for a short, nondeterministic
+            # window even though the timeout cleanup has succeeded.
             $counts = [CodexHubE2EJob]::GetProcessCounts($job)
+            [void][CodexHubE2EJob]::Terminate($job, 1)
+            $terminationDeadline = [DateTime]::UtcNow.AddSeconds(2)
+            do {
+                $remainingCounts = [CodexHubE2EJob]::GetProcessCounts($job)
+                if ([int]$remainingCounts[1] -eq 0 -or [DateTime]::UtcNow -ge $terminationDeadline) {
+                    break
+                }
+                Start-Sleep -Milliseconds 25
+            } while ($true)
             [CodexHubE2EJob]::Close($job)
             $job = [IntPtr]::Zero
             [void]$process.WaitForExit(2000)
@@ -532,6 +574,7 @@ exit $LASTEXITCODE
             Remove-Item -LiteralPath $stream.path -Force -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue
     }
 }
 
