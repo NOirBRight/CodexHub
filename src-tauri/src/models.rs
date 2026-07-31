@@ -2492,6 +2492,116 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const APP_SERVER_TEST_PROCESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS";
+    const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str =
+        "CODEXHUB_APP_SERVER_TEST_PROCESS_LIVENESS";
+    const APP_SERVER_TEST_PROCESS_HELPER: &str =
+        "models::tests::app_server_model_list_test_process_helper";
+
+    #[test]
+    #[ignore = "launched as a subprocess by app-server model-list tests"]
+    fn app_server_model_list_test_process_helper() {
+        let mode = std::env::var(APP_SERVER_TEST_PROCESS_ENV);
+        if !matches!(mode.as_deref(), Ok("respond" | "silent")) {
+            return;
+        }
+        let liveness_path = PathBuf::from(
+            std::env::var_os(APP_SERVER_TEST_PROCESS_LIVENESS_ENV)
+                .expect("app-server test-process liveness path"),
+        );
+        let liveness_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind app-server test-process liveness listener");
+        let liveness_address = liveness_listener
+            .local_addr()
+            .expect("read app-server test-process liveness address");
+        let mut liveness_options = fs::OpenOptions::new();
+        liveness_options.create_new(true).read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            liveness_options.share_mode(0);
+        }
+        let mut liveness = liveness_options
+            .open(&liveness_path)
+            .expect("hold app-server test-process liveness file");
+        writeln!(
+            liveness,
+            "pid={}\naddress={liveness_address}",
+            std::process::id()
+        )
+        .expect("write app-server test-process liveness record");
+        liveness
+            .flush()
+            .expect("flush app-server test-process liveness record");
+
+        if mode.as_deref() == Ok("respond") {
+            println!("\n{}", json!({"id": 2, "result": {"data": []}}));
+            std::io::stdout()
+                .flush()
+                .expect("flush app-server model-list test response");
+        }
+        loop {
+            thread::park();
+        }
+    }
+
+    fn responding_app_server_test_process_command(liveness_path: &Path) -> std::process::Command {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                APP_SERVER_TEST_PROCESS_HELPER,
+                "--nocapture",
+            ])
+            .env(APP_SERVER_TEST_PROCESS_ENV, "respond")
+            .env(APP_SERVER_TEST_PROCESS_LIVENESS_ENV, liveness_path);
+        command
+    }
+
+    fn silent_app_server_test_process_command(liveness_path: &Path) -> std::process::Command {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                APP_SERVER_TEST_PROCESS_HELPER,
+                "--nocapture",
+            ])
+            .env(APP_SERVER_TEST_PROCESS_ENV, "silent")
+            .env(APP_SERVER_TEST_PROCESS_LIVENESS_ENV, liveness_path);
+        command
+    }
+
+    fn assert_app_server_test_process_stopped(liveness_path: &Path) {
+        assert!(
+            liveness_path.is_file(),
+            "the deterministic app-server helper must reach response readiness"
+        );
+        let liveness_record =
+            fs::read_to_string(liveness_path).expect("read app-server helper liveness record");
+        let liveness_address = liveness_record
+            .lines()
+            .find_map(|line| line.strip_prefix("address="))
+            .expect("app-server helper liveness address")
+            .parse::<std::net::SocketAddr>()
+            .expect("parse app-server helper liveness address");
+        let released_listener = std::net::TcpListener::bind(liveness_address)
+            .expect("app-server helper must release its liveness listener");
+        drop(released_listener);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(liveness_path)
+                .expect("app-server helper must be terminated and release its liveness file");
+        }
+    }
 
     #[test]
     fn desktop_codex_exe_finds_the_app_managed_runtime() {
@@ -2566,26 +2676,10 @@ for line in sys.stdin:
     #[test]
     fn app_server_model_list_fails_closed_when_native_cache_is_never_published() {
         let root = temp_root("app-server-missing-cache");
-        let script = root.join("fake-codex-app-server.py");
         let cache_path = root.join("codex-home").join("models_cache.json");
+        let helper_liveness_path = root.join("helper-liveness.lock");
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &script,
-            r#"import json
-import sys
-import time
-
-for line in sys.stdin:
-    message = json.loads(line)
-    if message.get("id") != 2:
-        continue
-    print(json.dumps({"id": 2, "result": {"data": []}}), flush=True)
-    time.sleep(10)
-"#,
-        )
-        .unwrap();
-        let mut command = std::process::Command::new(super::find_python());
-        command.arg(&script);
+        let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
         let error = super::read_codex_app_server_model_list_with_command(
@@ -2603,6 +2697,35 @@ for line in sys.stdin:
             started.elapsed() < Duration::from_secs(2),
             "missing cache handling must remain bounded"
         );
+        assert_app_server_test_process_stopped(&helper_liveness_path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_response_timeout_remains_independently_bounded() {
+        let root = temp_root("app-server-response-timeout");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        let helper_liveness_path = root.join("helper-liveness.lock");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let command = silent_app_server_test_process_command(&helper_liveness_path);
+        let started = Instant::now();
+
+        let error = super::read_codex_app_server_model_list_with_command(
+            command,
+            &cache_path,
+            Duration::from_secs(1),
+        )
+        .expect_err("silent app-server must hit the response timeout");
+
+        assert_eq!(
+            error,
+            "codex app-server model list timed out after 0 seconds"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "response timeout handling must remain bounded"
+        );
+        assert_app_server_test_process_stopped(&helper_liveness_path);
         let _ = fs::remove_dir_all(root);
     }
 
