@@ -18,6 +18,8 @@ type TestLockAcquireHook = Box<dyn Fn(&Path, &'static str) + Send + Sync>;
 #[cfg(test)]
 thread_local! {
     static TEST_PRE_OPEN_EXISTING_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
+    static TEST_POST_PRIVATE_PARENT_PIN_HOOK: RefCell<Option<TestPreOpenHook>> =
+        RefCell::new(None);
     static TEST_PRE_PRIVATE_PUBLISH_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
     static TEST_PRE_PRIVATE_QUARANTINE_HOOK: RefCell<Option<TestPreOpenHook>> = RefCell::new(None);
     #[cfg(target_os = "linux")]
@@ -115,6 +117,25 @@ fn clear_test_pre_private_quarantine_hook() {
 #[cfg(test)]
 fn invoke_test_pre_private_quarantine_hook(path: &Path) {
     TEST_PRE_PRIVATE_QUARANTINE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_test_post_private_parent_pin_hook(hook: impl Fn(&Path) + 'static) {
+    TEST_POST_PRIVATE_PARENT_PIN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn clear_test_post_private_parent_pin_hook() {
+    TEST_POST_PRIVATE_PARENT_PIN_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn invoke_test_post_private_parent_pin_hook(path: &Path) {
+    TEST_POST_PRIVATE_PARENT_PIN_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow().as_ref() {
             hook(path);
         }
@@ -415,7 +436,9 @@ pub(crate) fn write_private_text_atomic(
 ) -> Result<(), String> {
     validate_confined_path(path, boundary, true)?;
     let pinned_parent = PinnedPrivateParent::open(path, boundary)?;
-    let lock = FileLock::acquire(path)?;
+    #[cfg(test)]
+    invoke_test_post_private_parent_pin_hook(path);
+    let lock = FileLock::acquire_private(path, &pinned_parent)?;
     write_text_locked_impl(path, text, &lock, Some(&pinned_parent))
 }
 
@@ -1222,6 +1245,62 @@ impl PinnedPrivateParent {
         })
     }
 
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn try_clone_for_lock(&self) -> Result<Self, String> {
+        Ok(Self {
+            directory: self.directory.try_clone().map_err(|error| {
+                format!(
+                    "failed to clone pinned private file parent {} for lock acquisition: {error}",
+                    self.parent_path.display()
+                )
+            })?,
+            parent_path: self.parent_path.clone(),
+        })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn open_lock(&self, path: &Path, create_new: bool) -> std::io::Result<File> {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+
+        let relative = path
+            .strip_prefix(&self.parent_path)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let mut components = relative.components();
+        let leaf = match (components.next(), components.next()) {
+            (Some(Component::Normal(leaf)), None) => leaf,
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+        };
+        let leaf = CString::new(leaf.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let mut flags = unix_private_io::O_RDWR
+            | unix_private_io::O_NOFOLLOW
+            | unix_private_io::O_CLOEXEC;
+        if create_new {
+            flags |= unix_private_io::O_CREAT | unix_private_io::O_EXCL;
+        }
+        let fd = unsafe {
+            openat(
+                self.directory.as_raw_fd(),
+                leaf.as_ptr(),
+                flags,
+                0o666,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     fn create_temp(&self, temp_path: &Path) -> std::io::Result<File> {
         #[cfg(target_os = "linux")]
         {
@@ -1579,6 +1658,8 @@ const STATUS_NO_SUCH_FILE: i32 = 0xC000_000F_u32 as i32;
 #[cfg(windows)]
 const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034_u32 as i32;
 #[cfg(windows)]
+const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035_u32 as i32;
+#[cfg(windows)]
 const STATUS_OBJECT_PATH_NOT_FOUND: i32 = 0xC000_003A_u32 as i32;
 
 #[cfg(windows)]
@@ -1599,17 +1680,17 @@ impl WindowsChildOpenError {
             Self::NtStatus(status) if windows_child_status_is_absent(status) => {
                 std::io::Error::from(std::io::ErrorKind::NotFound)
             }
+            Self::NtStatus(STATUS_OBJECT_NAME_COLLISION) => {
+                std::io::Error::from(std::io::ErrorKind::AlreadyExists)
+            }
             Self::NtStatus(status) => {
                 let code = unsafe { RtlNtStatusToDosError(status) };
                 let translated =
                     std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX));
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "relative NtCreateFile failed with NTSTATUS 0x{:08X} ({translated})",
-                        status as u32
-                    ),
-                )
+                std::io::Error::other(format!(
+                    "relative NtCreateFile failed with NTSTATUS 0x{:08X} ({translated})",
+                    status as u32
+                ))
             }
             Self::InvalidHandle => std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1653,6 +1734,42 @@ impl PinnedPrivateParent {
             directory,
             parent_path,
         })
+    }
+
+    fn try_clone_for_lock(&self) -> Result<Self, String> {
+        Ok(Self {
+            directory: self.directory.try_clone().map_err(|error| {
+                format!(
+                    "failed to clone pinned private file parent {} for lock acquisition: {error}",
+                    self.parent_path.display()
+                )
+            })?,
+            parent_path: self.parent_path.clone(),
+        })
+    }
+
+    fn open_lock(&self, path: &Path, create_new: bool) -> std::io::Result<File> {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+        const FILE_OPEN: u32 = 1;
+        const FILE_CREATE: u32 = 2;
+        const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+        const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        self.nt_create_child(
+            path,
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+            if create_new { FILE_ATTRIBUTE_NORMAL } else { 0 },
+            if create_new { FILE_CREATE } else { FILE_OPEN },
+            FILE_NON_DIRECTORY_FILE
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+        .map_err(WindowsChildOpenError::into_io_error)
     }
 
     fn create_temp(&self, temp_path: &Path) -> std::io::Result<File> {
@@ -2881,7 +2998,7 @@ fn revalidate_linux_vacant_slot(
     match parent.open_existing(&slot.path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(format!(
-            "{label} selected rollback tombstone occupied after reservation; live and evidence bytes were preserved and recovery remains fail-closed"
+            "{label} selected rollback tombstone occupied after selection; live and evidence bytes were preserved and recovery remains fail-closed"
         )),
         Err(error) => Err(format!(
             "failed to revalidate selected {label} rollback tombstone before mutation: {error}"
@@ -2910,7 +3027,7 @@ fn isolate_reserved_private_evidence_linux(
     if let Err(error) = parent.rename_path_noreplace(evidence, &slot.path) {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             return Err(format!(
-                "{label} selected rollback tombstone occupied after reservation; evidence bytes were preserved and recovery remains fail-closed"
+                "{label} selected rollback tombstone occupied after selection; evidence bytes were preserved and recovery remains fail-closed"
             ));
         }
         return Err(format!(
@@ -3398,7 +3515,110 @@ const LOCK_NOFOLLOW: i32 = 0x100;
 ))]
 const LOCK_NOFOLLOW: i32 = 0x100;
 
-fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
+#[derive(Clone, Copy)]
+enum LockOpenMode {
+    CreateNew,
+    Existing,
+}
+
+#[cfg(unix)]
+type LockIdentity = (u64, u64);
+#[cfg(windows)]
+type LockIdentity = (u32, u64);
+
+enum LockNamespace {
+    Absolute,
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    PinnedParent(PinnedPrivateParent),
+}
+
+enum LockNamespaceOpenError {
+    Io(std::io::Error),
+    Invalid(String),
+}
+
+impl LockNamespaceOpenError {
+    fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            Self::Io(error) => Some(error.kind()),
+            Self::Invalid(_) => None,
+        }
+    }
+
+    fn into_lock_error(self) -> String {
+        match self {
+            Self::Io(_) => "failed to open atomic write lock".to_owned(),
+            Self::Invalid(error) => error,
+        }
+    }
+}
+
+impl LockNamespace {
+    fn absolute() -> Self {
+        Self::Absolute
+    }
+
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    fn pinned(parent: &PinnedPrivateParent) -> Result<Self, String> {
+        parent.try_clone_for_lock().map(Self::PinnedParent)
+    }
+
+    fn open(&self, path: &Path, mode: LockOpenMode) -> std::io::Result<File> {
+        match self {
+            Self::Absolute => open_absolute_lock_file(path, mode),
+            #[cfg(any(
+                windows,
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            ))]
+            Self::PinnedParent(parent) => {
+                parent.open_lock(path, matches!(mode, LockOpenMode::CreateNew))
+            }
+        }
+    }
+
+    fn open_validated(
+        &self,
+        path: &Path,
+        mode: LockOpenMode,
+    ) -> Result<(File, LockIdentity), LockNamespaceOpenError> {
+        let file = self.open(path, mode).map_err(LockNamespaceOpenError::Io)?;
+        let metadata = file.metadata().map_err(|_| {
+            LockNamespaceOpenError::Invalid("failed to open atomic write lock".to_owned())
+        })?;
+        validate_lock_metadata(&metadata).map_err(LockNamespaceOpenError::Invalid)?;
+        validate_lock_handle(&file).map_err(LockNamespaceOpenError::Invalid)?;
+        let identity = lock_file_identity(&file).map_err(LockNamespaceOpenError::Invalid)?;
+        Ok((file, identity))
+    }
+
+    fn verify_identity(&self, path: &Path, file: &File) -> Result<(), String> {
+        let held_identity = lock_file_identity(file)?;
+        let (_, current_identity) = self
+            .open_validated(path, LockOpenMode::Existing)
+            .map_err(|_| "atomic write lock path changed".to_owned())?;
+        if held_identity != current_identity {
+            return Err("atomic write lock path changed".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn open_absolute_lock_file(path: &Path, mode: LockOpenMode) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     #[cfg(unix)]
@@ -3413,11 +3633,29 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
             .share_mode(win32::SHARE_READ_WRITE_DELETE)
             .custom_flags(win32::FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    if create_new {
+    if matches!(mode, LockOpenMode::CreateNew) {
         options.create_new(true).open(path)
     } else {
         options.open(path)
     }
+}
+
+fn open_existing_lock_after_snapshot(
+    namespace: &LockNamespace,
+    path: &Path,
+) -> Result<(File, LockIdentity), LockNamespaceOpenError> {
+    let (snapshot, pre_open_identity) =
+        namespace.open_validated(path, LockOpenMode::Existing)?;
+    drop(snapshot);
+    #[cfg(test)]
+    invoke_test_pre_open_hook(path);
+    let (file, opened_identity) = namespace.open_validated(path, LockOpenMode::Existing)?;
+    if opened_identity != pre_open_identity {
+        return Err(LockNamespaceOpenError::Invalid(
+            "atomic write lock path changed".to_owned(),
+        ));
+    }
+    Ok((file, opened_identity))
 }
 
 fn namespace_lock_path(primary: &Path) -> PathBuf {
@@ -3431,58 +3669,40 @@ fn namespace_lock_path(primary: &Path) -> PathBuf {
 }
 
 fn acquire_namespace_guard(
+    namespace: &LockNamespace,
     path: &Path,
     started: &Instant,
     hook: Option<&dyn Fn(&'static str)>,
 ) -> Result<File, String> {
     loop {
-        let file = match open_lock_file(path, true) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = match fs::symlink_metadata(path) {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        let file = match namespace.open_validated(path, LockOpenMode::CreateNew) {
+            Ok((file, _)) => file,
+            Err(error)
+                if error.io_kind() == Some(std::io::ErrorKind::AlreadyExists) =>
+            {
+                match open_existing_lock_after_snapshot(namespace, path) {
+                    Ok((file, _)) => file,
+                    Err(error)
+                        if error.io_kind() == Some(std::io::ErrorKind::NotFound) =>
+                    {
                         retry_lock(started)?;
                         continue;
                     }
-                    Err(_) => return Err("failed to open atomic write lock".to_owned()),
-                };
-                validate_lock_metadata(&metadata)?;
-                let pre_open_identity = lock_path_identity(path, &metadata)?;
-                #[cfg(test)]
-                invoke_test_pre_open_hook(path);
-                match open_lock_file(path, false) {
-                    Ok(file) => {
-                        let opened_identity = lock_file_identity(&file)?;
-                        if opened_identity != pre_open_identity {
-                            return Err("atomic write lock path changed".to_owned());
-                        }
-                        file
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        retry_lock(started)?;
-                        continue;
-                    }
-                    Err(_) => return Err("failed to open atomic write lock".to_owned()),
+                    Err(error) => return Err(error.into_lock_error()),
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.io_kind() == Some(std::io::ErrorKind::NotFound) => {
                 retry_lock(started)?;
                 continue;
             }
-            Err(_) => return Err("failed to open atomic write lock".to_owned()),
+            Err(error) => return Err(error.into_lock_error()),
         };
-        let metadata = file
-            .metadata()
-            .map_err(|_| "failed to open atomic write lock".to_owned())?;
-        validate_lock_metadata(&metadata)?;
-        validate_lock_handle(&file)?;
         if let Some(hook) = hook {
             hook("attempt");
         }
         match try_lock_exclusive(&file) {
             Ok(true) => {
-                if let Err(error) = verify_lock_identity(path, &file) {
+                if let Err(error) = namespace.verify_identity(path, &file) {
                     let _ = unlock(&file);
                     return Err(error);
                 }
@@ -3522,90 +3742,113 @@ fn acquire_namespace_guard(
 pub(crate) struct FileLock {
     target_path: PathBuf,
     namespace_path: PathBuf,
-    namespace: File,
+    guard: File,
     file: File,
     locked: bool,
     namespace_locked: bool,
+    lock_namespace: LockNamespace,
 }
 
 impl FileLock {
     pub(crate) fn acquire(target: &Path) -> Result<Self, String> {
-        Self::acquire_inner(target, None)
+        Self::acquire_inner(target, LockNamespace::absolute(), None)
+    }
+
+    fn acquire_private(
+        target: &Path,
+        parent: &PinnedPrivateParent,
+    ) -> Result<Self, String> {
+        #[cfg(any(
+            windows,
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))]
+        {
+            Self::acquire_inner(target, LockNamespace::pinned(parent)?, None)
+        }
+        #[cfg(not(any(
+            windows,
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )))]
+        {
+            let _ = (target, parent);
+            Err(
+                "private scoped lock acquisition is supported only by the Windows and Linux x86_64/aarch64 0.1.8 release gates"
+                    .to_owned(),
+            )
+        }
     }
 
     #[cfg(test)]
     fn acquire_with_hook(target: &Path, hook: &dyn Fn(&'static str)) -> Result<Self, String> {
-        Self::acquire_inner(target, Some(hook))
+        Self::acquire_inner(target, LockNamespace::absolute(), Some(hook))
     }
 
-    fn acquire_inner(target: &Path, hook: Option<&dyn Fn(&'static str)>) -> Result<Self, String> {
+    fn acquire_inner(
+        target: &Path,
+        lock_namespace: LockNamespace,
+        hook: Option<&dyn Fn(&'static str)>,
+    ) -> Result<Self, String> {
         let path = lock_path(target);
         let namespace_path = namespace_lock_path(&path);
         let started = Instant::now();
-        let namespace = acquire_namespace_guard(&namespace_path, &started, hook)?;
+        let guard =
+            acquire_namespace_guard(&lock_namespace, &namespace_path, &started, hook)?;
         loop {
-            let (mut file, created) = match open_lock_file(&path, true) {
-                Ok(file) => {
-                    let metadata = file
-                        .metadata()
-                        .map_err(|_| "failed to open atomic write lock".to_owned())?;
-                    validate_lock_metadata(&metadata)?;
-                    validate_lock_handle(&file)?;
-                    (file, true)
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let metadata = match fs::symlink_metadata(&path) {
-                        Ok(metadata) => metadata,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            retry_lock(&started)?;
-                            continue;
+            let (mut file, created) =
+                match lock_namespace.open_validated(&path, LockOpenMode::CreateNew) {
+                    Ok((file, _)) => (file, true),
+                    Err(error)
+                        if error.io_kind() == Some(std::io::ErrorKind::AlreadyExists) =>
+                    {
+                        match open_existing_lock_after_snapshot(&lock_namespace, &path) {
+                            Ok((file, _)) => (file, false),
+                            Err(error)
+                                if error.io_kind()
+                                    == Some(std::io::ErrorKind::NotFound) =>
+                            {
+                                retry_lock(&started)?;
+                                continue;
+                            }
+                            Err(error) => return Err(error.into_lock_error()),
                         }
-                        Err(_) => return Err("failed to open atomic write lock".to_owned()),
-                    };
-                    validate_lock_metadata(&metadata)?;
-                    let pre_open_identity = lock_path_identity(&path, &metadata)?;
-                    #[cfg(test)]
-                    invoke_test_pre_open_hook(&path);
-                    let file = match open_lock_file(&path, false) {
-                        Ok(file) => file,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            retry_lock(&started)?;
-                            continue;
-                        }
-                        Err(_) => return Err("failed to open atomic write lock".to_owned()),
-                    };
-                    let opened_metadata = file
-                        .metadata()
-                        .map_err(|_| "failed to open atomic write lock".to_owned())?;
-                    validate_lock_metadata(&opened_metadata)?;
-                    validate_lock_handle(&file)?;
-                    if lock_file_identity(&file)? != pre_open_identity {
-                        return Err("atomic write lock path changed".to_owned());
                     }
-                    (file, false)
-                }
-                Err(_) => return Err("failed to open atomic write lock".to_owned()),
+                    Err(error)
+                        if error.io_kind() == Some(std::io::ErrorKind::NotFound) =>
+                    {
+                        retry_lock(&started)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into_lock_error()),
             };
 
             match try_lock_exclusive(&file) {
                 Ok(true) => {
-                    if let Err(error) = verify_lock_identity(&path, &file) {
+                    if let Err(error) = lock_namespace.verify_identity(&path, &file) {
                         let _ = unlock(&file);
                         return Err(error);
                     }
                     match prepare_lock_metadata(&mut file, created) {
                         Ok(()) => {
-                            if let Err(error) = verify_lock_identity(&path, &file) {
+                            if let Err(error) =
+                                lock_namespace.verify_identity(&path, &file)
+                            {
                                 let _ = unlock(&file);
                                 return Err(error);
                             }
                             return Ok(Self {
                                 target_path: target.to_path_buf(),
                                 namespace_path: namespace_path.clone(),
-                                namespace,
+                                guard,
                                 file,
                                 locked: true,
                                 namespace_locked: true,
+                                lock_namespace,
                             });
                         }
                         Err(LockMetadataError::Transient) => {
@@ -3634,7 +3877,8 @@ impl FileLock {
     }
 
     fn verify_namespace_identity(&self) -> Result<(), String> {
-        verify_lock_identity(&self.namespace_path, &self.namespace)
+        self.lock_namespace
+            .verify_identity(&self.namespace_path, &self.guard)
     }
 
     fn release(&mut self) -> Result<(), String> {
@@ -3647,7 +3891,7 @@ impl FileLock {
             }
         }
         if self.namespace_locked {
-            if unlock(&self.namespace).is_err() && first_error.is_none() {
+            if unlock(&self.guard).is_err() && first_error.is_none() {
                 first_error = Some("failed to release atomic write namespace".to_owned());
             }
             self.namespace_locked = false;
@@ -3713,19 +3957,6 @@ fn lock_file_identity(file: &File) -> Result<(u64, u64), String> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-#[cfg(unix)]
-fn lock_path_identity(_path: &Path, metadata: &fs::Metadata) -> Result<(u64, u64), String> {
-    use std::os::unix::fs::MetadataExt;
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-#[cfg(windows)]
-fn lock_path_identity(path: &Path, _metadata: &fs::Metadata) -> Result<(u32, u64), String> {
-    let file =
-        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
-    lock_file_identity(&file)
-}
-
 #[cfg(windows)]
 fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
     use std::os::windows::io::AsRawHandle;
@@ -3746,39 +3977,6 @@ fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
 #[cfg(windows)]
 fn validate_lock_handle(file: &File) -> Result<(), String> {
     lock_file_identity(file).map(|_| ())
-}
-
-#[cfg(unix)]
-fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    let path_metadata =
-        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
-    validate_lock_metadata(&path_metadata)?;
-    let file_metadata = file
-        .metadata()
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
-    validate_lock_metadata(&file_metadata)?;
-    if path_metadata.dev() != file_metadata.dev() || path_metadata.ino() != file_metadata.ino() {
-        return Err("atomic write lock path changed".to_owned());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
-    let path_metadata =
-        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
-    validate_lock_metadata(&path_metadata)?;
-    let path_file =
-        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
-    let path_identity =
-        lock_file_identity(&path_file).map_err(|_| "atomic write lock path changed".to_owned())?;
-    let file_identity =
-        lock_file_identity(file).map_err(|_| "atomic write lock path changed".to_owned())?;
-    if path_identity != file_identity {
-        return Err("atomic write lock path changed".to_owned());
-    }
-    Ok(())
 }
 
 fn prepare_lock_metadata(file: &mut File, created: bool) -> Result<(), LockMetadataError> {
@@ -4169,10 +4367,11 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_test_pre_open_hook, clear_test_pre_private_publish_hook,
-        clear_test_pre_private_quarantine_hook, install_test_pre_open_hook,
-        install_test_pre_private_publish_hook, install_test_pre_private_quarantine_hook,
-        lock_state, parse_legacy_pid, quarantine_private_text, read_single_link_text,
+        clear_test_post_private_parent_pin_hook, clear_test_pre_open_hook,
+        clear_test_pre_private_publish_hook, clear_test_pre_private_quarantine_hook,
+        install_test_post_private_parent_pin_hook, install_test_pre_open_hook,
+        install_test_pre_private_publish_hook, install_test_pre_private_quarantine_hook, lock_state,
+        parse_legacy_pid, quarantine_private_text, read_single_link_text,
         write_private_text_atomic, write_text_atomic, write_text_locked, FileLock, LockState,
         LOCK_PROTOCOL,
     };
@@ -4597,6 +4796,13 @@ mod tests {
                 "non-absence raw status must remain typed and fail closed: {error}"
             );
         }
+        assert_eq!(
+            super::WindowsChildOpenError::NtStatus(super::STATUS_OBJECT_NAME_COLLISION)
+                .into_io_error()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "create-new collision must remain distinguishable from absence and generic failure"
+        );
     }
 
     #[cfg(windows)]
@@ -4909,7 +5115,7 @@ mod tests {
         clear_test_post_private_rollback_slot_selection_hook();
 
         assert!(
-            error.contains("selected rollback tombstone occupied after reservation"),
+            error.contains("selected rollback tombstone occupied after selection"),
             "unexpected selected-slot error: {error}"
         );
         assert!(!error.contains("capacity exhausted"));
@@ -4921,6 +5127,79 @@ mod tests {
                 .len(),
             0
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn linux_noreplace_catches_slot_collision_after_selected_slot_preflight() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("selected-slot-late-noreplace-collision");
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("providers.toml");
+        let evidence = root.join("providers.rollback-evidence");
+        let selected = rollback_tombstone_path(&live, 0);
+        let base = "provider = \"base\"\n";
+        let candidate = "api_key = \"late-collision-candidate\"\n";
+        let external = "external-selected-slot-owner";
+        fs::write(&live, base).unwrap();
+        fs::write(&evidence, candidate).unwrap();
+        let selected_for_hook = selected.clone();
+        install_test_pre_private_evidence_isolate_hook(move |_| {
+            fs::write(&selected_for_hook, external).unwrap();
+            fs::set_permissions(
+                &selected_for_hook,
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        });
+
+        let error = replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "late selected slot collision",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect_err("RENAME_NOREPLACE must reject a slot filled after preflight");
+        clear_test_pre_private_evidence_isolate_hook();
+
+        assert!(
+            error.contains("selected rollback tombstone occupied after selection"),
+            "unexpected late-collision error: {error}"
+        );
+        assert!(!error.contains("capacity exhausted"));
+        assert_eq!(fs::read_to_string(&live).unwrap(), base);
+        assert_eq!(fs::read_to_string(&evidence).unwrap(), candidate);
+        assert_eq!(fs::read_to_string(&selected).unwrap(), external);
+        fs::remove_file(&selected).unwrap();
+        replace_private_text_if_unchanged(
+            PrivateTextReplacement {
+                path: &live,
+                evidence: &evidence,
+                boundary: &root,
+                contents: base,
+                max_bytes: 1024,
+                label: "late selected slot collision retry",
+            },
+            |current| current == candidate,
+            || {},
+        )
+        .expect("removing the external collision must leave the exact prefix restartable");
+        assert_eq!(fs::read_to_string(&live).unwrap(), base);
+        assert!(!evidence.exists());
+        let retained = fs::metadata(&selected).unwrap();
+        assert_eq!(retained.len(), 0);
+        assert_eq!(retained.permissions().mode() & 0o777, 0o600);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5599,6 +5878,88 @@ mod tests {
         );
         #[cfg(not(target_os = "linux"))]
         assert!(!moved_parent.join("catalog.json").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn private_scoped_lock_and_write_stay_in_original_parent_after_parent_replacement() {
+        let root = test_root("private-scoped-lock-parent-replacement");
+        let parent = root.join("owned");
+        let moved_parent = root.join("owned-moved");
+        let target = parent.join("secret.backup");
+        let replacement_lock = parent.join("secret.backup.lock");
+        let replacement_guard = parent.join("secret.backup.lock.guard");
+        fs::create_dir_all(&parent).unwrap();
+
+        #[cfg(windows)]
+        let root_for_hook = root.clone();
+        let parent_for_hook = parent.clone();
+        let moved_for_hook = moved_parent.clone();
+        install_test_post_private_parent_pin_hook(move |_| {
+            #[cfg(windows)]
+            {
+                let mut opened_parent =
+                    open_renameable_windows_parent_for_test(&parent_for_hook);
+                let root_parent = super::PinnedPrivateParent {
+                    directory: open_renameable_windows_parent_for_test(&root_for_hook),
+                    parent_path: root_for_hook.clone(),
+                };
+                root_parent
+                    .rename_opened_file(&mut opened_parent, &moved_for_hook, false)
+                    .unwrap();
+            }
+            #[cfg(unix)]
+            fs::rename(&parent_for_hook, &moved_for_hook).unwrap();
+            fs::create_dir_all(&parent_for_hook).unwrap();
+            fs::write(parent_for_hook.join("secret.backup"), "replacement-target").unwrap();
+            fs::write(
+                parent_for_hook.join("secret.backup.lock"),
+                "replacement-lock",
+            )
+            .unwrap();
+            fs::write(
+                parent_for_hook.join("secret.backup.lock.guard"),
+                "replacement-guard",
+            )
+            .unwrap();
+        });
+
+        let result = write_private_text_atomic(&target, "scoped-private-write", &root);
+        clear_test_post_private_parent_pin_hook();
+        result.expect("private lock acquisition must stay in the pinned parent");
+
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("secret.backup")).unwrap(),
+            "scoped-private-write"
+        );
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("secret.backup.lock")).unwrap(),
+            LOCK_PROTOCOL
+        );
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("secret.backup.lock.guard")).unwrap(),
+            "",
+            "the guard file must retain the existing empty on-disk protocol"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "replacement-target"
+        );
+        assert_eq!(
+            fs::read_to_string(&replacement_lock).unwrap(),
+            "replacement-lock"
+        );
+        assert_eq!(
+            fs::read_to_string(&replacement_guard).unwrap(),
+            "replacement-guard"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -6443,6 +6804,61 @@ mod tests {
         release_tx.send(()).unwrap();
         done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(!target.exists());
+    }
+
+    #[cfg(any(
+        windows,
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn python_holder_blocks_scoped_private_writer_until_release() {
+        let root = test_root("python-holder-scoped-private-writer");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("shared-private.json");
+        let lock_path = target.with_file_name("shared-private.json.lock");
+        let guard_path = target.with_file_name("shared-private.json.lock.guard");
+        let mut holder = python_holder(&target);
+        expect_handshake(&holder.events, "ready");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let contender_target = target.clone();
+        let contender_boundary = root.clone();
+        let contender = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = write_private_text_atomic(
+                &contender_target,
+                "scoped-after-python-release",
+                &contender_boundary,
+            );
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "the scoped private writer must remain blocked while Python owns the protocol lock"
+        );
+
+        holder.stdin.write_all(b"release\n").unwrap();
+        holder.stdin.flush().unwrap();
+        expect_handshake(&holder.events, "released");
+        assert!(holder.child.wait().unwrap().success());
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .expect("the scoped private writer must acquire after Python releases");
+        contender.join().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "scoped-after-python-release"
+        );
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), LOCK_PROTOCOL);
+        assert_eq!(fs::read_to_string(&guard_path).unwrap(), "");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
