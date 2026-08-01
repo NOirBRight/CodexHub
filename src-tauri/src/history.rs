@@ -589,6 +589,11 @@ fn repair_unified_history(
             paths.codex_config_path().to_string_lossy().into_owned(),
             "--backup".to_string(),
             paths.config_backup_path().to_string_lossy().into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
         ];
         if target.is_unified() {
             args.push("--unified-history".to_string());

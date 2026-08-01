@@ -299,6 +299,25 @@ def _migrate_legacy_context_guard_values(
         )
 
 
+def _preserve_context_guard_overrides(current_text: str, restored_text: str) -> str:
+    """Carry user-owned global context overrides across a backup restore.
+
+    The active overlay can be edited while CodexHub is connected.  The backup
+    is intentionally a snapshot from before activation, so blindly restoring
+    it would silently discard a later user-owned context override.  Legacy
+    CodexHub-managed values have already been removed by migration; values
+    still present in the active config are therefore safe to preserve.
+    """
+
+    overrides = {
+        key: value
+        for key in CONTEXT_GUARD_KEYS
+        if (value := top_level_value(current_text, key)) is not None
+        and top_level_value(restored_text, key) != value
+    }
+    return set_top_level_values(restored_text, overrides) if overrides else restored_text
+
+
 def _safe_official_disable_updates(
     text: str,
     previous: dict[str, str | None],
@@ -792,10 +811,15 @@ def apply_overlay(
     owner: str = "release",
     takeover: bool = False,
     gateway_key: str = "codexhub-proxy",
+    context_guard_state_path: Path | None = None,
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
-    _migrate_legacy_context_guard_values(config_path, backup_path)
+    _migrate_legacy_context_guard_values(
+        config_path,
+        backup_path,
+        context_guard_state_path,
+    )
     original = read_text_preserving_newlines(config_path) if config_path.exists() else ""
     custom_section = section_key_values(original, f"model_providers.{PROXY_PROVIDER_ID}")
     if custom_section is not None and not (
@@ -826,11 +850,21 @@ def apply_overlay(
     atomic_write_text(config_path, updated, encoding="utf-8")
 
 
-def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
-    _migrate_legacy_context_guard_values(config_path, backup_path)
+def restore_overlay(
+    config_path: Path,
+    backup_path: Path,
+    unified_history: bool = False,
+    context_guard_state_path: Path | None = None,
+) -> str:
+    _migrate_legacy_context_guard_values(
+        config_path,
+        backup_path,
+        context_guard_state_path,
+    )
     if backup_path.exists():
         restored = read_text_preserving_newlines(backup_path)
         current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+        restored = _preserve_context_guard_overrides(current, restored)
         restore_from_backup = True
         if is_active_takeover_backup(current, restored, backup_path):
             restored_owner = overlay_owner(restored)
@@ -874,11 +908,13 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
     apply_parser.add_argument("--takeover", action="store_true")
     apply_parser.add_argument("--gateway-key", default="codexhub-proxy")
+    apply_parser.add_argument("--context-guard-state", type=Path)
 
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
     restore_parser.add_argument("--backup", required=True, type=Path)
     restore_parser.add_argument("--unified-history", action="store_true")
+    restore_parser.add_argument("--context-guard-state", type=Path)
 
     inspect_parser = subparsers.add_parser("inspect-unified")
     inspect_parser.add_argument("--config", required=True, type=Path)
@@ -897,9 +933,23 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "apply":
-        apply_overlay(args.config, args.backup, args.catalog, args.base_url, args.owner, args.takeover, args.gateway_key)
+        apply_overlay(
+            args.config,
+            args.backup,
+            args.catalog,
+            args.base_url,
+            args.owner,
+            args.takeover,
+            args.gateway_key,
+            args.context_guard_state,
+        )
     elif args.command == "restore":
-        status = restore_overlay(args.config, args.backup, args.unified_history)
+        status = restore_overlay(
+            args.config,
+            args.backup,
+            args.unified_history,
+            args.context_guard_state,
+        )
         if args.unified_history:
             print(f"unified_history={status}")
     elif args.command == "inspect-unified":

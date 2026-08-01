@@ -187,7 +187,7 @@ impl ConfigPaths {
         self.config_backup_path_for_owner(crate::app_flavor::current().routing_owner())
     }
 
-    fn context_guard_state_path(&self) -> PathBuf {
+    pub(crate) fn context_guard_state_path(&self) -> PathBuf {
         self.proxy_dir().join("context-guard-state.json")
     }
 
@@ -755,6 +755,11 @@ fn republish_managed_codex_context_budget_with_paths(
                 .config_backup_path_for_owner(current_owner)
                 .to_string_lossy()
                 .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
             "--catalog".to_string(),
             paths
                 .generated_catalog_path()
@@ -922,6 +927,11 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
                 .config_backup_path_for_target_owner(current_app_owner, backup_owner)
                 .to_string_lossy()
                 .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
         ];
         if settings.unified_codex_history {
             args.push("--unified-history".to_string());
@@ -941,6 +951,11 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
             "--backup".to_string(),
             paths
                 .config_backup_path_for_owner(current_app_owner)
+                .to_string_lossy()
+                .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
                 .to_string_lossy()
                 .into_owned(),
         ];
@@ -2129,6 +2144,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
         assert_arg_value(
             &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
+        );
+        assert_arg_value(
+            &commands[0].args,
             "--catalog",
             &paths.generated_catalog_path(),
         );
@@ -2543,6 +2563,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_contains_sequence(&commands[0].args, &["restore"]);
         assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+        assert_arg_value(
+            &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
+        );
         assert_eq!(
             paths
                 .config_backup_path()
@@ -3071,6 +3096,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             assert_contains_sequence(&commands[0].args, &["apply"]);
             assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
             assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+            assert_arg_value(
+                &commands[0].args,
+                "--context-guard-state",
+                &paths.context_guard_state_path(),
+            );
             assert_arg_value(&commands[0].args, "--catalog", &paths.generated_catalog_path());
             assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:9099");
             assert_arg_literal(&commands[0].args, "--gateway-key", "isolated-key");
