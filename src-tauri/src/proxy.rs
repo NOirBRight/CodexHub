@@ -783,6 +783,20 @@ fn start_outcome_with_paths(
 }
 
 fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), String> {
+    replace_managed_proxy_from_previous_bundle_with_controls(
+        paths,
+        &SystemProcessKiller,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
+    )
+}
+
+fn replace_managed_proxy_from_previous_bundle_with_controls(
+    paths: &ProxyPaths,
+    killer: &dyn ProcessKiller,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+) -> Result<(), String> {
     let Some(ProxyPidRecord::Managed(metadata)) = read_pid_record(paths)? else {
         return Ok(());
     };
@@ -795,7 +809,7 @@ fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), 
         return Ok(());
     }
 
-    let status = stop_with_paths(paths)?;
+    let status = stop_with_paths_and_controls(paths, killer, inspector, listener_inspector)?;
     if status.proxy_running {
         return Err(format!(
             "previous Gateway bundle is still running on port {}; stop it before starting {}",
@@ -1555,6 +1569,7 @@ fn force_kill_session_owned_gateway_at_deadline(
     Ok(Some(pid))
 }
 
+#[cfg(test)]
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     stop_with_paths_and_controls(
         paths,
@@ -3464,8 +3479,9 @@ mod tests {
         build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
         comparable_path, configure_start_stdio, detect_mode, find_python,
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
-        reconciled_snapshot_with_controls, start_with_paths, start_with_paths_and_controls,
-        start_with_paths_and_waiter, status_with_paths,
+        reconciled_snapshot_with_controls,
+        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths,
+        start_with_paths_and_controls, start_with_paths_and_waiter, status_with_paths,
         stop_current_session_owned_with_paths_and_controls,
         stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
         verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
@@ -5173,6 +5189,7 @@ time.sleep(10)
         result.expect("Gateway bundle upgrade lifecycle");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
         let root = temp_root("python-in-place-upgrade");
@@ -5209,6 +5226,74 @@ time.sleep(10)
 
         let _ = stop_with_paths(&paths);
         result.expect("Gateway in-place upgrade lifecycle");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
+        let root = temp_root("python-in-place-upgrade");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+
+        let result = (|| {
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            let old_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(old_status.proxy_running, "old in-place bundle should start")?;
+            let old_pid = read_pid(&paths)?
+                .ok_or_else(|| "old in-place bundle should own the proxy PID".to_string())?;
+
+            let script_path = paths.proxy_script_path();
+            let script = fs::read_to_string(&script_path)
+                .map_err(|error| format!("read in-place script: {error}"))?;
+            fs::write(&script_path, format!("{script}\n# upgraded in place\n"))
+                .map_err(|error| format!("update in-place script: {error}"))?;
+
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            let new_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(
+                new_status.proxy_running,
+                "upgraded in-place bundle should start",
+            )?;
+            let new_pid = read_pid(&paths)?
+                .ok_or_else(|| "upgraded in-place bundle should own the proxy PID".to_string())?;
+            ensure(
+                new_pid != old_pid,
+                "same-path script changes should replace the previous Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup = stop_with_paths_and_controls(
+            &paths,
+            &super::SystemProcessKiller,
+            &inspector,
+            &listener_inspector,
+        )
+        .map(|_| ());
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("Gateway in-place upgrade lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("Gateway in-place upgrade cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("Gateway in-place upgrade lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     fn test_paths(root: &Path) -> ProxyPaths {
@@ -5593,6 +5678,27 @@ time.sleep(10)
         fn spawned_process_start_id(&self, child: &std::process::Child) -> Result<String, String> {
             super::child_process_start_id(child)
         }
+    }
+
+    #[cfg(windows)]
+    fn start_with_controlled_inspector(
+        paths: &ProxyPaths,
+        inspector: &dyn ProcessInspector,
+        listener_inspector: &dyn ListenerInspector,
+    ) -> Result<AppStatus, String> {
+        super::start_with_paths_and_controls(
+            paths,
+            super::START_TIMEOUT,
+            Duration::from_millis(200),
+            &super::health,
+            inspector,
+            listener_inspector,
+            |child, port, timeout, poll_interval, health_probe, _output_capture| {
+                super::wait_for_startup_health(child, port, timeout, poll_interval, health_probe)
+            },
+        )
+        .map(|outcome| outcome.snapshot.status)
+        .map_err(|failure| failure.message)
     }
 
     #[cfg(windows)]
