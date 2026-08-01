@@ -9,11 +9,21 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLANNER_PATH = ROOT / "scripts" / "ci" / "ci_change_plan.py"
+LEGACY_PLANNER_PATH = ROOT / "scripts" / "ci" / "python_test_plan.py"
 
 
 @pytest.fixture(scope="module")
 def planner():
     spec = importlib.util.spec_from_file_location("ci_change_plan", PLANNER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def legacy_planner():
+    spec = importlib.util.spec_from_file_location("python_test_plan", LEGACY_PLANNER_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -86,6 +96,26 @@ def test_safe_file_selects_rust_and_linux_safe_file(planner):
     assert plan.rust is True
     assert plan.rust_safe_file_linux is True
     assert plan.release_flavor is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml"],
+)
+def test_rust_control_paths_select_rust_and_linux_safe_file(planner, path):
+    plan = planner.build_plan("pull_request", True, [path])
+    assert plan.rust is True
+    assert plan.rust_safe_file_linux is True
+
+
+def test_unified_planner_covers_every_legacy_synthetic_dependency(
+    planner, legacy_planner
+):
+    for path in legacy_planner.RELEVANT_SYNTHETIC_PATHS:
+        probe = f"{path}fixture" if path.endswith("/") else path
+        plan = planner.build_plan("pull_request", True, [probe])
+        assert plan.python_synthetic, path
+        assert plan.full is (path in planner.FULL_EXACT), path
 
 
 def test_release_path_selects_release_and_rust(planner):

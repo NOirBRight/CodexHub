@@ -367,6 +367,23 @@ def test_ci_yaml_classifier_uses_immutable_change_plan():
     assert "CI_PR_BASE_SHA" in classifier_job
 
 
+def test_ci_yaml_rust_jobs_force_the_declared_toolchain():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "RUSTUP_TOOLCHAIN: 1.97.1" in workflow_text
+
+
+def test_ci_md_describes_hosted_linux_and_unified_planner_verification():
+    ci_md = (ROOT / "docs" / "agents" / "ci.md").read_text(encoding="utf-8")
+    assert "Ubuntu WSL2" not in ci_md
+    assert "ubuntu-24.04" in ci_md
+    planner_start = ci_md.find("To verify only the planner/path logic")
+    assert planner_start != -1
+    planner_section = ci_md[planner_start:]
+    assert "tests/test_ci_change_plan.py" in planner_section
+
+
 def test_pr_rename_from_relevant_to_unrelated_runs_synthetic(plan):
     # With --no-renames git diff emits both the old relevant path and the new
     # unrelated path; the old path must keep the check synthetic.

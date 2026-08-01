@@ -128,6 +128,15 @@ SAFE_FILE_EXACT = frozenset(
     }
 )
 
+RUST_CONTROL_EXACT = frozenset(
+    {
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+    }
+)
+
 FULL_EXACT = frozenset(
     {
         ".github/workflows/ci.yml",
@@ -245,6 +254,7 @@ def _classify_path(path: str) -> tuple[frozenset[str], bool]:
         or normalized in {"cargo.toml", "cargo.lock"}
         or normalized.endswith("/cargo.toml")
         or normalized.endswith("/cargo.lock")
+        or _matches(path, RUST_CONTROL_EXACT)
     ):
         categories.add("rust")
     if _matches(path, SAFE_FILE_EXACT) or normalized.endswith("/safe_file.rs"):

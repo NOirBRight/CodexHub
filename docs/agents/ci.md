@@ -24,7 +24,7 @@ does not pass.
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
 - Release flavor contract: portable-build dry-run parity for the normal and debug flavors
 - Rust safe_file Linux compile and tests: standalone `rustc --test` compile of
-  `src-tauri/src/safe_file.rs` on Ubuntu WSL2, a `clippy-driver -D warnings`
+  `src-tauri/src/safe_file.rs` on the Hosted `ubuntu-24.04` runner, a `clippy-driver -D warnings`
   lint of the same file, and the resulting cross-language test binary. The
   Hosted Linux uses Rust's official `x86_64-unknown-linux-musl` target with
   `rust-lld`, avoiding a host-wide C toolchain while still compiling and
@@ -87,8 +87,10 @@ A PR is considered relevant for the synthetic check when it touches any of the f
 - `tests/fixtures/real_client_e2e/**` (E2E fixtures and the Windows watchdog runner)
 - `docs/agents/real-client-e2e.md` (real-client operator documentation)
 - `.github/workflows/ci.yml`
+- `scripts/ci/ci_change_plan.py`
 - `scripts/ci/python_test_plan.py`
 - `scripts/ci/check_python_test_partitions.py`
+- `tests/test_ci_change_plan.py`
 - `tests/test_ci_python_plan.py`
 - `pytest.ini`
 
@@ -138,11 +140,11 @@ python scripts/ci/check_python_test_partitions.py
 This executes the core suite, the watchdog-bounded synthetic suite, and proves
 the two partitions are disjoint and complete.
 
-To verify only the planner/path logic and collection completeness without
-executing `tests/test_real_client_e2e.py`, use:
+To verify only the planner/path logic, unified/legacy synthetic parity, and
+collection completeness without executing `tests/test_real_client_e2e.py`, use:
 
 ```powershell
-python -m pytest -q tests/test_ci_python_plan.py && python scripts/ci/check_python_test_partitions.py
+python -m pytest -q tests/test_ci_python_plan.py tests/test_ci_change_plan.py && python scripts/ci/check_python_test_partitions.py
 ```
 
 Do not commit generated frontend output, local Tauri resource placeholders, or `dist/` artifacts.
