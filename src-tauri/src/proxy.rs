@@ -5128,12 +5128,8 @@ time.sleep(10)
             Ok::<(), String>(())
         })();
 
-        let cleanup = if read_pid(&paths).ok().flatten().is_some() {
-            *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
-            coordinator.stop(&backend).map(|_| ())
-        } else {
-            Ok(())
-        };
+        *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
+        let cleanup = coordinator.stop(&backend).map(|_| ());
         match (result, cleanup) {
             (Ok(()), Ok(())) => {}
             (Err(error), Ok(())) => panic!("port-change restart lifecycle: {error}"),
