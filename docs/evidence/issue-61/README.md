@@ -2,7 +2,9 @@
 
 Risk class: `strict` (Gateway routing/protocol policy).
 
-Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
+Base: `origin/dev` at `42b0c375d97bad025a8deed07c6a72068df2b97c`.
+
+Exact candidate head: `2e578bc10abf26084facc6b8009205ffd85801cb`.
 
 ## Architecture
 
@@ -100,6 +102,27 @@ Base: `origin/dev` at `ae927c687390017903435cd9bf4314610b6da229`.
   regression.
 
 ## Candidate verification
+
+### Exact-head verification (2026-08-01)
+
+- Focused routing/Gateway gate:
+  `py -3.13 -m pytest -q tests/test_routing.py
+  tests/test_chat_completions_gateway.py tests/test_proxy_event_logging.py`
+  — 712 passed, 233 subtests passed in 50.28 seconds.
+- Authoritative Python 3.13 core:
+  `py -3.13 -m pytest -q --ignore=tests/test_real_client_e2e.py`
+  — 1,527 passed, 1 skipped, 460 subtests passed in 124.21 seconds.
+- `py -3.13 -m py_compile src-python/codex_proxy.py tests/test_routing.py`
+  — passed.
+- `git diff --check` — passed (only the repository's CRLF normalization
+  warning was emitted).
+- `py -3.13 scripts/report_quality_gates.py --json` — report-only, exit 0:
+  2 unused imports, 84 dead functions, 152 duplicate names, 0 parse errors.
+  These findings remain non-blocking baseline reports; no new RoutePlan
+  finding was introduced.
+- Hosted CI run `30682449604` for this exact head passed `CI classifier`,
+  `Python core`, and `CI / gate`; the remaining jobs were correctly skipped
+  by the path classifier.
 
 - Third-review affected delta:
   `python -m pytest -q tests/test_routing.py tests/test_chat_completions_gateway.py tests/test_proxy_event_logging.py`
