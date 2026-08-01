@@ -100,12 +100,38 @@ def test_safe_file_selects_rust_and_linux_safe_file(planner):
 
 @pytest.mark.parametrize(
     "path",
-    ["rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml"],
+    [
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "src-tauri/rust-toolchain",
+        "src-tauri/rust-toolchain.toml",
+        "src-tauri/.cargo/config",
+        "src-tauri/.cargo/config.toml",
+    ],
 )
 def test_rust_control_paths_select_rust_and_linux_safe_file(planner, path):
     plan = planner.build_plan("pull_request", True, [path])
     assert plan.rust is True
     assert plan.rust_safe_file_linux is True
+
+
+def test_legacy_and_unified_synthetic_surface_have_bidirectional_parity(
+    planner, legacy_planner
+):
+    legacy_exact = {
+        path.lower()
+        for path in legacy_planner.RELEVANT_SYNTHETIC_PATHS
+        if not path.endswith("/")
+    }
+    assert planner.SYNTHETIC_EXACT <= legacy_exact
+
+    for path in ("scripts/ci/ci_change_plan.py", "tests/test_ci_change_plan.py"):
+        assert legacy_planner.is_relevant_synthetic_path(path), path
+        plan = planner.build_plan("pull_request", True, [path])
+        assert plan.full is True
+        assert plan.python_synthetic is True
 
 
 def test_unified_planner_covers_every_legacy_synthetic_dependency(

@@ -123,6 +123,8 @@ SAFE_FILE_EXACT = frozenset(
         "rust-toolchain.toml",
         "src-tauri/rust-toolchain",
         "src-tauri/rust-toolchain.toml",
+        "src-tauri/.cargo/config",
+        "src-tauri/.cargo/config.toml",
         ".cargo/config",
         ".cargo/config.toml",
     }
