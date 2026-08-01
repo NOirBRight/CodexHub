@@ -31,7 +31,9 @@ RELEVANT_SYNTHETIC_PATHS = [
     ".github/workflows/ci.yml",
     "scripts/ci/python_test_plan.py",
     "scripts/ci/check_python_test_partitions.py",
+    "scripts/ci/ci_change_plan.py",
     "tests/test_ci_python_plan.py",
+    "tests/test_ci_change_plan.py",
     "pytest.ini",
 ]
 

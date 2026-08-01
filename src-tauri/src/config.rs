@@ -30,6 +30,7 @@ pub struct CodexContextGuardStatus {
     pub gateway_enabled: bool,
     pub model_context_window: Option<u32>,
     pub model_auto_compact_token_limit: Option<u32>,
+    pub global_override_conflict: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +38,8 @@ struct CodexConfigContextGuardStatus {
     enabled: bool,
     model_context_window: Option<u32>,
     model_auto_compact_token_limit: Option<u32>,
+    #[serde(default)]
+    global_override_conflict: bool,
 }
 
 pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, String> {
@@ -58,6 +61,16 @@ pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
     let paths = ConfigPaths::runtime()?;
     let python = find_python();
     republish_managed_codex_context_budget_with_paths(&paths, &python, &ProcessCommandRunner)
+}
+
+/// Migrate legacy CodexHub-owned global context values without changing the
+/// active route.  This is deliberately independent of the overlay owner and
+/// selected model so an upgraded install is repaired even when a Stable/Beta
+/// backup belongs to the other channel or the active model is third-party.
+pub(crate) fn migrate_legacy_context_guard() -> Result<bool, String> {
+    let paths = ConfigPaths::runtime()?;
+    let python = find_python();
+    migrate_legacy_context_guard_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
 pub fn switch_mode_with_takeover(
@@ -184,7 +197,7 @@ impl ConfigPaths {
         self.config_backup_path_for_owner(crate::app_flavor::current().routing_owner())
     }
 
-    fn context_guard_state_path(&self) -> PathBuf {
+    pub(crate) fn context_guard_state_path(&self) -> PathBuf {
         self.proxy_dir().join("context-guard-state.json")
     }
 
@@ -752,6 +765,11 @@ fn republish_managed_codex_context_budget_with_paths(
                 .config_backup_path_for_owner(current_owner)
                 .to_string_lossy()
                 .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
             "--catalog".to_string(),
             paths
                 .generated_catalog_path()
@@ -787,6 +805,71 @@ fn republish_managed_codex_context_budget_with_paths(
     Ok(before != fs::read_to_string(config_path).unwrap_or_default())
 }
 
+pub(crate) fn migrate_legacy_context_guard_with_paths(
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<bool, String> {
+    ensure_mode_switch_directories(paths)?;
+    let config_path = paths.codex_config_path();
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let backup_owner = fs::read_to_string(&config_path)
+        .ok()
+        .as_deref()
+        .and_then(codex_overlay_owner)
+        .unwrap_or(current_app_owner);
+    let selected_backup =
+        paths.config_backup_path_for_target_owner(current_app_owner, backup_owner);
+    let mut backup_paths = vec![selected_backup];
+    // Stable and Beta may leave a backup in the other runtime directory after
+    // a channel switch.  Startup migration is deliberately independent of the
+    // active overlay owner, so inspect every existing CodexHub backup once.
+    for target_owner in [
+        crate::app_flavor::RoutingOwner::Release,
+        crate::app_flavor::RoutingOwner::Beta,
+    ] {
+        let candidate =
+            paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+        if candidate.exists() && !backup_paths.contains(&candidate) {
+            backup_paths.push(candidate);
+        }
+    }
+    let before_config = fs::read(&config_path).unwrap_or_default();
+    let before_backups = backup_paths
+        .iter()
+        .map(|path| fs::read(path).unwrap_or_default())
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        "migrate-context-guard".to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+    ];
+    for backup_path in &backup_paths {
+        args.extend([
+            "--backup".to_string(),
+            backup_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    args.extend([
+        "--context-guard-state".to_string(),
+        paths
+            .context_guard_state_path()
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    run_python_script(
+        "legacy context guard migration",
+        python,
+        paths.config_overlay_script(),
+        args,
+        runner,
+    )?;
+    let backups_changed = backup_paths.iter().zip(before_backups).any(|(path, before)| {
+        before != fs::read(path).unwrap_or_default()
+    });
+    Ok(before_config != fs::read(&config_path).unwrap_or_default() || backups_changed)
+}
+
 fn top_level_model_is_official(text: &str) -> bool {
     for line in text.lines() {
         let trimmed = line.trim();
@@ -818,6 +901,7 @@ fn combined_context_guard_status(
         gateway_enabled,
         model_context_window: codex_status.model_context_window,
         model_auto_compact_token_limit: codex_status.model_auto_compact_token_limit,
+        global_override_conflict: codex_status.global_override_conflict,
     }
 }
 
@@ -918,6 +1002,11 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
                 .config_backup_path_for_target_owner(current_app_owner, backup_owner)
                 .to_string_lossy()
                 .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
+                .to_string_lossy()
+                .into_owned(),
         ];
         if settings.unified_codex_history {
             args.push("--unified-history".to_string());
@@ -937,6 +1026,11 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
             "--backup".to_string(),
             paths
                 .config_backup_path_for_owner(current_app_owner)
+                .to_string_lossy()
+                .into_owned(),
+            "--context-guard-state".to_string(),
+            paths
+                .context_guard_state_path()
                 .to_string_lossy()
                 .into_owned(),
         ];
@@ -1466,7 +1560,8 @@ mod tests {
     use super::{
         codex_overlay_owner, ensure_codex_owner_mutation_allowed,
         get_codex_context_guard_status_with_paths, get_providers_with_paths,
-        get_settings_with_paths, republish_managed_codex_context_budget_with_paths,
+        get_settings_with_paths, migrate_legacy_context_guard_with_paths,
+        republish_managed_codex_context_budget_with_paths,
         save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
         switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner,
         top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths,
@@ -2125,6 +2220,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
         assert_arg_value(
             &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
+        );
+        assert_arg_value(
+            &commands[0].args,
             "--catalog",
             &paths.generated_catalog_path(),
         );
@@ -2539,6 +2639,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert_contains_sequence(&commands[0].args, &["restore"]);
         assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
         assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+        assert_arg_value(
+            &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
+        );
         assert_eq!(
             paths
                 .config_backup_path()
@@ -2669,6 +2774,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert!(status.gateway_enabled);
         assert_eq!(status.model_context_window, Some(272_000));
         assert_eq!(status.model_auto_compact_token_limit, Some(240_000));
+        assert!(!status.global_override_conflict);
         assert!(
             get_settings_with_paths(&paths)
                 .expect("saved settings")
@@ -2765,6 +2871,67 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             &commands[0].args,
             "--catalog",
             &paths.generated_catalog_path(),
+        );
+    }
+
+    #[test]
+    fn startup_context_migration_targets_a_foreign_channel_backup() {
+        let root = temp_root("startup-context-migration-foreign-channel");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\nmodel = \"volc/glm-5.2\"\n",
+        )
+        .unwrap();
+        let current_owner = crate::app_flavor::current().routing_owner();
+        let backup_path = paths.config_backup_path_for_target_owner(
+            current_owner,
+            crate::app_flavor::RoutingOwner::Beta,
+        );
+        let other_backup_path = paths.config_backup_path_for_target_owner(
+            current_owner,
+            crate::app_flavor::RoutingOwner::Release,
+        );
+        for path in [&backup_path, &other_backup_path] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "legacy backup").unwrap();
+        }
+        let runner = RecordingRunner::successful();
+
+        migrate_legacy_context_guard_with_paths(
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("startup context migration");
+
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(
+            &commands[0].args,
+            &["migrate-context-guard", "--config", "--backup", "--context-guard-state"],
+        );
+        assert_eq!(
+            commands[0]
+                .args
+                .iter()
+                .filter(|argument| argument.as_str() == "--backup")
+                .count(),
+            2
+        );
+        assert!(commands[0]
+            .args
+            .iter()
+            .any(|argument| argument == &backup_path.to_string_lossy()));
+        assert!(commands[0]
+            .args
+            .iter()
+            .any(|argument| argument == &other_backup_path.to_string_lossy()));
+        assert_arg_value(
+            &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
         );
     }
 
@@ -3066,6 +3233,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             assert_contains_sequence(&commands[0].args, &["apply"]);
             assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
             assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
+            assert_arg_value(
+                &commands[0].args,
+                "--context-guard-state",
+                &paths.context_guard_state_path(),
+            );
             assert_arg_value(&commands[0].args, "--catalog", &paths.generated_catalog_path());
             assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:9099");
             assert_arg_literal(&commands[0].args, "--gateway-key", "isolated-key");

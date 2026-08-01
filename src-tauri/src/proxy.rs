@@ -30,6 +30,8 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, NO_ERROR,
 };
+#[cfg(all(windows, test))]
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND};
 #[cfg(windows)]
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -50,6 +52,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+#[cfg(all(windows, test))]
+use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, OpenThread, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -764,7 +768,7 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     start_outcome_with_paths(paths)
         .map(|outcome| outcome.snapshot.status)
@@ -779,6 +783,20 @@ fn start_outcome_with_paths(
 }
 
 fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), String> {
+    replace_managed_proxy_from_previous_bundle_with_controls(
+        paths,
+        &SystemProcessKiller,
+        &SystemProcessInspector,
+        &SystemListenerInspector,
+    )
+}
+
+fn replace_managed_proxy_from_previous_bundle_with_controls(
+    paths: &ProxyPaths,
+    killer: &dyn ProcessKiller,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+) -> Result<(), String> {
     let Some(ProxyPidRecord::Managed(metadata)) = read_pid_record(paths)? else {
         return Ok(());
     };
@@ -791,7 +809,7 @@ fn replace_managed_proxy_from_previous_bundle(paths: &ProxyPaths) -> Result<(), 
         return Ok(());
     }
 
-    let status = stop_with_paths(paths)?;
+    let status = stop_with_paths_and_controls(paths, killer, inspector, listener_inspector)?;
     if status.proxy_running {
         return Err(format!(
             "previous Gateway bundle is still running on port {}; stop it before starting {}",
@@ -1551,6 +1569,7 @@ fn force_kill_session_owned_gateway_at_deadline(
     Ok(Some(pid))
 }
 
+#[cfg(all(test, not(windows)))]
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     stop_with_paths_and_controls(
         paths,
@@ -3097,10 +3116,23 @@ fn stop_and_reap_inspection_child(
 
 #[cfg(windows)]
 fn run_bounded_inspection_command(
-    mut command: Command,
+    command: Command,
     deadline: Instant,
     kind: WindowsInspectionKind,
 ) -> Result<std::process::Output, String> {
+    run_bounded_inspection_command_with_hook(command, deadline, kind, |_| {})
+}
+
+#[cfg(windows)]
+fn run_bounded_inspection_command_with_hook<F>(
+    mut command: Command,
+    deadline: Instant,
+    kind: WindowsInspectionKind,
+    on_spawn: F,
+) -> Result<std::process::Output, String>
+where
+    F: FnOnce(u32),
+{
     let stdout = inspection_output_file(kind)?;
     let stderr = inspection_output_file(kind)?;
     command.stdout(Stdio::from(
@@ -3121,6 +3153,7 @@ fn run_bounded_inspection_command(
     let mut child = command
         .spawn()
         .map_err(|_| kind.start_error().to_string())?;
+    on_spawn(child.id());
     if let Err(error) = job.assign(&child, kind) {
         let _ = child.kill();
         let _ = child.wait();
@@ -3446,18 +3479,24 @@ mod tests {
         build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
         comparable_path, configure_start_stdio, detect_mode, find_python,
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
-        reconciled_snapshot_with_controls, start_with_paths, start_with_paths_and_controls,
+        reconciled_snapshot_with_controls,
+        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths_and_controls,
         start_with_paths_and_waiter, status_with_paths,
         stop_current_session_owned_with_paths_and_controls,
-        stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
+        stop_session_owned_with_paths_and_controls, stop_with_paths_and_controls,
         verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
         ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller, ProxyLifecycleBackend,
         ProxyPaths, ProxyPidMetadata, ProxyPidRecord, ShutdownClock, StartupOutcome,
         UserRequestedShutdownControls, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
+
     #[cfg(windows)]
-    use super::{run_bounded_inspection_command, run_windows_inspection, WindowsInspectionKind};
-    use crate::Settings;
+    use super::{
+        run_bounded_inspection_command_with_hook, run_windows_inspection, WindowsInspectionKind,
+    };
+    #[cfg(not(windows))]
+    use super::{start_with_paths, stop_with_paths};
+    use crate::{AppStatus, Settings};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
@@ -3469,28 +3508,83 @@ mod tests {
     use std::process::Stdio;
     use std::sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    fn wait_for_missing_process(pid: u32) {
-        // On Windows the inspection shells out to PowerShell/CIM, which can
-        // itself stall under parallel test load; retry instead of failing on
-        // one slow attempt.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut last = String::from("inspection did not run");
-        while Instant::now() < deadline {
-            match super::inspect_process(pid) {
-                Ok(InspectedProcess::Missing) => return,
-                Ok(InspectedProcess::Running(_)) => {
-                    last = format!("PID {pid} is still running");
-                }
-                Err(error) => last = error,
+    #[cfg(windows)]
+    const WINDOWS_STILL_ACTIVE: u32 = 259;
+
+    #[cfg(windows)]
+    fn windows_process_start_id_if_running(pid: u32) -> Result<Option<String>, String> {
+        let handle =
+            unsafe { super::OpenProcess(super::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            let error = unsafe { super::GetLastError() };
+            if error == super::ERROR_INVALID_PARAMETER || error == super::ERROR_NOT_FOUND {
+                return Ok(None);
             }
-            thread::sleep(Duration::from_millis(200));
+            return Err(format!(
+                "failed to open test process {pid} for inspection (Win32 error {error})"
+            ));
         }
-        panic!("process {pid} did not disappear within the bounded window: {last}");
+
+        let mut exit_code = 0u32;
+        let read = unsafe { super::GetExitCodeProcess(handle, &mut exit_code) } != 0;
+        if !read {
+            let error = unsafe { super::GetLastError() };
+            unsafe { super::CloseHandle(handle) };
+            return Err(format!(
+                "failed to read test process {pid} exit status (Win32 error {error})"
+            ));
+        }
+        if exit_code != WINDOWS_STILL_ACTIVE {
+            unsafe { super::CloseHandle(handle) };
+            return Ok(None);
+        }
+
+        let start_id = super::process_start_id_from_handle(handle);
+        unsafe { super::CloseHandle(handle) };
+        start_id.map(Some)
+    }
+
+    fn wait_for_missing_process(pid: u32) {
+        #[cfg(windows)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut last_error = None;
+            while Instant::now() < deadline {
+                match windows_process_start_id_if_running(pid) {
+                    Ok(None) => return,
+                    Ok(Some(_)) => {}
+                    Err(error) => last_error = Some(error),
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            panic!(
+                "process {pid} did not disappear within the bounded window: {}",
+                last_error.unwrap_or_else(|| "process is still running".to_string())
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            // On Unix, /proc provides a direct process-existence check.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut last = String::from("inspection did not run");
+            while Instant::now() < deadline {
+                match super::inspect_process(pid) {
+                    Ok(InspectedProcess::Missing) => return,
+                    Ok(InspectedProcess::Running(_)) => {
+                        last = format!("PID {pid} is still running");
+                    }
+                    Err(error) => last = error,
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            panic!("process {pid} did not disappear within the bounded window: {last}");
+        }
     }
 
     #[cfg(windows)]
@@ -3501,13 +3595,8 @@ mod tests {
         command.args([
             "-NoProfile",
             "-Command",
-            &format!(
-                "$PID | Set-Content -NoNewline -Path $env:CODEXHUB_TEST_PID_PATH; Write-Error '{sentinel}'; Start-Sleep -Seconds 60"
-            ),
+            "Write-Error 'private-inspection-sentinel'; Start-Sleep -Seconds 60",
         ]);
-        let root = temp_root("bounded-inspection-command");
-        let pid_path = root.join("helper.pid");
-        command.env("CODEXHUB_TEST_PID_PATH", &pid_path);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         super::configure_no_window(&mut command);
         // Generous deadline: PowerShell cold start under parallel test load can
@@ -3515,16 +3604,19 @@ mod tests {
         // timeout path still triggers because the helper sleeps far longer.
         let deadline = Instant::now() + Duration::from_secs(15);
 
-        let error =
-            run_bounded_inspection_command(command, deadline, WindowsInspectionKind::Process)
-                .expect_err("hung inspection must time out");
+        let spawned_pid = Arc::new(Mutex::new(None));
+        let spawned_pid_for_hook = Arc::clone(&spawned_pid);
+        let error = run_bounded_inspection_command_with_hook(
+            command,
+            deadline,
+            WindowsInspectionKind::Process,
+            move |pid| *spawned_pid_for_hook.lock().unwrap() = Some(pid),
+        )
+        .expect_err("hung inspection must time out");
 
         assert_eq!(error, "Gateway process inspection timed out");
         assert!(!error.contains(sentinel));
-        let pid = fs::read_to_string(&pid_path)
-            .expect("helper PID")
-            .parse::<u32>()
-            .expect("numeric helper PID");
+        let pid = spawned_pid.lock().unwrap().expect("inspection child PID");
         wait_for_missing_process(pid);
     }
 
@@ -4524,8 +4616,8 @@ time.sleep(10)
     }
 
     #[test]
-    fn failed_start_cleanup_is_bounded_and_persists_identity_when_kill_is_unconfirmed() {
-        let root = temp_root("bounded-failed-cleanup");
+    fn failed_start_cleanup_persists_identity_when_kill_is_unconfirmed() {
+        let root = temp_root("failed-cleanup-persists-identity");
         let paths = test_paths(&root);
         let port = free_port();
         write_settings(&paths, port);
@@ -4536,13 +4628,21 @@ time.sleep(10)
         let mut child = command.spawn().expect("spawn cleanup child");
         let pid = child.id();
         let capture = capture_child_stdio(&mut child);
-        let record = ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::new(
             pid,
             port,
             &paths.proxy_script_path(),
+            super::test_process_start_id(pid),
         ));
-        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
-        let started = Instant::now();
+        let inspected_process = match fake_proxy_process(&paths, port) {
+            InspectedProcess::Running(mut info) => {
+                info.process_start_id = Some(super::test_process_start_id(pid));
+                InspectedProcess::Running(info)
+            }
+            InspectedProcess::Missing => unreachable!("fake process must be running"),
+        };
+        let inspector = RecordingInspector::new(inspected_process);
+        let terminator = RecordingUnconfirmedTerminator::default();
 
         let failure = clean_up_failed_start_with_controls(
             &paths,
@@ -4551,10 +4651,15 @@ time.sleep(10)
             "startup reconciliation failed".to_string(),
             &record,
             &inspector,
-            &UnconfirmedTerminator,
+            &terminator,
         );
 
-        assert!(started.elapsed() < Duration::from_millis(500));
+        // The injected terminator returns immediately; this verifies cleanup
+        // delegates termination exactly once without adding a retry or sleep.
+        // A wall-clock assertion would make the same deterministic behavior
+        // depend on Hosted runner scheduling and temporary-file I/O latency.
+        assert_eq!(*terminator.calls.borrow(), 1);
+        assert_eq!(*inspector.inspected.borrow(), vec![pid]);
         assert!(failure
             .message
             .contains("termination could not be confirmed"));
@@ -4937,6 +5042,7 @@ time.sleep(10)
         assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_status_stop_real_python_proxy_on_ephemeral_port() {
         let root = temp_root("python-lifecycle");
@@ -4992,6 +5098,99 @@ time.sleep(10)
         result.expect("python proxy lifecycle");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn start_status_stop_real_python_proxy_on_ephemeral_port() {
+        let root = temp_root("python-lifecycle");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+
+        let result = (|| {
+            let start_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(start_status.proxy_running, "start status should be running")?;
+            ensure(
+                start_status.proxy_port == port,
+                "start status should report the requested port",
+            )?;
+            ensure(
+                start_status.proxy_build.is_some(),
+                "start status should include proxy build",
+            )?;
+            ensure(read_pid(&paths)?.is_some(), "start should write a PID")?;
+
+            #[cfg(feature = "debug-diagnostics")]
+            ensure(
+                paths
+                    .codex_dir
+                    .join("diagnostics/control/status.json")
+                    .is_file(),
+                "debug Gateway should activate its recorder in the existing child",
+            )?;
+            #[cfg(not(feature = "debug-diagnostics"))]
+            ensure(
+                !paths.codex_dir.join("diagnostics").exists(),
+                "normal Gateway should not create a diagnostic runtime subtree",
+            )?;
+
+            let running_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                running_snapshot.status.proxy_running,
+                "status should be running",
+            )?;
+
+            let stop_status = stop_with_paths_and_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(!stop_status.proxy_running, "stop status should be stopped")?;
+            ensure(
+                stop_status.message == "Gateway stopped gracefully",
+                "stop should use the Gateway /shutdown endpoint",
+            )?;
+            ensure(read_pid(&paths)?.is_none(), "stop should remove PID")?;
+
+            let stopped_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                !stopped_snapshot.status.proxy_running,
+                "status should be stopped",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup = stop_with_paths_and_controls(
+            &paths,
+            &super::SystemProcessKiller,
+            &inspector,
+            &listener_inspector,
+        );
+        match (result, cleanup) {
+            (Ok(()), Ok(_)) => {}
+            (Err(error), Ok(_)) => panic!("python proxy lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("python proxy cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("python proxy lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn restart_after_settings_port_change_stops_recorded_port_before_starting_new_port() {
         let root = temp_root("python-port-change-restart");
@@ -5001,21 +5200,30 @@ time.sleep(10)
         let new_port = free_port();
         write_settings(&paths, old_port);
 
-        let result = (|| {
-            let old_status = start_with_paths(&paths)?;
-            ensure(
-                old_status.proxy_port == old_port,
-                "old Gateway should use old port",
-            )?;
-            let old_pid = read_pid(&paths)?.ok_or_else(|| "old PID missing".to_string())?;
-            write_settings(&paths, new_port);
-            let backend = ProxyLifecycleBackend {
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), old_port);
+        let listener_inspector = super::SystemListenerInspector;
+        let backend = ControlledProxyLifecycleBackend {
+            delegate: ProxyLifecycleBackend {
                 lifecycle_gate_path: paths.lifecycle_gate_path(),
                 paths: paths.clone(),
                 session_owned_identity: None,
                 require_current_session_identity: false,
-            };
-            let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
+            },
+            inspector: &inspector,
+            listener_inspector: &listener_inspector,
+            session_owned_identity: RefCell::new(None),
+        };
+        let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
+
+        let result = (|| {
+            let old_status = coordinator.start(&backend, || Ok(()))?;
+            *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
+            ensure(
+                old_status.status.proxy_port == old_port,
+                "old Gateway should use old port",
+            )?;
+            let old_pid = read_pid(&paths)?.ok_or_else(|| "old PID missing".to_string())?;
+            write_settings(&paths, new_port);
 
             let replacement = coordinator.restart(&backend, || Ok(()))?;
 
@@ -5032,10 +5240,19 @@ time.sleep(10)
             Ok::<(), String>(())
         })();
 
-        let _ = stop_with_paths(&paths);
-        result.expect("port-change restart lifecycle");
+        *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
+        let cleanup = coordinator.stop(&backend).map(|_| ());
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("port-change restart lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("port-change restart cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("port-change restart lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_replaces_running_managed_proxy_from_previous_bundle() {
         let root = temp_root("python-bundle-upgrade");
@@ -5069,6 +5286,72 @@ time.sleep(10)
         result.expect("Gateway bundle upgrade lifecycle");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn start_replaces_running_managed_proxy_from_previous_bundle() {
+        let root = temp_root("python-bundle-upgrade");
+        let old_repo_root = copy_python_sources_to_temp_repo(&root.join("old-bundle"));
+        let new_repo_root = copy_python_sources_to_temp_repo(&root.join("new-bundle"));
+        let runtime_home = root.join("codex-home");
+        let old_paths = ProxyPaths::new(runtime_home.clone(), old_repo_root);
+        let new_paths = ProxyPaths::new(runtime_home, new_repo_root);
+        let port = free_port();
+        write_settings(&old_paths, port);
+        let old_inspector = FastProcessInspector::new(&old_paths.proxy_script_path(), port);
+        let new_inspector = FastProcessInspector::new(&new_paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+        let mut previous_bundle_replaced = false;
+
+        let result = (|| {
+            let old_status =
+                start_with_controlled_inspector(&old_paths, &old_inspector, &listener_inspector)?;
+            ensure(old_status.proxy_running, "old bundle should start")?;
+
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &new_paths,
+                &super::SystemProcessKiller,
+                &old_inspector,
+                &listener_inspector,
+            )?;
+            previous_bundle_replaced = true;
+            let new_status =
+                start_with_controlled_inspector(&new_paths, &new_inspector, &listener_inspector)?;
+            ensure(new_status.proxy_running, "new bundle should start")?;
+            let record = read_pid_record(&new_paths)?
+                .ok_or_else(|| "new bundle should own the proxy PID".to_string())?;
+            let ProxyPidRecord::Managed(metadata) = record else {
+                return Err("new bundle should write managed PID metadata".to_string());
+            };
+            ensure(
+                metadata.script_path == comparable_path(&new_paths.proxy_script_path()),
+                "new bundle should replace the previous bundle's Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup_inspector: &dyn ProcessInspector = if previous_bundle_replaced {
+            &new_inspector
+        } else {
+            &old_inspector
+        };
+        let cleanup = stop_with_paths_and_controls(
+            &new_paths,
+            &super::SystemProcessKiller,
+            cleanup_inspector,
+            &listener_inspector,
+        )
+        .map(|_| ());
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("Gateway bundle upgrade lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("Gateway bundle upgrade cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("Gateway bundle upgrade lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
         let root = temp_root("python-in-place-upgrade");
@@ -5105,6 +5388,74 @@ time.sleep(10)
 
         let _ = stop_with_paths(&paths);
         result.expect("Gateway in-place upgrade lifecycle");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
+        let root = temp_root("python-in-place-upgrade");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+
+        let result = (|| {
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            let old_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(old_status.proxy_running, "old in-place bundle should start")?;
+            let old_pid = read_pid(&paths)?
+                .ok_or_else(|| "old in-place bundle should own the proxy PID".to_string())?;
+
+            let script_path = paths.proxy_script_path();
+            let script = fs::read_to_string(&script_path)
+                .map_err(|error| format!("read in-place script: {error}"))?;
+            fs::write(&script_path, format!("{script}\n# upgraded in place\n"))
+                .map_err(|error| format!("update in-place script: {error}"))?;
+
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            let new_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(
+                new_status.proxy_running,
+                "upgraded in-place bundle should start",
+            )?;
+            let new_pid = read_pid(&paths)?
+                .ok_or_else(|| "upgraded in-place bundle should own the proxy PID".to_string())?;
+            ensure(
+                new_pid != old_pid,
+                "same-path script changes should replace the previous Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup = stop_with_paths_and_controls(
+            &paths,
+            &super::SystemProcessKiller,
+            &inspector,
+            &listener_inspector,
+        )
+        .map(|_| ());
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("Gateway in-place upgrade lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("Gateway in-place upgrade cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("Gateway in-place upgrade lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     fn test_paths(root: &Path) -> ProxyPaths {
@@ -5330,6 +5681,18 @@ time.sleep(10)
         }
     }
 
+    #[derive(Default)]
+    struct RecordingUnconfirmedTerminator {
+        calls: RefCell<usize>,
+    }
+
+    impl ChildTerminator for RecordingUnconfirmedTerminator {
+        fn terminate(&self, _child: &mut std::process::Child) -> Result<bool, String> {
+            *self.calls.borrow_mut() += 1;
+            Ok(false)
+        }
+    }
+
     impl ProcessKiller for RecordingKiller {
         fn kill(&self, pid: u32) -> Result<(), String> {
             self.killed.borrow_mut().push(pid);
@@ -5432,6 +5795,146 @@ time.sleep(10)
                     .ok_or_else(|| "test process has no start identity".to_string()),
                 InspectedProcess::Missing => Err("test process is missing".to_string()),
             }
+        }
+    }
+
+    #[cfg(windows)]
+    struct FastProcessInspector {
+        script_path: String,
+        port: Mutex<u16>,
+    }
+
+    #[cfg(windows)]
+    impl FastProcessInspector {
+        fn new(script_path: &Path, port: u16) -> Self {
+            Self {
+                script_path: comparable_path(script_path),
+                port: Mutex::new(port),
+            }
+        }
+
+        fn set_port(&self, port: u16) {
+            *self.port.lock().unwrap() = port;
+        }
+    }
+
+    #[cfg(windows)]
+    impl ProcessInspector for FastProcessInspector {
+        fn inspect(&self, pid: u32) -> Result<InspectedProcess, String> {
+            let Some(start_id) = windows_process_start_id_if_running(pid)? else {
+                return Ok(InspectedProcess::Missing);
+            };
+            let port = *self.port.lock().unwrap();
+            let mut info = ProcessInfo::from_args(vec![
+                "python".to_string(),
+                self.script_path.clone(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                port.to_string(),
+            ]);
+            info.process_start_id = Some(start_id);
+            Ok(InspectedProcess::Running(info))
+        }
+
+        fn spawned_process_start_id(&self, child: &std::process::Child) -> Result<String, String> {
+            super::child_process_start_id(child)
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_with_controlled_inspector(
+        paths: &ProxyPaths,
+        inspector: &dyn ProcessInspector,
+        listener_inspector: &dyn ListenerInspector,
+    ) -> Result<AppStatus, String> {
+        super::start_with_paths_and_controls(
+            paths,
+            super::START_TIMEOUT,
+            Duration::from_millis(200),
+            &super::health,
+            inspector,
+            listener_inspector,
+            |child, port, timeout, poll_interval, health_probe, _output_capture| {
+                super::wait_for_startup_health(child, port, timeout, poll_interval, health_probe)
+            },
+        )
+        .map(|outcome| outcome.snapshot.status)
+        .map_err(|failure| failure.message)
+    }
+
+    #[cfg(windows)]
+    struct ControlledProxyLifecycleBackend<'a> {
+        delegate: ProxyLifecycleBackend,
+        inspector: &'a FastProcessInspector,
+        listener_inspector: &'a dyn ListenerInspector,
+        session_owned_identity: RefCell<Option<super::GatewayIdentity>>,
+    }
+
+    #[cfg(windows)]
+    impl super::GatewayLifecycleBackend for ControlledProxyLifecycleBackend<'_> {
+        fn lifecycle_gate_path(&self) -> &Path {
+            self.delegate.lifecycle_gate_path()
+        }
+
+        fn snapshot(&self) -> Result<super::GatewayLifecycleSnapshot, String> {
+            super::reconciled_snapshot_with_controls(
+                &self.delegate.paths,
+                &super::health,
+                self.inspector,
+                self.listener_inspector,
+            )
+        }
+
+        fn transitional_status(
+            &self,
+            phase: super::GatewayLifecyclePhase,
+        ) -> Result<AppStatus, String> {
+            self.delegate.transitional_status(phase)
+        }
+
+        fn start(&self) -> Result<super::GatewayStartOutcome, super::GatewayStartFailure> {
+            super::start_with_paths_and_controls(
+                &self.delegate.paths,
+                super::START_TIMEOUT,
+                Duration::from_millis(200),
+                &super::health,
+                self.inspector,
+                self.listener_inspector,
+                |child, port, timeout, poll_interval, health_probe, _output_capture| {
+                    super::wait_for_startup_health(
+                        child,
+                        port,
+                        timeout,
+                        poll_interval,
+                        health_probe,
+                    )
+                },
+            )
+        }
+
+        fn stop(&self) -> Result<AppStatus, String> {
+            let clock = super::SystemShutdownClock::new();
+            let controls = super::UserRequestedShutdownControls {
+                killer: &super::SystemProcessKiller,
+                inspector: self.inspector,
+                listener_inspector: self.listener_inspector,
+                shutdown_request: &super::request_shutdown_with_timeout,
+                health_probe: &super::health_with_timeout,
+                clock: &clock,
+            };
+            let status = super::stop_session_owned_with_paths_and_controls(
+                &self.delegate.paths,
+                self.session_owned_identity.borrow().as_ref(),
+                &controls,
+            )?;
+            self.inspector
+                .set_port(super::read_settings(&self.delegate.paths)?.proxy_port);
+            Ok(status)
+        }
+
+        fn can_reuse(&self, snapshot: &super::GatewayLifecycleSnapshot) -> bool {
+            self.delegate.can_reuse(snapshot)
         }
     }
 

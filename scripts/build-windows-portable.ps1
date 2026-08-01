@@ -27,7 +27,7 @@ $generatedTauriConfigPath = (& (Join-Path $PSScriptRoot "Build-TauriConfig.ps1")
 $generatedTauriConfig = Get-Content -Raw -LiteralPath $generatedTauriConfigPath | ConvertFrom-Json
 $version = [string]$generatedTauriConfig.version
 . (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
-Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $version
+Assert-ReleaseVersion -Version $version
 $targetRoot = Get-FlavorTargetRoot -TauriDir $tauriDir -Flavor $Flavor
 
 $generatedEndpoint = [string]$generatedTauriConfig.plugins.updater.endpoints[0]

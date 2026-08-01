@@ -526,6 +526,7 @@ export interface CodexContextGuardStatus {
   gateway_enabled: boolean;
   model_context_window?: number | null;
   model_auto_compact_token_limit?: number | null;
+  global_override_conflict?: boolean;
 }
 
 export type TabId = "codexhub" | "gateway";

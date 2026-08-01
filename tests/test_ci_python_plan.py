@@ -28,8 +28,9 @@ def plan():
 
 def _workflow_job_text(workflow_text: str, job_name: str) -> str:
     """Return the raw text of a top-level GitHub Actions job."""
-    start = workflow_text.find(f"  {job_name}:")
-    assert start != -1, f"job {job_name!r} not found"
+    match = re.search(rf"(?m)^  {re.escape(job_name)}:", workflow_text)
+    assert match is not None, f"job {job_name!r} not found"
+    start = match.start()
     after = workflow_text[start + 1 :]
     next_job = re.search(r"\n  [a-zA-Z0-9_-]+:", after)
     if next_job:
@@ -313,7 +314,7 @@ def test_ci_yaml_synthetic_run_uses_watchdog_with_3600s_bound():
     )
     timeout_idx = normalized.find("--timeout-seconds 3600")
     separator_idx = normalized.find("-- ")
-    pytest_idx = normalized.find("python -m pytest")
+    pytest_idx = normalized.find("python.exe -m pytest")
     assert -1 < watchdog_idx < timeout_idx < separator_idx < pytest_idx, normalized
 
 
@@ -345,7 +346,7 @@ def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
 
 
 def test_ci_yaml_synthetic_job_has_no_depth_boundary():
-    """Regression: re-shallowing base history can make merge-base fail."""
+    """Synthetic checkout remains deep for reproducible fixture execution."""
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -353,15 +354,34 @@ def test_ci_yaml_synthetic_job_has_no_depth_boundary():
     assert "--depth=" not in synthetic_job, "synthetic job must not re-shallow history"
 
 
-def test_ci_yaml_changed_paths_uses_no_renames():
+def test_ci_yaml_classifier_uses_immutable_change_plan():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
-    plan_step = _step_run_text(synthetic_job, "Plan synthetic partition")
-    assert "git diff" in plan_step
-    assert "--no-renames" in plan_step
-    assert "--name-only" in plan_step
+    classifier_job = _workflow_job_text(workflow_text, "classifier")
+    assert "fetch-depth: 0" in classifier_job
+    plan_step = _step_run_text(classifier_job, "Classify changed paths")
+    assert "scripts/ci/ci_change_plan.py" in plan_step
+    assert "--output-json" in plan_step
+    assert "Fail closed when path acquisition failed" in classifier_job
+    assert "CI_PR_BASE_SHA" in classifier_job
+
+
+def test_ci_yaml_rust_jobs_force_the_declared_toolchain():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "RUSTUP_TOOLCHAIN: 1.97.1" in workflow_text
+
+
+def test_ci_md_describes_hosted_linux_and_unified_planner_verification():
+    ci_md = (ROOT / "docs" / "agents" / "ci.md").read_text(encoding="utf-8")
+    assert "Ubuntu WSL2" not in ci_md
+    assert "ubuntu-24.04" in ci_md
+    planner_start = ci_md.find("To verify only the planner/path logic")
+    assert planner_start != -1
+    planner_section = ci_md[planner_start:]
+    assert "tests/test_ci_change_plan.py" in planner_section
 
 
 def test_pr_rename_from_relevant_to_unrelated_runs_synthetic(plan):
@@ -380,7 +400,7 @@ def test_pr_rename_from_unrelated_to_relevant_runs_synthetic(plan):
     assert p.synthetic_status == "run"
 
 
-def test_ci_yaml_routes_final_jobs_to_repo_dedicated_self_hosted_labels():
+def test_ci_yaml_routes_final_jobs_to_github_hosted_runners():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -394,12 +414,11 @@ def test_ci_yaml_routes_final_jobs_to_repo_dedicated_self_hosted_labels():
     )
     for job_name in windows_jobs:
         job = _workflow_job_text(workflow_text, job_name)
-        assert (
-            "runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]" in job
-        ), job_name
+        assert "runs-on: windows-2025" in job, job_name
 
     linux_job = _workflow_job_text(workflow_text, "rust-safe-file-linux")
-    assert "runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]" in linux_job
+    assert "runs-on: ubuntu-24.04" in linux_job
+    assert "self-hosted" not in workflow_text
 
 
 def test_ci_yaml_preserves_final_check_names():
@@ -420,7 +439,7 @@ def test_ci_yaml_preserves_final_check_names():
         assert f"name: {check_name}" in job, job_name
 
 
-def test_ci_yaml_self_hosted_jobs_deny_fork_prs_and_smoke_only_dispatch():
+def test_ci_yaml_hosted_jobs_have_no_self_hosted_guards_or_smoke_dispatch():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -435,43 +454,53 @@ def test_ci_yaml_self_hosted_jobs_deny_fork_prs_and_smoke_only_dispatch():
     )
     for job_name in final_jobs:
         job = _workflow_job_text(workflow_text, job_name)
-        assert "github.event.pull_request.head.repo.full_name == github.repository" in job
-        assert "inputs.validation_scope != 'runner-smoke'" in job
+        assert "github.event.pull_request.head.repo.full_name" not in job
+        assert "runner-smoke" not in job
 
-    runner_doc = (
-        ROOT / "docs" / "agents" / "self-hosted-runner.md"
-    ).read_text(encoding="utf-8")
-    assert "ACTIONS_RUNNER_HOOK_JOB_STARTED" in runner_doc
-    assert "host-owned pre-job guard" in runner_doc
-    assert "host hook is the authoritative boundary" in runner_doc
-    assert "additional readable assertion" in runner_doc
-    assert "head repositories both exactly" in runner_doc
+    assert "validation_scope" not in workflow_text
+    assert "runner-smoke" not in workflow_text
+    assert "workflow_dispatch:" in workflow_text
 
 
-def test_ci_yaml_has_bounded_windows_and_linux_runner_smoke_jobs():
+def test_ci_yaml_has_classifier_and_single_gate():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    assert "validation_scope:" in workflow_text
-    assert "runner-smoke" in workflow_text
+    classifier = _workflow_job_text(workflow_text, "classifier")
+    assert "name: CI classifier" in classifier
+    assert "runs-on: windows-2025" in classifier
+    assert "ci_change_plan.py" in classifier
 
-    windows_smoke = _workflow_job_text(workflow_text, "runner-smoke-windows")
-    assert "name: Runner smoke (Windows)" in windows_smoke
-    assert "runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]" in windows_smoke
-    assert "timeout-minutes: 5" in windows_smoke
-    assert "inputs.validation_scope == 'runner-smoke'" in windows_smoke
+    gate = _workflow_job_text(workflow_text, "gate")
+    assert "name: CI / gate" in gate
+    assert "if: always()" in gate
+    for job_name in (
+        "classifier",
+        "python-core",
+        "python-synthetic",
+        "frontend",
+        "rust-tests",
+        "rust-safe-file-linux",
+        "release-flavor-contract",
+        "rust-clippy",
+    ):
+        assert f"- {job_name}" in gate
 
-    linux_smoke = _workflow_job_text(workflow_text, "runner-smoke-linux")
-    assert "name: Runner smoke (Linux)" in linux_smoke
-    assert "runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]" in linux_smoke
-    assert "timeout-minutes: 5" in linux_smoke
-    assert "inputs.validation_scope == 'runner-smoke'" in linux_smoke
-    assert "Rust 1.97.1 is required." in linux_smoke
-    assert "clippy-x86_64-unknown-linux-gnu" in linux_smoke
-    assert "x86_64-unknown-linux-musl" in linux_smoke
-    assert "rust-lld" in linux_smoke
 
-    assert "clippy-x86_64-pc-windows-msvc" in windows_smoke
+def test_ci_yaml_never_uses_workflow_paths_filters():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "paths:" not in workflow_text
+    assert "paths-ignore:" not in workflow_text
+
+
+def test_ci_yaml_has_no_runner_smoke_jobs():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "runner-smoke-windows" not in workflow_text
+    assert "runner-smoke-linux" not in workflow_text
 
 
 def test_ci_yaml_linux_safe_file_uses_self_contained_linux_target():
@@ -485,26 +514,44 @@ def test_ci_yaml_linux_safe_file_uses_self_contained_linux_target():
     assert linux_job.count("-C linker=rust-lld") == 2
 
 
-def test_ci_yaml_windows_jobs_use_verified_preinstalled_toolchains():
+def test_ci_yaml_hosted_jobs_install_pinned_toolchains():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    windows_python_jobs = (
-        _workflow_job_text(workflow_text, "runner-smoke-windows"),
-        _workflow_job_text(workflow_text, "python-core"),
-        _workflow_job_text(workflow_text, "python-synthetic"),
-    )
-    for job in windows_python_jobs:
-        assert "actions/setup-python" not in job
-        assert "Python 3.13 is required." in job
+    for job_name in ("python-core", "python-synthetic"):
+        job = _workflow_job_text(workflow_text, job_name)
+        assert "actions/setup-python@v7" in job
+        assert "python-version: '3.13'" in job
 
     frontend_job = _workflow_job_text(workflow_text, "frontend")
-    assert "actions/setup-node" not in frontend_job
-    assert "Node.js 22 is required." in frontend_job
+    assert "actions/setup-node@v7" in frontend_job
+    assert "node-version: '22'" in frontend_job
 
-    for job_name in ("runner-smoke-windows", "rust-tests", "rust-clippy"):
+    for job_name in ("rust-tests", "rust-clippy"):
         job = _workflow_job_text(workflow_text, job_name)
-        assert "Rust 1.97.1 is required." in job
+        assert "rustup toolchain install" in job
+        assert "1.97.1" in job
+
+    linux_job = _workflow_job_text(workflow_text, "rust-safe-file-linux")
+    assert "actions/setup-python@v7" in linux_job
+    assert "rustup toolchain install" in linux_job
+
+
+def test_ci_yaml_rust_caches_exclude_build_outputs():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    expected_key_prefixes = {
+        "rust-tests": "cargo-deps-v2-test-",
+        "rust-clippy": "cargo-deps-v2-clippy-",
+    }
+    for job_name, key_prefix in expected_key_prefixes.items():
+        job = _workflow_job_text(workflow_text, job_name)
+        assert "uses: actions/cache@v6" in job
+        assert "~/.cargo/registry" in job
+        assert "~/.cargo/git" in job
+        assert key_prefix in job
+        assert "src-tauri/target" not in job
 
 
 def test_ci_yaml_final_jobs_have_explicit_safety_timeouts():
@@ -528,3 +575,22 @@ def test_ci_docs_type_unmanaged_paseo_checkout_as_not_applicable():
     ci_doc = (ROOT / "docs" / "agents" / "ci.md").read_text(encoding="utf-8")
     assert "not_applicable_unmanaged_checkout" in ci_doc
     assert "not a product regression" in ci_doc
+
+
+def test_ci_yaml_uses_current_official_action_majors():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "actions/checkout@v7" in workflow_text
+    assert "actions/setup-python@v7" in workflow_text
+    assert "actions/setup-node@v7" in workflow_text
+    assert "actions/cache@v6" in workflow_text
+    assert "actions/upload-artifact@v7" in workflow_text
+
+
+def test_ci_yaml_rust_jobs_force_serial_test_execution():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    rust_job = _workflow_job_text(workflow_text, "rust-tests")
+    assert "--test-threads=1" in rust_job

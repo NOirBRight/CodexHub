@@ -27,7 +27,7 @@ function Resolve-GitCommit([string]$Ref) {
 
 $commitSha = Resolve-GitCommit $Commit
 $mainSha = Resolve-GitCommit "main"
-Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $Version
+$isPrerelease = Test-ReleaseVersionIsPrerelease -Version $Version
 
 if ($commitSha -ne $mainSha) {
     throw "Normal and debug publication requires the exact main commit."
@@ -37,6 +37,7 @@ $normalInstaller = Get-ReleaseArtifactName -Flavor "normal" -Version $Version
 $debugInstaller = Get-ReleaseArtifactName -Flavor "debug" -Version $Version
 $normalManifest = Get-ReleaseManifestName -Flavor "normal"
 $debugManifest = Get-ReleaseManifestName -Flavor "debug"
+$normalPortable = "CodexHub_{0}_portable_{1}.zip" -f $Version, $commitSha.Substring(0, 8)
 $selectedInstaller = Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
 $selectedManifest = Get-ReleaseManifestName -Flavor $Flavor
 $plan = [ordered]@{
@@ -50,11 +51,12 @@ $plan = [ordered]@{
     }
     immutable_release = [ordered]@{
         tag = "v$Version"
-        prerelease = $false
+        prerelease = $isPrerelease
         assets = @(
             $normalInstaller,
             "$normalInstaller.sig",
             $normalManifest,
+            $normalPortable,
             $debugInstaller,
             "$debugInstaller.sig",
             $debugManifest

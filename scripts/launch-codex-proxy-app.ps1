@@ -127,6 +127,7 @@ $HealthUrl = "$ProxyBaseUrl/health"
 $CatalogPath = Join-Path $env:USERPROFILE '.codex\model-catalogs\codexhub-model-catalog.json'
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
 $ConfigPath = Join-Path $env:USERPROFILE '.codex\config.toml'
+$ContextGuardStatePath = Join-Path $CodexDir 'proxy\context-guard-state.json'
 $GlobalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $SessionId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
 $ConfigBackupPath = Join-Path $ScriptDir "config.toml.session-$SessionId.bak"
@@ -455,7 +456,7 @@ $ConfigOverlayApplied = $false
 Write-Host 'Launching Codex App...'
 try {
     Invoke-Timed -Label 'Config overlay apply' -ScriptBlock {
-        Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'apply', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--catalog', $CatalogPath, '--base-url', $ProxyBaseUrl)
+        Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'apply', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--catalog', $CatalogPath, '--base-url', $ProxyBaseUrl, '--context-guard-state', $ContextGuardStatePath)
     }
     $ConfigOverlayApplied = $true
 
@@ -478,7 +479,7 @@ finally {
         Write-Host 'Restoring original Codex config...'
         try {
             Invoke-Timed -Label 'Config overlay restore' -ScriptBlock {
-                Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'restore', '--config', $ConfigPath, '--backup', $ConfigBackupPath)
+                Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'restore', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--context-guard-state', $ContextGuardStatePath)
             }
         }
         catch {

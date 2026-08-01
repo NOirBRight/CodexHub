@@ -20,7 +20,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.1.7"
+    expected = "0.1.8-beta.1"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -277,7 +277,8 @@ def test_portable_rejects_invalid_flavor_before_building(tmp_path):
     result = _portable(repo, "invalid")
 
     assert result.returncode != 0
-    assert "Flavor" in result.stderr
+    normalized_error = "".join(result.stderr.split())
+    assert "parameter'Flavor'" in normalized_error
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -343,6 +344,7 @@ def test_release_plan_places_both_flavors_in_one_immutable_release(tmp_path):
             "CodexHub_0.1.5_x64-setup.exe",
             "CodexHub_0.1.5_x64-setup.exe.sig",
             "latest.json",
+            f"CodexHub_0.1.5_portable_{main_commit[:8]}.zip",
             "CodexHub_0.1.5_debug_x64-setup.exe",
             "CodexHub_0.1.5_debug_x64-setup.exe.sig",
             "latest-debug.json",
@@ -351,14 +353,41 @@ def test_release_plan_places_both_flavors_in_one_immutable_release(tmp_path):
     assert plan["channel_release"] is None
 
 
-def test_release_plan_rejects_prerelease_versions_and_non_main_commits(tmp_path):
+def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
+    repo, main_commit, _ = _release_repo(tmp_path)
+
+    result = _plan(repo, "normal", "0.1.8-beta.1", main_commit)
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["manifest"] == {
+        "name": "latest.json",
+        "asset_url": (
+            "https://github.com/NOirBRight/CodexHub/releases/download/"
+            "v0.1.8-beta.1/CodexHub_0.1.8-beta.1_x64-setup.exe"
+        ),
+    }
+    assert plan["immutable_release"]["tag"] == "v0.1.8-beta.1"
+    assert plan["immutable_release"]["prerelease"] is True
+    assert plan["immutable_release"]["assets"] == [
+        "CodexHub_0.1.8-beta.1_x64-setup.exe",
+        "CodexHub_0.1.8-beta.1_x64-setup.exe.sig",
+        "latest.json",
+        f"CodexHub_0.1.8-beta.1_portable_{main_commit[:8]}.zip",
+        "CodexHub_0.1.8-beta.1_debug_x64-setup.exe",
+        "CodexHub_0.1.8-beta.1_debug_x64-setup.exe.sig",
+        "latest-debug.json",
+    ]
+
+
+def test_release_plan_rejects_invalid_versions_and_non_main_commits(tmp_path):
     repo, main_commit, dev_commit = _release_repo(tmp_path)
 
-    prerelease = _plan(repo, "normal", "0.1.5-beta.1", main_commit)
+    invalid = _plan(repo, "normal", "0.1.8_beta1", main_commit)
     wrong_commit = _plan(repo, "debug", "0.1.5", dev_commit)
 
-    assert prerelease.returncode != 0
-    assert "prerelease suffix" in prerelease.stderr
+    assert invalid.returncode != 0
+    assert "valid SemVer" in invalid.stderr
     assert wrong_commit.returncode != 0
     assert "exact main commit" in wrong_commit.stderr
 
@@ -468,7 +497,8 @@ def test_release_scripts_share_flavor_validation_helpers():
 
     for script in (plan_script, manifest_script):
         assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in script
-        assert "Assert-ReleaseFlavorVersion" in script
+    assert "Test-ReleaseVersionIsPrerelease" in plan_script
+    assert "Assert-ReleaseVersion" in manifest_script
     assert "Get-ReleaseArtifactName" in helpers
     assert "Get-ReleaseManifestName" in helpers
     assert "Get-FlavorTargetRoot" in helpers

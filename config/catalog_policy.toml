@@ -27,6 +27,7 @@ allowed_provider_models = [
   "ollama-cloud/minimax-m3",
   "ollama-cloud/glm-5.2",
   "ollama-cloud/kimi-k2.6",
+  "ollama-cloud/kimi-k2.7-code",
   "ollama-e2e-responses/glm-5.2",
   "ollama-e2e-responses/kimi-k2.7-code",
   "ollama-e2e-responses/minimax-m3",
@@ -83,6 +84,7 @@ denied_substrings = ["embedding"]
 "ollama-cloud/glm-5.2" = "Ollama GLM-5.2"
 "ollama-cloud/minimax-m3" = "Ollama MiniMax-M3"
 "ollama-cloud/kimi-k2.6" = "Ollama Kimi K2.6"
+"ollama-cloud/kimi-k2.7-code" = "Ollama Kimi K2.7 Code"
 "kimi-k2.7-code" = "Ollama Kimi K2.7 Code"
 "deepseek-v4-pro" = "Ollama DeepSeek V4 Pro"
 "deepseek-v4-flash" = "Ollama DeepSeek V4 Flash"
