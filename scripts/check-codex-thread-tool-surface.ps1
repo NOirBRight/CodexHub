@@ -88,7 +88,10 @@ function Get-UnknownTaggedSourceCount {
 }
 
 function Get-WireIdentityReplayStatus {
-    param([object]$Audit)
+    param(
+        [object]$Audit,
+        [string]$WireFixtureSha256
+    )
 
     $replay = $Audit.wire_identity_replay
     if ($null -eq $replay) { return 'not_captured' }
@@ -99,9 +102,44 @@ function Get-WireIdentityReplayStatus {
     }
     if ($status -notin @('complete', 'met')) { return $status }
     $caseNames = @('identity', 'mutation', 'deletion', 'loss')
+    $sourceHash = [string]$replay.wire_fixture_sha256
     if (
         $replay.fail_closed -eq $true -and
-        ($caseNames | Where-Object { $replay.cases.$_ -notin @('complete','met') }).Count -eq 0
+        $sourceHash -match '^[0-9a-f]{64}$' -and
+        $sourceHash -eq $WireFixtureSha256 -and
+        ($caseNames | Where-Object {
+            $case = $replay.cases.$_
+            $case.status -notin @('complete','met') -or
+            $case.observed -ne $true -or
+            ([string]$case.output_sha256) -notmatch '^[0-9a-f]{64}$'
+        }).Count -eq 0
+    ) {
+        return $status
+    }
+    return 'not_captured'
+}
+
+function Get-SseIdentityStatus {
+    param(
+        [object]$Audit,
+        [string]$WireFixtureSha256
+    )
+
+    $evidence = $Audit.sse_identity
+    if ($null -eq $evidence) { return 'not_captured' }
+    $status = if ($evidence.PSObject.Properties.Name -contains 'status') {
+        [string]$evidence.status
+    } else {
+        'not_captured'
+    }
+    if ($status -notin @('complete', 'met')) { return $status }
+    if (
+        $evidence.fail_closed -eq $true -and
+        ([string]$evidence.wire_fixture_sha256) -match '^[0-9a-f]{64}$' -and
+        [string]$evidence.wire_fixture_sha256 -eq $WireFixtureSha256 -and
+        ([string]$evidence.pre_stream_sequence_sha256) -match '^[0-9a-f]{64}$' -and
+        [string]$evidence.post_stream_sequence_sha256 -eq [string]$evidence.pre_stream_sequence_sha256 -and
+        $evidence.event_count -gt 0
     ) {
         return $status
     }
@@ -350,7 +388,7 @@ if (
 ) {
     Add-Mismatch 'inventory unknown_tagged_source_count does not match the bound wire evidence'
 }
-if ($streamUnknown.Count -ne 1 -or $nonStreamingUnknown.Count -ne 1) {
+if ($streamUnknown.Count -eq 0 -or $nonStreamingUnknown.Count -eq 0) {
     Add-Mismatch 'unknown tagged sentinels were not preserved in both response modes'
 }
 if ($wire.response.streaming.captured -ne $true) {
@@ -676,28 +714,20 @@ if (-not $candidateVersionKey -or -not $floorVersionKey) {
 if ([bool]$qualification.candidate_version_eligible -ne $expectedCandidateEligible) {
     Add-Mismatch 'inventory qualification candidate_version_eligible is inconsistent with status'
 }
+$wireFixtureSha256 = Get-Sha256Hex -Path $WireFixturePath
 $expectedEvidenceGates = [ordered]@{
     complete_model_visible_plan = $trace.capture_coverage.complete_model_visible_plan.status
     clean_cold_start_current_binding = $trace.capture_coverage.clean_cold_start_current_binding.status
     full_pre_post_request_response = $audit.gate_classification.full_pre_post_request_response
     full_request_fingerprint = $trace.gateway_observability.full_request_body_fingerprint
     full_response_fingerprint = $trace.gateway_observability.full_response_body_fingerprint
-    sse_identity = if (
-        $audit.gateway_identity_route.full_body_hmac_pairs -gt 0 -and
-        $audit.gateway_identity_route.full_body_hmac_equal -eq $audit.gateway_identity_route.request_starts -and
-        $audit.gateway_identity_route.full_body_hmac_mismatch -eq 0 -and
-        $audit.gateway_identity_route.full_body_hmac_unavailable -eq 0 -and
-        $audit.gateway_identity_route.response_body_fingerprint_fields_present -eq $true -and
-        $audit.gateway_identity_route.response_body_fingerprint_equal -eq $audit.gateway_identity_route.request_starts -and
-        $audit.gateway_identity_route.response_body_fingerprint_mismatch -eq 0 -and
-        $audit.gateway_identity_route.response_body_fingerprint_unavailable -eq 0
-    ) { 'met' } else { 'not_captured' }
+    sse_identity = Get-SseIdentityStatus -Audit $audit -WireFixtureSha256 $wireFixtureSha256
     terminal_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -eq 'response.completed' }).Count -gt 0) { 'met' } else { 'not_captured' }
     error_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -match 'error' -or $_.tag -eq 'error' }).Count -gt 0) { 'met' } else { 'not_captured' }
     non_streaming = $audit.gate_classification.non_streaming
     non_streaming_fixture = if ($wire.response.non_streaming.captured -eq $true -and $wire.response.non_streaming.fixture_kind -ne 'contract_sentinel' -and $wire.response.non_streaming.request_stream -eq $false -and @($wire.response.non_streaming.response_items).Count -gt 0) { 'met' } else { 'not_captured' }
     identity_replay = $audit.gate_classification.zero_unclassified_identity
-    wire_identity_replay = Get-WireIdentityReplayStatus -Audit $audit
+    wire_identity_replay = Get-WireIdentityReplayStatus -Audit $audit -WireFixtureSha256 $wireFixtureSha256
 }
 $acceptedEvidenceGateStatuses = @{
     complete_model_visible_plan = @('complete')
@@ -747,6 +777,7 @@ $expectedLiveDispositions = @{
     core_sse_errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'live_control_required' }
     terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'live_control_required' }
     errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'live_control_required' }
+    core_function_replay = if ($expectedEvidenceGates.wire_identity_replay -in $acceptedEvidenceGateStatuses.wire_identity_replay) { 'preserved' } else { 'live_control_required' }
     hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met')) { 'preserved' } else { 'live_control_required' }
     unknown_tagged_sentinels = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response -and $expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture -and $streamUnknown.Count -gt 0) { 'preserved' } else { 'live_control_required' }
     default_runtime_fields = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response) { 'preserved' } else { 'live_control_required' }
@@ -759,6 +790,13 @@ foreach ($scope in $expectedLiveDispositions.Keys) {
 }
 if ($inventory.identity_control.unclassified_core_items -ne 0) {
     Add-Mismatch 'inventory identity control reports unclassified core items'
+}
+$expectedReplayCases = @('identity','mutation','deletion','loss')
+if ($inventory.identity_control.fail_closed -ne $true) {
+    Add-Mismatch 'inventory identity control is not fail-closed'
+}
+if ((@($inventory.identity_control.replay_cases) -join '|') -ne ($expectedReplayCases -join '|')) {
+    Add-Mismatch 'inventory identity control replay cases are invalid'
 }
 
 switch ($InventoryReplayCase) {

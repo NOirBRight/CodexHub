@@ -239,6 +239,21 @@ def _count_unknown_tags(value: Any) -> int:
     return 0
 
 
+def _unknown_tag_mode_counts(wire: dict[str, Any]) -> tuple[int, int]:
+    streaming = _streaming_events(wire)
+    non_streaming = wire.get("response", {}).get("non_streaming", {}).get(
+        "response_items", []
+    )
+    return (
+        sum(1 for item in streaming if item.get("tag") == "unknown"),
+        sum(
+            1
+            for item in non_streaming
+            if isinstance(item, dict) and item.get("tag") == "unknown"
+        ),
+    )
+
+
 def _streaming_events(wire: dict[str, Any]) -> list[dict[str, Any]]:
     events = wire.get("response", {}).get("streaming", {}).get("events", [])
     return [event for event in events if isinstance(event, dict)]
@@ -256,7 +271,9 @@ def _has_error_event(wire: dict[str, Any]) -> bool:
     )
 
 
-def _wire_identity_replay_status(audit: dict[str, Any]) -> str:
+def _wire_identity_replay_status(
+    audit: dict[str, Any], *, expected_wire_sha256: str | None = None
+) -> str:
     replay = audit.get("wire_identity_replay")
     if not isinstance(replay, dict):
         return "not_captured"
@@ -264,10 +281,48 @@ def _wire_identity_replay_status(audit: dict[str, Any]) -> str:
     if status not in {"complete", "met"}:
         return status
     cases = replay.get("cases")
+    source_hash = replay.get("wire_fixture_sha256")
     if (
         replay.get("fail_closed") is True
+        and isinstance(source_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_hash)
+        and (expected_wire_sha256 is None or source_hash == expected_wire_sha256)
         and isinstance(cases, dict)
-        and all(cases.get(case) in {"complete", "met"} for case in ("identity", "mutation", "deletion", "loss"))
+        and all(
+            isinstance(cases.get(case), dict)
+            and cases[case].get("status") in {"complete", "met"}
+            and cases[case].get("observed") is True
+            and re.fullmatch(
+                r"[0-9a-f]{64}", str(cases[case].get("output_sha256", ""))
+            )
+            for case in ("identity", "mutation", "deletion", "loss")
+        )
+    ):
+        return status
+    return "not_captured"
+
+
+def _sse_identity_status(
+    audit: dict[str, Any], *, expected_wire_sha256: str | None = None
+) -> str:
+    evidence = audit.get("sse_identity")
+    if not isinstance(evidence, dict):
+        return "not_captured"
+    status = evidence.get("status", "not_captured")
+    if status not in {"complete", "met"}:
+        return status
+    source_hash = evidence.get("wire_fixture_sha256")
+    pre_hash = evidence.get("pre_stream_sequence_sha256")
+    post_hash = evidence.get("post_stream_sequence_sha256")
+    if (
+        evidence.get("fail_closed") is True
+        and isinstance(source_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_hash)
+        and (expected_wire_sha256 is None or source_hash == expected_wire_sha256)
+        and isinstance(pre_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", pre_hash)
+        and post_hash == pre_hash
+        and evidence.get("event_count", 0) > 0
     ):
         return status
     return "not_captured"
@@ -276,6 +331,8 @@ def _wire_identity_replay_status(audit: dict[str, Any]) -> str:
 def _classify_core_items(
     wire: dict[str, Any],
     audit: dict[str, Any],
+    *,
+    wire_fixture_sha256: str | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -286,6 +343,9 @@ def _classify_core_items(
     )
     identity_gate = audit.get("gate_classification", {}).get(
         "zero_unclassified_identity"
+    )
+    wire_replay_gate = _wire_identity_replay_status(
+        audit, expected_wire_sha256=wire_fixture_sha256
     )
     items.append(
         _item(
@@ -401,7 +461,9 @@ def _classify_core_items(
         _item(
             "core_function_replay",
             "preserved"
-            if _gate_is_complete(full_wire_gate) and _gate_is_complete(identity_gate)
+            if _gate_is_complete(full_wire_gate)
+            and _gate_is_complete(identity_gate)
+            and _gate_is_complete(wire_replay_gate)
             else "live_control_required",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
@@ -450,15 +512,8 @@ def _classify_live_control_items(
     full_wire_gate = gate_classification.get("full_pre_post_request_response")
     non_direct_gate = gate_classification.get("non_direct_states")
     non_streaming_captured = _real_non_streaming_captured(wire)
-    unknown_tag_count = sum(
-        1
-        for response in (
-            wire.get("response", {}).get("streaming", {}),
-            wire.get("response", {}).get("non_streaming", {}),
-        )
-        for item in response.get("events", []) + response.get("response_items", [])
-        if item.get("tag") == "unknown"
-    )
+    unknown_tag_count = _count_unknown_tags(wire)
+    unknown_stream_count, unknown_non_stream_count = _unknown_tag_mode_counts(wire)
 
     choice_captured = (
         wire.get("pre_gateway", {}).get("choice_controls", {}).get("captured") is True
@@ -515,6 +570,8 @@ def _classify_live_control_items(
             "unknown_tagged_sentinels",
             "preserved"
             if unknown_tag_count > 0
+            and unknown_stream_count > 0
+            and unknown_non_stream_count > 0
             and _gate_is_complete(full_wire_gate)
             and non_streaming_captured
             else "live_control_required",
@@ -615,6 +672,7 @@ def _build_qualification(
     trace: dict[str, Any],
     wire: dict[str, Any],
     audit: dict[str, Any],
+    wire_fixture_sha256: str | None = None,
 ) -> dict[str, Any]:
     live_control_scopes = sorted(
         item["scope"]
@@ -646,23 +704,7 @@ def _build_qualification(
             "full_response_body_fingerprint", "unknown"
         ),
         "sse_identity": (
-            "met"
-            if (
-                audit.get("gateway_identity_route", {}).get("full_body_hmac_pairs", 0) > 0
-                and audit.get("gateway_identity_route", {}).get("full_body_hmac_equal", 0)
-                == audit.get("gateway_identity_route", {}).get("request_starts", 0)
-                and audit.get("gateway_identity_route", {}).get("full_body_hmac_mismatch", 0) == 0
-                and audit.get("gateway_identity_route", {}).get("full_body_hmac_unavailable", 0) == 0
-                and audit.get("gateway_identity_route", {}).get(
-                    "response_body_fingerprint_fields_present"
-                )
-                is True
-                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_equal", 0)
-                == audit.get("gateway_identity_route", {}).get("request_starts", 0)
-                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_mismatch", 0) == 0
-                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_unavailable", 0) == 0
-            )
-            else "not_captured"
+            _sse_identity_status(audit, expected_wire_sha256=wire_fixture_sha256)
         ),
         "terminal_events": (
             "met"
@@ -691,7 +733,9 @@ def _build_qualification(
         "identity_replay": audit.get("gate_classification", {}).get(
             "zero_unclassified_identity", "unknown"
         ),
-        "wire_identity_replay": _wire_identity_replay_status(audit),
+        "wire_identity_replay": _wire_identity_replay_status(
+            audit, expected_wire_sha256=wire_fixture_sha256
+        ),
     }
     accepted_gate_statuses = {
         "complete_model_visible_plan": {"complete"},
@@ -700,8 +744,8 @@ def _build_qualification(
         "full_request_fingerprint": {"captured", "complete", "met"},
         "full_response_fingerprint": {"captured", "complete", "met"},
         "sse_identity": {"captured", "complete", "met"},
-        "terminal_events": {"observed", "complete", "met"},
-        "error_events": {"observed", "complete", "met"},
+        "terminal_events": {"complete", "met"},
+        "error_events": {"complete", "met"},
         "non_streaming": {"complete", "met"},
         "non_streaming_fixture": {"captured", "complete", "met"},
         "identity_replay": {"complete", "met"},
@@ -854,6 +898,7 @@ def build_inventory(
     trace_data = _load_json(trace)
     wire_data = _load_json(wire_fixture)
     audit_data = _load_json(audit)
+    wire_fixture_sha256 = _sha256_file(wire_fixture)
     if (
         trace_data.get("schema_version") != 4
         or wire_data.get("schema_version") != 1
@@ -864,7 +909,11 @@ def build_inventory(
         raise ValueError("Issue #62 evidence schema identity is invalid")
 
     items: list[dict[str, Any]] = []
-    items.extend(_classify_core_items(wire_data, audit_data))
+    items.extend(
+        _classify_core_items(
+            wire_data, audit_data, wire_fixture_sha256=wire_fixture_sha256
+        )
+    )
     items.extend(_classify_live_control_items(wire_data, audit_data))
     items.extend(_classify_advanced_items(trace_data))
 
@@ -875,8 +924,13 @@ def build_inventory(
         seen.add(item["scope"])
 
     unknown_tagged_source_count = _count_unknown_tags(wire_data)
+    unknown_stream_count, unknown_non_stream_count = _unknown_tag_mode_counts(wire_data)
     if unknown_tagged_source_count == 0:
         raise ValueError("wire evidence contains no unknown-tag sentinel to classify")
+    if unknown_stream_count == 0 or unknown_non_stream_count == 0:
+        raise ValueError(
+            "wire evidence must contain unknown-tag sentinels in both response modes"
+        )
     identity_control = _build_identity_control(
         items, unknown_tagged_source_count=unknown_tagged_source_count
     )
@@ -891,7 +945,7 @@ def build_inventory(
         "trace": {"file": trace.name, "sha256": _sha256_file(trace)},
         "wire_fixture": {
             "file": wire_fixture.name,
-            "sha256": _sha256_file(wire_fixture),
+            "sha256": wire_fixture_sha256,
         },
         "audit": {"file": audit.name, "sha256": _sha256_file(audit)},
     }
@@ -904,6 +958,7 @@ def build_inventory(
         trace=trace_data,
         wire=wire_data,
         audit=audit_data,
+        wire_fixture_sha256=wire_fixture_sha256,
     )
 
     return {
@@ -1087,8 +1142,8 @@ def reconcile_inventory(
         "full_request_fingerprint": {"captured", "complete", "met"},
         "full_response_fingerprint": {"captured", "complete", "met"},
         "sse_identity": {"captured", "complete", "met"},
-        "terminal_events": {"observed", "complete", "met"},
-        "error_events": {"observed", "complete", "met"},
+        "terminal_events": {"complete", "met"},
+        "error_events": {"complete", "met"},
         "non_streaming": {"complete", "met"},
         "non_streaming_fixture": {"captured", "complete", "met"},
         "identity_replay": {"complete", "met"},
@@ -1186,6 +1241,7 @@ def reconcile_inventory(
                     trace=trace_data,
                     wire=wire_data,
                     audit=audit_data,
+                    wire_fixture_sha256=evidence_binding["wire_fixture"]["sha256"],
                 )
                 for field in (
                     "evidence_gates",
@@ -1198,7 +1254,18 @@ def reconcile_inventory(
                             f"mutation: qualification.{field} does not match bound evidence"
                         )
 
-    unclassified = inventory.get("identity_control", {}).get("unclassified_core_items")
+    identity_control = inventory.get("identity_control", {})
+    if identity_control.get("fail_closed") is not True:
+        mismatches.append("identity_control.fail_closed must be true")
+    if identity_control.get("replay_cases") != [
+        "identity",
+        "mutation",
+        "deletion",
+        "loss",
+    ]:
+        mismatches.append("identity_control.replay_cases are invalid")
+
+    unclassified = identity_control.get("unclassified_core_items")
     if not isinstance(unclassified, int) or unclassified < 0:
         mismatches.append("identity_control.unclassified_core_items is invalid")
     else:
@@ -1213,7 +1280,7 @@ def reconcile_inventory(
                 f"does not match observed unclassified items={actual_unclassified}"
             )
 
-    unknown_tagged_source_count = inventory.get("identity_control", {}).get(
+    unknown_tagged_source_count = identity_control.get(
         "unknown_tagged_source_count"
     )
     if not isinstance(unknown_tagged_source_count, int) or unknown_tagged_source_count <= 0:

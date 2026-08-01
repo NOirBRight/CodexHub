@@ -276,6 +276,22 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
         )
 
 
+def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
+    module = load_inventory_module()
+    wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["gate_classification"]["full_pre_post_request_response"] = "met"
+    audit["gate_classification"]["zero_unclassified_identity"] = "met"
+
+    items = module._classify_core_items(
+        wire,
+        audit,
+        wire_fixture_sha256=module._sha256_file(WIRE_FIXTURE),
+    )
+    replay = next(item for item in items if item["scope"] == "core_function_replay")
+    assert replay["disposition"] == "live_control_required"
+
+
 def test_committed_inventory_matches_generator_output() -> None:
     module = load_inventory_module()
 
@@ -349,6 +365,13 @@ def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
     assert report["reconciled"] is False
     assert any("unknown_tagged_source_count" in mismatch for mismatch in report["mismatches"])
 
+    tampered_identity_control = json.loads(json.dumps(base))
+    tampered_identity_control["identity_control"]["fail_closed"] = False
+    tampered_identity_control["identity_control"]["replay_cases"] = []
+    report = module.reconcile_inventory(tampered_identity_control)
+    assert report["reconciled"] is False
+    assert any("identity_control" in mismatch for mismatch in report["mismatches"])
+
 
 def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() -> None:
     module = load_inventory_module()
@@ -393,6 +416,14 @@ def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() ->
                 "response_body_fingerprint_mismatch": 0,
                 "response_body_fingerprint_unavailable": 0,
             },
+            "sse_identity": {
+                "status": "met",
+                "fail_closed": True,
+                "wire_fixture_sha256": "a" * 64,
+                "pre_stream_sequence_sha256": "b" * 64,
+                "post_stream_sequence_sha256": "b" * 64,
+                "event_count": 2,
+            },
             "gate_classification": {
                 "full_pre_post_request_response": "met",
                 "full_request_body_fingerprint": "captured",
@@ -403,11 +434,12 @@ def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() ->
             "wire_identity_replay": {
                 "status": "met",
                 "fail_closed": True,
+                "wire_fixture_sha256": "a" * 64,
                 "cases": {
-                    "identity": "met",
-                    "mutation": "met",
-                    "deletion": "met",
-                    "loss": "met",
+                    "identity": {"status": "met", "observed": True, "output_sha256": "c" * 64},
+                    "mutation": {"status": "met", "observed": True, "output_sha256": "d" * 64},
+                    "deletion": {"status": "met", "observed": True, "output_sha256": "e" * 64},
+                    "loss": {"status": "met", "observed": True, "output_sha256": "f" * 64},
                 },
             },
         },

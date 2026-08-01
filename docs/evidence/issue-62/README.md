@@ -162,8 +162,11 @@ It never fabricates a `Supported` disposition for a gate the artifacts mark
 The qualification also has a separate `wire_identity_replay` gate. A full
 request/response fingerprint is not treated as replay proof by itself: a
 future capture must record fail-closed identity, mutation, deletion, and loss
-cases as complete/met. The current sanitized evidence has no such wire replay
-record, so this gate remains `not_captured`.
+cases as complete/met, with each case observed and bound to the current wire
+fixture SHA-256 plus an output digest. The current sanitized evidence has no
+such wire replay record, so this gate remains `not_captured`. Likewise,
+`sse_identity` requires an independent pre/post stream-sequence digest bound to
+the same wire fixture; full-body request/response equality alone is not enough.
 
 ### Disposition vocabulary
 
