@@ -11,14 +11,14 @@ The former registrations were:
 
 | Runner | Former purpose | Retirement state |
 |---|---|---|
-| `codexhub-windows-x64` (id 21) | Python, synthetic, frontend, Rust, Clippy, release checks | Deregister after Hosted CI acceptance |
-| `codexhub-linux-x64` (id 22) | Linux `safe_file` compile, lint, and tests | Deregister after Hosted CI acceptance |
+| `codexhub-windows-x64` (id 21) | Python, synthetic, frontend, Rust, Clippy, release checks | Deregistered; GitHub currently reports zero self-hosted runners |
+| `codexhub-linux-x64` (id 22) | Linux `safe_file` compile, lint, and tests | Deregistered; GitHub currently reports zero self-hosted runners |
 
-The registrations, local runner directories, WSL files, and historical logs
-are separate operational state. Do not restart either listener to unblock a
-PR. Deregistration is performed only after the Hosted parity workflow, the
-path-aware `CI / gate`, branch protection, and all Beta1 PRs have passed. The
-first retirement pass removes the GitHub registrations but does not delete
+The registrations were separate from local runner directories, WSL files, and
+historical logs. The GitHub registrations have been removed after the Hosted
+parity workflow, path-aware `CI / gate`, branch protection, and Beta1 PR checks
+passed. Do not restart either listener to unblock a PR. The retirement pass
+removed the GitHub registrations but did not delete
 `D:\GitHubActions\CodexHub\windows`, WSL data, or logs.
 
 ## Hosted CI invariants
