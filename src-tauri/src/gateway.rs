@@ -1993,6 +1993,14 @@ fn official_models_from_metadata(
     subscription_models: Option<Vec<crate::Model>>,
     published_context_windows: &BTreeMap<String, u32>,
 ) -> Vec<GatewayModel> {
+    // An Official model without a committed catalog budget is not safe to
+    // advertise: a missing context value would let a caller send an
+    // unbounded request.  The activation path already refuses to start
+    // Official routing without this publication fence; keep the Gateway
+    // model/status surfaces fail-closed as well.
+    if published_context_windows.is_empty() {
+        return Vec::new();
+    }
     let mut models: Vec<GatewayModel> =
         match subscription_models.filter(|models| !models.is_empty()) {
             Some(source_models) => {
@@ -2086,6 +2094,7 @@ fn official_gateway_model_from_metadata(
     published_context_windows: &BTreeMap<String, u32>,
 ) -> Option<GatewayModel> {
     let id = official_gateway_model_id(&model.id)?;
+    let context_window = published_context_windows.get(&id).copied()?;
     if official_model_disabled(settings, &id) || is_gateway_fast_variant_id(&id) {
         return None;
     }
@@ -2100,7 +2109,7 @@ fn official_gateway_model_from_metadata(
         source_kind: "official".to_string(),
         supports_responses: true,
         supports_chat_completions: true,
-        context_window: published_context_windows.get(&id).copied(),
+        context_window: Some(context_window),
         input_modalities: model
             .input_modalities
             .clone()
@@ -2125,18 +2134,23 @@ fn fallback_official_gateway_models(
 ) -> Vec<GatewayModel> {
     OFFICIAL_MODELS
         .iter()
-        .filter(|(id, _, _)| !official_model_disabled(settings, id))
-        .map(|(id, display_name, _)| GatewayModel {
-            id: (*id).to_string(),
-            display_name: (*display_name).to_string(),
-            source: "Official Codex subscription".to_string(),
-            source_kind: "official".to_string(),
-            supports_responses: true,
-            supports_chat_completions: true,
-            context_window: published_context_windows.get(*id).copied(),
-            input_modalities: Some(official_gateway_input_modalities()),
-            supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
-            default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
+        .filter(|(id, _, _)| {
+            !official_model_disabled(settings, id) && published_context_windows.contains_key(*id)
+        })
+        .filter_map(|(id, display_name, _)| {
+            let context_window = published_context_windows.get(*id).copied()?;
+            Some(GatewayModel {
+                id: (*id).to_string(),
+                display_name: (*display_name).to_string(),
+                source: "Official Codex subscription".to_string(),
+                source_kind: "official".to_string(),
+                supports_responses: true,
+                supports_chat_completions: true,
+                context_window: Some(context_window),
+                input_modalities: Some(official_gateway_input_modalities()),
+                supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
+                default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
+            })
         })
         .collect()
 }
@@ -8085,8 +8099,7 @@ mod tests {
             &BTreeMap::new(),
         );
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].context_window, None);
+        assert!(models.is_empty());
     }
 
     #[test]

@@ -37,6 +37,15 @@ CONTEXT_GUARD_KEYS = {
     "model_auto_compact_token_limit",
 }
 
+# Releases before the catalog-scoped guard projected this exact pair into the
+# top-level config.  It is the only legacy signature we can safely recognize
+# when an old config was restored without the CodexHub marker/state file.  Do
+# not infer ownership from arbitrary user-authored values.
+LEGACY_MANAGED_CONTEXT_VALUES = {
+    "model_context_window": "272000",
+    "model_auto_compact_token_limit": "244800",
+}
+
 
 def toml_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
@@ -265,15 +274,30 @@ def _migrate_legacy_context_guard_values(
             continue
         text = read_text_preserving_newlines(path)
         entry = state.get(target)
+        has_state_entry = isinstance(entry, dict)
         managed = (
             _normalized_context_guard_values(entry.get("managed"))
             if isinstance(entry, dict)
             else {key: None for key in CONTEXT_GUARD_KEYS}
         )
         marker_managed = _context_guard_managed_values(text)
+        # A disconnected config can lose both the marker and the state file.
+        # In that case only the exact pair emitted by the legacy guard is
+        # identifiable as CodexHub-owned; arbitrary top-level values remain
+        # user-owned and are never removed by migration.
+        marker_or_state = has_state_entry or any(marker_managed.values())
+        legacy_pair = (
+            not marker_or_state
+            and all(
+                top_level_value(text, key) == value
+                for key, value in LEGACY_MANAGED_CONTEXT_VALUES.items()
+            )
+        )
         removable: dict[str, None] = {}
         for key in CONTEXT_GUARD_KEYS:
             known_value = managed.get(key) or marker_managed.get(key)
+            if known_value is None and legacy_pair:
+                known_value = LEGACY_MANAGED_CONTEXT_VALUES[key]
             if known_value is not None and top_level_value(text, key) == known_value:
                 removable[key] = None
         if removable:
@@ -367,6 +391,18 @@ def set_context_guard(
     catalog_path: Path | None = None,
 ) -> dict[str, int | bool | None]:
     _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
+    selected_model = top_level_value(
+        read_text_preserving_newlines(config_path) if config_path.exists() else "",
+        "model",
+    )
+    selected_official = _selected_model_is_official(selected_model)
+    safe_official_budget = (
+        _selected_official_context_budget(catalog_path, selected_model)
+        if selected_official and catalog_path is not None
+        else None
+    )
+    if selected_official and safe_official_budget is None:
+        raise ValueError("safe current Official context budget is unavailable")
     target_paths = {"config": config_path}
     if backup_path.exists():
         target_paths["backup"] = backup_path
@@ -931,6 +967,11 @@ def main(argv: list[str] | None = None) -> int:
     context_set_parser.add_argument("--catalog", required=True, type=Path)
     context_set_parser.add_argument("--enabled", required=True, choices=("true", "false"))
 
+    migrate_context_parser = subparsers.add_parser("migrate-context-guard")
+    migrate_context_parser.add_argument("--config", required=True, type=Path)
+    migrate_context_parser.add_argument("--backup", required=True, type=Path)
+    migrate_context_parser.add_argument("--context-guard-state", required=True, type=Path)
+
     args = parser.parse_args(argv)
     if args.command == "apply":
         apply_overlay(
@@ -974,6 +1015,12 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 ensure_ascii=False,
             )
+        )
+    elif args.command == "migrate-context-guard":
+        _migrate_legacy_context_guard_values(
+            args.config,
+            args.backup,
+            args.context_guard_state,
         )
     return 0
 

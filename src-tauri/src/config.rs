@@ -63,6 +63,16 @@ pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
     republish_managed_codex_context_budget_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
+/// Migrate legacy CodexHub-owned global context values without changing the
+/// active route.  This is deliberately independent of the overlay owner and
+/// selected model so an upgraded install is repaired even when a Stable/Beta
+/// backup belongs to the other channel or the active model is third-party.
+pub(crate) fn migrate_legacy_context_guard() -> Result<bool, String> {
+    let paths = ConfigPaths::runtime()?;
+    let python = find_python();
+    migrate_legacy_context_guard_with_paths(&paths, &python, &ProcessCommandRunner)
+}
+
 pub fn switch_mode_with_takeover(
     mode: &str,
     auto_sync: bool,
@@ -795,6 +805,63 @@ fn republish_managed_codex_context_budget_with_paths(
     Ok(before != fs::read_to_string(config_path).unwrap_or_default())
 }
 
+pub(crate) fn migrate_legacy_context_guard_with_paths(
+    paths: &ConfigPaths,
+    python: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<bool, String> {
+    ensure_mode_switch_directories(paths)?;
+    let config_path = paths.codex_config_path();
+    let current_app_owner = crate::app_flavor::current().routing_owner();
+    let backup_owner = fs::read_to_string(&config_path)
+        .ok()
+        .as_deref()
+        .and_then(codex_overlay_owner)
+        .unwrap_or(current_app_owner);
+    let selected_backup =
+        paths.config_backup_path_for_target_owner(current_app_owner, backup_owner);
+    let mut backup_paths = vec![selected_backup];
+    // Stable and Beta may leave a backup in the other runtime directory after
+    // a channel switch.  Startup migration is deliberately independent of the
+    // active overlay owner, so inspect every existing CodexHub backup once.
+    for target_owner in [
+        crate::app_flavor::RoutingOwner::Release,
+        crate::app_flavor::RoutingOwner::Beta,
+    ] {
+        let candidate =
+            paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+        if candidate.exists() && !backup_paths.contains(&candidate) {
+            backup_paths.push(candidate);
+        }
+    }
+    let mut changed = false;
+    for backup_path in backup_paths {
+        let before_config = fs::read(&config_path).unwrap_or_default();
+        let before_backup = fs::read(&backup_path).unwrap_or_default();
+        let _outcome = run_python_script(
+            "legacy context guard migration",
+            python,
+            paths.config_overlay_script(),
+            vec![
+                "migrate-context-guard".to_string(),
+                "--config".to_string(),
+                config_path.to_string_lossy().into_owned(),
+                "--backup".to_string(),
+                backup_path.to_string_lossy().into_owned(),
+                "--context-guard-state".to_string(),
+                paths
+                    .context_guard_state_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            runner,
+        )?;
+        changed |= before_config != fs::read(&config_path).unwrap_or_default()
+            || before_backup != fs::read(&backup_path).unwrap_or_default();
+    }
+    Ok(changed)
+}
+
 fn top_level_model_is_official(text: &str) -> bool {
     for line in text.lines() {
         let trimmed = line.trim();
@@ -1485,7 +1552,8 @@ mod tests {
     use super::{
         codex_overlay_owner, ensure_codex_owner_mutation_allowed,
         get_codex_context_guard_status_with_paths, get_providers_with_paths,
-        get_settings_with_paths, republish_managed_codex_context_budget_with_paths,
+        get_settings_with_paths, migrate_legacy_context_guard_with_paths,
+        republish_managed_codex_context_budget_with_paths,
         save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
         switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner,
         top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths,
@@ -2795,6 +2863,44 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             &commands[0].args,
             "--catalog",
             &paths.generated_catalog_path(),
+        );
+    }
+
+    #[test]
+    fn startup_context_migration_targets_a_foreign_channel_backup() {
+        let root = temp_root("startup-context-migration-foreign-channel");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.codex_config_path().parent().unwrap()).unwrap();
+        fs::write(
+            paths.codex_config_path(),
+            "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\nmodel = \"volc/glm-5.2\"\n",
+        )
+        .unwrap();
+        let current_owner = crate::app_flavor::current().routing_owner();
+        let backup_path = paths.config_backup_path_for_target_owner(
+            current_owner,
+            crate::app_flavor::RoutingOwner::Beta,
+        );
+        let runner = RecordingRunner::successful();
+
+        migrate_legacy_context_guard_with_paths(
+            &paths,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("startup context migration");
+
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_contains_sequence(
+            &commands[0].args,
+            &["migrate-context-guard", "--config", "--backup", "--context-guard-state"],
+        );
+        assert_arg_value(&commands[0].args, "--backup", &backup_path);
+        assert_arg_value(
+            &commands[0].args,
+            "--context-guard-state",
+            &paths.context_guard_state_path(),
         );
     }
 

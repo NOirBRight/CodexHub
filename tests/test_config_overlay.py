@@ -11,6 +11,7 @@ from unittest.mock import patch
 from config_overlay import (
     MARKER_BEGIN,
     MARKER_END,
+    _migrate_legacy_context_guard_values,
     _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
@@ -481,6 +482,32 @@ class ConfigOverlayTests(unittest.TestCase):
             restored = config_path.read_text(encoding="utf-8")
             self.assertNotIn("model_context_window", restored)
             self.assertNotIn("model_auto_compact_token_limit", restored)
+
+    def test_startup_migrates_exact_legacy_pair_without_marker_or_state(self):
+        """A disconnected old install can lose both ownership markers."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.toml.release.backup"
+            state_path = tmp / "context-guard-state.json"
+            legacy = (
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n"
+                'model_reasoning_effort = "high"\n'
+            )
+            config_path.write_text(legacy, encoding="utf-8")
+            backup_path.write_text(legacy, encoding="utf-8")
+
+            _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
+
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("model_context_window", text)
+                self.assertNotIn("model_auto_compact_token_limit", text)
+                self.assertIn('model_reasoning_effort = "high"', text)
+            self.assertFalse(state_path.exists())
 
     def test_apply_and_restore_use_current_channel_state_for_foreign_backup(self):
         """A channel switch must not look for guard state beside a foreign backup.
@@ -1652,6 +1679,39 @@ class ConfigOverlayTests(unittest.TestCase):
                 self.assertIn("model_context_window = 400000", text)
                 self.assertIn("model_auto_compact_token_limit = 360000", text)
                 self.assertIn('model_reasoning_effort = "high"', text)
+
+    def test_context_guard_fails_closed_for_official_without_safe_catalog_budget(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+            catalog_path.write_text('{"models": []}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
+                set_context_guard(
+                    config_path,
+                    backup_path,
+                    state_path,
+                    enabled=True,
+                    catalog_path=catalog_path,
+                )
+
+            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
+                set_context_guard(
+                    config_path,
+                    backup_path,
+                    state_path,
+                    enabled=True,
+                )
+
+            self.assertEqual(
+                config_path.read_text(encoding="utf-8"),
+                'model = "gpt-5.6-terra"\n',
+            )
+            self.assertFalse(state_path.exists())
 
     def test_context_guard_keeps_an_explicit_official_override_as_a_conflict(self):
         original = "\n".join(
