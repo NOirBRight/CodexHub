@@ -1493,24 +1493,10 @@ function OfficialDetail({
   const authRefreshBusy = busy === "auth-refresh";
   const [contextGuardStatus, setContextGuardStatus] = useState<CodexContextGuardStatus | null>(null);
   const [contextGuardBusy, setContextGuardBusy] = useState(false);
-  const displayedGatewayContextById = useMemo(() => {
-    if (!contextGuardStatus?.gateway_enabled) {
-      return gatewayContextById;
-    }
-    return new Map(
-      Array.from(gatewayContextById, ([modelId, contextWindow]) => [
-        modelId,
-        Math.min(
-          contextWindow,
-          contextGuardStatus.model_context_window ?? contextWindow,
-        ),
-      ]),
-    );
-  }, [
-    contextGuardStatus?.gateway_enabled,
-    contextGuardStatus?.model_context_window,
-    gatewayContextById,
-  ]);
+  // Gateway publishes the authoritative per-model window from the Official
+  // catalog.  A user-owned Codex top-level override is Desktop-only and must
+  // not shrink the Gateway display when the conflict diagnostic is active.
+  const displayedGatewayContextById = gatewayContextById;
 
   useEffect(() => {
     let active = true;

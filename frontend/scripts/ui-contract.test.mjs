@@ -1715,7 +1715,8 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(providersSource, /id="context-guard-tooltip"/);
   assert.match(providersSource, /h-7[\s\S]*rounded-full/);
   assert.match(providersSource, /rounded-full[\s\S]*t\("common\.refresh"\)/);
-  assert.match(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.doesNotMatch(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.match(providersSource, /const displayedGatewayContextById = gatewayContextById/);
   assert.match(providersSource, /openai_context_guard_enabled: enabled/);
   assert.match(enSource, /contextGuard: "Official model long-context cost protection"/);
   assert.match(zhSource, /contextGuard: "Official 模型长上下文费用保护"/);

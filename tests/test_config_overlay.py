@@ -12,6 +12,7 @@ from config_overlay import (
     MARKER_BEGIN,
     MARKER_END,
     _migrate_legacy_context_guard_values,
+    _migrate_legacy_context_guard_values_for_backups,
     _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
@@ -512,6 +513,163 @@ class ConfigOverlayTests(unittest.TestCase):
             status = context_guard_status(config_path, state_path)
             self.assertTrue(status["global_override_conflict"])
 
+    def test_startup_migrates_all_channel_backups_before_clearing_shared_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_one = tmp / "stable" / "config.toml.backup"
+            backup_two = tmp / "beta" / "config.toml.backup"
+            state_path = tmp / "context-guard-state.json"
+            for path in (backup_one, backup_two):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            legacy = (
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n"
+            )
+            config_path.write_text(legacy, encoding="utf-8")
+            backup_one.write_text(legacy, encoding="utf-8")
+            backup_two.write_text(legacy, encoding="utf-8")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "config": {
+                            "previous": {
+                                "model_context_window": None,
+                                "model_auto_compact_token_limit": None,
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                        "backup": {
+                            "previous": {
+                                "model_context_window": None,
+                                "model_auto_compact_token_limit": None,
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _migrate_legacy_context_guard_values_for_backups(
+                config_path,
+                [backup_one, backup_two],
+                state_path,
+            )
+
+            for path in (config_path, backup_one, backup_two):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("model_context_window", text)
+                self.assertNotIn("model_auto_compact_token_limit", text)
+            migrated_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIsNone(migrated_state["backup"]["managed"]["model_context_window"])
+
+    def test_failed_official_guard_enable_does_not_migrate_config_or_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = tmp / "catalog.json"
+            config_text = (
+                f"{MARKER_BEGIN}\n"
+                "# owner = release\n"
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n"
+                f"{MARKER_END}\n"
+                'model = "gpt-5.6-terra"\n'
+            )
+            state = {
+                "config": {
+                    "previous": {
+                        "model_context_window": "400000",
+                        "model_auto_compact_token_limit": "360000",
+                    },
+                    "managed": {
+                        "model_context_window": "272000",
+                        "model_auto_compact_token_limit": "244800",
+                    },
+                }
+            }
+            config_path.write_text(config_text, encoding="utf-8")
+            backup_path.write_text(config_text, encoding="utf-8")
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            catalog_path.write_text("{not json", encoding="utf-8")
+            before = {
+                path: path.read_text(encoding="utf-8")
+                for path in (config_path, backup_path, state_path)
+            }
+
+            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
+                set_context_guard(
+                    config_path,
+                    backup_path,
+                    state_path,
+                    enabled=True,
+                    catalog_path=catalog_path,
+                )
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), before[config_path])
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), before[backup_path])
+            self.assertEqual(state_path.read_text(encoding="utf-8"), before[state_path])
+
+    def test_migration_restores_previous_user_override_from_legacy_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            state_path = tmp / "context-guard-state.json"
+            config_path.write_text(
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n",
+                encoding="utf-8",
+            )
+            backup_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "config": {
+                            "previous": {
+                                "model_context_window": "400000",
+                                "model_auto_compact_token_limit": "360000",
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                        "backup": {
+                            "previous": {
+                                "model_context_window": "400000",
+                                "model_auto_compact_token_limit": "360000",
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
+
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("model_context_window = 400000", text)
+                self.assertIn("model_auto_compact_token_limit = 360000", text)
+                self.assertNotIn("272000", text)
+                self.assertNotIn("244800", text)
+
     def test_apply_and_restore_use_current_channel_state_for_foreign_backup(self):
         """A channel switch must not look for guard state beside a foreign backup.
 
@@ -652,6 +810,58 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("model_auto_compact_token_limit = 900000", restored)
             self.assertIn('model = "volc/glm-5.2"', restored)
             self.assertIn('model_reasoning_effort = "high"', restored)
+
+    def test_restore_preserves_explicit_deletion_of_a_previous_user_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.toml.release.backup"
+            state_path = tmp / "context-guard-state.json"
+            original = (
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 400000\n"
+                "model_auto_compact_token_limit = 360000\n"
+            )
+            config_path.write_text(original, encoding="utf-8")
+            backup_path.write_text(original, encoding="utf-8")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "config": {
+                            "previous": {
+                                "model_context_window": "400000",
+                                "model_auto_compact_token_limit": "360000",
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                        "backup": {
+                            "previous": {
+                                "model_context_window": "400000",
+                                "model_auto_compact_token_limit": "360000",
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # Simulate the user deleting both top-level keys while connected.
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+            restore_overlay(
+                config_path,
+                backup_path,
+                context_guard_state_path=state_path,
+            )
+            restored = config_path.read_text(encoding="utf-8")
+            self.assertNotIn("model_context_window", restored)
+            self.assertNotIn("model_auto_compact_token_limit", restored)
 
     def test_selected_official_context_budget_prefers_active_model_over_unrelated_default(self):
         """Active task-model budget wins; do not fall back to an unrelated Official default.

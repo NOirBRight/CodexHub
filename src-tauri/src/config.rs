@@ -834,32 +834,40 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
             backup_paths.push(candidate);
         }
     }
-    let mut changed = false;
-    for backup_path in backup_paths {
-        let before_config = fs::read(&config_path).unwrap_or_default();
-        let before_backup = fs::read(&backup_path).unwrap_or_default();
-        let _outcome = run_python_script(
-            "legacy context guard migration",
-            python,
-            paths.config_overlay_script(),
-            vec![
-                "migrate-context-guard".to_string(),
-                "--config".to_string(),
-                config_path.to_string_lossy().into_owned(),
-                "--backup".to_string(),
-                backup_path.to_string_lossy().into_owned(),
-                "--context-guard-state".to_string(),
-                paths
-                    .context_guard_state_path()
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
-            runner,
-        )?;
-        changed |= before_config != fs::read(&config_path).unwrap_or_default()
-            || before_backup != fs::read(&backup_path).unwrap_or_default();
+    let before_config = fs::read(&config_path).unwrap_or_default();
+    let before_backups = backup_paths
+        .iter()
+        .map(|path| fs::read(path).unwrap_or_default())
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        "migrate-context-guard".to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+    ];
+    for backup_path in &backup_paths {
+        args.extend([
+            "--backup".to_string(),
+            backup_path.to_string_lossy().into_owned(),
+        ]);
     }
-    Ok(changed)
+    args.extend([
+        "--context-guard-state".to_string(),
+        paths
+            .context_guard_state_path()
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    run_python_script(
+        "legacy context guard migration",
+        python,
+        paths.config_overlay_script(),
+        args,
+        runner,
+    )?;
+    let backups_changed = backup_paths.iter().zip(before_backups).any(|(path, before)| {
+        before != fs::read(path).unwrap_or_default()
+    });
+    Ok(before_config != fs::read(&config_path).unwrap_or_default() || backups_changed)
 }
 
 fn top_level_model_is_official(text: &str) -> bool {
@@ -2881,6 +2889,14 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             current_owner,
             crate::app_flavor::RoutingOwner::Beta,
         );
+        let other_backup_path = paths.config_backup_path_for_target_owner(
+            current_owner,
+            crate::app_flavor::RoutingOwner::Release,
+        );
+        for path in [&backup_path, &other_backup_path] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "legacy backup").unwrap();
+        }
         let runner = RecordingRunner::successful();
 
         migrate_legacy_context_guard_with_paths(
@@ -2896,7 +2912,22 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             &commands[0].args,
             &["migrate-context-guard", "--config", "--backup", "--context-guard-state"],
         );
-        assert_arg_value(&commands[0].args, "--backup", &backup_path);
+        assert_eq!(
+            commands[0]
+                .args
+                .iter()
+                .filter(|argument| argument.as_str() == "--backup")
+                .count(),
+            2
+        );
+        assert!(commands[0]
+            .args
+            .iter()
+            .any(|argument| argument == &backup_path.to_string_lossy()));
+        assert!(commands[0]
+            .args
+            .iter()
+            .any(|argument| argument == &other_backup_path.to_string_lossy()));
         assert_arg_value(
             &commands[0].args,
             "--context-guard-state",

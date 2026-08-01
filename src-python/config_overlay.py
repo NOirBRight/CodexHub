@@ -239,9 +239,9 @@ def _read_context_guard_state(
     return entries or None
 
 
-def _migrate_legacy_context_guard_values(
+def _migrate_legacy_context_guard_values_for_backups(
     config_path: Path,
-    backup_path: Path,
+    backup_paths: list[Path],
     state_path: Path | None = None,
 ) -> None:
     """Remove only the old CodexHub-owned global context projection.
@@ -254,42 +254,61 @@ def _migrate_legacy_context_guard_values(
     user-owned global override and is surfaced by ``context_guard_status``.
     """
 
-    state_path = state_path or _context_guard_default_state_path(backup_path)
+    default_backup_path = backup_paths[0] if backup_paths else config_path
+    state_path = state_path or _context_guard_default_state_path(default_backup_path)
     state = _read_context_guard_state(state_path) or {}
     state_changed = False
-    targets = {"config": config_path, "backup": backup_path}
+    targets: list[tuple[str, Path]] = [("config", config_path)]
+    targets.extend(("backup", path) for path in backup_paths)
+    state_targets_to_clear: set[str] = set()
 
-    for target, path in targets.items():
+    for target, path in targets:
         if not path.exists():
             continue
         text = read_text_preserving_newlines(path)
         entry = state.get(target)
-        has_state_entry = isinstance(entry, dict)
         managed = (
             _normalized_context_guard_values(entry.get("managed"))
             if isinstance(entry, dict)
             else {key: None for key in CONTEXT_GUARD_KEYS}
         )
+        previous = (
+            _normalized_context_guard_values(entry.get("previous"))
+            if isinstance(entry, dict)
+            else {key: None for key in CONTEXT_GUARD_KEYS}
+        )
         marker_managed = _context_guard_managed_values(text)
-        removable: dict[str, None] = {}
+        updates: dict[str, str | None] = {}
         for key in CONTEXT_GUARD_KEYS:
             known_value = managed.get(key) or marker_managed.get(key)
             if known_value is not None and top_level_value(text, key) == known_value:
-                removable[key] = None
-        if removable:
+                # The old state snapshot is the user's value from before the
+                # CodexHub projection. Restore it when it is still untouched;
+                # only remove the key when the snapshot was absent.
+                updates[key] = previous.get(key)
+        if updates:
             atomic_write_text(
                 path,
-                set_top_level_values(text, removable),
+                set_top_level_values(text, updates),
                 encoding="utf-8",
             )
 
         if isinstance(entry, dict) and any(value is not None for value in managed.values()):
-            # Preserve the enabled bit and previous snapshot for diagnostics,
-            # but stop treating the old values as an owned projection.
-            entry["managed"] = {key: None for key in CONTEXT_GUARD_KEYS}
-            entry.setdefault("enabled", True)
-            state[target] = entry
-            state_changed = True
+            # Defer clearing the shared backup entry until every channel
+            # backup has been inspected.  Stable and Beta can both point at
+            # this one state file; clearing it after the first backup would
+            # hide ownership evidence from the next markerless backup.
+            state_targets_to_clear.add(target)
+
+    for target in state_targets_to_clear:
+        entry = state.get(target)
+        if not isinstance(entry, dict):
+            continue
+        updated_entry = dict(entry)
+        updated_entry["managed"] = {key: None for key in CONTEXT_GUARD_KEYS}
+        updated_entry.setdefault("enabled", True)
+        state[target] = updated_entry
+        state_changed = True
 
     if state_changed:
         atomic_write_text(
@@ -299,22 +318,53 @@ def _migrate_legacy_context_guard_values(
         )
 
 
-def _preserve_context_guard_overrides(current_text: str, restored_text: str) -> str:
+def _migrate_legacy_context_guard_values(
+    config_path: Path,
+    backup_path: Path,
+    state_path: Path | None = None,
+) -> None:
+    _migrate_legacy_context_guard_values_for_backups(
+        config_path,
+        [backup_path],
+        state_path,
+    )
+
+
+def _preserve_context_guard_overrides(
+    current_text: str,
+    restored_text: str,
+    state_path: Path | None = None,
+) -> str:
     """Carry user-owned global context overrides across a backup restore.
 
     The active overlay can be edited while CodexHub is connected.  The backup
     is intentionally a snapshot from before activation, so blindly restoring
     it would silently discard a later user-owned context override.  Legacy
     CodexHub-managed values have already been removed by migration; values
-    still present in the active config are therefore safe to preserve.
+    still present in the active config are therefore safe to preserve.  When a
+    state snapshot proves that a user-owned value existed before the overlay,
+    an explicit deletion while connected is carried through the restore too.
     """
 
-    overrides = {
-        key: value
-        for key in CONTEXT_GUARD_KEYS
-        if (value := top_level_value(current_text, key)) is not None
-        and top_level_value(restored_text, key) != value
-    }
+    state = _read_context_guard_state(state_path) if state_path is not None else None
+    entry = (state or {}).get("config", {})
+    previous = (
+        _normalized_context_guard_values(entry.get("previous"))
+        if isinstance(entry, dict)
+        else {key: None for key in CONTEXT_GUARD_KEYS}
+    )
+    overrides: dict[str, str | None] = {}
+    for key in CONTEXT_GUARD_KEYS:
+        current_value = top_level_value(current_text, key)
+        restored_value = top_level_value(restored_text, key)
+        if current_value is not None and restored_value != current_value:
+            overrides[key] = current_value
+        elif (
+            current_value is None
+            and previous.get(key) is not None
+            and restored_value == previous.get(key)
+        ):
+            overrides[key] = None
     return set_top_level_values(restored_text, overrides) if overrides else restored_text
 
 
@@ -366,7 +416,6 @@ def set_context_guard(
     enabled: bool,
     catalog_path: Path | None = None,
 ) -> dict[str, int | bool | None]:
-    _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
     selected_model = top_level_value(
         read_text_preserving_newlines(config_path) if config_path.exists() else "",
         "model",
@@ -379,6 +428,10 @@ def set_context_guard(
     )
     if selected_official and safe_official_budget is None:
         raise ValueError("safe current Official context budget is unavailable")
+    # Validate the requested Official budget before migrating legacy files.
+    # A failed enable/disable must not partially rewrite config or state while
+    # the Rust caller leaves the Gateway setting unchanged.
+    _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
     target_paths = {"config": config_path}
     if backup_path.exists():
         target_paths["backup"] = backup_path
@@ -876,7 +929,11 @@ def restore_overlay(
     if backup_path.exists():
         restored = read_text_preserving_newlines(backup_path)
         current = read_text_preserving_newlines(config_path) if config_path.exists() else ""
-        restored = _preserve_context_guard_overrides(current, restored)
+        restored = _preserve_context_guard_overrides(
+            current,
+            restored,
+            context_guard_state_path,
+        )
         restore_from_backup = True
         if is_active_takeover_backup(current, restored, backup_path):
             restored_owner = overlay_owner(restored)
@@ -945,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
 
     migrate_context_parser = subparsers.add_parser("migrate-context-guard")
     migrate_context_parser.add_argument("--config", required=True, type=Path)
-    migrate_context_parser.add_argument("--backup", required=True, type=Path)
+    migrate_context_parser.add_argument("--backup", required=True, type=Path, action="append")
     migrate_context_parser.add_argument("--context-guard-state", required=True, type=Path)
 
     args = parser.parse_args(argv)
@@ -993,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif args.command == "migrate-context-guard":
-        _migrate_legacy_context_guard_values(
+        _migrate_legacy_context_guard_values_for_backups(
             args.config,
             args.backup,
             args.context_guard_state,
