@@ -1571,7 +1571,7 @@ IMAGE_PROXY_CACHE_LOCK = threading.Lock()
 
 
 class ImageProxyError(Exception):
-    """Raised when an image proxy request cannot be prepared safely."""
+    """Raised when a Vision Proxy request cannot be prepared safely."""
 
 
 class UnsupportedRouteProtocolError(ValueError):
@@ -13608,7 +13608,7 @@ def _image_proxy_cache_lookup(cache_key: str) -> str | None:
             finally:
                 conn.close()
     except (OSError, sqlite3.DatabaseError) as exc:
-        logger.warning("image proxy cache lookup failed: %s", type(exc).__name__)
+        logger.warning("vision proxy cache lookup failed: %s", type(exc).__name__)
         return None
     if not row:
         return None
@@ -13636,7 +13636,7 @@ def _image_proxy_cache_store(cache_key: str, vision_model: str, description: str
             finally:
                 conn.close()
     except (OSError, sqlite3.DatabaseError) as exc:
-        logger.warning("image proxy cache store failed: %s", type(exc).__name__)
+        logger.warning("vision proxy cache store failed: %s", type(exc).__name__)
 
 
 def _extract_model_response_text(payload: Any) -> str:
@@ -13690,7 +13690,7 @@ def _image_proxy_response_body(response: Any) -> bytes:
         termination = assembler.finish()
         if termination.disposition == "incomplete":
             raise UpstreamStreamIncompleteError(
-                "Image proxy SSE stream ended with an incomplete pending frame"
+                "Vision Proxy SSE stream ended with an incomplete pending frame"
             )
         for frame in termination.events:
             payload = _converted_sse_payload(frame)
@@ -13942,7 +13942,7 @@ def _vision_proxy_context(
 def _image_proxy_vision_upstream() -> tuple[str, Mapping[str, Any]]:
     vision_model = gateway_image_proxy_model()
     if not vision_model:
-        raise ImageProxyError("Vision model is not configured for Image Proxy")
+        raise ImageProxyError("Vision model is not configured for Vision Proxy")
     try:
         vision_upstream = choose_upstream(vision_model)
     except ValueError as exc:
@@ -14002,7 +14002,7 @@ def apply_image_proxy_to_responses_payload(
         if cache_key not in descriptions:
             if _image_proxy_cache_lookup(cache_key) is None:
                 if not emit_progress_once():
-                    raise DownstreamClosedDuringImageProxyError("downstream closed during image proxy")
+                    raise DownstreamClosedDuringImageProxyError("downstream closed during Vision Proxy")
             descriptions[cache_key] = _image_proxy_description_for_part(
                 part,
                 vision_model,
@@ -14073,7 +14073,7 @@ def apply_image_proxy_to_chat_payload(
         if cache_key not in descriptions:
             if _image_proxy_cache_lookup(cache_key) is None:
                 if not emit_progress_once():
-                    raise DownstreamClosedDuringImageProxyError("downstream closed during image proxy")
+                    raise DownstreamClosedDuringImageProxyError("downstream closed during Vision Proxy")
             descriptions[cache_key] = _image_proxy_description_for_part(
                 part,
                 vision_model,
@@ -14150,7 +14150,7 @@ def enforce_text_only_image_boundary(
             else "the target model"
         )
         raise ImageProxyError(
-            f"{model_label} does not support image input and Image Proxy is disabled."
+            f"{model_label} does not support image input and Vision Proxy is disabled."
         )
     if vision_plan.network_action != VisionNetworkAction.IMAGE_PROXY:
         raise ImageProxyError(
@@ -14175,7 +14175,7 @@ def enforce_text_only_image_boundary(
     )
     if _value_contains_image(image_root):
         raise ImageProxyError(
-            "Image Proxy could not replace the image for the text-only target model."
+            "Vision Proxy could not replace the image for the text-only target model."
         )
     if changed:
         _write_adapter_event(
@@ -16417,7 +16417,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             if route_plan.vision.action == VisionAction.REJECT:
                 model_label = canonical_model_id(model) if model else "the target model"
                 raise ImageProxyError(
-                    f"{model_label} does not support image input and Image Proxy is disabled."
+                    f"{model_label} does not support image input and Vision Proxy is disabled."
                 )
             operational_authentication = (
                 materialize_operational_authentication(
@@ -16642,7 +16642,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if route_plan.vision.action == VisionAction.PROXY:
                     if image_proxy_payload is None:
                         raise ImageProxyError(
-                            "Image Proxy could not inspect the planned image payload."
+                            "Vision Proxy could not inspect the planned image payload."
                         )
                     image_proxy_changed = enforce_text_only_image_boundary(
                         image_proxy_payload,
