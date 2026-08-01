@@ -5156,6 +5156,7 @@ time.sleep(10)
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_replaces_running_managed_proxy_from_previous_bundle() {
         let root = temp_root("python-bundle-upgrade");
@@ -5187,6 +5188,71 @@ time.sleep(10)
 
         let _ = stop_with_paths(&new_paths);
         result.expect("Gateway bundle upgrade lifecycle");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn start_replaces_running_managed_proxy_from_previous_bundle() {
+        let root = temp_root("python-bundle-upgrade");
+        let old_repo_root = copy_python_sources_to_temp_repo(&root.join("old-bundle"));
+        let new_repo_root = copy_python_sources_to_temp_repo(&root.join("new-bundle"));
+        let runtime_home = root.join("codex-home");
+        let old_paths = ProxyPaths::new(runtime_home.clone(), old_repo_root);
+        let new_paths = ProxyPaths::new(runtime_home, new_repo_root);
+        let port = free_port();
+        write_settings(&old_paths, port);
+        let old_inspector = FastProcessInspector::new(&old_paths.proxy_script_path(), port);
+        let new_inspector = FastProcessInspector::new(&new_paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+        let mut previous_bundle_replaced = false;
+
+        let result = (|| {
+            let old_status =
+                start_with_controlled_inspector(&old_paths, &old_inspector, &listener_inspector)?;
+            ensure(old_status.proxy_running, "old bundle should start")?;
+
+            replace_managed_proxy_from_previous_bundle_with_controls(
+                &new_paths,
+                &super::SystemProcessKiller,
+                &old_inspector,
+                &listener_inspector,
+            )?;
+            previous_bundle_replaced = true;
+            let new_status =
+                start_with_controlled_inspector(&new_paths, &new_inspector, &listener_inspector)?;
+            ensure(new_status.proxy_running, "new bundle should start")?;
+            let record = read_pid_record(&new_paths)?
+                .ok_or_else(|| "new bundle should own the proxy PID".to_string())?;
+            let ProxyPidRecord::Managed(metadata) = record else {
+                return Err("new bundle should write managed PID metadata".to_string());
+            };
+            ensure(
+                metadata.script_path == comparable_path(&new_paths.proxy_script_path()),
+                "new bundle should replace the previous bundle's Gateway process",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup_inspector: &dyn ProcessInspector = if previous_bundle_replaced {
+            &new_inspector
+        } else {
+            &old_inspector
+        };
+        let cleanup = stop_with_paths_and_controls(
+            &new_paths,
+            &super::SystemProcessKiller,
+            cleanup_inspector,
+            &listener_inspector,
+        )
+        .map(|_| ());
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("Gateway bundle upgrade lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("Gateway bundle upgrade cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("Gateway bundle upgrade lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     #[cfg(not(windows))]
