@@ -1692,6 +1692,7 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(typesSource, /export interface CodexContextGuardStatus/);
   assert.match(typesSource, /codex_enabled: boolean;/);
   assert.match(typesSource, /gateway_enabled: boolean;/);
+  assert.match(typesSource, /global_override_conflict\?: boolean;/);
   assert.match(tauriSource, /get_codex_context_guard_status/);
   assert.match(tauriSource, /set_codex_context_guard/);
   assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
@@ -1714,16 +1715,19 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(providersSource, /id="context-guard-tooltip"/);
   assert.match(providersSource, /h-7[\s\S]*rounded-full/);
   assert.match(providersSource, /rounded-full[\s\S]*t\("common\.refresh"\)/);
-  assert.match(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.doesNotMatch(providersSource, /contextGuardStatus\.model_context_window \?\? contextWindow/);
+  assert.match(providersSource, /const displayedGatewayContextById = gatewayContextById/);
   assert.match(providersSource, /openai_context_guard_enabled: enabled/);
-  assert.match(enSource, /contextGuard: "Long-context cost guard"/);
-  assert.match(zhSource, /contextGuard: "长上下文费用保护"/);
+  assert.match(enSource, /contextGuard: "Official model long-context cost protection"/);
+  assert.match(zhSource, /contextGuard: "Official 模型长上下文费用保护"/);
+  assert.match(providersSource, /contextGuardStatus\?\.global_override_conflict/);
+  assert.match(enSource, /contextGuardGlobalOverrideConflict:/);
+  assert.match(zhSource, /contextGuardGlobalOverrideConflict:/);
   assert.match(zhSource, /contextGuardTooltip:/);
-  assert.match(zhSource, /Codex 与 Gateway/);
-  assert.match(zhSource, /272K/);
-  assert.match(zhSource, /240K/);
-  assert.match(zhSource, /高价/);
-  assert.match(zhSource, /开启客户端自动同步时/);
+  assert.match(zhSource, /第三方模型继续使用自己的目录窗口/);
+  assert.match(zhSource, /不再写入全局上下文上限/);
+  assert.match(zhSource, /更高价/);
+  assert.doesNotMatch(zhSource, /Codex 与 Gateway 中将 OpenAI 模型上下文限制为 272K/);
   assert.match(zhSource, /外部客户端已同步，请重启外部客户端/);
   assert.match(zhSource, /外部客户端未改动，请在 Gateway 中确认已由当前版本接管后重试/);
   assert.match(zhSource, /外部客户端未自动同步，请在 Gateway 中手动同步/);
@@ -1733,8 +1737,7 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(zhSource, /Gateway 中标记为“未更新”/);
   assert.match(zhSource, /Gateway 更改已实时生效/);
   assert.match(zhSource, /重启 Codex App/);
-  assert.match(zhSource, /272K/);
-  assert.match(zhSource, /240K/);
+  assert.match(zhSource, /Official 模型/);
 });
 
 test("settings save restarts running gateway when retry or image proxy runtime settings change", async () => {
@@ -3102,8 +3105,8 @@ test("route and context changes disclose the exact Codex restart requirement", a
   assert.match(providersSource, /t\("providers\.contextGuardDisabledRestartCodex"\)/);
   assert.match(enSource, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex App to apply"/);
   assert.match(zhSource, /codexRouteChangedRestart: "\{\{status\}\}；请重启 Codex App 使其生效"/);
-  assert.match(enSource, /Gateway changed immediately; restart Codex App/);
-  assert.match(zhSource, /Gateway 更改已实时生效；请重启 Codex App/);
+  assert.match(enSource, /Gateway changed immediately; restart Codex App after a catalog refresh/);
+  assert.match(zhSource, /Gateway 更改已实时生效；刷新目录后请重启 Codex App/);
 });
 
 test("manual Official refresh carries and discloses a Codex restart requirement", async () => {

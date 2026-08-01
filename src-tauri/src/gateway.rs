@@ -1993,6 +1993,14 @@ fn official_models_from_metadata(
     subscription_models: Option<Vec<crate::Model>>,
     published_context_windows: &BTreeMap<String, u32>,
 ) -> Vec<GatewayModel> {
+    // When the Official cost guard is enabled, a missing publication fence
+    // must not expose an Official model with an unbounded context window. The
+    // activation path also refuses to start Official routing without this
+    // fence. With the optional guard disabled, preserve the legacy metadata
+    // surface and leave an unknown window unset rather than inventing one.
+    if settings.openai_context_guard_enabled && published_context_windows.is_empty() {
+        return Vec::new();
+    }
     let mut models: Vec<GatewayModel> =
         match subscription_models.filter(|models| !models.is_empty()) {
             Some(source_models) => {
@@ -2086,6 +2094,10 @@ fn official_gateway_model_from_metadata(
     published_context_windows: &BTreeMap<String, u32>,
 ) -> Option<GatewayModel> {
     let id = official_gateway_model_id(&model.id)?;
+    let context_window = published_context_windows.get(&id).copied();
+    if settings.openai_context_guard_enabled && context_window.is_none() {
+        return None;
+    }
     if official_model_disabled(settings, &id) || is_gateway_fast_variant_id(&id) {
         return None;
     }
@@ -2100,7 +2112,7 @@ fn official_gateway_model_from_metadata(
         source_kind: "official".to_string(),
         supports_responses: true,
         supports_chat_completions: true,
-        context_window: published_context_windows.get(&id).copied(),
+        context_window,
         input_modalities: model
             .input_modalities
             .clone()
@@ -2138,6 +2150,7 @@ fn fallback_official_gateway_models(
             supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
             default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
         })
+        .filter(|model| !settings.openai_context_guard_enabled || model.context_window.is_some())
         .collect()
 }
 
@@ -8087,6 +8100,20 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].context_window, None);
+
+        let guarded = official_models_from_metadata(
+            &Settings {
+                openai_context_guard_enabled: true,
+                ..Settings::default()
+            },
+            Some(vec![Model {
+                id: "gpt-5.6-terra".to_string(),
+                context_window: Some(353_400),
+                ..Model::default()
+            }]),
+            &BTreeMap::new(),
+        );
+        assert!(guarded.is_empty());
     }
 
     #[test]

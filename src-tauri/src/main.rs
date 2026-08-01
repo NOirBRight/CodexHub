@@ -1136,6 +1136,12 @@ fn start_gateway_on_launch() {
     std::thread::spawn(move || {
         let mut launch_ready = StartupLaunchReady::new(ready_tx);
         official_refresh::start_scheduled_refresh_loop();
+        // Migrate legacy top-level context caps before reading startup
+        // settings.  This path must run even when settings.json is damaged or
+        // the Official snapshot is fresh enough to skip network refresh.
+        if let Err(error) = config::migrate_legacy_context_guard() {
+            log::warn!("startup context guard migration failed: {error}");
+        }
         let Ok(settings) = config::get_settings() else {
             return;
         };
