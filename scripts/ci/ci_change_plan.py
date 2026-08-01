@@ -123,6 +123,17 @@ SAFE_FILE_EXACT = frozenset(
         "rust-toolchain.toml",
         "src-tauri/rust-toolchain",
         "src-tauri/rust-toolchain.toml",
+        "src-tauri/.cargo/config",
+        "src-tauri/.cargo/config.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+    }
+)
+
+RUST_CONTROL_EXACT = frozenset(
+    {
+        "rust-toolchain",
+        "rust-toolchain.toml",
         ".cargo/config",
         ".cargo/config.toml",
     }
@@ -245,6 +256,7 @@ def _classify_path(path: str) -> tuple[frozenset[str], bool]:
         or normalized in {"cargo.toml", "cargo.lock"}
         or normalized.endswith("/cargo.toml")
         or normalized.endswith("/cargo.lock")
+        or _matches(path, RUST_CONTROL_EXACT)
     ):
         categories.add("rust")
     if _matches(path, SAFE_FILE_EXACT) or normalized.endswith("/safe_file.rs"):
