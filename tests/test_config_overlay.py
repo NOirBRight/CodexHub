@@ -483,8 +483,8 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("model_context_window", restored)
             self.assertNotIn("model_auto_compact_token_limit", restored)
 
-    def test_startup_migrates_exact_legacy_pair_without_marker_or_state(self):
-        """A disconnected old install can lose both ownership markers."""
+    def test_startup_preserves_unowned_values_without_marker_or_state(self):
+        """Without ownership evidence, even legacy-looking values are user-owned."""
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -504,10 +504,13 @@ class ConfigOverlayTests(unittest.TestCase):
 
             for path in (config_path, backup_path):
                 text = path.read_text(encoding="utf-8")
-                self.assertNotIn("model_context_window", text)
-                self.assertNotIn("model_auto_compact_token_limit", text)
+                self.assertIn("model_context_window = 272000", text)
+                self.assertIn("model_auto_compact_token_limit = 244800", text)
                 self.assertIn('model_reasoning_effort = "high"', text)
             self.assertFalse(state_path.exists())
+
+            status = context_guard_status(config_path, state_path)
+            self.assertTrue(status["global_override_conflict"])
 
     def test_apply_and_restore_use_current_channel_state_for_foreign_backup(self):
         """A channel switch must not look for guard state beside a foreign backup.

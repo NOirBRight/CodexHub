@@ -37,16 +37,6 @@ CONTEXT_GUARD_KEYS = {
     "model_auto_compact_token_limit",
 }
 
-# Releases before the catalog-scoped guard projected this exact pair into the
-# top-level config.  It is the only legacy signature we can safely recognize
-# when an old config was restored without the CodexHub marker/state file.  Do
-# not infer ownership from arbitrary user-authored values.
-LEGACY_MANAGED_CONTEXT_VALUES = {
-    "model_context_window": "272000",
-    "model_auto_compact_token_limit": "244800",
-}
-
-
 def toml_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -281,23 +271,9 @@ def _migrate_legacy_context_guard_values(
             else {key: None for key in CONTEXT_GUARD_KEYS}
         )
         marker_managed = _context_guard_managed_values(text)
-        # A disconnected config can lose both the marker and the state file.
-        # In that case only the exact pair emitted by the legacy guard is
-        # identifiable as CodexHub-owned; arbitrary top-level values remain
-        # user-owned and are never removed by migration.
-        marker_or_state = has_state_entry or any(marker_managed.values())
-        legacy_pair = (
-            not marker_or_state
-            and all(
-                top_level_value(text, key) == value
-                for key, value in LEGACY_MANAGED_CONTEXT_VALUES.items()
-            )
-        )
         removable: dict[str, None] = {}
         for key in CONTEXT_GUARD_KEYS:
             known_value = managed.get(key) or marker_managed.get(key)
-            if known_value is None and legacy_pair:
-                known_value = LEGACY_MANAGED_CONTEXT_VALUES[key]
             if known_value is not None and top_level_value(text, key) == known_value:
                 removable[key] = None
         if removable:
