@@ -36,8 +36,7 @@ if ($null -eq $normal -or $null -eq $debug) {
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = [string]$tauriConfig.version
 }
-Assert-ReleaseFlavorVersion -Flavor normal -Version $Version
-Assert-ReleaseFlavorVersion -Flavor debug -Version $Version
+Assert-ReleaseVersion -Version $Version
 
 $sharedIdentityKeys = @(
     "productName",

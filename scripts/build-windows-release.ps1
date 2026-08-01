@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) {
 $tauriConfig = Get-Content -Raw -LiteralPath $tauriConfigPath | ConvertFrom-Json
 $productName = [string]$tauriConfig.productName
 $version = [string]$tauriConfig.version
-Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $version
+Assert-ReleaseVersion -Version $version
 if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
     $ReleaseBaseUrl = "https://github.com/NOirBRight/CodexHub/releases/download/v$version"
 }

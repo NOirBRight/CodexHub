@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
 
-Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $Version
+Assert-ReleaseVersion -Version $Version
 
 foreach ($path in @($ManifestPath, $InstallerPath, $SignaturePath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
