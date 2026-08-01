@@ -356,6 +356,45 @@ function Get-FailureSummaryValue {
     }
 }
 
+function New-StartGateFile {
+    param([string]$Path)
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        $bytes = $script:Utf8NoBom.GetBytes('ready')
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
+function Remove-StartGateFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $true
+    }
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return -not (Test-Path -LiteralPath $Path -PathType Leaf)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Set-RunnerPhase {
     param([string]$Phase)
     if (-not $script:WatchdogStatePath) {
@@ -372,11 +411,10 @@ function Invoke-RunnerSupervisor {
     [void](New-Item -ItemType Directory -Force -Path $supervisorOutput)
     $summaryPath = Join-Path $supervisorOutput 'summary.json'
     $statePath = Join-Path $supervisorOutput 'runner-watchdog-state'
-    $startGatePath = Join-Path $supervisorOutput 'runner-start-gate'
+    $startGatePath = Join-Path $supervisorOutput ('runner-start-gate.' + [Guid]::NewGuid().ToString('N'))
     $stdoutPath = Join-Path $supervisorOutput 'runner-watchdog.stdout'
     $stderrPath = Join-Path $supervisorOutput 'runner-watchdog.stderr'
     [System.IO.File]::WriteAllText($statePath, 'preflight', $script:Utf8NoBom)
-    Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue
     foreach ($path in @($stdoutPath, $stderrPath)) {
         [System.IO.File]::WriteAllText($path, '', $script:Utf8NoBom)
     }
@@ -421,7 +459,15 @@ function Invoke-RunnerSupervisor {
     }
     Start-Sleep -Milliseconds 10
   }
-  Remove-Item -LiteralPath $gate -Force -ErrorAction SilentlyContinue
+  try {
+    Remove-Item -LiteralPath $gate -Force -ErrorAction Stop
+  }
+  catch {
+    exit 125
+  }
+  if (Test-Path -LiteralPath $gate -PathType Leaf) {
+    exit 125
+  }
 }
 & $env:CODEXHUB_E2E_SUPERVISOR_SCRIPT `
   -CandidateSha '0000000000000000000000000000000000000000' `
@@ -471,6 +517,10 @@ exit $LASTEXITCODE
     $job = [CodexHubE2EJob]::CreateKillOnClose()
     $started = [System.Diagnostics.Stopwatch]::StartNew()
     try {
+        if (Test-Path -LiteralPath $startGatePath -PathType Leaf) {
+            Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_start_gate_conflict')
+            return 1
+        }
         try {
             $process = Start-Process `
                 -FilePath $powershellPath `
@@ -499,7 +549,11 @@ exit $LASTEXITCODE
         # closes the short Start-Process/AssignProcessToJobObject race: every
         # candidate and client process is created only after the worker belongs
         # to the kill-on-close job.
-        [System.IO.File]::WriteAllText($startGatePath, 'ready', $script:Utf8NoBom)
+        if (-not (New-StartGateFile -Path $startGatePath)) {
+            Stop-ProcessTree -ProcessId $process.Id -TimeoutMilliseconds 2000
+            Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_start_gate_publish_failed')
+            return 1
+        }
         $completed = $process.WaitForExit($OverallTimeoutSeconds * 1000)
         if (-not $completed) {
             # Terminate first and keep the handle open long enough to observe
@@ -540,10 +594,22 @@ exit $LASTEXITCODE
                 total_process_count = [Math]::Min([int]$counts[0], 1000)
                 active_process_count = [Math]::Min([int]$counts[1], 1000)
             })
+            if (-not (Remove-StartGateFile -Path $startGatePath)) {
+                Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_start_gate_cleanup_failed')
+                return 1
+            }
             Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'automated_outer_timeout' -Artifacts @($timeoutArtifact))
             return 1
         }
         $exitCode = $process.ExitCode
+        if (Test-Path -LiteralPath $startGatePath -PathType Leaf) {
+            if (-not (Remove-StartGateFile -Path $startGatePath)) {
+                Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_start_gate_cleanup_failed')
+                return 1
+            }
+            Write-JsonFile -Path $summaryPath -Value (Get-FailureSummaryValue -FailureClassification 'preflight_start_gate_not_consumed')
+            return 1
+        }
         [CodexHubE2EJob]::Close($job)
         $job = [IntPtr]::Zero
         return $exitCode
@@ -573,7 +639,7 @@ exit $LASTEXITCODE
             Remove-Item -LiteralPath $stream.path -Force -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue
+        [void](Remove-StartGateFile -Path $startGatePath)
     }
 }
 

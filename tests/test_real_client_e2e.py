@@ -3193,6 +3193,31 @@ def test_operator_commands_have_explicit_outer_and_manual_deadlines():
     assert "manual window is finite" in documentation
 
 
+def test_supervisor_start_gate_is_unique_and_fail_closed():
+    runner = SCRIPT.read_text(encoding="utf-8")
+    supervisor_start = runner.index("function Invoke-RunnerSupervisor")
+    supervisor_end = runner.index("function Get-JsonProperty", supervisor_start)
+    supervisor = runner[supervisor_start:supervisor_end]
+    worker_start = supervisor.index("$workerBootstrap = @'")
+    worker_end = supervisor.index("'@", worker_start)
+    worker = supervisor[worker_start:worker_end]
+
+    assert (
+        "$startGatePath = Join-Path $supervisorOutput "
+        "('runner-start-gate.' + [Guid]::NewGuid().ToString('N'))"
+    ) in supervisor
+    assert "function New-StartGateFile" in runner
+    assert "function Remove-StartGateFile" in runner
+    assert "[System.IO.FileMode]::CreateNew" in runner
+    assert "Remove-Item -LiteralPath $gate -Force -ErrorAction Stop" in worker
+    assert "Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue" not in supervisor
+
+    assignment = supervisor.index("[CodexHubE2EJob]::Assign($job, $process.Handle)")
+    publication = supervisor.index("New-StartGateFile -Path $startGatePath")
+    wait = supervisor.index("$completed = $process.WaitForExit")
+    assert assignment < publication < wait
+
+
 def test_matrix_documentation_declares_native_responses_release_gate():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
