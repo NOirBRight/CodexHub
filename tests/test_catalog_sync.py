@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from catalog import CatalogPolicy
+from catalog import CatalogPolicy, load_policy
 import catalog_sync
 from catalog_sync import build_codex_catalog, diff_model_state, discover_ollama_ids
 from providers_config import ModelConfig, ProviderConfig
@@ -108,6 +108,28 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["deepseek-v4-pro"]["max_output_tokens"], 393216)
         self.assertEqual(by_slug["deepseek-v4-flash"]["context_window"], 1048576)
         self.assertEqual(by_slug["deepseek-v4-flash"]["max_output_tokens"], 393216)
+
+    def test_discovered_kimi_k26_remains_visible_without_beta1_qualification(self):
+        policy = load_policy(Path("config/catalog_policy.toml"))
+        catalog = build_codex_catalog(
+            [],
+            ["kimi-k2.6:cloud", "kimi-k2.7-code:cloud"],
+            policy,
+            "0.142.0",
+        )
+
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(
+            [model["slug"] for model in catalog["models"] if model["slug"].startswith("kimi-")],
+            ["kimi-k2.6", "kimi-k2.7-code"],
+        )
+        self.assertEqual(by_slug["kimi-k2.6"]["display_name"], "Ollama Kimi K2.6")
+        self.assertEqual(by_slug["kimi-k2.7-code"]["display_name"], "Ollama Kimi K2.7 Code")
+        for slug in ("kimi-k2.6", "kimi-k2.7-code"):
+            with self.subTest(slug=slug):
+                metadata = by_slug[slug].get("codex_proxy_metadata", {})
+                self.assertNotIn("native_responses_tool_codec", metadata)
+                self.assertNotIn("tool_surface_strategy", metadata)
 
     def test_build_catalog_runtime_ollama_models_use_provider_settings_instead_of_static_allowlist(self):
         policy = CatalogPolicy(

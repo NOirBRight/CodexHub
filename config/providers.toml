@@ -28,13 +28,12 @@ enabled = true
   native_responses_tool_codec = "strict_apply_patch"
 
   [[providers.models]]
-  id = "kimi-k2.6"
-  display_name = "Ollama Kimi K2.6"
-  context_window = 256000
+  id = "kimi-k2.7-code"
+  display_name = "Ollama Kimi K2.7 Code"
+  context_window = 262144
   max_output_tokens = 32768
   sort_order = 3
   enabled = true
-  native_responses_tool_codec = "strict_apply_patch"
 
 [[providers]]
 id = "volc"
