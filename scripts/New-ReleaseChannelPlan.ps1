@@ -27,7 +27,7 @@ function Resolve-GitCommit([string]$Ref) {
 
 $commitSha = Resolve-GitCommit $Commit
 $mainSha = Resolve-GitCommit "main"
-Assert-ReleaseFlavorVersion -Flavor $Flavor -Version $Version
+$isPrerelease = Test-ReleaseVersionIsPrerelease -Version $Version
 
 if ($commitSha -ne $mainSha) {
     throw "Normal and debug publication requires the exact main commit."
@@ -50,7 +50,7 @@ $plan = [ordered]@{
     }
     immutable_release = [ordered]@{
         tag = "v$Version"
-        prerelease = $false
+        prerelease = $isPrerelease
         assets = @(
             $normalInstaller,
             "$normalInstaller.sig",

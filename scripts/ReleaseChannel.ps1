@@ -1,9 +1,6 @@
-function Assert-ReleaseFlavorVersion {
+function Assert-ReleaseVersion {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [ValidateSet("normal", "debug")]
-        [string]$Flavor,
         [Parameter(Mandatory = $true)]
         [string]$Version
     )
@@ -15,10 +12,17 @@ function Assert-ReleaseFlavorVersion {
         throw "Release version must be valid SemVer: $Version"
     }
 
-    $hasPrerelease = $Matches.ContainsKey("prerelease") -and -not [string]::IsNullOrEmpty($Matches["prerelease"])
-    if ($hasPrerelease) {
-        throw "Normal and debug release flavors require a version without a prerelease suffix."
-    }
+}
+
+function Test-ReleaseVersionIsPrerelease {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    Assert-ReleaseVersion -Version $Version
+    return $Version -match '\A[0-9]+\.[0-9]+\.[0-9]+-'
 }
 
 function Get-ReleaseArtifactName {
