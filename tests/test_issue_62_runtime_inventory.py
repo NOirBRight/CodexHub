@@ -292,6 +292,26 @@ def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
     assert replay["disposition"] == "live_control_required"
 
 
+def test_captured_sse_status_does_not_satisfy_independent_sse_gate() -> None:
+    module = load_inventory_module()
+    trace = json.loads(TRACE.read_text(encoding="utf-8"))
+    wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["sse_identity"] = {"status": "captured"}
+
+    qualification = module._build_qualification(
+        [],
+        "eligible",
+        trace=trace,
+        wire=wire,
+        audit=audit,
+        wire_fixture_sha256=module._sha256_file(WIRE_FIXTURE),
+    )
+    assert qualification["evidence_gates"]["sse_identity"] == "captured"
+    assert "sse_identity" in qualification["blocking_gates"]
+    assert qualification["ready_for_beta1"] is False
+
+
 def test_committed_inventory_matches_generator_output() -> None:
     module = load_inventory_module()
 
