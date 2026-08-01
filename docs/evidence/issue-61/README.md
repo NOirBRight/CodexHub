@@ -4,7 +4,7 @@ Risk class: `strict` (Gateway routing/protocol policy).
 
 Base: `origin/dev` at `42b0c375d97bad025a8deed07c6a72068df2b97c`.
 
-Exact candidate head: `2e578bc10abf26084facc6b8009205ffd85801cb`.
+Exact candidate head: `50ef0aee6d8c04248a077da84123b6f320fe504b`.
 
 ## Architecture
 
