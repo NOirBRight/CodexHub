@@ -125,7 +125,13 @@ def test_legacy_and_unified_synthetic_surface_have_bidirectional_parity(
         for path in legacy_planner.RELEVANT_SYNTHETIC_PATHS
         if not path.endswith("/")
     }
+    legacy_prefixes = {
+        path.lower()
+        for path in legacy_planner.RELEVANT_SYNTHETIC_PATHS
+        if path.endswith("/")
+    }
     assert planner.SYNTHETIC_EXACT <= legacy_exact
+    assert set(planner.SYNTHETIC_PREFIXES) <= legacy_prefixes
 
     for path in ("scripts/ci/ci_change_plan.py", "tests/test_ci_change_plan.py"):
         assert legacy_planner.is_relevant_synthetic_path(path), path
