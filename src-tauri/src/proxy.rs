@@ -30,6 +30,8 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, NO_ERROR,
 };
+#[cfg(all(windows, test))]
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND};
 #[cfg(windows)]
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -50,10 +52,12 @@ use windows_sys::Win32::System::JobObjects::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+#[cfg(all(windows, test))]
+use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread, ResumeThread,
-    PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+    GetProcessTimes, OpenProcess, OpenThread, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
+    THREAD_SUSPEND_RESUME,
 };
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
@@ -3465,7 +3469,7 @@ mod tests {
         stop_current_session_owned_with_paths_and_controls,
         stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
         verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
-        ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller,
+        ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller, ProxyLifecycleBackend,
         ProxyPaths, ProxyPidMetadata, ProxyPidRecord, ShutdownClock, StartupOutcome,
         UserRequestedShutdownControls, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
@@ -3475,7 +3479,7 @@ mod tests {
     };
     use crate::{AppStatus, Settings};
     use std::cell::RefCell;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::VecDeque;
     use std::fs;
     use std::io::Write;
     use std::net::TcpListener;
@@ -3490,26 +3494,59 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    #[cfg(windows)]
+    const WINDOWS_STILL_ACTIVE: u32 = 259;
+
+    #[cfg(windows)]
+    fn windows_process_start_id_if_running(pid: u32) -> Result<Option<String>, String> {
+        let handle =
+            unsafe { super::OpenProcess(super::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            let error = unsafe { super::GetLastError() };
+            if error == super::ERROR_INVALID_PARAMETER || error == super::ERROR_NOT_FOUND {
+                return Ok(None);
+            }
+            return Err(format!(
+                "failed to open test process {pid} for inspection (Win32 error {error})"
+            ));
+        }
+
+        let mut exit_code = 0u32;
+        let read = unsafe { super::GetExitCodeProcess(handle, &mut exit_code) } != 0;
+        if !read {
+            let error = unsafe { super::GetLastError() };
+            unsafe { super::CloseHandle(handle) };
+            return Err(format!(
+                "failed to read test process {pid} exit status (Win32 error {error})"
+            ));
+        }
+        if exit_code != WINDOWS_STILL_ACTIVE {
+            unsafe { super::CloseHandle(handle) };
+            return Ok(None);
+        }
+
+        let start_id = super::process_start_id_from_handle(handle);
+        unsafe { super::CloseHandle(handle) };
+        start_id.map(Some)
+    }
+
     fn wait_for_missing_process(pid: u32) {
         #[cfg(windows)]
         {
             let deadline = Instant::now() + Duration::from_secs(30);
+            let mut last_error = None;
             while Instant::now() < deadline {
-                let handle = unsafe {
-                    super::OpenProcess(super::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-                };
-                if handle.is_null() {
-                    return;
-                }
-                let mut exit_code = 0u32;
-                let read = unsafe { super::GetExitCodeProcess(handle, &mut exit_code) } != 0;
-                unsafe { super::CloseHandle(handle) };
-                if !read || exit_code != 259 {
-                    return;
+                match windows_process_start_id_if_running(pid) {
+                    Ok(None) => return,
+                    Ok(Some(_)) => {}
+                    Err(error) => last_error = Some(error),
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            panic!("process {pid} did not disappear within the bounded window");
+            panic!(
+                "process {pid} did not disappear within the bounded window: {}",
+                last_error.unwrap_or_else(|| "process is still running".to_string())
+            );
         }
 
         #[cfg(not(windows))]
@@ -3560,10 +3597,7 @@ mod tests {
 
         assert_eq!(error, "Gateway process inspection timed out");
         assert!(!error.contains(sentinel));
-        let pid = spawned_pid
-            .lock()
-            .unwrap()
-            .expect("inspection child PID");
+        let pid = spawned_pid.lock().unwrap().expect("inspection child PID");
         wait_for_missing_process(pid);
     }
 
@@ -5044,6 +5078,7 @@ time.sleep(10)
         result.expect("python proxy lifecycle");
     }
 
+    #[cfg(windows)]
     #[test]
     fn restart_after_settings_port_change_stops_recorded_port_before_starting_new_port() {
         let root = temp_root("python-port-change-restart");
@@ -5057,14 +5092,20 @@ time.sleep(10)
             let inspector = FastProcessInspector::new(&paths.proxy_script_path(), old_port);
             let listener_inspector = super::SystemListenerInspector;
             let backend = ControlledProxyLifecycleBackend {
-                lifecycle_gate_path: paths.lifecycle_gate_path(),
-                paths: paths.clone(),
+                delegate: ProxyLifecycleBackend {
+                    lifecycle_gate_path: paths.lifecycle_gate_path(),
+                    paths: paths.clone(),
+                    session_owned_identity: None,
+                    require_current_session_identity: false,
+                },
                 inspector: &inspector,
                 listener_inspector: &listener_inspector,
+                session_owned_identity: RefCell::new(None),
             };
             let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
 
             let old_status = coordinator.start(&backend, || Ok(()))?;
+            *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
             ensure(
                 old_status.status.proxy_port == old_port,
                 "old Gateway should use old port",
@@ -5506,7 +5547,6 @@ time.sleep(10)
     struct FastProcessInspector {
         script_path: String,
         port: Mutex<u16>,
-        start_ids: Mutex<HashMap<u32, String>>,
     }
 
     #[cfg(windows)]
@@ -5515,41 +5555,20 @@ time.sleep(10)
             Self {
                 script_path: comparable_path(script_path),
                 port: Mutex::new(port),
-                start_ids: Mutex::new(HashMap::new()),
             }
         }
 
         fn set_port(&self, port: u16) {
             *self.port.lock().unwrap() = port;
         }
-
-        fn process_is_running(pid: u32) -> bool {
-            let handle = unsafe {
-                super::OpenProcess(super::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-            };
-            if handle.is_null() {
-                return false;
-            }
-            let mut exit_code = 0u32;
-            let read = unsafe { super::GetExitCodeProcess(handle, &mut exit_code) } != 0;
-            unsafe { super::CloseHandle(handle) };
-            read && exit_code == 259
-        }
     }
 
     #[cfg(windows)]
     impl ProcessInspector for FastProcessInspector {
         fn inspect(&self, pid: u32) -> Result<InspectedProcess, String> {
-            if !Self::process_is_running(pid) {
+            let Some(start_id) = windows_process_start_id_if_running(pid)? else {
                 return Ok(InspectedProcess::Missing);
-            }
-            let start_id = self
-                .start_ids
-                .lock()
-                .unwrap()
-                .get(&pid)
-                .cloned()
-                .ok_or_else(|| format!("test process identity is missing for PID {pid}"))?;
+            };
             let port = *self.port.lock().unwrap();
             let mut info = ProcessInfo::from_args(vec![
                 "python".to_string(),
@@ -5564,29 +5583,27 @@ time.sleep(10)
         }
 
         fn spawned_process_start_id(&self, child: &std::process::Child) -> Result<String, String> {
-            let start_id = super::child_process_start_id(child)?;
-            self.start_ids.lock().unwrap().insert(child.id(), start_id.clone());
-            Ok(start_id)
+            super::child_process_start_id(child)
         }
     }
 
     #[cfg(windows)]
     struct ControlledProxyLifecycleBackend<'a> {
-        paths: ProxyPaths,
-        lifecycle_gate_path: PathBuf,
+        delegate: ProxyLifecycleBackend,
         inspector: &'a FastProcessInspector,
         listener_inspector: &'a dyn ListenerInspector,
+        session_owned_identity: RefCell<Option<super::GatewayIdentity>>,
     }
 
     #[cfg(windows)]
     impl super::GatewayLifecycleBackend for ControlledProxyLifecycleBackend<'_> {
         fn lifecycle_gate_path(&self) -> &Path {
-            &self.lifecycle_gate_path
+            self.delegate.lifecycle_gate_path()
         }
 
         fn snapshot(&self) -> Result<super::GatewayLifecycleSnapshot, String> {
             super::reconciled_snapshot_with_controls(
-                &self.paths,
+                &self.delegate.paths,
                 &super::health,
                 self.inspector,
                 self.listener_inspector,
@@ -5597,36 +5614,12 @@ time.sleep(10)
             &self,
             phase: super::GatewayLifecyclePhase,
         ) -> Result<AppStatus, String> {
-            let settings = super::read_settings(&self.paths)?;
-            let mode = super::read_mode(&self.paths)?;
-            let (proxy_running, message) = match phase {
-                super::GatewayLifecyclePhase::Unavailable => {
-                    (false, "Gateway lifecycle is unavailable")
-                }
-                super::GatewayLifecyclePhase::Starting => (false, "Gateway is starting"),
-                super::GatewayLifecyclePhase::Stopping => (true, "Gateway is stopping"),
-                super::GatewayLifecyclePhase::Restarting => (true, "Gateway is restarting"),
-                super::GatewayLifecyclePhase::Running => (true, "Gateway is running"),
-                super::GatewayLifecyclePhase::Stopped => (false, "Gateway is stopped"),
-                super::GatewayLifecyclePhase::Failed => {
-                    (false, "Gateway lifecycle needs reconciliation")
-                }
-            };
-            Ok(AppStatus {
-                mode,
-                proxy_running,
-                proxy_port: settings.proxy_port,
-                proxy_build: None,
-                message: message.to_string(),
-                gateway_lifecycle: phase,
-                history_sync_status: None,
-                history_sync_message: None,
-            })
+            self.delegate.transitional_status(phase)
         }
 
         fn start(&self) -> Result<super::GatewayStartOutcome, super::GatewayStartFailure> {
             super::start_with_paths_and_controls(
-                &self.paths,
+                &self.delegate.paths,
                 super::START_TIMEOUT,
                 Duration::from_millis(200),
                 &super::health,
@@ -5645,15 +5638,27 @@ time.sleep(10)
         }
 
         fn stop(&self) -> Result<AppStatus, String> {
-            let status = super::stop_with_paths_and_controls(
-                &self.paths,
-                &super::SystemProcessKiller,
-                self.inspector,
-                self.listener_inspector,
+            let clock = super::SystemShutdownClock::new();
+            let controls = super::UserRequestedShutdownControls {
+                killer: &super::SystemProcessKiller,
+                inspector: self.inspector,
+                listener_inspector: self.listener_inspector,
+                shutdown_request: &super::request_shutdown_with_timeout,
+                health_probe: &super::health_with_timeout,
+                clock: &clock,
+            };
+            let status = super::stop_session_owned_with_paths_and_controls(
+                &self.delegate.paths,
+                self.session_owned_identity.borrow().as_ref(),
+                &controls,
             )?;
             self.inspector
-                .set_port(super::read_settings(&self.paths)?.proxy_port);
+                .set_port(super::read_settings(&self.delegate.paths)?.proxy_port);
             Ok(status)
+        }
+
+        fn can_reuse(&self, snapshot: &super::GatewayLifecycleSnapshot) -> bool {
+            self.delegate.can_reuse(snapshot)
         }
     }
 
