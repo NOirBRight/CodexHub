@@ -8,8 +8,17 @@ CI job by default.
 
 ## CI jobs
 
-- **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0`. Runs on every PR.
-- **Synthetic real-client contract**: appears on every PR. For unrelated paths it succeeds explicitly as `not applicable` and does not start `scripts/Run-RealClientE2E.ps1`. For relevant paths, and for all non-PR events, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The planner at `scripts/ci/python_test_plan.py` decides which paths are relevant using the PR merge-base; `python scripts/ci/check_python_test_partitions.py` proves the core and synthetic partitions are disjoint and complete.
+Every workflow run creates one immutable **CI classifier** and one final
+**`CI / gate`** check.  The classifier in
+`scripts/ci/ci_change_plan.py` compares a pull request's merge-base to its
+head and emits the job-selection booleans.  Formal jobs keep their existing
+check names, but are skipped when their contract is unaffected.  A skipped
+formal job is acceptable only when the classifier selected it as out of scope;
+the gate fails on classifier failure, cancellation, or any selected job that
+does not pass.
+
+- **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0` when the classifier selects Python core.
+- **Synthetic real-client contract**: when selected, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The unified classifier uses the existing synthetic dependency set; `python scripts/ci/check_python_test_partitions.py` still proves the core and synthetic partitions are disjoint and complete.
 - Frontend build and UI contract: `npm ci`, `npm run build`, `npm run test:ui-contract` in `frontend/`
 - Rust tests (normal and debug flavors): `cargo test --locked -- --test-threads=1` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
@@ -24,15 +33,17 @@ CI job by default.
   `safe_file.rs` must stay free of crate dependencies so the standalone compile
   keeps working.
 
-### Triggers
+### Triggers and path scheduling
 
-Same-repository and fork PRs to `dev` and `main` run both Python checks, the
-frontend job, Rust normal/debug tests, Rust clippy, release flavor contract,
-and Linux `safe_file` on GitHub-hosted runners. Hosted runners are disposable
-and do not depend on the developer machine or a repository self-hosted
-registration. Pushes to `dev` and `main` preserve the same job set.
-`workflow_dispatch` runs the full validation. The weekly Sunday 03:17 UTC
-`schedule` runs the full validation, including the synthetic suite.
+Same-repository and fork PRs to `dev` and `main` always run the classifier and
+gate.  The classifier selects Python, frontend, Rust, Linux `safe_file`, and
+release checks from changed paths; documentation-only changes run only the
+classifier and gate.  Unknown paths, planner/workflow changes, path-read
+failures, pushes, schedules, and manual dispatches fail closed to the full
+matrix.  Workflow triggers intentionally do not use `paths` filters, so the
+required `CI / gate` check is never left permanently pending by GitHub.
+Hosted runners are disposable and do not depend on the developer machine or a
+repository self-hosted registration.
 
 Windows jobs pin `windows-2025`; the Linux-only `safe_file` job pins
 `ubuntu-24.04`, so its `cfg(unix)` code is compiled and exercised on Linux.
@@ -81,7 +92,9 @@ A PR is considered relevant for the synthetic check when it touches any of the f
 - `tests/test_ci_python_plan.py`
 - `pytest.ini`
 
-If changed-path acquisition for a PR is missing, unavailable, or fails, the check fails closed and runs the synthetic suite.
+If changed-path acquisition for a PR is missing, unavailable, or fails, the
+classifier fails closed, selects every formal job, and the gate reports the
+classifier failure instead of silently accepting a partial plan.
 
 The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
 

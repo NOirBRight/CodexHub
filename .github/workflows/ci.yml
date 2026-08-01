@@ -24,8 +24,61 @@ env:
   RUST_TOOLCHAIN: 1.97.1
 
 jobs:
+  classifier:
+    name: CI classifier
+    runs-on: windows-2025
+    timeout-minutes: 10
+    outputs:
+      python_core: ${{ steps.plan.outputs.python_core }}
+      python_synthetic: ${{ steps.plan.outputs.python_synthetic }}
+      frontend: ${{ steps.plan.outputs.frontend }}
+      rust: ${{ steps.plan.outputs.rust }}
+      rust_safe_file_linux: ${{ steps.plan.outputs.rust_safe_file_linux }}
+      release_flavor: ${{ steps.plan.outputs.release_flavor }}
+      full: ${{ steps.plan.outputs.full }}
+      classifier_failed: ${{ steps.plan.outputs.classifier_failed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Classify changed paths
+        id: plan
+        shell: pwsh
+        env:
+          CI_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $raw = & python scripts/ci/ci_change_plan.py --output-json
+          $exitCode = $LASTEXITCODE
+          if (-not $raw) {
+            throw 'CI classifier produced no plan output.'
+          }
+          $plan = $raw | ConvertFrom-Json
+          foreach ($key in @('python_core', 'python_synthetic', 'frontend', 'rust', 'rust_safe_file_linux', 'release_flavor', 'full', 'classifier_failed')) {
+            $value = [bool]$plan.PSObject.Properties[$key].Value
+            "$key=$($value.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          }
+          Write-Host ($plan | ConvertTo-Json -Compress)
+          if ($exitCode -ne 0) {
+            throw "CI classifier exited unexpectedly with code $exitCode."
+          }
+
+      - name: Fail closed when path acquisition failed
+        if: steps.plan.outputs.classifier_failed == 'true'
+        shell: pwsh
+        run: throw 'CI classifier could not acquire changed paths; full matrix was selected but the gate must fail.'
+
   python-core:
     name: Python core
+    needs: classifier
+    if: always() && (needs.classifier.outputs.python_core == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
@@ -59,6 +112,8 @@ jobs:
 
   python-synthetic:
     name: Synthetic real-client contract
+    needs: classifier
+    if: always() && (needs.classifier.outputs.python_synthetic == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 75
     steps:
@@ -80,48 +135,13 @@ jobs:
       - name: Install test dependencies
         run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
 
-      - name: Plan synthetic partition
-        id: plan
-        shell: pwsh
-        run: |
-          $event = '${{ github.event_name }}'
-          $isPr = $event -eq 'pull_request'
-          $changedFile = '.changed-paths.txt'
-          $acquisitionFailed = $false
-          if ($isPr) {
-            $baseSha = '${{ github.event.pull_request.base.sha }}'
-            $headSha = '${{ github.event.pull_request.head.sha }}'
-            git fetch origin $baseSha
-            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
-            $mergeBase = git merge-base $baseSha $headSha
-            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
-            $changed = git diff --no-renames --name-only $mergeBase $headSha
-            if ($LASTEXITCODE -ne 0) { $acquisitionFailed = $true }
-            if (-not $acquisitionFailed) {
-              $changed | Out-File -Encoding utf8 $changedFile
-            }
-          }
-          if ($acquisitionFailed) {
-            Remove-Item $changedFile -ErrorAction SilentlyContinue
-          }
-          $plan = .\.venv-ci\Scripts\python.exe scripts/ci/python_test_plan.py `
-            --event $event `
-            $(if ($isPr) { '--is-pull-request' }) `
-            --changed-paths-file $changedFile `
-            --output-json
-          echo "json=$plan" >> $env:GITHUB_OUTPUT
-
       - name: Run or skip synthetic partition
         shell: pwsh
         run: |
-          $plan = '${{ steps.plan.outputs.json }}' | ConvertFrom-Json
-          if ($plan.synthetic_status -eq 'not_applicable') {
-            Write-Host 'Synthetic real-client contract: not applicable'
-          } else {
-            .\.venv-ci\Scripts\python.exe tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
-              --timeout-seconds 3600 `
-              -- .\.venv-ci\Scripts\python.exe -m pytest @($plan.synthetic_args)
-          }
+          .\.venv-ci\Scripts\python.exe tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
+            --timeout-seconds 3600 `
+            -- .\.venv-ci\Scripts\python.exe -m pytest -q tests/test_real_client_e2e.py `
+              --junitxml=.pytest-results/junit-synthetic.xml --durations=0
 
       - name: Upload synthetic JUnit evidence
         if: always()
@@ -133,6 +153,8 @@ jobs:
 
   frontend:
     name: Frontend build and UI contract
+    needs: classifier
+    if: always() && (needs.classifier.outputs.frontend == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 30
     defaults:
@@ -158,6 +180,8 @@ jobs:
 
   rust-tests:
     name: Rust tests (${{ matrix.flavor }})
+    needs: classifier
+    if: always() && (needs.classifier.outputs.rust == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 75
     strategy:
@@ -219,6 +243,8 @@ jobs:
 
   rust-safe-file-linux:
     name: Rust safe_file Linux compile and tests
+    needs: classifier
+    if: always() && (needs.classifier.outputs.rust_safe_file_linux == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -258,6 +284,8 @@ jobs:
 
   release-flavor-contract:
     name: Release flavor contract
+    needs: classifier
+    if: always() && (needs.classifier.outputs.release_flavor == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
@@ -297,6 +325,8 @@ jobs:
 
   rust-clippy:
     name: Rust clippy
+    needs: classifier
+    if: always() && (needs.classifier.outputs.rust == 'true' || needs.classifier.outputs.full == 'true')
     runs-on: windows-2025
     timeout-minutes: 45
     defaults:
@@ -333,3 +363,53 @@ jobs:
       - name: Run clippy
         shell: pwsh
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  gate:
+    name: CI / gate
+    if: always()
+    needs:
+      - classifier
+      - python-core
+      - python-synthetic
+      - frontend
+      - rust-tests
+      - rust-safe-file-linux
+      - release-flavor-contract
+      - rust-clippy
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Evaluate selected checks
+        shell: pwsh
+        run: |
+          $classifierResult = '${{ needs.classifier.result }}'
+          if ($classifierResult -in @('failure', 'cancelled')) {
+            throw "CI classifier did not complete successfully ($classifierResult)."
+          }
+
+          $checks = @(
+            @('python_core', "${{ needs['python-core'].result }}", "${{ needs.classifier.outputs.python_core }}"),
+            @('python_synthetic', "${{ needs['python-synthetic'].result }}", "${{ needs.classifier.outputs.python_synthetic }}"),
+            @('frontend', "${{ needs.frontend.result }}", "${{ needs.classifier.outputs.frontend }}"),
+            @('rust_tests', "${{ needs['rust-tests'].result }}", "${{ needs.classifier.outputs.rust }}"),
+            @('rust_safe_file_linux', "${{ needs['rust-safe-file-linux'].result }}", "${{ needs.classifier.outputs.rust_safe_file_linux }}"),
+            @('release_flavor', "${{ needs['release-flavor-contract'].result }}", "${{ needs.classifier.outputs.release_flavor }}"),
+            @('rust_clippy', "${{ needs['rust-clippy'].result }}", "${{ needs.classifier.outputs.rust }}")
+          )
+
+          foreach ($check in $checks) {
+            $name = $check[0]
+            $result = $check[1]
+            $selected = $check[2] -eq 'true'
+            if (-not $selected) {
+              Write-Host "$name is intentionally skipped."
+              continue
+            }
+            if ($result -in @('failure', 'cancelled')) {
+              throw "$name was selected but finished with $result."
+            }
+            if ($result -ne 'success') {
+              throw "$name was selected but finished with unexpected result '$result'."
+            }
+            Write-Host "$name passed."
+          }

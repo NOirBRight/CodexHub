@@ -28,8 +28,9 @@ def plan():
 
 def _workflow_job_text(workflow_text: str, job_name: str) -> str:
     """Return the raw text of a top-level GitHub Actions job."""
-    start = workflow_text.find(f"  {job_name}:")
-    assert start != -1, f"job {job_name!r} not found"
+    match = re.search(rf"(?m)^  {re.escape(job_name)}:", workflow_text)
+    assert match is not None, f"job {job_name!r} not found"
+    start = match.start()
     after = workflow_text[start + 1 :]
     next_job = re.search(r"\n  [a-zA-Z0-9_-]+:", after)
     if next_job:
@@ -345,7 +346,7 @@ def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
 
 
 def test_ci_yaml_synthetic_job_has_no_depth_boundary():
-    """Regression: re-shallowing base history can make merge-base fail."""
+    """Synthetic checkout remains deep for reproducible fixture execution."""
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -353,15 +354,17 @@ def test_ci_yaml_synthetic_job_has_no_depth_boundary():
     assert "--depth=" not in synthetic_job, "synthetic job must not re-shallow history"
 
 
-def test_ci_yaml_changed_paths_uses_no_renames():
+def test_ci_yaml_classifier_uses_immutable_change_plan():
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    synthetic_job = _workflow_job_text(workflow_text, "python-synthetic")
-    plan_step = _step_run_text(synthetic_job, "Plan synthetic partition")
-    assert "git diff" in plan_step
-    assert "--no-renames" in plan_step
-    assert "--name-only" in plan_step
+    classifier_job = _workflow_job_text(workflow_text, "classifier")
+    assert "fetch-depth: 0" in classifier_job
+    plan_step = _step_run_text(classifier_job, "Classify changed paths")
+    assert "scripts/ci/ci_change_plan.py" in plan_step
+    assert "--output-json" in plan_step
+    assert "Fail closed when path acquisition failed" in classifier_job
+    assert "CI_PR_BASE_SHA" in classifier_job
 
 
 def test_pr_rename_from_relevant_to_unrelated_runs_synthetic(plan):
@@ -440,6 +443,39 @@ def test_ci_yaml_hosted_jobs_have_no_self_hosted_guards_or_smoke_dispatch():
     assert "validation_scope" not in workflow_text
     assert "runner-smoke" not in workflow_text
     assert "workflow_dispatch:" in workflow_text
+
+
+def test_ci_yaml_has_classifier_and_single_gate():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    classifier = _workflow_job_text(workflow_text, "classifier")
+    assert "name: CI classifier" in classifier
+    assert "runs-on: windows-2025" in classifier
+    assert "ci_change_plan.py" in classifier
+
+    gate = _workflow_job_text(workflow_text, "gate")
+    assert "name: CI / gate" in gate
+    assert "if: always()" in gate
+    for job_name in (
+        "classifier",
+        "python-core",
+        "python-synthetic",
+        "frontend",
+        "rust-tests",
+        "rust-safe-file-linux",
+        "release-flavor-contract",
+        "rust-clippy",
+    ):
+        assert f"- {job_name}" in gate
+
+
+def test_ci_yaml_never_uses_workflow_paths_filters():
+    workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "paths:" not in workflow_text
+    assert "paths-ignore:" not in workflow_text
 
 
 def test_ci_yaml_has_no_runner_smoke_jobs():
