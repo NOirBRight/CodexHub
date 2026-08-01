@@ -194,8 +194,7 @@ change the implementation or test files.
   repository's Python 3.13 type-parameter syntax. The diagnostic test passed
   immediately in isolation; a direct traceback identified the two replay
   failures as Python 3.11 `SyntaxError`, not route-plan behavior.
-- Authoritative core with
-  `C:\Users\noirb\AppData\Local\Programs\Python\Python313` first on `PATH`:
+- Authoritative core with the Python 3.13 interpreter first on `PATH`:
   1,484 passed, 1 skipped, 456 subtests passed in 92.29 seconds. A later
   redundant path-recording run printed the same Python 3.13.11 executable and
   had only the independently reproduced diagnostic incident-counter flake
