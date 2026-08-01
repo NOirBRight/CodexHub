@@ -3209,6 +3209,8 @@ def test_supervisor_start_gate_is_unique_and_fail_closed():
     assert "function New-StartGateFile" in runner
     assert "function Remove-StartGateFile" in runner
     assert "[System.IO.FileMode]::CreateNew" in runner
+    assert "[System.IO.File]::Move($temporaryPath, $Path)" in runner
+    assert "$stream.Flush($true)" in runner
     assert "Remove-Item -LiteralPath $gate -Force -ErrorAction Stop" in worker
     assert "Remove-Item -LiteralPath $startGatePath -Force -ErrorAction SilentlyContinue" not in supervisor
 
@@ -3216,6 +3218,161 @@ def test_supervisor_start_gate_is_unique_and_fail_closed():
     publication = supervisor.index("New-StartGateFile -Path $startGatePath")
     wait = supervisor.index("$completed = $process.WaitForExit")
     assert assignment < publication < wait
+
+
+def test_supervisor_start_gate_synthetic_lifecycle_is_fail_closed(tmp_path):
+    powershell = _powershell()
+    runner = SCRIPT.read_text(encoding="utf-8")
+    helper_start = runner.index("function New-StartGateFile")
+    helper_end = runner.index("function Set-RunnerPhase", helper_start)
+    helpers = runner[helper_start:helper_end]
+    worker_start = runner.index("$workerBootstrap = @'")
+    worker_body_start = worker_start + len("$workerBootstrap = @'\n")
+    worker_body_end = runner.index("'@", worker_body_start)
+    worker_body = runner[worker_body_start:worker_body_end]
+
+    harness = f"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+{helpers}
+
+$root = Join-Path $env:TEMP ('codexhub-start-gate-synthetic.' + [Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Force -Path $root)
+$stub = Join-Path $root 'stub.ps1'
+$marker = Join-Path $root 'client-started.marker'
+Set-Content -LiteralPath $stub -Encoding UTF8 -Value @'
+param(
+  [string]$CandidateSha,
+  [string]$DebugBuild,
+  [string]$ManagedClientConfigBuild,
+  [string]$ManagedClientConfigSha,
+  [string]$LunaModel,
+  [string]$ThirdPartyModel,
+  [string]$OutputDirectory,
+  [string]$HostEnvironmentManifest,
+  [int]$TimeoutSeconds,
+  [int]$ManualEvidenceTimeoutSeconds,
+  [int]$OverallTimeoutSeconds,
+  [string]$InternalSupervisorToken
+)
+[System.IO.File]::WriteAllText($env:CODEXHUB_SYNTHETIC_MARKER, 'started')
+exit 0
+'@
+
+$workerBootstrap = @'
+{worker_body}
+'@
+$encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerBootstrap))
+function Invoke-SyntheticWorker([string]$Gate, [string]$Supervisor, [string]$MarkerPath) {{
+  $keys = @(
+    'CODEXHUB_E2E_SUPERVISOR_START_GATE',
+    'CODEXHUB_E2E_SUPERVISOR_SCRIPT',
+    'CODEXHUB_E2E_SUPERVISOR_TOKEN',
+    'CODEXHUB_SYNTHETIC_MARKER'
+  )
+  $previous = @{{}}
+  foreach ($key in $keys) {{
+    $previous[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+  }}
+  [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_SUPERVISOR_START_GATE', $Gate, 'Process')
+  [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_SUPERVISOR_SCRIPT', $Supervisor, 'Process')
+  [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_SUPERVISOR_TOKEN', 'synthetic-token', 'Process')
+  [Environment]::SetEnvironmentVariable('CODEXHUB_SYNTHETIC_MARKER', $MarkerPath, 'Process')
+  try {{
+    $child = Start-Process -FilePath (Get-Command powershell.exe -ErrorAction Stop).Source `
+      -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedWorker) `
+      -WindowStyle Hidden -Wait -PassThru
+    return $child.ExitCode
+  }}
+  finally {{
+    foreach ($key in $keys) {{
+      [Environment]::SetEnvironmentVariable($key, $previous[$key], 'Process')
+    }}
+  }}
+}}
+
+$gateA = Join-Path $root 'runner-start-gate.a'
+$gateB = Join-Path $root 'runner-start-gate.b'
+$uniqueA = New-StartGateFile -Path $gateA
+$uniqueB = New-StartGateFile -Path $gateB
+$uniquePathsDiffer = $gateA -ne $gateB
+$uniqueFilesReady = (Test-Path -LiteralPath $gateA -PathType Leaf) -and (Test-Path -LiteralPath $gateB -PathType Leaf)
+$uniqueCleanup = (Remove-StartGateFile -Path $gateA) -and (Remove-StartGateFile -Path $gateB)
+
+$lockedGate = Join-Path $root 'runner-start-gate.locked'
+$lockedStream = [System.IO.File]::Open($lockedGate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try {{
+  $lockedPublishFailed = -not (New-StartGateFile -Path $lockedGate)
+  $lockedCleanupFailed = -not (Remove-StartGateFile -Path $lockedGate)
+}} finally {{
+  $lockedStream.Dispose()
+}}
+$lockedReleasedCleanup = Remove-StartGateFile -Path $lockedGate
+
+$workerLockedGate = Join-Path $root 'runner-start-gate.worker-locked'
+$workerLockedStream = [System.IO.File]::Open($workerLockedGate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try {{
+  $lockedWorkerExit = Invoke-SyntheticWorker -Gate $workerLockedGate -Supervisor $stub -MarkerPath $marker
+  $lockedWorkerStarted = Test-Path -LiteralPath $marker -PathType Leaf
+}} finally {{
+  $workerLockedStream.Dispose()
+}}
+$workerLockedCleanup = Remove-StartGateFile -Path $workerLockedGate
+
+$consumedGate = Join-Path $root 'runner-start-gate.consumed'
+$consumedMarker = Join-Path $root 'consumed.marker'
+$consumedPublished = New-StartGateFile -Path $consumedGate
+$consumedWorkerExit = Invoke-SyntheticWorker -Gate $consumedGate -Supervisor $stub -MarkerPath $consumedMarker
+$consumedWorkerStarted = Test-Path -LiteralPath $consumedMarker -PathType Leaf
+$consumedGateRemoved = -not (Test-Path -LiteralPath $consumedGate -PathType Leaf)
+
+[ordered]@{{
+  unique_publish = $uniqueA -and $uniqueB
+  unique_paths_differ = $uniquePathsDiffer
+  unique_files_ready = $uniqueFilesReady
+  unique_cleanup = $uniqueCleanup
+  locked_publish_failed = $lockedPublishFailed
+  locked_cleanup_failed = $lockedCleanupFailed
+  locked_released_cleanup = $lockedReleasedCleanup
+  locked_worker_exit = $lockedWorkerExit
+  locked_worker_started = $lockedWorkerStarted
+  locked_worker_cleanup = $workerLockedCleanup
+  consumed_publish = $consumedPublished
+  consumed_worker_exit = $consumedWorkerExit
+  consumed_worker_started = $consumedWorkerStarted
+  consumed_gate_removed = $consumedGateRemoved
+}} | ConvertTo-Json -Compress
+Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+"""
+    harness_path = tmp_path / "start-gate-synthetic.ps1"
+    harness_path.write_text(harness, encoding="utf-8")
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness_path)],
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        cwd=ROOT,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip())
+    assert result == {
+        "unique_publish": True,
+        "unique_paths_differ": True,
+        "unique_files_ready": True,
+        "unique_cleanup": True,
+        "locked_publish_failed": True,
+        "locked_cleanup_failed": True,
+        "locked_released_cleanup": True,
+        "locked_worker_exit": 125,
+        "locked_worker_started": False,
+        "locked_worker_cleanup": True,
+        "consumed_publish": True,
+        "consumed_worker_exit": 0,
+        "consumed_worker_started": True,
+        "consumed_gate_removed": True,
+    }
 
 
 def test_matrix_documentation_declares_native_responses_release_gate():

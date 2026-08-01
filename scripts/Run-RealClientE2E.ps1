@@ -358,17 +358,21 @@ function Get-FailureSummaryValue {
 
 function New-StartGateFile {
     param([string]$Path)
+    $temporaryPath = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     $stream = $null
     try {
         $stream = [System.IO.File]::Open(
-            $Path,
+            $temporaryPath,
             [System.IO.FileMode]::CreateNew,
             [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::None
         )
         $bytes = $script:Utf8NoBom.GetBytes('ready')
         $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush()
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        [System.IO.File]::Move($temporaryPath, $Path)
         return $true
     }
     catch {
@@ -377,6 +381,9 @@ function New-StartGateFile {
     finally {
         if ($null -ne $stream) {
             $stream.Dispose()
+        }
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
