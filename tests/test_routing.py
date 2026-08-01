@@ -6389,6 +6389,17 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["model"], "vision-model")
         self.assertEqual(payload["output"][0]["content"][0]["text"], "described image")
 
+    def test_image_proxy_sse_to_body_reports_vision_proxy_for_incomplete_frame(self):
+        response = FakeSseResponse(
+            [b'data: {"type":"response.created"}\n', b""]
+        )
+
+        with self.assertRaises(codex_proxy.UpstreamStreamIncompleteError) as context:
+            codex_proxy._image_proxy_response_body(response)
+
+        self.assertIn("Vision Proxy", str(context.exception))
+        self.assertNotIn("Image proxy", str(context.exception))
+
     def test_converted_target_events_are_invariant_to_transport_partitioning(self):
         sources = (
             (
@@ -11406,7 +11417,7 @@ class RoutingTests(unittest.TestCase):
             )
 
         self.assertIn("does not support image input", str(context.exception))
-        self.assertIn("Image Proxy is disabled", str(context.exception))
+        self.assertIn("Vision Proxy is disabled", str(context.exception))
 
     def test_image_proxy_prompt_requests_ocr_ui_and_chart_detail(self):
         prompt = codex_proxy.IMAGE_PROXY_PROMPT
