@@ -10,15 +10,6 @@ on:
       - dev
       - main
   workflow_dispatch:
-    inputs:
-      validation_scope:
-        description: Validation scope
-        required: true
-        default: full
-        type: choice
-        options:
-          - full
-          - runner-smoke
   schedule:
     - cron: '17 3 * * 0'
 
@@ -29,107 +20,38 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUST_TOOLCHAIN: 1.97.1
+
 jobs:
-  runner-smoke-windows:
-    name: Runner smoke (Windows)
-    if: github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'runner-smoke'
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
-    timeout-minutes: 5
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Verify dedicated Windows runner toolchain
-        shell: pwsh
-        run: |
-          if ($env:RUNNER_NAME -notlike 'codexhub-*') {
-            throw "Unexpected runner identity."
-          }
-          git --version
-          $pythonVersion = python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-          if ($pythonVersion -ne "3.13") { throw "Python 3.13 is required." }
-          $nodeVersion = node -p "process.versions.node"
-          if ($nodeVersion -notlike "22.*") { throw "Node.js 22 is required." }
-          python --version
-          node --version
-          npm --version
-          $rustVersion = rustc --version
-          if ($rustVersion -notlike "rustc 1.97.1 *") { throw "Rust 1.97.1 is required." }
-          $components = rustup component list --installed
-          if ($components -notcontains "clippy-x86_64-pc-windows-msvc") {
-            throw "The clippy component is required."
-          }
-          cargo --version
-          $rustVersion
-
-  runner-smoke-linux:
-    name: Runner smoke (Linux)
-    if: github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'runner-smoke'
-    runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]
-    timeout-minutes: 5
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Verify dedicated Linux runner toolchain
-        run: |
-          case "$RUNNER_NAME" in
-            codexhub-*) ;;
-            *) echo "Unexpected runner identity." >&2; exit 1 ;;
-          esac
-          git --version
-          test "$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.13"
-          python --version
-          rustup --version
-          cargo --version
-          case "$(rustc --version)" in
-            "rustc 1.97.1 "*) ;;
-            *) echo "Rust 1.97.1 is required." >&2; exit 1 ;;
-          esac
-          rustup component list --installed | grep -qx 'clippy-x86_64-unknown-linux-gnu'
-          rustup target list --installed | grep -qx 'x86_64-unknown-linux-musl'
-          sysroot="$(rustc --print sysroot)"
-          test -x "$sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
-
   python-core:
     name: Python core
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Verify preinstalled Python
-        shell: pwsh
-        run: |
-          $version = python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-          if ($version -ne "3.13") { throw "Python 3.13 is required." }
-          python --version
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
 
       - name: Create isolated Python environment
         shell: pwsh
         run: |
           python -m venv .venv-ci
-          "$pwd\.venv-ci\Scripts" >> $env:GITHUB_PATH
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest
+        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
 
       - name: Run Python core partition
         run: |
-          python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
+          .\.venv-ci\Scripts\python.exe -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
 
       - name: Upload Python core JUnit evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-core-junit
           path: .pytest-results/junit-core.xml
@@ -137,32 +59,26 @@ jobs:
 
   python-synthetic:
     name: Synthetic real-client contract
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 75
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Verify preinstalled Python
-        shell: pwsh
-        run: |
-          $version = python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-          if ($version -ne "3.13") { throw "Python 3.13 is required." }
-          python --version
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
 
       - name: Create isolated Python environment
         shell: pwsh
         run: |
           python -m venv .venv-ci
-          "$pwd\.venv-ci\Scripts" >> $env:GITHUB_PATH
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest
+        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
 
       - name: Plan synthetic partition
         id: plan
@@ -186,11 +102,9 @@ jobs:
             }
           }
           if ($acquisitionFailed) {
-            # Remove the file so the planner treats this as missing/unreadable
-            # and fails closed to the full synthetic suite.
             Remove-Item $changedFile -ErrorAction SilentlyContinue
           }
-          $plan = python scripts/ci/python_test_plan.py `
+          $plan = .\.venv-ci\Scripts\python.exe scripts/ci/python_test_plan.py `
             --event $event `
             $(if ($isPr) { '--is-pull-request' }) `
             --changed-paths-file $changedFile `
@@ -204,14 +118,14 @@ jobs:
           if ($plan.synthetic_status -eq 'not_applicable') {
             Write-Host 'Synthetic real-client contract: not applicable'
           } else {
-            python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
+            .\.venv-ci\Scripts\python.exe tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
               --timeout-seconds 3600 `
-              -- python -m pytest @($plan.synthetic_args)
+              -- .\.venv-ci\Scripts\python.exe -m pytest @($plan.synthetic_args)
           }
 
       - name: Upload synthetic JUnit evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-synthetic-junit
           path: .pytest-results/junit-synthetic.xml
@@ -219,25 +133,19 @@ jobs:
 
   frontend:
     name: Frontend build and UI contract
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Verify preinstalled Node.js
-        shell: pwsh
-        run: |
-          $version = node -p "process.versions.node"
-          if ($version -notlike "22.*") { throw "Node.js 22 is required." }
-          node --version
-          npm --version
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
 
       - name: Install dependencies
         run: npm ci
@@ -250,10 +158,7 @@ jobs:
 
   rust-tests:
     name: Rust tests (${{ matrix.flavor }})
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -268,17 +173,18 @@ jobs:
         working-directory: src-tauri
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Verify preinstalled Rust stable
+      - name: Install Rust 1.97.1 toolchain
         shell: pwsh
         run: |
-          $version = rustc --version
-          if ($version -notlike "rustc 1.97.1 *") { throw "Rust 1.97.1 is required." }
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component clippy
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
           cargo --version
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -288,11 +194,13 @@ jobs:
             ${{ runner.os }}-cargo-deps-v2-test-
 
       - name: Prepare Tauri resource placeholder
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force resources/python | Out-Null
           Set-Content -Path resources/python/.ci-placeholder -Value ''
 
       - name: Run cargo tests
+        shell: pwsh
         run: |
           if ("${{ matrix.flavor }}" -eq "debug") {
             cargo test --locked --features debug-diagnostics -- --test-threads=1
@@ -301,6 +209,7 @@ jobs:
           }
 
       - name: Build release-optimized flavor
+        shell: pwsh
         run: |
           if ("${{ matrix.flavor }}" -eq "debug") {
             cargo build --release --locked --features debug-diagnostics
@@ -310,39 +219,37 @@ jobs:
 
   rust-safe-file-linux:
     name: Rust safe_file Linux compile and tests
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Linux, X64, codexhub-ci-linux-x64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
-      - name: Verify preinstalled Rust stable
+      - name: Install Rust 1.97.1 toolchain and musl target
         run: |
-          case "$(rustc --version)" in
-            "rustc 1.97.1 "*) ;;
-            *) echo "Rust 1.97.1 is required." >&2; exit 1 ;;
-          esac
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component clippy
+          rustup target add x86_64-unknown-linux-musl --toolchain "${RUST_TOOLCHAIN}"
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
           rustup component list --installed | grep -qx 'clippy-x86_64-unknown-linux-gnu'
           rustup target list --installed | grep -qx 'x86_64-unknown-linux-musl'
-          cargo --version
+          test -x "$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
 
-      - name: Lint safe_file with clippy for Linux
+      - name: Lint safe_file with Clippy for Linux
         env:
           CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
-        run: rustup run stable clippy-driver --target x86_64-unknown-linux-musl -C linker=rust-lld --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-lint -D warnings
+        run: rustup run "${RUST_TOOLCHAIN}" clippy-driver --target x86_64-unknown-linux-musl -C linker=rust-lld --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-lint -D warnings
 
       - name: Compile safe_file test harness for Linux
         env:
           CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
-        run: rustc +stable --target x86_64-unknown-linux-musl -C linker=rust-lld --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-tests
+        run: rustc +"${RUST_TOOLCHAIN}" --target x86_64-unknown-linux-musl -C linker=rust-lld --edition=2021 --test src-tauri/src/safe_file.rs -o safe-file-linux-tests
 
       - name: Run safe_file Linux tests
         env:
@@ -351,14 +258,11 @@ jobs:
 
   release-flavor-contract:
     name: Release flavor contract
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify normal default and debug parity
         shell: pwsh
@@ -393,31 +297,25 @@ jobs:
 
   rust-clippy:
     name: Rust clippy
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name != 'workflow_dispatch' || inputs.validation_scope != 'runner-smoke')
-    runs-on: [self-hosted, Windows, X64, codexhub-ci-windows-x64]
+    runs-on: windows-2025
     timeout-minutes: 45
     defaults:
       run:
         working-directory: src-tauri
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Verify preinstalled Rust stable with clippy
+      - name: Install Rust 1.97.1 toolchain
         shell: pwsh
         run: |
-          $version = rustc --version
-          if ($version -notlike "rustc 1.97.1 *") { throw "Rust 1.97.1 is required." }
-          $components = rustup component list --installed
-          if ($components -notcontains "clippy-x86_64-pc-windows-msvc") {
-            throw "The clippy component is required."
-          }
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component clippy
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
           cargo --version
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -427,9 +325,11 @@ jobs:
             ${{ runner.os }}-cargo-deps-v2-clippy-
 
       - name: Prepare Tauri resource placeholder
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force resources/python | Out-Null
           Set-Content -Path resources/python/.ci-placeholder -Value ''
 
       - name: Run clippy
+        shell: pwsh
         run: cargo clippy --locked --all-targets -- -D warnings

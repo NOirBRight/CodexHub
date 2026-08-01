@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 from unittest import TestCase
+from unittest.mock import patch
 
 import diagnostic_control
 import diagnostic_recorder
@@ -79,7 +80,13 @@ class DiagnosticControlTests(TestCase):
         self.assertEqual(marked["result"], {"accepted": True, "incident_id": "i000001"})
 
     def test_delete_and_status_are_deterministic_after_the_tail_freezes(self) -> None:
-        marked = self._request("mark")
+        # Drive the freeze synchronously below.  The production recorder starts
+        # a maintenance thread after a marker is created; with the fake clock,
+        # that thread can race the explicit process_due_incidents() call and
+        # either freeze twice or advance the incident counter before the
+        # response is read.
+        with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
+            marked = self._request("mark")
         self.assertEqual(marked["result"]["incident_id"], "i000001")
         self.clock.advance(1)
         self.assertEqual(self.recorder.process_due_incidents(), 1)

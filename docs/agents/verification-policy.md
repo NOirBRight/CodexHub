@@ -53,16 +53,15 @@ not block PR, merge, or release under the current policy.
 
 ## CI authority
 
-GitHub Actions runs every repository job for every same-repository PR to `dev`
-or `main` regardless of local verification class (Python core, synthetic
-real-client contract, frontend build and UI contract, Rust tests for both
-flavors, Rust clippy, release flavor contract, and the safe_file Linux
-compile/lint/tests). These checks run on the repository-dedicated self-hosted
-Windows and Linux runners described in
-`docs/agents/self-hosted-runner.md`. Because the repository is public, fork PR
-code is never scheduled on those trusted-host runners. That boundary is
-enforced by the host-owned pre-job hook before checkout; a job-level workflow
-condition alone is not accepted as the security boundary.
+GitHub Actions runs every repository job for every PR to `dev` or `main`
+regardless of local verification class (Python core, synthetic real-client
+contract, frontend build and UI contract, Rust tests for both flavors, Rust
+clippy, release flavor contract, and the safe_file Linux compile/lint/tests).
+Routine checks run on fresh GitHub-hosted Windows and Linux runners. Because
+the repository is public, fork PR code is allowed to run only on those
+disposable hosted VMs; it never receives access to a persistent developer or
+self-hosted machine. True real-client Desktop/CLI evidence remains a local
+release-operator procedure.
 Local risk selection reduces duplicate work; it does not weaken CI. When CI is
 unavailable and a merge must proceed, reproduce the full fallback in
 `docs/agents/ci.md`.
