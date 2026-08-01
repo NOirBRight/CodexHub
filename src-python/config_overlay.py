@@ -148,21 +148,56 @@ def context_guard_status(
         "model_auto_compact_token_limit",
     )
     state = _read_context_guard_state(state_path) if state_path is not None else None
-    managed_values = (state or {}).get("config", {}).get("managed", {})
-    enabled = bool(managed_values) and all(
-        managed_values.get(key) is not None
-        and top_level_value(text, key) == managed_values[key]
-        for key in CONTEXT_GUARD_KEYS
+    entry = (state or {}).get("config", {})
+    managed_values = entry.get("managed", {}) if isinstance(entry, dict) else {}
+    if not isinstance(managed_values, dict):
+        managed_values = {}
+    explicit_enabled = entry.get("enabled") if isinstance(entry, dict) else None
+    if isinstance(explicit_enabled, bool):
+        enabled = explicit_enabled
+    else:
+        # Version 1 state recorded only the values that it installed.  Treat
+        # a missing value as a migrated, enabled guard after the new overlay
+        # removes the old global projection; an explicit disable deletes state.
+        enabled = bool(managed_values) and all(
+            top_level_value(text, key) in {None, managed_values.get(key)}
+            for key in CONTEXT_GUARD_KEYS
+        )
+    current_values = {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
+    global_override_conflict = any(
+        value is not None
+        and value != managed_values.get(key)
+        for key, value in current_values.items()
     )
     return {
         "enabled": enabled,
         "model_context_window": context_window,
         "model_auto_compact_token_limit": auto_compact_token_limit,
+        "global_override_conflict": global_override_conflict,
     }
 
 
 def _context_guard_previous_values(text: str) -> dict[str, str | None]:
     return {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
+
+
+def _context_guard_managed_values(text: str) -> dict[str, str | None]:
+    """Read legacy guard values only from the CodexHub-owned marker."""
+
+    match = re.search(
+        rf"(?ms)^\s*{re.escape(MARKER_BEGIN)}\s*$.*?^\s*{re.escape(MARKER_END)}\s*$",
+        text,
+    )
+    if match is None:
+        return {key: None for key in CONTEXT_GUARD_KEYS}
+    marker_text = match.group(0)
+    return {key: top_level_value(marker_text, key) for key in CONTEXT_GUARD_KEYS}
+
+
+def _context_guard_default_state_path(backup_path: Path) -> Path:
+    """Return the state file colocated with a managed Codex backup."""
+
+    return backup_path.parent / "context-guard-state.json"
 
 
 def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
@@ -176,22 +211,25 @@ def _normalized_context_guard_values(payload: object) -> dict[str, str | None]:
 
 def _read_context_guard_state(
     state_path: Path,
-) -> dict[str, dict[str, dict[str, str | None]]] | None:
+) -> dict[str, dict[str, object]] | None:
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
-    entries: dict[str, dict[str, dict[str, str | None]]] = {}
+    entries: dict[str, dict[str, object]] = {}
     for target, values in payload.items():
         if target not in {"config", "backup"} or not isinstance(values, dict):
             continue
         if "previous" in values or "managed" in values:
-            entries[target] = {
+            entry: dict[str, object] = {
                 "previous": _normalized_context_guard_values(values.get("previous")),
                 "managed": _normalized_context_guard_values(values.get("managed")),
             }
+            if isinstance(values.get("enabled"), bool):
+                entry["enabled"] = values["enabled"]
+            entries[target] = entry
         else:
             # Older state cannot identify the dynamic value it installed.  Do
             # not remove a potentially user-managed value during disable.
@@ -200,6 +238,65 @@ def _read_context_guard_state(
                 "managed": {key: None for key in CONTEXT_GUARD_KEYS},
             }
     return entries or None
+
+
+def _migrate_legacy_context_guard_values(
+    config_path: Path,
+    backup_path: Path,
+    state_path: Path | None = None,
+) -> None:
+    """Remove only the old CodexHub-owned global context projection.
+
+    Version 1 wrote the two context keys either inside the managed overlay or
+    as top-level values recorded in ``context-guard-state.json``.  The current
+    ownership boundary is catalog-scoped, so those values must not survive a
+    route switch.  A value is removed only while it still equals the recorded
+    managed value; an edit made after the old guard was enabled remains a
+    user-owned global override and is surfaced by ``context_guard_status``.
+    """
+
+    state_path = state_path or _context_guard_default_state_path(backup_path)
+    state = _read_context_guard_state(state_path) or {}
+    state_changed = False
+    targets = {"config": config_path, "backup": backup_path}
+
+    for target, path in targets.items():
+        if not path.exists():
+            continue
+        text = read_text_preserving_newlines(path)
+        entry = state.get(target)
+        managed = (
+            _normalized_context_guard_values(entry.get("managed"))
+            if isinstance(entry, dict)
+            else {key: None for key in CONTEXT_GUARD_KEYS}
+        )
+        marker_managed = _context_guard_managed_values(text)
+        removable: dict[str, None] = {}
+        for key in CONTEXT_GUARD_KEYS:
+            known_value = managed.get(key) or marker_managed.get(key)
+            if known_value is not None and top_level_value(text, key) == known_value:
+                removable[key] = None
+        if removable:
+            atomic_write_text(
+                path,
+                set_top_level_values(text, removable),
+                encoding="utf-8",
+            )
+
+        if isinstance(entry, dict) and any(value is not None for value in managed.values()):
+            # Preserve the enabled bit and previous snapshot for diagnostics,
+            # but stop treating the old values as an owned projection.
+            entry["managed"] = {key: None for key in CONTEXT_GUARD_KEYS}
+            entry.setdefault("enabled", True)
+            state[target] = entry
+            state_changed = True
+
+    if state_changed:
+        atomic_write_text(
+            state_path,
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _safe_official_disable_updates(
@@ -250,43 +347,42 @@ def set_context_guard(
     enabled: bool,
     catalog_path: Path | None = None,
 ) -> dict[str, int | bool | None]:
+    _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
     target_paths = {"config": config_path}
     if backup_path.exists():
         target_paths["backup"] = backup_path
     if enabled:
-        selected_model = top_level_value(
-            read_text_preserving_newlines(config_path) if config_path.exists() else "",
-            "model",
-        )
-        budget = (
-            _selected_official_context_budget(catalog_path, selected_model)
-            if catalog_path is not None
-            else None
-        )
-        if budget is None:
-            selected = selected_model.strip() if isinstance(selected_model, str) else ""
-            if selected.removeprefix("openai/").startswith("gpt-"):
-                raise ValueError("safe current Official context budget is unavailable")
-            return context_guard_status(config_path, state_path)
-
-        managed_values = {
-            "model_context_window": str(budget[0]),
-            "model_auto_compact_token_limit": str(budget[1]),
-        }
         state = _read_context_guard_state(state_path) or {}
         for target, path in target_paths.items():
-            entry = state.get(target)
-            if entry is None:
-                entry = {
-                    "previous": _context_guard_previous_values(
-                        read_text_preserving_newlines(path) if path.exists() else ""
-                    ),
-                    "managed": {},
-                }
-                state[target] = entry
-            entry["managed"] = dict(managed_values)
             text = read_text_preserving_newlines(path) if path.exists() else ""
-            atomic_write_text(path, set_top_level_values(text, managed_values), encoding="utf-8")
+            entry = state.get(target) if isinstance(state.get(target), dict) else {}
+            previous = _normalized_context_guard_values(entry.get("previous"))
+            managed = _normalized_context_guard_values(entry.get("managed"))
+            if not entry:
+                marker_managed = _context_guard_managed_values(text)
+                previous_source = text
+                if target == "config" and any(marker_managed.values()) and backup_path.exists():
+                    previous_source = read_text_preserving_newlines(backup_path)
+                previous = _context_guard_previous_values(previous_source)
+                # Only values inside the old CodexHub marker are known to be
+                # managed.  Unmarked top-level values remain user-owned.
+                managed = marker_managed
+            removable = {
+                key: value
+                for key, value in managed.items()
+                if value is not None and top_level_value(text, key) == value
+            }
+            if removable:
+                atomic_write_text(
+                    path,
+                    set_top_level_values(text, {key: None for key in removable}),
+                    encoding="utf-8",
+                )
+            state[target] = {
+                "enabled": True,
+                "previous": previous,
+                "managed": managed,
+            }
         atomic_write_text(
             state_path,
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
@@ -301,28 +397,11 @@ def set_context_guard(
             previous = entry.get("previous", {key: None for key in CONTEXT_GUARD_KEYS})
             managed = entry.get("managed", {key: None for key in CONTEXT_GUARD_KEYS})
             text = read_text_preserving_newlines(path)
-            selected_model = top_level_value(text, "model")
-            selected_official = _selected_model_is_official(selected_model)
-            safe_official_budget = (
-                _selected_official_context_budget(catalog_path, selected_model)
-                if selected_official
-                else None
-            )
-            if selected_official and safe_official_budget is None:
-                raise ValueError("safe current Official context budget is unavailable")
-            if safe_official_budget is not None:
-                updates = _safe_official_disable_updates(
-                    text,
-                    previous,
-                    managed,
-                    safe_official_budget,
-                )
-            else:
-                updates = {
-                    key: previous.get(key)
-                    for key, managed_value in managed.items()
-                    if managed_value is not None and top_level_value(text, key) == managed_value
-                }
+            updates = {
+                key: previous.get(key)
+                for key, managed_value in managed.items()
+                if managed_value is not None and top_level_value(text, key) == managed_value
+            }
             if updates:
                 atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
         state_path.unlink(missing_ok=True)
@@ -622,6 +701,9 @@ def build_overlay(
     owner: str,
     context_budget: tuple[int, int] | None = None,
 ) -> str:
+    # Context limits are model-scoped catalog metadata.  The old global
+    # projection is intentionally ignored even when callers still pass the
+    # legacy budget argument.
     lines = [
         MARKER_BEGIN,
         f"# owner = {owner}",
@@ -629,14 +711,6 @@ def build_overlay(
     ]
     if catalog_value is not None:
         lines.append(f"model_catalog_json = {toml_literal(catalog_value)}")
-    if context_budget is not None:
-        context_window, auto_compact_token_limit = context_budget
-        lines.extend(
-            [
-                f"model_context_window = {context_window}",
-                f"model_auto_compact_token_limit = {auto_compact_token_limit}",
-            ]
-        )
     return "\n".join([*lines, MARKER_END, ""])
 
 
@@ -721,16 +795,13 @@ def apply_overlay(
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
+    _migrate_legacy_context_guard_values(config_path, backup_path)
     original = read_text_preserving_newlines(config_path) if config_path.exists() else ""
     custom_section = section_key_values(original, f"model_providers.{PROXY_PROVIDER_ID}")
     if custom_section is not None and not (
         custom_section == unified_official_provider_values() or is_managed_gateway_provider(custom_section)
     ):
         raise ValueError("refusing to overwrite unknown custom provider")
-    selected_model = top_level_value(original, "model")
-    context_budget = _selected_official_context_budget(catalog_path, selected_model)
-    if context_budget is None and _selected_model_is_official(selected_model):
-        raise ValueError("safe current Official context budget is unavailable")
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
     cross_owner_takeover = takeover and active_owner != owner
@@ -746,19 +817,17 @@ def apply_overlay(
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     cleaned = strip_top_level_keys(cleaned)
-    if context_budget is not None:
-        cleaned = strip_top_level_keys(cleaned, CONTEXT_GUARD_KEYS)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(
         catalog_config_value(config_path, catalog_path) if catalog_path is not None else None,
         owner,
-        context_budget,
     ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
 
 
 def restore_overlay(config_path: Path, backup_path: Path, unified_history: bool = False) -> str:
+    _migrate_legacy_context_guard_values(config_path, backup_path)
     if backup_path.exists():
         restored = read_text_preserving_newlines(backup_path)
         current = read_text_preserving_newlines(config_path) if config_path.exists() else ""

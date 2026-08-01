@@ -30,6 +30,7 @@ pub struct CodexContextGuardStatus {
     pub gateway_enabled: bool,
     pub model_context_window: Option<u32>,
     pub model_auto_compact_token_limit: Option<u32>,
+    pub global_override_conflict: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +38,8 @@ struct CodexConfigContextGuardStatus {
     enabled: bool,
     model_context_window: Option<u32>,
     model_auto_compact_token_limit: Option<u32>,
+    #[serde(default)]
+    global_override_conflict: bool,
 }
 
 pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, String> {
@@ -818,6 +821,7 @@ fn combined_context_guard_status(
         gateway_enabled,
         model_context_window: codex_status.model_context_window,
         model_auto_compact_token_limit: codex_status.model_auto_compact_token_limit,
+        global_override_conflict: codex_status.global_override_conflict,
     }
 }
 
@@ -2669,6 +2673,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert!(status.gateway_enabled);
         assert_eq!(status.model_context_window, Some(272_000));
         assert_eq!(status.model_auto_compact_token_limit, Some(240_000));
+        assert!(!status.global_override_conflict);
         assert!(
             get_settings_with_paths(&paths)
                 .expect("saved settings")

@@ -1705,6 +1705,14 @@ function OfficialDetail({
             >
               {t("providers.contextGuardTooltip")}
             </div>
+            {contextGuardStatus?.global_override_conflict && (
+              <div
+                role="status"
+                className="mt-1 max-w-80 text-right text-[11px] font-medium leading-4 text-amber-700"
+              >
+                {t("providers.contextGuardGlobalOverrideConflict")}
+              </div>
+            )}
           </div>
         }
         interactionDisabled={authState !== "authorized"}

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from config_overlay import (
     MARKER_BEGIN,
+    MARKER_END,
     _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
@@ -268,16 +269,16 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             activated = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 272000", activated)
-            self.assertIn("model_auto_compact_token_limit = 240000", activated)
+            self.assertIn("model_context_window = 353400", activated)
+            self.assertIn("model_auto_compact_token_limit = 300000", activated)
             self.assertEqual(activated.count("model_context_window"), 1)
             self.assertEqual(activated.count("model_auto_compact_token_limit"), 1)
-            self.assertLess(240_000, 249_433)
 
             catalog_path.write_text("{not json", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
-            self.assertEqual(config_path.read_text(encoding="utf-8"), activated)
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            refreshed = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_context_window = 353400", refreshed)
+            self.assertIn("model_auto_compact_token_limit = 300000", refreshed)
 
             restore_overlay(config_path, backup_path)
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
@@ -317,11 +318,10 @@ class ConfigOverlayTests(unittest.TestCase):
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
 
             text = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 272000", text)
-            self.assertIn("model_auto_compact_token_limit = 244800", text)
-            self.assertLess(244_800, 249_433)
+            self.assertNotIn("model_context_window", text)
+            self.assertNotIn("model_auto_compact_token_limit", text)
 
-    def test_249433_token_replay_compacts_before_the_next_ordinary_generation(self):
+    def test_overlay_does_not_project_a_global_context_budget(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             config_path = tmp / "config.toml"
@@ -340,16 +340,36 @@ class ConfigOverlayTests(unittest.TestCase):
             )
 
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            text = config_path.read_text(encoding="utf-8")
+            marker = text[text.index(MARKER_BEGIN) : text.index("# END CODEX PROXY SESSION CONFIG")]
+            self.assertNotIn("model_context_window", marker)
+            self.assertNotIn("model_auto_compact_token_limit", marker)
+            self.assertIn("model_context_window = 353400", text)
+            self.assertIn("model_auto_compact_token_limit = 300000", text)
+
+    def test_explicit_global_compaction_override_still_drives_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(
+                'model = "gpt-5.6-terra"\n'
+                "model_context_window = 353400\n"
+                "model_auto_compact_token_limit = 300000\n",
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             replay = DeterministicCompactionReplay(config_path.read_text(encoding="utf-8"))
 
-            self.assertFalse(replay.submit_ordinary_generation(249_433))
-            self.assertEqual(replay.events, [("context_compacted", 249_433)])
-
+            self.assertFalse(replay.submit_ordinary_generation(300_000))
+            self.assertEqual(replay.events, [("context_compacted", 300_000)])
             self.assertFalse(replay.submit_ordinary_generation(45_514))
             self.assertEqual(
                 replay.events,
                 [
-                    ("context_compacted", 249_433),
+                    ("context_compacted", 300_000),
                     ("ordinary_generation_withheld", 45_514),
                 ],
             )
@@ -359,12 +379,146 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(
                 replay.events,
                 [
-                    ("context_compacted", 249_433),
+                    ("context_compacted", 300_000),
                     ("ordinary_generation_withheld", 45_514),
                     ("compaction_completed", 45_514),
                     ("ordinary_generation", 45_514),
                 ],
             )
+
+    def test_apply_migrates_legacy_managed_context_keys_out_of_the_overlay_marker(self):
+        legacy = "\n".join(
+            [
+                MARKER_BEGIN,
+                "# owner = release",
+                'model_provider = "custom"',
+                "model_context_window = 272000",
+                "model_auto_compact_token_limit = 244800",
+                MARKER_END,
+                'model = "gpt-5.6-terra"',
+                "",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(legacy, encoding="utf-8")
+            backup_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            text = config_path.read_text(encoding="utf-8")
+            marker = text[text.index(MARKER_BEGIN) : text.index("# END CODEX PROXY SESSION CONFIG")]
+            self.assertNotIn("model_context_window", marker)
+            self.assertNotIn("model_auto_compact_token_limit", marker)
+            self.assertNotIn("model_context_window", text)
+            self.assertNotIn("model_auto_compact_token_limit", text)
+
+    def test_apply_migrates_legacy_global_values_from_config_and_backup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.toml.release.backup"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n"
+                'model_reasoning_effort = "high"\n',
+                encoding="utf-8",
+            )
+            backup_path.write_text(
+                'model = "volc/glm-5.2"\n'
+                "model_context_window = 272000\n"
+                "model_auto_compact_token_limit = 244800\n"
+                'model_reasoning_effort = "high"\n',
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "config": {
+                            "previous": {
+                                "model_context_window": None,
+                                "model_auto_compact_token_limit": None,
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                        "backup": {
+                            "previous": {
+                                "model_context_window": None,
+                                "model_auto_compact_token_limit": None,
+                            },
+                            "managed": {
+                                "model_context_window": "272000",
+                                "model_auto_compact_token_limit": "244800",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+
+            for path in (config_path, backup_path):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("model_context_window", text)
+                self.assertNotIn("model_auto_compact_token_limit", text)
+                self.assertIn('model_reasoning_effort = "high"', text)
+            migrated_state = json.loads(state_path.read_text(encoding="utf-8"))
+            for target in ("config", "backup"):
+                self.assertIsNone(migrated_state[target]["managed"]["model_context_window"])
+                self.assertTrue(migrated_state[target]["enabled"])
+
+            restore_overlay(config_path, backup_path)
+            restored = config_path.read_text(encoding="utf-8")
+            self.assertNotIn("model_context_window", restored)
+            self.assertNotIn("model_auto_compact_token_limit", restored)
+
+    def test_apply_preserves_a_legacy_value_changed_by_the_user(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.toml.release.backup"
+            state_path = tmp / "context-guard-state.json"
+            catalog_path = self._official_budget_catalog(tmp)
+            config_path.write_text(
+                'model = "volc/glm-5.2"\nmodel_context_window = 600000\n',
+                encoding="utf-8",
+            )
+            backup_path.write_text(
+                'model = "volc/glm-5.2"\nmodel_context_window = 272000\n',
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "config": {
+                            "previous": {"model_context_window": None},
+                            "managed": {"model_context_window": "272000"},
+                        },
+                        "backup": {
+                            "previous": {"model_context_window": None},
+                            "managed": {"model_context_window": "272000"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+
+            self.assertIn("model_context_window = 600000", config_path.read_text(encoding="utf-8"))
+            self.assertIn("model_context_window = 600000", backup_path.read_text(encoding="utf-8"))
+            status = context_guard_status(config_path, state_path)
+            self.assertTrue(status["global_override_conflict"])
 
     def test_selected_official_context_budget_prefers_active_model_over_unrelated_default(self):
         """Active task-model budget wins; do not fall back to an unrelated Official default.
@@ -519,10 +673,8 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             activated = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 1000000", activated)
-            self.assertIn("model_auto_compact_token_limit = 900000", activated)
-            self.assertEqual(activated.count("model_context_window"), 1)
-            self.assertEqual(activated.count("model_auto_compact_token_limit"), 1)
+            self.assertNotIn("model_context_window", activated)
+            self.assertNotIn("model_auto_compact_token_limit", activated)
 
     def test_overlay_uses_active_official_budget_when_official_model_selected(self):
         """Active Official model keeps its own budget when a task model is also in the catalog."""
@@ -575,10 +727,8 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             activated = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 272000", activated)
-            self.assertIn("model_auto_compact_token_limit = 244800", activated)
-            self.assertEqual(activated.count("model_context_window"), 1)
-            self.assertEqual(activated.count("model_auto_compact_token_limit"), 1)
+            self.assertNotIn("model_context_window", activated)
+            self.assertNotIn("model_auto_compact_token_limit", activated)
 
     def test_overlay_adopts_a_larger_budget_only_from_a_fresh_direct_catalog_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -613,8 +763,8 @@ class ConfigOverlayTests(unittest.TestCase):
                 encoding="utf-8",
             )
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
-            self.assertIn("model_context_window = 400000", config_path.read_text(encoding="utf-8"))
-            self.assertIn("model_auto_compact_token_limit = 380000", config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("model_context_window", config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("model_auto_compact_token_limit", config_path.read_text(encoding="utf-8"))
 
             catalog_path.write_text(
                 json.dumps(
@@ -638,9 +788,8 @@ class ConfigOverlayTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
-            self.assertIn("model_context_window = 400000", config_path.read_text(encoding="utf-8"))
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            self.assertNotIn("model_context_window", config_path.read_text(encoding="utf-8"))
 
             catalog_path.write_text(
                 json.dumps(
@@ -668,8 +817,8 @@ class ConfigOverlayTests(unittest.TestCase):
             )
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             restarted = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 400000", restarted)
-            self.assertIn("model_auto_compact_token_limit = 380000", restarted)
+            self.assertNotIn("model_context_window", restarted)
+            self.assertNotIn("model_auto_compact_token_limit", restarted)
 
     def test_overlay_adopts_fresh_direct_cache_authority_and_rejects_a_stale_expansion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -705,9 +854,8 @@ class ConfigOverlayTests(unittest.TestCase):
 
             apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
             activated = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 272000", activated)
-            self.assertIn("model_auto_compact_token_limit = 244800", activated)
-            self.assertLess(244_800, 249_433)
+            self.assertNotIn("model_context_window", activated)
+            self.assertNotIn("model_auto_compact_token_limit", activated)
 
             catalog_path.write_text(
                 json.dumps(
@@ -734,9 +882,10 @@ class ConfigOverlayTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
-            self.assertEqual(config_path.read_text(encoding="utf-8"), activated)
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            refreshed = config_path.read_text(encoding="utf-8")
+            self.assertNotIn("model_context_window", refreshed)
+            self.assertNotIn("model_auto_compact_token_limit", refreshed)
 
     def test_overlay_preserves_an_explicit_third_party_context_budget(self):
         original = "\n".join(
@@ -799,9 +948,8 @@ class ConfigOverlayTests(unittest.TestCase):
             backup_path.write_text(original, encoding="utf-8")
             catalog_path.write_text("{not json", encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
-            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            apply_overlay(config_path, backup_path, catalog_path, "http://127.0.0.1:9099")
+            self.assertIn("model_provider = \"custom\"", config_path.read_text(encoding="utf-8"))
             self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
 
             restore_overlay(config_path, backup_path)
@@ -1343,7 +1491,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("[model_providers.custom]", updated)
             self.assertIn("[features]", updated)
 
-    def test_context_guard_updates_live_and_overlay_backup_then_restores_previous_values(self):
+    def test_context_guard_does_not_write_global_values_and_preserves_user_overrides(self):
         original = "\n".join(
             [
                 "model_context_window = 400000",
@@ -1374,18 +1522,13 @@ class ConfigOverlayTests(unittest.TestCase):
             )
 
             self.assertTrue(enabled["enabled"])
-            self.assertEqual(enabled["model_context_window"], 272_000)
-            self.assertEqual(
-                enabled["model_auto_compact_token_limit"],
-                240_000,
-            )
+            self.assertEqual(enabled["model_context_window"], 400_000)
+            self.assertEqual(enabled["model_auto_compact_token_limit"], 360_000)
+            self.assertTrue(enabled["global_override_conflict"])
             for path in (config_path, backup_path):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("model_context_window = 272000", text)
-                self.assertIn(
-                    "model_auto_compact_token_limit = 240000",
-                    text,
-                )
+                self.assertIn("model_context_window = 400000", text)
+                self.assertIn("model_auto_compact_token_limit = 360000", text)
                 self.assertIn('model_reasoning_effort = "high"', text)
                 self.assertIn("[features]", text)
 
@@ -1407,7 +1550,7 @@ class ConfigOverlayTests(unittest.TestCase):
                 self.assertIn("model_auto_compact_token_limit = 360000", text)
                 self.assertIn('model_reasoning_effort = "high"', text)
 
-    def test_context_guard_disable_does_not_restore_an_unsafe_official_override(self):
+    def test_context_guard_keeps_an_explicit_official_override_as_a_conflict(self):
         original = "\n".join(
             [
                 'model = "gpt-5.6-terra"',
@@ -1444,10 +1587,8 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertFalse(disabled["enabled"])
             for path in (config_path, backup_path):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("model_context_window = 272000", text)
-                self.assertIn("model_auto_compact_token_limit = 240000", text)
-                self.assertNotIn("model_context_window = 400000", text)
-                self.assertNotIn("model_auto_compact_token_limit = 360000", text)
+                self.assertIn("model_context_window = 400000", text)
+                self.assertIn("model_auto_compact_token_limit = 360000", text)
 
     def test_context_guard_disable_keeps_a_third_party_backup_unchanged(self):
         official = (
@@ -1485,7 +1626,7 @@ class ConfigOverlayTests(unittest.TestCase):
                 catalog_path=catalog_path,
             )
 
-            self.assertIn("model_context_window = 272000", config_path.read_text(encoding="utf-8"))
+            self.assertIn("model_context_window = 400000", config_path.read_text(encoding="utf-8"))
             restored_backup = backup_path.read_text(encoding="utf-8")
             self.assertIn('model = "volc/glm-5.2"', restored_backup)
             self.assertIn("model_context_window = 1000000", restored_backup)
@@ -1581,7 +1722,7 @@ class ConfigOverlayTests(unittest.TestCase):
                 catalog_path=catalog_path,
             )
             changed = config_path.read_text(encoding="utf-8").replace(
-                "model_context_window = 272000",
+                "model_context_window = 500000",
                 "model_context_window = 600000",
             )
             config_path.write_text(changed, encoding="utf-8")
@@ -1591,7 +1732,7 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("model_context_window = 600000", text)
             self.assertNotIn("model_auto_compact_token_limit", text)
 
-    def test_context_guard_adopts_preexisting_managed_values_and_can_fully_disable_them(self):
+    def test_context_guard_does_not_claim_unmarked_preexisting_values(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             config_path = tmp / "config.toml"
