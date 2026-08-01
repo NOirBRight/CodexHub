@@ -53,15 +53,17 @@ not block PR, merge, or release under the current policy.
 
 ## CI authority
 
-GitHub Actions runs every repository job for every PR to `dev` or `main`
-regardless of local verification class (Python core, synthetic real-client
-contract, frontend build and UI contract, Rust tests for both flavors, Rust
-clippy, release flavor contract, and the safe_file Linux compile/lint/tests).
-Routine checks run on fresh GitHub-hosted Windows and Linux runners. Because
-the repository is public, fork PR code is allowed to run only on those
-disposable hosted VMs; it never receives access to a persistent developer or
-self-hosted machine. True real-client Desktop/CLI evidence remains a local
-release-operator procedure.
+GitHub Actions always creates the classifier and `CI / gate` for every PR to
+`dev` or `main`. The immutable classifier selects the applicable formal jobs
+(Python core, synthetic real-client contract, frontend build and UI contract,
+Rust tests for both flavors, Rust clippy, release flavor contract, and the
+safe_file Linux compile/lint/tests). Unknown paths, planner/workflow changes,
+path-read failures, and non-PR events fail closed to the full matrix. Routine
+checks run on fresh GitHub-hosted Windows and Linux runners. Because the
+repository is public, fork PR code is allowed to run only on those disposable
+hosted VMs; it never receives access to a persistent developer or self-hosted
+machine. True real-client Desktop/CLI evidence remains a local release-
+operator procedure.
 Local risk selection reduces duplicate work; it does not weaken CI. When CI is
 unavailable and a merge must proceed, reproduce the full fallback in
 `docs/agents/ci.md`.
@@ -71,18 +73,20 @@ unavailable and a merge must proceed, reproduce the full fallback in
 The Python validation is split into two stable checks so the real-client E2E
 suite is only invoked when its contract surface actually changed:
 
-- **`Python core`** runs on every PR. It executes every Python test except
+- **`Python core`** is selected for Python source, configuration, and ordinary
+  Python tests. It executes every Python test except
   `tests/test_real_client_e2e.py`.
-- **`Synthetic real-client contract`** appears on every PR. For PRs that do not
-  touch a real-client E2E dependency it succeeds explicitly as
-  `not applicable` and does not start `scripts/Run-RealClientE2E.ps1`. For PRs
-  that touch a relevant path it runs `tests/test_real_client_e2e.py` in full.
+- **`Synthetic real-client contract`** is selected for the real-client E2E
+  dependency surface and runs `tests/test_real_client_e2e.py` in full.
 
 Non-PR events (`push`, `workflow_dispatch`, the weekly full-validation
-`schedule`, release/full-validation, and unknown events) fail closed and always
-run the synthetic suite. The planner that implements this decision lives at
-`scripts/ci/python_test_plan.py` and is tested by
-`tests/test_ci_python_plan.py`. Collection completeness is verified by
+`schedule`, release/full-validation, and unknown events) fail closed and run
+the full matrix. The unified planner lives at
+`scripts/ci/ci_change_plan.py`; the existing Python partition planner remains
+the source of the core/synthetic partition definitions used by local fallback
+and is tested by `tests/test_ci_python_plan.py`. The Hosted workflow keeps
+those same stable pytest arguments after the unified planner selects the job.
+Collection completeness is verified by
 `python scripts/ci/check_python_test_partitions.py`.
 
 Existing active work migrates incrementally: retain already completed full
