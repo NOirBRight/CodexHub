@@ -768,7 +768,7 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     start_outcome_with_paths(paths)
         .map(|outcome| outcome.snapshot.status)
@@ -1569,7 +1569,7 @@ fn force_kill_session_owned_gateway_at_deadline(
     Ok(Some(pid))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     stop_with_paths_and_controls(
         paths,
@@ -3480,19 +3480,22 @@ mod tests {
         comparable_path, configure_start_stdio, detect_mode, find_python,
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
         reconciled_snapshot_with_controls,
-        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths,
-        start_with_paths_and_controls, start_with_paths_and_waiter, status_with_paths,
+        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths_and_controls,
+        start_with_paths_and_waiter, status_with_paths,
         stop_current_session_owned_with_paths_and_controls,
-        stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
+        stop_session_owned_with_paths_and_controls, stop_with_paths_and_controls,
         verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
         ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller, ProxyLifecycleBackend,
         ProxyPaths, ProxyPidMetadata, ProxyPidRecord, ShutdownClock, StartupOutcome,
         UserRequestedShutdownControls, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
+
     #[cfg(windows)]
     use super::{
         run_bounded_inspection_command_with_hook, run_windows_inspection, WindowsInspectionKind,
     };
+    #[cfg(not(windows))]
+    use super::{start_with_paths, stop_with_paths};
     use crate::{AppStatus, Settings};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -5039,6 +5042,7 @@ time.sleep(10)
         assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_status_stop_real_python_proxy_on_ephemeral_port() {
         let root = temp_root("python-lifecycle");
@@ -5092,6 +5096,98 @@ time.sleep(10)
 
         let _ = stop_with_paths(&paths);
         result.expect("python proxy lifecycle");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn start_status_stop_real_python_proxy_on_ephemeral_port() {
+        let root = temp_root("python-lifecycle");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+
+        let result = (|| {
+            let start_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(start_status.proxy_running, "start status should be running")?;
+            ensure(
+                start_status.proxy_port == port,
+                "start status should report the requested port",
+            )?;
+            ensure(
+                start_status.proxy_build.is_some(),
+                "start status should include proxy build",
+            )?;
+            ensure(read_pid(&paths)?.is_some(), "start should write a PID")?;
+
+            #[cfg(feature = "debug-diagnostics")]
+            ensure(
+                paths
+                    .codex_dir
+                    .join("diagnostics/control/status.json")
+                    .is_file(),
+                "debug Gateway should activate its recorder in the existing child",
+            )?;
+            #[cfg(not(feature = "debug-diagnostics"))]
+            ensure(
+                !paths.codex_dir.join("diagnostics").exists(),
+                "normal Gateway should not create a diagnostic runtime subtree",
+            )?;
+
+            let running_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                running_snapshot.status.proxy_running,
+                "status should be running",
+            )?;
+
+            let stop_status = stop_with_paths_and_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(!stop_status.proxy_running, "stop status should be stopped")?;
+            ensure(
+                stop_status.message == "Gateway stopped gracefully",
+                "stop should use the Gateway /shutdown endpoint",
+            )?;
+            ensure(read_pid(&paths)?.is_none(), "stop should remove PID")?;
+
+            let stopped_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                !stopped_snapshot.status.proxy_running,
+                "status should be stopped",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let cleanup = stop_with_paths_and_controls(
+            &paths,
+            &super::SystemProcessKiller,
+            &inspector,
+            &listener_inspector,
+        );
+        match (result, cleanup) {
+            (Ok(()), Ok(_)) => {}
+            (Err(error), Ok(_)) => panic!("python proxy lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("python proxy cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("python proxy lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     #[cfg(windows)]
