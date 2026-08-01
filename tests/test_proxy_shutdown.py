@@ -212,13 +212,31 @@ def test_shutdown_endpoint_stops_server() -> None:
     try:
         host, port = server.server_address
         connection = HTTPConnection(host, port, timeout=2)
-        connection.request("POST", "/shutdown")
-        response = connection.getresponse()
-        payload = json.loads(response.read().decode("utf-8"))
+        with (
+            patch.object(
+                codex_proxy,
+                "choose_upstream",
+                side_effect=AssertionError(
+                    "shutdown must not select an upstream"
+                ),
+            ) as choose_upstream,
+            patch.object(
+                codex_proxy,
+                "materialize_operational_authentication",
+                side_effect=AssertionError(
+                    "shutdown must not materialize provider credentials"
+                ),
+            ) as materialize_authentication,
+        ):
+            connection.request("POST", "/shutdown")
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
         connection.close()
 
         assert response.status == 200
         assert payload["ok"] is True
+        choose_upstream.assert_not_called()
+        materialize_authentication.assert_not_called()
 
         thread.join(timeout=2)
         assert not thread.is_alive()
@@ -433,12 +451,12 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             patch.object(
                 codex_proxy,
                 "codex_access_token",
-                side_effect=AssertionError("shutdown cancellation must not read Codex auth"),
+                return_value="test-token",
             ) as access_token,
             patch.object(
                 codex_proxy,
                 "codex_account_id",
-                side_effect=AssertionError("shutdown cancellation must not read Codex auth"),
+                return_value="test-account",
             ) as account_id,
             patch.object(codex_proxy, "_open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
             patch.object(codex_proxy, "write_proxy_event") as write_event,
@@ -462,8 +480,8 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             }
             assert open_upstream.call_count == 1
             build_upstream_headers.assert_called_once()
-            access_token.assert_not_called()
-            account_id.assert_not_called()
+            access_token.assert_called_once_with()
+            account_id.assert_called_once_with()
             shutdown_event = next(
                 call.kwargs
                 for call in write_event.call_args_list
