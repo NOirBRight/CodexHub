@@ -5039,6 +5039,7 @@ time.sleep(10)
         assert_eq!(paths.codex_config_path(), root.join(".codex/config.toml"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn start_status_stop_real_python_proxy_on_ephemeral_port() {
         let root = temp_root("python-lifecycle");
@@ -5091,6 +5092,91 @@ time.sleep(10)
         })();
 
         let _ = stop_with_paths(&paths);
+        result.expect("python proxy lifecycle");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn start_status_stop_real_python_proxy_on_ephemeral_port() {
+        let root = temp_root("python-lifecycle");
+        let repo_root = copy_python_sources_to_temp_repo(&root);
+        let paths = ProxyPaths::new(root.join("codex-home"), repo_root);
+        let port = free_port();
+        write_settings(&paths, port);
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), port);
+        let listener_inspector = super::SystemListenerInspector;
+
+        let result = (|| {
+            let start_status =
+                start_with_controlled_inspector(&paths, &inspector, &listener_inspector)?;
+            ensure(start_status.proxy_running, "start status should be running")?;
+            ensure(
+                start_status.proxy_port == port,
+                "start status should report the requested port",
+            )?;
+            ensure(
+                start_status.proxy_build.is_some(),
+                "start status should include proxy build",
+            )?;
+            ensure(read_pid(&paths)?.is_some(), "start should write a PID")?;
+
+            #[cfg(feature = "debug-diagnostics")]
+            ensure(
+                paths
+                    .codex_dir
+                    .join("diagnostics/control/status.json")
+                    .is_file(),
+                "debug Gateway should activate its recorder in the existing child",
+            )?;
+            #[cfg(not(feature = "debug-diagnostics"))]
+            ensure(
+                !paths.codex_dir.join("diagnostics").exists(),
+                "normal Gateway should not create a diagnostic runtime subtree",
+            )?;
+
+            let running_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                running_snapshot.status.proxy_running,
+                "status should be running",
+            )?;
+
+            let stop_status = stop_with_paths_and_controls(
+                &paths,
+                &super::SystemProcessKiller,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(!stop_status.proxy_running, "stop status should be stopped")?;
+            ensure(
+                stop_status.message == "Gateway stopped gracefully",
+                "stop should use the Gateway /shutdown endpoint",
+            )?;
+            ensure(read_pid(&paths)?.is_none(), "stop should remove PID")?;
+
+            let stopped_snapshot = reconciled_snapshot_with_controls(
+                &paths,
+                &super::health,
+                &inspector,
+                &listener_inspector,
+            )?;
+            ensure(
+                !stopped_snapshot.status.proxy_running,
+                "status should be stopped",
+            )?;
+            Ok::<(), String>(())
+        })();
+
+        let _ = stop_with_paths_and_controls(
+            &paths,
+            &super::SystemProcessKiller,
+            &inspector,
+            &listener_inspector,
+        );
         result.expect("python proxy lifecycle");
     }
 
