@@ -137,4 +137,65 @@ The remaining gates require a separately authorized live control: complete
 registered contributor/defer-loading capture, a clean current-binding cold
 start, independently fingerprinted full caller/upstream/downstream requests
 and responses, a real non-streaming request, and observed non-Direct states.
-No such control was run for this audit.
+
+## Versioned runtime/wire inventory
+
+`runtime-wire-inventory.json` is the versioned inventory artifact that feeds
+#249 (the beta.1 capability gate) and #66 (the Chat conversion matrix). It
+records one per-scope disposition for every taxonomy item the Codex CLI
+exposes over the core Responses contract and the explicitly-deferred advanced
+capabilities.
+
+The artifact is bound to CLI floor `0.145.0` and to the candidate identity
+captured by the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
+source commit `9e552e9d15ba52bed7077d5357f3e18e330f8f38`, official Responses
+route). It is generated from the existing sanitized evidence only; it never
+fabricates a `Supported` disposition for a gate the artifacts mark
+`live_control_required`.
+
+### Disposition vocabulary
+
+| Disposition | Meaning |
+| --- | --- |
+| `preserved` | Observed and carried through unchanged |
+| `reversibly_adapted` | Observed with a documented reversible adaptation |
+| `local_consume` | Observed and consumed locally without upstream I/O |
+| `Unsupported` | Out of scope for the beta.1 core contract |
+| `Unqualified` | Observed but not qualified by accepted evidence |
+| `live_control_required` | The bounded artifacts do not prove the item; a separately authorized live control window must capture it before any `Supported` claim |
+
+### Taxonomy coverage
+
+Core items (`preserved`/`reversibly_adapted` where the bounded artifacts prove
+them): core text streaming, multi-turn history, item/call IDs, streaming SSE
+event kinds, standard function declaration/call/result/replay, and identity
+(request/response/item/call IDs).
+
+Live-control items (`live_control_required` until a coordinated live window
+captures them): non-streaming text, choice controls (the wire fixture carries a
+contract sentinel; the bounded audit observes `tool_choice`/`parallel_tool_calls`
+but full pre/post choice identity requires a live control), terminal events,
+errors, hosted-only declarations, unknown tagged sentinels, and default runtime
+fields.
+
+Advanced capabilities (`Unsupported`/`Unqualified`): Code Mode, `tool_search`,
+Collaboration V2, and Chat conversion are explicitly deferred for beta.1 per
+#248/#258 and are not advertised.
+
+### Identity control
+
+The inventory reports `unclassified_core_items: 0` and fails closed on
+mutation, deletion, and loss. Replay cases run through both the Python
+generator (`scripts/build_issue_62_runtime_inventory.py --replay-case`) and
+the PowerShell reconciliation (`scripts/check-codex-thread-tool-surface.ps1
+-InventoryReplayCase`):
+
+```powershell
+python scripts/build_issue_62_runtime_inventory.py
+python scripts/build_issue_62_runtime_inventory.py --replay-case mutation
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1 -InventoryReplayCase mutation
+```
+
+The live-control-required gates remain open until the separately authorized
+live control window documented above captures real evidence for each one.

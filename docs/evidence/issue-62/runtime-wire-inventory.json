@@ -1,0 +1,194 @@
+{
+  "artifact_kind": "runtime_wire_inventory",
+  "candidate_identity": {
+    "cli_version": "0.144.0-alpha.4",
+    "configured_provider_id": "custom",
+    "inbound_format": "responses",
+    "model": "gpt-5.6-sol",
+    "route_upstream": "official",
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "upstream_format": "responses"
+  },
+  "cli_version_floor": "0.145.0",
+  "disposition_vocabulary": [
+    "preserved",
+    "reversibly_adapted",
+    "local_consume",
+    "Unsupported",
+    "Unqualified",
+    "live_control_required"
+  ],
+  "evidence_sources": {
+    "audit": "read-only-gate-audit.json",
+    "trace": "current-codexhub-thread-tool-surface.json",
+    "wire_fixture": "codexhub-runtime-wire-fixture.json"
+  },
+  "feeds": {
+    "capability_gate": "#249",
+    "chat_conversion_matrix": "#66"
+  },
+  "identity_control": {
+    "fail_closed": true,
+    "replay_cases": [
+      "identity",
+      "mutation",
+      "deletion",
+      "loss"
+    ],
+    "unclassified_core_items": 0,
+    "unclassified_scopes": []
+  },
+  "items": [
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
+      "notes": "streaming response text observed and preserved across the official Responses route",
+      "scope": "core_text_streaming"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false",
+      "notes": "no real non-streaming request exists; contract sentinel only",
+      "scope": "core_text_non_streaming"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls",
+      "notes": "multi-turn history with paired call/output rows observed",
+      "scope": "core_history_multiturn"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "call_item_id and output_item_id aliases preserved per link",
+      "scope": "core_history_item_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.required_call_ids",
+      "notes": "call_id aliases preserved and reconciled with call links",
+      "scope": "core_history_call_ids"
+    },
+    {
+      "disposition": "reversibly_adapted",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.events",
+      "notes": "observed SSE event kinds sanitized to redacted payloads with stable event sequence",
+      "scope": "core_sse_streaming_events"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
+      "notes": "terminal event classification requires independently captured full response-body evidence",
+      "scope": "core_sse_terminal_events"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
+      "notes": "error classification requires independently fingerprinted pre/post response bodies",
+      "scope": "core_sse_errors"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces",
+      "notes": "Direct and Deferred function declarations observed for the codex_app namespace",
+      "scope": "core_function_declaration"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "function_call items with call_id and arguments aliases observed",
+      "scope": "core_function_call"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "function_call_output items with call_id and output aliases observed",
+      "scope": "core_function_result"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "check-codex-thread-tool-surface.ps1#required-membership-replay",
+      "notes": "required thread tool replay reconciles registered, Deferred, and discoverable membership",
+      "scope": "core_function_replay"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "item/call id aliases preserved across pre/post-Gateway replay",
+      "scope": "identity_item_call_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+      "notes": "response_id aliases preserved across pre/post-Gateway replay",
+      "scope": "identity_response_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
+      "notes": "request_id aliases preserved and equal across pre/post-Gateway replay",
+      "scope": "identity_request_ids"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false",
+      "notes": "choice controls are a contract sentinel in the wire fixture; the bounded audit observes tool_choice/parallel_tool_calls but full pre/post choice identity requires a live control",
+      "scope": "choice_controls"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+      "notes": "terminal event classification requires a real captured response body fingerprint",
+      "scope": "terminal_events"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+      "notes": "error classification requires independently captured pre/post response evidence",
+      "scope": "errors"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
+      "notes": "hosted-only and host-unavailable are tagged reconciliation sentinels; no runtime-observed host binding",
+      "scope": "hosted_only_declarations"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
+      "notes": "unknown tagged sentinels are preserved as opaque replay sentinels; live runtime dispositions require a real unknown item",
+      "scope": "unknown_tagged_sentinels"
+    },
+    {
+      "disposition": "live_control_required",
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
+      "notes": "default runtime field classification requires an independently captured full request body",
+      "scope": "default_runtime_fields"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.1-scope",
+      "notes": "Code Mode is beta.2 scope (#251/#279/#280); not advertised in beta.1",
+      "scope": "code_mode"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "current-codexhub-thread-tool-surface.json#planner_gates.caller_request",
+      "notes": "client-executed tool_search is observed in the caller request but model non-selection is owned by #63; beta.2 scope",
+      "scope": "tool_search"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.3-scope",
+      "notes": "Collaboration V2 is beta.3 scope (#64/#282/#283); observed multi_agent_version='v2' is not advertised in beta.1",
+      "scope": "collaboration_v2"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.4-scope",
+      "notes": "Chat conversion is beta.4 scope (#66/#253/#254); not advertised in beta.1",
+      "scope": "chat_conversion"
+    }
+  ],
+  "schema_version": 1
+}

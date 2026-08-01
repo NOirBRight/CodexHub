@@ -30,6 +30,25 @@ def run_replay(case: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_inventory_replay(case: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-InventoryReplayCase",
+            case,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> None:
     trace = json.loads(TRACE.read_text(encoding="utf-8"))
 
@@ -142,3 +161,21 @@ def test_negative_replays_fail_visibly(case: str) -> None:
 
     assert result.returncode == 1
     assert "RECONCILIATION_MISMATCH:" in result.stderr
+
+
+def test_inventory_identity_replay_passes() -> None:
+    result = run_inventory_replay("identity")
+
+    assert result.returncode == 0, result.stderr
+    assert "THREAD_TOOL_SURFACE_COMPLETE" in result.stdout
+    assert "Inventory replay case: identity" in result.stdout
+
+
+@pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
+def test_negative_inventory_replays_fail_visibly(case: str) -> None:
+    result = run_inventory_replay(case)
+
+    assert result.returncode == 1
+    assert "RECONCILIATION_MISMATCH:" in result.stderr
+    assert "INVENTORY_IDENTITY_MISMATCH:" in result.stderr
+    assert case in result.stderr

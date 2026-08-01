@@ -2,13 +2,16 @@ param(
     [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
     [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
     [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
+    [string]$InventoryPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\runtime-wire-inventory.json'),
     [ValidateSet('identity', 'mutation', 'deletion', 'loss', 'required-set-deletion', 'required-membership-mutation')]
-    [string]$ReplayCase = 'identity'
+    [string]$ReplayCase = 'identity',
+    [ValidateSet('identity', 'mutation', 'deletion', 'loss')]
+    [string]$InventoryReplayCase = 'identity'
 )
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($path in @($TracePath, $WireFixturePath, $AuditPath)) {
+foreach ($path in @($TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Evidence file not found: $path"
     }
@@ -17,6 +20,7 @@ foreach ($path in @($TracePath, $WireFixturePath, $AuditPath)) {
 $trace = Get-Content -Raw -LiteralPath $TracePath | ConvertFrom-Json
 $wire = Get-Content -Raw -LiteralPath $WireFixturePath | ConvertFrom-Json
 $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
+$inventory = Get-Content -Raw -LiteralPath $InventoryPath | ConvertFrom-Json
 $mismatches = [System.Collections.Generic.List[string]]::new()
 
 function Add-Mismatch {
@@ -350,6 +354,142 @@ if (
     Add-Mismatch 'bounded audit sanitization contract is invalid'
 }
 
+$inventoryItems = @($inventory.items)
+$inventoryScopes = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($entry in $inventoryItems) {
+    [void]$inventoryScopes.Add($entry.scope)
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
+        Add-Mismatch "inventory item $($entry.scope) has disallowed disposition $($entry.disposition)"
+    }
+    if (-not $entry.evidence_source) {
+        Add-Mismatch "inventory item $($entry.scope) is missing evidence_source"
+    }
+}
+$requiredCoreScopes = @(
+    'core_text_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'core_function_replay',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids',
+    'core_sse_streaming_events'
+)
+$requiredLiveControlScopes = @(
+    'core_text_non_streaming',
+    'core_sse_terminal_events',
+    'core_sse_errors',
+    'terminal_events',
+    'errors',
+    'hosted_only_declarations',
+    'unknown_tagged_sentinels',
+    'default_runtime_fields'
+)
+$requiredAdvancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
+$requiredChoiceScope = @('choice_controls')
+$allRequiredScopes = $requiredCoreScopes + $requiredLiveControlScopes + $requiredAdvancedScopes + $requiredChoiceScope
+foreach ($scope in $allRequiredScopes) {
+    if (-not $inventoryScopes.Contains($scope)) {
+        Add-Mismatch "inventory is missing required scope: $scope"
+    }
+}
+if (
+    $inventory.artifact_kind -ne 'runtime_wire_inventory' -or
+    $inventory.schema_version -ne 1 -or
+    $inventory.cli_version_floor -ne '0.145.0'
+) {
+    Add-Mismatch 'inventory artifact identity or CLI version floor is invalid'
+}
+$inventoryCandidate = $inventory.candidate_identity
+if (
+    $inventoryCandidate.cli_version -ne '0.144.0-alpha.4' -or
+    $inventoryCandidate.source_commit -ne '9e552e9d15ba52bed7077d5357f3e18e330f8f38' -or
+    $inventoryCandidate.route_upstream -ne 'official'
+) {
+    Add-Mismatch 'inventory candidate identity does not bind to the exact Codex CLI version and official route'
+}
+$advancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
+foreach ($scope in $advancedScopes) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry -or $entry.disposition -notin @('Unsupported','Unqualified')) {
+        Add-Mismatch "inventory advanced scope $scope is not Unsupported or Unqualified"
+    }
+}
+$liveControlScopes = @(
+    'core_text_non_streaming',
+    'core_sse_terminal_events',
+    'core_sse_errors',
+    'terminal_events',
+    'errors',
+    'hosted_only_declarations',
+    'unknown_tagged_sentinels',
+    'default_runtime_fields'
+)
+foreach ($scope in $liveControlScopes) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry -or $entry.disposition -ne 'live_control_required') {
+        Add-Mismatch "inventory live-control scope $scope is not marked live_control_required"
+    }
+}
+if ($inventory.identity_control.unclassified_core_items -ne 0) {
+    Add-Mismatch 'inventory identity control reports unclassified core items'
+}
+
+switch ($InventoryReplayCase) {
+    'mutation' {
+        $target = @($inventoryItems | Where-Object { $_.scope -eq 'core_history_call_ids' })[0]
+        if ($target) {
+            $target.disposition = 'Supported'
+            $inventory.identity_control.unclassified_core_items = ($inventory.identity_control.unclassified_core_items + 1)
+        }
+    }
+    'deletion' {
+        $inventory.items = @($inventoryItems | Where-Object { $_.scope -ne 'core_text_streaming' })
+    }
+    'loss' {
+        $kept = [ordered]@{}
+        foreach ($prop in $inventory.candidate_identity.PSObject.Properties) {
+            if ($prop.Name -ne 'route_upstream') {
+                $kept[$prop.Name] = $prop.Value
+            }
+        }
+        $inventory.candidate_identity = [PSCustomObject]$kept
+    }
+}
+
+$inventoryMismatches = [System.Collections.Generic.List[string]]::new()
+$replayScopes = [System.Collections.Generic.HashSet[string]]::new()
+$observedUnclassified = 0
+foreach ($entry in $inventory.items) {
+    [void]$replayScopes.Add($entry.scope)
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
+        $inventoryMismatches.Add("mutation: $($entry.scope) disposition $($entry.disposition) not allowed")
+        $observedUnclassified += 1
+    }
+}
+foreach ($scope in $allRequiredScopes) {
+    if (-not $replayScopes.Contains($scope)) {
+        $inventoryMismatches.Add("deletion: missing scope $scope")
+    }
+}
+if (-not ($inventory.candidate_identity.PSObject.Properties.Name -contains 'route_upstream')) {
+    $inventoryMismatches.Add('loss: candidate_identity.route_upstream is missing')
+}
+$reportedUnclassified = $inventory.identity_control.unclassified_core_items
+if ($reportedUnclassified -ne $observedUnclassified) {
+    $inventoryMismatches.Add("identity_control.unclassified_core_items=$reportedUnclassified does not match observed unclassified items=$observedUnclassified")
+}
+if ($InventoryReplayCase -ne 'identity' -and $inventoryMismatches.Count -eq 0) {
+    $inventoryMismatches.Add("NEGATIVE_INVENTORY_REPLAY_CONTROL_DID_NOT_FAIL: $InventoryReplayCase")
+}
+foreach ($m in $inventoryMismatches) {
+    Add-Mismatch "INVENTORY_IDENTITY_MISMATCH: $m"
+}
+
 Write-Output "Capture: $($trace.source.capture_id)"
 Write-Output "Provider/model: $($trace.source.configured_provider_id) / $($trace.source.model)"
 Write-Output "Gateway route: $($trace.gateway_route.behavior_profile)"
@@ -358,6 +498,7 @@ Write-Output "Direct / Deferred: $($direct.Count) / $($deferred.Count)"
 Write-Output "Deferred tools discoverable through tool_search: $($discoverable.Count)"
 Write-Output "Bounded audit transport rows / Gateway starts: $($auditPlan.transport_log_rows) / $($auditGateway.request_starts)"
 Write-Output "Replay case: $ReplayCase"
+Write-Output "Inventory replay case: $InventoryReplayCase"
 
 if ($mismatches.Count -gt 0) {
     [Console]::Error.WriteLine('RECONCILIATION_MISMATCH: ' + ($mismatches -join ' | '))
