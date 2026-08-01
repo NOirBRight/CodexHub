@@ -164,6 +164,14 @@ fn refresh_flight() -> &'static SingleFlight<RefreshOutcome> {
 }
 
 pub(crate) fn refresh_at_startup() -> Result<(), String> {
+    // Legacy releases projected the Official safety budget into top-level
+    // Codex config keys.  Migrate that state even when the Official snapshot
+    // is still fresh and this startup refresh is cache-only; otherwise an
+    // upgraded install can keep capping third-party models until the next
+    // route switch or scheduled refresh.
+    if let Err(error) = config::republish_managed_codex_context_budget() {
+        log::warn!("startup context guard migration failed: {error}");
+    }
     refresh(RefreshTrigger::Startup).map(|_| ())
 }
 
