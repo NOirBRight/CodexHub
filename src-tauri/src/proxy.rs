@@ -5171,13 +5171,20 @@ time.sleep(10)
             Ok::<(), String>(())
         })();
 
-        let _ = stop_with_paths_and_controls(
+        let cleanup = stop_with_paths_and_controls(
             &paths,
             &super::SystemProcessKiller,
             &inspector,
             &listener_inspector,
         );
-        result.expect("python proxy lifecycle");
+        match (result, cleanup) {
+            (Ok(()), Ok(_)) => {}
+            (Err(error), Ok(_)) => panic!("python proxy lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("python proxy cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("python proxy lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     #[cfg(windows)]
