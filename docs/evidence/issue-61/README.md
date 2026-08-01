@@ -4,7 +4,9 @@ Risk class: `strict` (Gateway routing/protocol policy).
 
 Base: `origin/dev` at `42b0c375d97bad025a8deed07c6a72068df2b97c`.
 
-Exact candidate head: `50ef0aee6d8c04248a077da84123b6f320fe504b`.
+Implementation candidate (code-only) head: `2e578bc10abf26084facc6b8009205ffd85801cb`.
+The later commits on this PR refresh this evidence record only; they do not
+change the implementation or test files.
 
 ## Architecture
 
@@ -112,6 +114,9 @@ Exact candidate head: `50ef0aee6d8c04248a077da84123b6f320fe504b`.
 - Authoritative Python 3.13 core:
   `py -3.13 -m pytest -q --ignore=tests/test_real_client_e2e.py`
   — 1,527 passed, 1 skipped, 460 subtests passed in 124.21 seconds.
+  A separate repeat in an ambient nested-interpreter environment reproduced
+  two unchanged issue-108 replay-smoke failures; the Hosted Python core run
+  is the acceptance result for this exact head.
 - `py -3.13 -m py_compile src-python/codex_proxy.py tests/test_routing.py`
   — passed.
 - `git diff --check` — passed (only the repository's CRLF normalization
