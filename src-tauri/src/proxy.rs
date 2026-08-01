@@ -768,7 +768,7 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn start_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     start_outcome_with_paths(paths)
         .map(|outcome| outcome.snapshot.status)
@@ -1569,7 +1569,7 @@ fn force_kill_session_owned_gateway_at_deadline(
     Ok(Some(pid))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn stop_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
     stop_with_paths_and_controls(
         paths,
@@ -3480,19 +3480,22 @@ mod tests {
         comparable_path, configure_start_stdio, detect_mode, find_python,
         force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
         reconciled_snapshot_with_controls,
-        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths,
-        start_with_paths_and_controls, start_with_paths_and_waiter, status_with_paths,
+        replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths_and_controls,
+        start_with_paths_and_waiter, status_with_paths,
         stop_current_session_owned_with_paths_and_controls,
-        stop_session_owned_with_paths_and_controls, stop_with_paths, stop_with_paths_and_controls,
+        stop_session_owned_with_paths_and_controls, stop_with_paths_and_controls,
         verify_proxy_command_line, write_pid, ChildTerminator, GatewayIdentity, InspectedProcess,
         ListenerInspector, ProcessInfo, ProcessInspector, ProcessKiller, ProxyLifecycleBackend,
         ProxyPaths, ProxyPidMetadata, ProxyPidRecord, ShutdownClock, StartupOutcome,
         UserRequestedShutdownControls, VerifiedProxyProcess, DEBUG_DIAGNOSTIC_BOOTSTRAP,
     };
+
     #[cfg(windows)]
     use super::{
         run_bounded_inspection_command_with_hook, run_windows_inspection, WindowsInspectionKind,
     };
+    #[cfg(not(windows))]
+    use super::{start_with_paths, stop_with_paths};
     use crate::{AppStatus, Settings};
     use std::cell::RefCell;
     use std::collections::VecDeque;
