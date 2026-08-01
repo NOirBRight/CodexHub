@@ -12,6 +12,11 @@
     "configured_provider_id": "custom",
     "upstream_route": "official",
     "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "behavior_profile": "official_codex_app_http_passthrough",
+    "route_mode": "official",
+    "wire_format_adapter": "transparent",
+    "codex_semantic_adapter": "none",
+    "repair_policy": "none",
     "classification_basis": "upstream_route and catalog_binding; never configured_provider_id alone"
   },
   "exposure_state_tags": ["Direct", "DirectModelOnly", "Deferred", "Hidden", "hosted-only", "host-unavailable"],

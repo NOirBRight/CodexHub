@@ -1,10 +1,14 @@
 {
   "artifact_kind": "runtime_wire_inventory",
   "candidate_identity": {
+    "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
     "cli_version": "0.144.0-alpha.4",
+    "codex_source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
     "configured_provider_id": "custom",
+    "evidence_manifest_sha256": "3d0351fa23f87a982cfa4419cbebd14cde3cb5df570851c5e10fad4770cd6197",
     "inbound_format": "responses",
     "model": "gpt-5.6-sol",
+    "route_behavior_profile": "official_codex_app_http_passthrough",
     "route_upstream": "official",
     "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
     "upstream_format": "responses"
@@ -21,15 +25,15 @@
   "evidence_binding": {
     "audit": {
       "file": "read-only-gate-audit.json",
-      "sha256": "3afb8379097eccb86be5d271b8807d80b0c7efbe448103c31466c84e236d8811"
+      "sha256": "a27f27622f89436f9530e2a7ca31f4b1b48872a31bbced8426302682f8516fa0"
     },
     "trace": {
       "file": "current-codexhub-thread-tool-surface.json",
-      "sha256": "b05c59b6290f23feef1ccb62338c0454e16301b64a0126b829df149cc1e91fa5"
+      "sha256": "a4367f96fc2aceaa419577ee43f91870fb3fcca4cc95644bc3347cbdd4206ee3"
     },
     "wire_fixture": {
       "file": "codexhub-runtime-wire-fixture.json",
-      "sha256": "27f46edb21955ff0e14de159dd6e31927313e650a022be0cd18de044b52c7e79"
+      "sha256": "e5bcd52ef094b0d4bd96a7d59b5f1d9d013d7bbf4f000f11dc0e299cfb59c278"
     }
   },
   "evidence_sources": {
@@ -205,6 +209,13 @@
     }
   ],
   "qualification": {
+    "blocking_gates": [
+      "clean_cold_start_current_binding",
+      "complete_model_visible_plan",
+      "full_pre_post_request_response",
+      "identity_replay",
+      "non_streaming"
+    ],
     "blocking_scopes": [
       "choice_controls",
       "core_function_replay",
@@ -219,6 +230,13 @@
     ],
     "candidate_version_eligible": false,
     "candidate_version_status": "legacy_below_floor",
+    "evidence_gates": {
+      "clean_cold_start_current_binding": "not_run",
+      "complete_model_visible_plan": "partial",
+      "full_pre_post_request_response": "live_control_required",
+      "identity_replay": "partial",
+      "non_streaming": "live_control_required"
+    },
     "ready_for_beta1": false
   },
   "schema_version": 1

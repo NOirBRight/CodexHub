@@ -34,10 +34,36 @@ function Get-Sha256Hex {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n", "`n")
+        $canonicalBytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($canonicalBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-Sha256Text {
+    param([string]$Text)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
         return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     }
     finally {
         $sha.Dispose()
+    }
+}
+
+function Get-CliVersionKey {
+    param([string]$Value)
+
+    $match = [regex]::Match($Value, '^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')
+    if (-not $match.Success) { return $null }
+    return [PSCustomObject]@{
+        Core = [version]::new([int]$match.Groups[1].Value, [int]$match.Groups[2].Value, [int]$match.Groups[3].Value)
+        Stable = [string]::IsNullOrEmpty($match.Groups[4].Value)
     }
 }
 
@@ -368,10 +394,40 @@ if (
 }
 
 $inventoryItems = @($inventory.items)
+$knownInventoryScopes = @(
+    'core_text_streaming',
+    'core_text_non_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_sse_streaming_events',
+    'core_sse_terminal_events',
+    'core_sse_errors',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'core_function_replay',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids',
+    'choice_controls',
+    'terminal_events',
+    'errors',
+    'hosted_only_declarations',
+    'unknown_tagged_sentinels',
+    'default_runtime_fields',
+    'code_mode',
+    'tool_search',
+    'collaboration_v2',
+    'chat_conversion'
+)
 $inventoryScopes = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($entry in $inventoryItems) {
     if (-not $inventoryScopes.Add($entry.scope)) {
         Add-Mismatch "inventory contains duplicate scope: $($entry.scope)"
+    }
+    if ($entry.scope -notin $knownInventoryScopes) {
+        Add-Mismatch "inventory contains unknown scope: $($entry.scope)"
     }
     if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
         Add-Mismatch "inventory item $($entry.scope) has disallowed disposition $($entry.disposition)"
@@ -423,6 +479,7 @@ $inventoryCandidate = $inventory.candidate_identity
 if (
     $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
     $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.codex_source_commit -ne $trace.planner_gates.source_commit -or
     $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
     $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
     $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
@@ -432,7 +489,14 @@ if (
     $wire.route.inbound_format -ne $trace.gateway_route.inbound_format -or
     $wire.route.upstream_format -ne $trace.gateway_route.upstream_format -or
     $wire.route.configured_provider_id -ne $trace.source.configured_provider_id -or
-    $wire.pre_gateway.model -ne $trace.source.model
+    $wire.route.catalog_binding -ne $trace.gateway_route.catalog_binding -or
+    $wire.route.behavior_profile -ne $trace.gateway_route.behavior_profile -or
+    $wire.route.route_mode -ne $trace.gateway_route.route_mode -or
+    $wire.route.wire_format_adapter -ne $trace.gateway_route.wire_format_adapter -or
+    $wire.route.codex_semantic_adapter -ne $trace.gateway_route.codex_semantic_adapter -or
+    $wire.route.repair_policy -ne $trace.gateway_route.repair_policy -or
+    $wire.pre_gateway.model -ne $trace.source.model -or
+    $wire.post_gateway.model -ne $trace.source.model
 ) {
     Add-Mismatch 'inventory candidate identity does not bind to the exact trace and wire candidate route'
 }
@@ -452,6 +516,14 @@ foreach ($name in $evidenceBindings.Keys) {
     if ($expectedHash -ne $actualHash) {
         Add-Mismatch "inventory evidence binding $name hash does not match the input artifact"
     }
+}
+$manifestParts = foreach ($name in @('audit','trace','wire_fixture')) {
+    $binding = $inventory.evidence_binding.$name
+    '{0}:{1}:{2}' -f $name, $binding.file, $binding.sha256
+}
+$expectedManifest = Get-Sha256Text -Text ($manifestParts -join "`n")
+if ($inventoryCandidate.evidence_manifest_sha256 -ne $expectedManifest) {
+    Add-Mismatch 'inventory candidate evidence manifest is stale'
 }
 $coreEvidence = @{
     core_text_streaming = 'codexhub-runtime-wire-fixture.json#response.streaming.captured'
@@ -494,10 +566,52 @@ if (($observedBlockingScopes -join '|') -ne ($reportedBlockingScopes -join '|'))
     Add-Mismatch 'inventory qualification blocking_scopes does not match item dispositions'
 }
 $expectedCandidateEligible = ($qualification.candidate_version_status -eq 'eligible')
+$candidateVersionKey = Get-CliVersionKey -Value ([string]$inventoryCandidate.cli_version)
+$floorVersionKey = Get-CliVersionKey -Value ([string]$inventory.cli_version_floor)
+if (-not $candidateVersionKey -or -not $floorVersionKey) {
+    Add-Mismatch 'inventory candidate CLI version or floor is malformed'
+} else {
+    $versionComparison = $candidateVersionKey.Core.CompareTo($floorVersionKey.Core)
+    $expectedCandidateStatus = if ($versionComparison -gt 0 -or ($versionComparison -eq 0 -and $candidateVersionKey.Stable -and $floorVersionKey.Stable)) { 'eligible' } else { 'legacy_below_floor' }
+    if ($qualification.candidate_version_status -ne $expectedCandidateStatus) {
+        Add-Mismatch 'inventory qualification candidate version status does not match the CLI floor'
+    }
+}
 if ([bool]$qualification.candidate_version_eligible -ne $expectedCandidateEligible) {
     Add-Mismatch 'inventory qualification candidate_version_eligible is inconsistent with status'
 }
-$expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0
+$expectedEvidenceGates = [ordered]@{
+    complete_model_visible_plan = $trace.capture_coverage.complete_model_visible_plan.status
+    clean_cold_start_current_binding = $trace.capture_coverage.clean_cold_start_current_binding.status
+    full_pre_post_request_response = $audit.gate_classification.full_pre_post_request_response
+    non_streaming = $audit.gate_classification.non_streaming
+    identity_replay = $audit.gate_classification.zero_unclassified_identity
+}
+$acceptedEvidenceGateStatuses = @{
+    complete_model_visible_plan = @('complete')
+    clean_cold_start_current_binding = @('complete','pass')
+    full_pre_post_request_response = @('complete','observed')
+    non_streaming = @('complete','observed')
+    identity_replay = @('complete','observed')
+}
+$observedBlockingGates = @(
+    foreach ($gate in $expectedEvidenceGates.Keys) {
+        if ($expectedEvidenceGates[$gate] -notin $acceptedEvidenceGateStatuses[$gate]) { $gate }
+    }
+)
+$reportedEvidenceGates = @($qualification.evidence_gates.PSObject.Properties.Name)
+if ((($reportedEvidenceGates | Sort-Object) -join '|') -ne (($expectedEvidenceGates.Keys | Sort-Object) -join '|')) {
+    Add-Mismatch 'inventory qualification evidence_gates has an unexpected key set'
+}
+foreach ($gate in $expectedEvidenceGates.Keys) {
+    if ($qualification.evidence_gates.$gate -ne $expectedEvidenceGates[$gate]) {
+        Add-Mismatch "inventory qualification evidence gate $gate does not match trace/audit"
+    }
+}
+if ((($qualification.blocking_gates | Sort-Object) -join '|') -ne (($observedBlockingGates | Sort-Object) -join '|')) {
+    Add-Mismatch 'inventory qualification blocking_gates does not match trace/audit'
+}
+$expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0 -and $observedBlockingGates.Count -eq 0
 if ([bool]$qualification.ready_for_beta1 -ne $expectedReady) {
     Add-Mismatch 'inventory qualification ready_for_beta1 is inconsistent with evidence blockers'
 }

@@ -154,7 +154,8 @@ route). Because the captured CLI is below the floor, the generated
 marked `legacy_below_floor`; this evidence cannot be used as the beta.1
 candidate. The generator rejects an explicitly supplied CLI/source value that
 does not match the trace, binds route/provider/model fields across trace and
-wire fixtures, and records SHA-256 fingerprints for all three input artifacts.
+wire fixtures (including pre/post models, catalog binding, and route profile),
+and records a canonical-LF SHA-256 manifest for all three input artifacts.
 It never fabricates a `Supported` disposition for a gate the artifacts mark
 `live_control_required`.
 
@@ -210,7 +211,10 @@ generated object to this committed JSON artifact. The PowerShell reconciliation
 also checks the input fingerprints, rejects duplicate scopes, and requires
 each core scope to point at its declared evidence path. A zero
 `unclassified_core_items` count therefore describes vocabulary validity only;
-`qualification.ready_for_beta1` is the separate completion gate.
+`qualification.ready_for_beta1` is the separate completion gate. That gate also
+consumes planner completeness, current-binding cold-start, full-wire
+fingerprinting, non-streaming, and identity-replay statuses; item dispositions
+alone cannot make an incomplete evidence set ready.
 
 The live-control-required gates remain open until the separately authorized
 live control window documented above captures real evidence for each one.

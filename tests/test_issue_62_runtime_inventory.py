@@ -40,12 +40,30 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     candidate = inventory["candidate_identity"]
     assert candidate["cli_version"] == "0.144.0-alpha.4"
     assert candidate["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+    assert candidate["codex_source_commit"] == candidate["source_commit"]
     assert candidate["route_upstream"] == "official"
     assert candidate["inbound_format"] == "responses"
     assert candidate["upstream_format"] == "responses"
+    assert candidate["catalog_binding"] == "official Codex catalog entry for openai/gpt-5.6-sol"
+    assert candidate["route_behavior_profile"] == "official_codex_app_http_passthrough"
+    assert len(candidate["evidence_manifest_sha256"]) == 64
     assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
     assert inventory["qualification"]["candidate_version_eligible"] is False
     assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["qualification"]["blocking_gates"] == [
+        "clean_cold_start_current_binding",
+        "complete_model_visible_plan",
+        "full_pre_post_request_response",
+        "identity_replay",
+        "non_streaming",
+    ]
+    assert inventory["qualification"]["evidence_gates"] == {
+        "clean_cold_start_current_binding": "not_run",
+        "complete_model_visible_plan": "partial",
+        "full_pre_post_request_response": "live_control_required",
+        "identity_replay": "partial",
+        "non_streaming": "live_control_required",
+    }
     assert inventory["evidence_binding"]["trace"]["file"] == TRACE.name
     assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
 
@@ -269,6 +287,42 @@ def test_inventory_reconcile_rejects_duplicate_and_wrong_core_evidence() -> None
     report = module.reconcile_inventory(wrong_evidence)
     assert report["reconciled"] is False
     assert any("evidence_source" in mismatch for mismatch in report["mismatches"])
+
+    unknown_scope = json.loads(json.dumps(base))
+    unknown_scope["items"].append(
+        {
+            "scope": "future_unclassified_scope",
+            "disposition": "Unqualified",
+            "evidence_source": "future-fixture.json#scope",
+        }
+    )
+    report = module.reconcile_inventory(unknown_scope)
+    assert report["reconciled"] is False
+    assert any("unknown scope" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    evidence_root = INVENTORY.parent
+
+    report = module.reconcile_inventory(base, evidence_root=evidence_root)
+    assert report == {"reconciled": True, "mismatches": []}
+
+    tampered_hash = json.loads(json.dumps(base))
+    tampered_hash["evidence_binding"]["trace"]["sha256"] = "0" * 64
+    report = module.reconcile_inventory(tampered_hash, evidence_root=evidence_root)
+    assert report["reconciled"] is False
+    assert any(
+        "stale" in mismatch or "hash mismatch" in mismatch
+        for mismatch in report["mismatches"]
+    )
+
+    tampered_status = json.loads(json.dumps(base))
+    tampered_status["qualification"]["candidate_version_status"] = "eligible"
+    report = module.reconcile_inventory(tampered_status)
+    assert report["reconciled"] is False
+    assert any("CLI floor" in mismatch for mismatch in report["mismatches"])
 
 
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])

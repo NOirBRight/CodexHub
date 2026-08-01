@@ -103,6 +103,13 @@ CORE_CONTRACT_SCOPES = frozenset(
     }
 )
 
+KNOWN_SCOPES = (
+    CORE_CONTRACT_SCOPES
+    | LIVE_CONTROL_SCOPES
+    | ADVANCED_UNSUPPORTED_SCOPES
+    | {"choice_controls"}
+)
+
 # Evidence references are part of the contract, not free-form annotations.
 # This map lets reconciliation detect a stale or hand-edited inventory that
 # silently points a core claim at an unrelated tool-surface check.
@@ -136,7 +143,19 @@ REQUIRED_CANDIDATE_FIELDS = (
 
 
 def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Evidence is JSON text; hash its canonical LF representation so a
+    # Windows checkout (CRLF) and a Linux checkout (LF) bind to the same
+    # artifact bytes.
+    canonical = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _evidence_manifest_sha256(evidence_binding: dict[str, Any]) -> str:
+    manifest = "\n".join(
+        f"{name}:{evidence_binding[name]['file']}:{evidence_binding[name]['sha256']}"
+        for name in sorted(evidence_binding)
+    )
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
 def _version_key(value: str) -> tuple[int, int, int, int, str]:
@@ -485,7 +504,11 @@ def _build_identity_control(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _build_qualification(
-    items: list[dict[str, Any]], candidate_version_status: str
+    items: list[dict[str, Any]],
+    candidate_version_status: str,
+    *,
+    trace: dict[str, Any],
+    audit: dict[str, Any],
 ) -> dict[str, Any]:
     live_control_scopes = sorted(
         item["scope"]
@@ -500,11 +523,44 @@ def _build_qualification(
     )
     blocking_scopes = sorted(set(live_control_scopes) | set(unqualified_core_scopes))
     candidate_version_eligible = candidate_version_status == "eligible"
+    evidence_gates = {
+        "complete_model_visible_plan": trace.get("capture_coverage", {})
+        .get("complete_model_visible_plan", {})
+        .get("status", "unknown"),
+        "clean_cold_start_current_binding": trace.get("capture_coverage", {})
+        .get("clean_cold_start_current_binding", {})
+        .get("status", "unknown"),
+        "full_pre_post_request_response": audit.get("gate_classification", {}).get(
+            "full_pre_post_request_response", "unknown"
+        ),
+        "non_streaming": audit.get("gate_classification", {}).get(
+            "non_streaming", "unknown"
+        ),
+        "identity_replay": audit.get("gate_classification", {}).get(
+            "zero_unclassified_identity", "unknown"
+        ),
+    }
+    accepted_gate_statuses = {
+        "complete_model_visible_plan": {"complete"},
+        "clean_cold_start_current_binding": {"complete", "pass"},
+        "full_pre_post_request_response": {"complete", "observed"},
+        "non_streaming": {"complete", "observed"},
+        "identity_replay": {"complete", "observed"},
+    }
+    blocking_gates = sorted(
+        gate
+        for gate, status in evidence_gates.items()
+        if status not in accepted_gate_statuses[gate]
+    )
     return {
         "candidate_version_status": candidate_version_status,
         "candidate_version_eligible": candidate_version_eligible,
         "blocking_scopes": blocking_scopes,
-        "ready_for_beta1": candidate_version_eligible and not blocking_scopes,
+        "evidence_gates": evidence_gates,
+        "blocking_gates": blocking_gates,
+        "ready_for_beta1": candidate_version_eligible
+        and not blocking_scopes
+        and not blocking_gates,
     }
 
 
@@ -556,6 +612,23 @@ def _validate_candidate_binding(
                 f"wire={wire_value!r} trace={trace_value!r}"
             )
 
+    profile_fields = (
+        "catalog_binding",
+        "behavior_profile",
+        "route_mode",
+        "wire_format_adapter",
+        "codex_semantic_adapter",
+        "repair_policy",
+    )
+    for field in profile_fields:
+        wire_value = wire_route.get(field)
+        trace_value = trace_route.get(field)
+        if not wire_value or wire_value != trace_value:
+            raise ValueError(
+                f"candidate route profile field {field} is not consistently bound: "
+                f"wire={wire_value!r} trace={trace_value!r}"
+            )
+
     trace_provider = source.get("configured_provider_id")
     wire_provider = wire_route.get("configured_provider_id")
     if not trace_provider or wire_provider != trace_provider:
@@ -564,22 +637,26 @@ def _validate_candidate_binding(
             f"wire={wire_provider!r} trace={trace_provider!r}"
         )
     trace_model = source.get("model")
-    wire_model = wire_data.get("pre_gateway", {}).get("model")
-    if not trace_model or wire_model != trace_model:
+    pre_wire_model = wire_data.get("pre_gateway", {}).get("model")
+    post_wire_model = wire_data.get("post_gateway", {}).get("model")
+    if not trace_model or pre_wire_model != trace_model or post_wire_model != trace_model:
         raise ValueError(
             "candidate model binding is inconsistent: "
-            f"wire={wire_model!r} trace={trace_model!r}"
+            f"pre_wire={pre_wire_model!r} post_wire={post_wire_model!r} trace={trace_model!r}"
         )
 
     status = _candidate_version_status(candidate_cli_version, cli_version_floor)
     identity = {
         "cli_version": candidate_cli_version,
         "source_commit": candidate_source_commit,
+        "codex_source_commit": candidate_source_commit,
         "route_upstream": wire_route["upstream_route"],
         "inbound_format": wire_route["inbound_format"],
         "upstream_format": wire_route["upstream_format"],
         "configured_provider_id": trace_provider,
         "model": trace_model,
+        "catalog_binding": wire_route["catalog_binding"],
+        "route_behavior_profile": trace_route.get("behavior_profile"),
     }
     return identity, status
 
@@ -616,7 +693,23 @@ def build_inventory(
         candidate_cli_version=candidate_cli_version,
         candidate_source_commit=candidate_source_commit,
     )
-    qualification = _build_qualification(items, candidate_version_status)
+    evidence_binding = {
+        "trace": {"file": trace.name, "sha256": _sha256_file(trace)},
+        "wire_fixture": {
+            "file": wire_fixture.name,
+            "sha256": _sha256_file(wire_fixture),
+        },
+        "audit": {"file": audit.name, "sha256": _sha256_file(audit)},
+    }
+    candidate_identity["evidence_manifest_sha256"] = _evidence_manifest_sha256(
+        evidence_binding
+    )
+    qualification = _build_qualification(
+        items,
+        candidate_version_status,
+        trace=trace_data,
+        audit=audit_data,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -636,14 +729,7 @@ def build_inventory(
             "wire_fixture": wire_fixture.name,
             "audit": audit.name,
         },
-        "evidence_binding": {
-            "trace": {"file": trace.name, "sha256": _sha256_file(trace)},
-            "wire_fixture": {
-                "file": wire_fixture.name,
-                "sha256": _sha256_file(wire_fixture),
-            },
-            "audit": {"file": audit.name, "sha256": _sha256_file(audit)},
-        },
+        "evidence_binding": evidence_binding,
     }
 
 
@@ -685,7 +771,9 @@ def replay_inventory(inventory: dict[str, Any], case: str) -> dict[str, Any]:
     raise ValueError(f"unknown replay case: {case!r}")
 
 
-def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
+def reconcile_inventory(
+    inventory: dict[str, Any], *, evidence_root: Path | None = None
+) -> dict[str, Any]:
     """Reconcile an inventory (possibly mutated) against the identity contract."""
     mismatches: list[str] = []
 
@@ -700,6 +788,8 @@ def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
             mismatches.append(f"duplicate scope: {scope}")
             continue
         seen_scopes.add(scope)
+        if scope not in KNOWN_SCOPES:
+            mismatches.append(f"mutation: unknown scope {scope}")
         disposition = item.get("disposition")
         if disposition not in ALLOWED_DISPOSITIONS:
             mismatches.append(
@@ -758,7 +848,50 @@ def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
         mismatches.append(
             "qualification.blocking_scopes does not match observed blocking dispositions"
         )
-    expected_ready = candidate_eligible is True and not actual_blocking_scopes
+    expected_status = None
+    try:
+        expected_status = _candidate_version_status(
+            str(candidate_identity.get("cli_version", "")),
+            str(inventory.get("cli_version_floor", "")),
+        )
+    except ValueError:
+        mismatches.append("candidate_identity.cli_version or cli_version_floor is invalid")
+    if expected_status and candidate_status != expected_status:
+        mismatches.append(
+            "qualification.candidate_version_status does not match the CLI floor"
+        )
+
+    evidence_gates = qualification.get("evidence_gates", {})
+    expected_gate_keys = {
+        "complete_model_visible_plan",
+        "clean_cold_start_current_binding",
+        "full_pre_post_request_response",
+        "non_streaming",
+        "identity_replay",
+    }
+    if set(evidence_gates) != expected_gate_keys:
+        mismatches.append("qualification.evidence_gates has an unexpected key set")
+    accepted_gate_statuses = {
+        "complete_model_visible_plan": {"complete"},
+        "clean_cold_start_current_binding": {"complete", "pass"},
+        "full_pre_post_request_response": {"complete", "observed"},
+        "non_streaming": {"complete", "observed"},
+        "identity_replay": {"complete", "observed"},
+    }
+    actual_blocking_gates = sorted(
+        gate
+        for gate, allowed in accepted_gate_statuses.items()
+        if evidence_gates.get(gate) not in allowed
+    )
+    if qualification.get("blocking_gates") != actual_blocking_gates:
+        mismatches.append(
+            "qualification.blocking_gates does not match evidence gate statuses"
+        )
+    expected_ready = (
+        candidate_eligible is True
+        and not actual_blocking_scopes
+        and not actual_blocking_gates
+    )
     if qualification.get("ready_for_beta1") is not expected_ready:
         mismatches.append(
             "qualification.ready_for_beta1 is inconsistent with candidate eligibility and blockers"
@@ -771,6 +904,66 @@ def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
             r"[0-9a-f]{64}", str(entry.get("sha256", ""))
         ):
             mismatches.append(f"loss: evidence_binding.{name} is missing or malformed")
+
+    if evidence_binding and all(
+        isinstance(evidence_binding.get(name), dict)
+        for name in ("trace", "wire_fixture", "audit")
+    ):
+        manifest = _evidence_manifest_sha256(evidence_binding)
+        if candidate_identity.get("evidence_manifest_sha256") != manifest:
+            mismatches.append("loss: candidate_identity.evidence_manifest_sha256 is stale")
+
+    if evidence_root is not None and not mismatches:
+        bound_paths: dict[str, Path] = {}
+        for name in ("trace", "wire_fixture", "audit"):
+            entry = evidence_binding[name]
+            path = evidence_root / entry["file"]
+            bound_paths[name] = path
+            if not path.is_file():
+                mismatches.append(f"loss: evidence binding file does not exist: {path}")
+                continue
+            if _sha256_file(path) != entry["sha256"]:
+                mismatches.append(f"mutation: evidence binding hash mismatch for {name}")
+        if not mismatches:
+            trace_data = _load_json(bound_paths["trace"])
+            wire_data = _load_json(bound_paths["wire_fixture"])
+            audit_data = _load_json(bound_paths["audit"])
+            try:
+                expected_identity, expected_status_from_evidence = _validate_candidate_binding(
+                    trace_data=trace_data,
+                    wire_data=wire_data,
+                    cli_version_floor=str(inventory.get("cli_version_floor", "")),
+                    candidate_cli_version=candidate_identity.get("cli_version"),
+                    candidate_source_commit=candidate_identity.get("source_commit"),
+                )
+            except (TypeError, ValueError) as exc:
+                mismatches.append(f"mutation: candidate evidence binding failed: {exc}")
+            else:
+                for field, expected in expected_identity.items():
+                    if candidate_identity.get(field) != expected:
+                        mismatches.append(
+                            f"mutation: candidate_identity.{field} does not match evidence"
+                        )
+                if candidate_status != expected_status_from_evidence:
+                    mismatches.append(
+                        "qualification candidate status does not match bound evidence"
+                    )
+                expected_qualification = _build_qualification(
+                    items,
+                    expected_status_from_evidence,
+                    trace=trace_data,
+                    audit=audit_data,
+                )
+                for field in (
+                    "evidence_gates",
+                    "blocking_gates",
+                    "blocking_scopes",
+                    "ready_for_beta1",
+                ):
+                    if qualification.get(field) != expected_qualification[field]:
+                        mismatches.append(
+                            f"mutation: qualification.{field} does not match bound evidence"
+                        )
 
     unclassified = inventory.get("identity_control", {}).get("unclassified_core_items")
     if not isinstance(unclassified, int) or unclassified < 0:
@@ -838,11 +1031,11 @@ def main() -> int:
 
     if args.replay_case != "identity":
         replayed = replay_inventory(inventory, args.replay_case)
-        report = reconcile_inventory(replayed)
+        report = reconcile_inventory(replayed, evidence_root=args.trace.parent)
         print(json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True))
         return 0 if report["reconciled"] else 1
 
-    report = reconcile_inventory(inventory)
+    report = reconcile_inventory(inventory, evidence_root=args.trace.parent)
     if not report["reconciled"]:
         raise SystemExit(f"identity reconciliation failed: {report['mismatches']}")
 
