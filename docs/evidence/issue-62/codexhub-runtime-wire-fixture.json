@@ -17,7 +17,15 @@
     "wire_format_adapter": "transparent",
     "codex_semantic_adapter": "none",
     "repair_policy": "none",
+    "catalog_snapshot_sha256": "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876",
+    "catalog_model_entry_id": "gpt-5.6-sol",
+    "catalog_model_supports_search_tool": true,
     "classification_basis": "upstream_route and catalog_binding; never configured_provider_id alone"
+  },
+  "provenance": {
+    "cli_version": "0.144.0-alpha.4",
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "capture_id": "sanitized-current-side-capture"
   },
   "exposure_state_tags": ["Direct", "DirectModelOnly", "Deferred", "Hidden", "hosted-only", "host-unavailable"],
   "pre_gateway": {

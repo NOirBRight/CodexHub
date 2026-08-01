@@ -115,7 +115,7 @@ KNOWN_SCOPES = (
 # silently points a core claim at an unrelated tool-surface check.
 CORE_SCOPE_EVIDENCE = {
     "core_text_streaming": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
-    "core_text_non_streaming": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false",
+    "core_text_non_streaming": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
     "core_history_multiturn": "codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls",
     "core_history_item_ids": "codexhub-runtime-wire-fixture.json#history.call_links",
     "core_history_call_ids": "codexhub-runtime-wire-fixture.json#history.required_call_ids",
@@ -139,6 +139,11 @@ REQUIRED_CANDIDATE_FIELDS = (
     "upstream_format",
     "configured_provider_id",
     "model",
+    "catalog_binding",
+    "catalog_snapshot_sha256",
+    "catalog_model_entry_id",
+    "route_behavior_profile",
+    "evidence_manifest_sha256",
 )
 
 
@@ -207,12 +212,81 @@ def _item(
     return item
 
 
+def _gate_is_met(value: Any) -> bool:
+    return value in {"observed", "met", "complete", "pass"}
+
+
+def _gate_is_complete(value: Any) -> bool:
+    return value in {"met", "complete"}
+
+
+def _real_non_streaming_captured(wire: dict[str, Any]) -> bool:
+    non_streaming = wire.get("response", {}).get("non_streaming", {})
+    return (
+        non_streaming.get("captured") is True
+        and non_streaming.get("fixture_kind") != "contract_sentinel"
+        and bool(non_streaming.get("response_items"))
+        and non_streaming.get("request_stream") is False
+    )
+
+
+def _count_unknown_tags(value: Any) -> int:
+    if isinstance(value, dict):
+        own = 1 if value.get("tag") == "unknown" else 0
+        return own + sum(_count_unknown_tags(child) for child in value.values())
+    if isinstance(value, list):
+        return sum(_count_unknown_tags(child) for child in value)
+    return 0
+
+
+def _streaming_events(wire: dict[str, Any]) -> list[dict[str, Any]]:
+    events = wire.get("response", {}).get("streaming", {}).get("events", [])
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _has_terminal_event(wire: dict[str, Any]) -> bool:
+    return any(event.get("event") == "response.completed" for event in _streaming_events(wire))
+
+
+def _has_error_event(wire: dict[str, Any]) -> bool:
+    return any(
+        "error" in str(event.get("event", "")).lower()
+        or event.get("tag") == "error"
+        for event in _streaming_events(wire)
+    )
+
+
+def _wire_identity_replay_status(audit: dict[str, Any]) -> str:
+    replay = audit.get("wire_identity_replay")
+    if not isinstance(replay, dict):
+        return "not_captured"
+    status = replay.get("status", "not_captured")
+    if status not in {"complete", "met"}:
+        return status
+    cases = replay.get("cases")
+    if (
+        replay.get("fail_closed") is True
+        and isinstance(cases, dict)
+        and all(cases.get(case) in {"complete", "met"} for case in ("identity", "mutation", "deletion", "loss"))
+    ):
+        return status
+    return "not_captured"
+
+
 def _classify_core_items(
     wire: dict[str, Any],
+    audit: dict[str, Any],
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
     streaming_captured = wire.get("response", {}).get("streaming", {}).get("captured") is True
+    non_streaming_captured = _real_non_streaming_captured(wire)
+    full_wire_gate = audit.get("gate_classification", {}).get(
+        "full_pre_post_request_response"
+    )
+    identity_gate = audit.get("gate_classification", {}).get(
+        "zero_unclassified_identity"
+    )
     items.append(
         _item(
             "core_text_streaming",
@@ -225,9 +299,9 @@ def _classify_core_items(
     items.append(
         _item(
             "core_text_non_streaming",
-            "live_control_required",
-            "codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false",
-            "no real non-streaming request exists; contract sentinel only",
+            "preserved" if non_streaming_captured else "live_control_required",
+            "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
+            "non-streaming response text is only qualified when a real captured fixture is present",
         )
     )
 
@@ -273,7 +347,9 @@ def _classify_core_items(
     items.append(
         _item(
             "core_sse_terminal_events",
-            "live_control_required",
+            "preserved"
+            if _gate_is_complete(full_wire_gate) and _has_terminal_event(wire)
+            else "live_control_required",
             "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
             "terminal event classification requires independently captured full response-body evidence",
         )
@@ -281,7 +357,9 @@ def _classify_core_items(
     items.append(
         _item(
             "core_sse_errors",
-            "live_control_required",
+            "preserved"
+            if _gate_is_complete(full_wire_gate) and _has_error_event(wire)
+            else "live_control_required",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
             "error classification requires independently fingerprinted pre/post response bodies",
         )
@@ -322,7 +400,9 @@ def _classify_core_items(
     items.append(
         _item(
             "core_function_replay",
-            "live_control_required",
+            "preserved"
+            if _gate_is_complete(full_wire_gate) and _gate_is_complete(identity_gate)
+            else "live_control_required",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
         )
@@ -366,6 +446,20 @@ def _classify_live_control_items(
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
+    gate_classification = audit.get("gate_classification", {})
+    full_wire_gate = gate_classification.get("full_pre_post_request_response")
+    non_direct_gate = gate_classification.get("non_direct_states")
+    non_streaming_captured = _real_non_streaming_captured(wire)
+    unknown_tag_count = sum(
+        1
+        for response in (
+            wire.get("response", {}).get("streaming", {}),
+            wire.get("response", {}).get("non_streaming", {}),
+        )
+        for item in response.get("events", []) + response.get("response_items", [])
+        if item.get("tag") == "unknown"
+    )
+
     choice_captured = (
         wire.get("pre_gateway", {}).get("choice_controls", {}).get("captured") is True
     )
@@ -389,7 +483,9 @@ def _classify_live_control_items(
     items.append(
         _item(
             "terminal_events",
-            "live_control_required",
+            "preserved"
+            if _gate_is_complete(full_wire_gate) and _has_terminal_event(wire)
+            else "live_control_required",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
             "terminal event classification requires a real captured response body fingerprint",
         )
@@ -397,7 +493,9 @@ def _classify_live_control_items(
     items.append(
         _item(
             "errors",
-            "live_control_required",
+            "preserved"
+            if _gate_is_complete(full_wire_gate) and _has_error_event(wire)
+            else "live_control_required",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
             "error classification requires independently captured pre/post response evidence",
         )
@@ -406,7 +504,7 @@ def _classify_live_control_items(
     items.append(
         _item(
             "hosted_only_declarations",
-            "live_control_required",
+            "preserved" if _gate_is_met(non_direct_gate) else "live_control_required",
             "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
             "hosted-only and host-unavailable are tagged reconciliation sentinels; no runtime-observed host binding",
         )
@@ -415,7 +513,11 @@ def _classify_live_control_items(
     items.append(
         _item(
             "unknown_tagged_sentinels",
-            "live_control_required",
+            "preserved"
+            if unknown_tag_count > 0
+            and _gate_is_complete(full_wire_gate)
+            and non_streaming_captured
+            else "live_control_required",
             "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
             "unknown tagged sentinels are preserved as opaque replay sentinels; live runtime dispositions require a real unknown item",
         )
@@ -424,7 +526,7 @@ def _classify_live_control_items(
     items.append(
         _item(
             "default_runtime_fields",
-            "live_control_required",
+            "preserved" if _gate_is_complete(full_wire_gate) else "live_control_required",
             "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
             "default runtime field classification requires an independently captured full request body",
         )
@@ -483,7 +585,9 @@ def _classify_advanced_items(
     return items
 
 
-def _build_identity_control(items: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_identity_control(
+    items: list[dict[str, Any]], *, unknown_tagged_source_count: int
+) -> dict[str, Any]:
     by_scope = {item.get("scope"): item for item in items}
     core_allowed = {"preserved", "reversibly_adapted", "live_control_required"}
     unclassified = []
@@ -500,6 +604,7 @@ def _build_identity_control(items: list[dict[str, Any]]) -> dict[str, Any]:
         "unclassified_scopes": unclassified,
         "fail_closed": True,
         "replay_cases": ["identity", "mutation", "deletion", "loss"],
+        "unknown_tagged_source_count": unknown_tagged_source_count,
     }
 
 
@@ -508,6 +613,7 @@ def _build_qualification(
     candidate_version_status: str,
     *,
     trace: dict[str, Any],
+    wire: dict[str, Any],
     audit: dict[str, Any],
 ) -> dict[str, Any]:
     live_control_scopes = sorted(
@@ -533,19 +639,73 @@ def _build_qualification(
         "full_pre_post_request_response": audit.get("gate_classification", {}).get(
             "full_pre_post_request_response", "unknown"
         ),
+        "full_request_fingerprint": trace.get("gateway_observability", {}).get(
+            "full_request_body_fingerprint", "unknown"
+        ),
+        "full_response_fingerprint": trace.get("gateway_observability", {}).get(
+            "full_response_body_fingerprint", "unknown"
+        ),
+        "sse_identity": (
+            "met"
+            if (
+                audit.get("gateway_identity_route", {}).get("full_body_hmac_pairs", 0) > 0
+                and audit.get("gateway_identity_route", {}).get("full_body_hmac_equal", 0)
+                == audit.get("gateway_identity_route", {}).get("request_starts", 0)
+                and audit.get("gateway_identity_route", {}).get("full_body_hmac_mismatch", 0) == 0
+                and audit.get("gateway_identity_route", {}).get("full_body_hmac_unavailable", 0) == 0
+                and audit.get("gateway_identity_route", {}).get(
+                    "response_body_fingerprint_fields_present"
+                )
+                is True
+                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_equal", 0)
+                == audit.get("gateway_identity_route", {}).get("request_starts", 0)
+                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_mismatch", 0) == 0
+                and audit.get("gateway_identity_route", {}).get("response_body_fingerprint_unavailable", 0) == 0
+            )
+            else "not_captured"
+        ),
+        "terminal_events": (
+            "met"
+            if _gate_is_complete(audit.get("gate_classification", {}).get(
+                "full_pre_post_request_response"
+            ))
+            and _has_terminal_event(wire)
+            else "not_captured"
+        ),
+        "error_events": (
+            "met"
+            if _gate_is_complete(audit.get("gate_classification", {}).get(
+                "full_pre_post_request_response"
+            ))
+            and _has_error_event(wire)
+            else "not_captured"
+        ),
         "non_streaming": audit.get("gate_classification", {}).get(
             "non_streaming", "unknown"
+        ),
+        "non_streaming_fixture": (
+            "met"
+            if _real_non_streaming_captured(wire)
+            else "not_captured"
         ),
         "identity_replay": audit.get("gate_classification", {}).get(
             "zero_unclassified_identity", "unknown"
         ),
+        "wire_identity_replay": _wire_identity_replay_status(audit),
     }
     accepted_gate_statuses = {
         "complete_model_visible_plan": {"complete"},
         "clean_cold_start_current_binding": {"complete", "pass"},
-        "full_pre_post_request_response": {"complete", "observed"},
-        "non_streaming": {"complete", "observed"},
-        "identity_replay": {"complete", "observed"},
+        "full_pre_post_request_response": {"complete", "met"},
+        "full_request_fingerprint": {"captured", "complete", "met"},
+        "full_response_fingerprint": {"captured", "complete", "met"},
+        "sse_identity": {"captured", "complete", "met"},
+        "terminal_events": {"observed", "complete", "met"},
+        "error_events": {"observed", "complete", "met"},
+        "non_streaming": {"complete", "met"},
+        "non_streaming_fixture": {"captured", "complete", "met"},
+        "identity_replay": {"complete", "met"},
+        "wire_identity_replay": {"complete", "met"},
     }
     blocking_gates = sorted(
         gate
@@ -636,6 +796,25 @@ def _validate_candidate_binding(
             "candidate provider binding is inconsistent: "
             f"wire={wire_provider!r} trace={trace_provider!r}"
         )
+    wire_provenance = wire_data.get("provenance", {})
+    if (
+        wire_provenance.get("cli_version") != trace_cli_version
+        or wire_provenance.get("source_commit") != trace_source_commit
+        or wire_provenance.get("capture_id") != source.get("capture_id")
+    ):
+        raise ValueError("wire provenance is not bound to the trace candidate")
+    catalog_snapshot = (
+        trace_data.get("planner_gates", {})
+        .get("catalog_source", {})
+        .get("read_only_snapshot_validation", {})
+    )
+    if (
+        wire_route.get("catalog_snapshot_sha256") != catalog_snapshot.get("sha256")
+        or wire_route.get("catalog_model_entry_id") != catalog_snapshot.get("model_entry_id")
+        or wire_route.get("catalog_model_supports_search_tool")
+        is not catalog_snapshot.get("model_entry_supports_search_tool")
+    ):
+        raise ValueError("wire catalog snapshot is not bound to the trace catalog evidence")
     trace_model = source.get("model")
     pre_wire_model = wire_data.get("pre_gateway", {}).get("model")
     post_wire_model = wire_data.get("post_gateway", {}).get("model")
@@ -656,6 +835,8 @@ def _validate_candidate_binding(
         "configured_provider_id": trace_provider,
         "model": trace_model,
         "catalog_binding": wire_route["catalog_binding"],
+        "catalog_snapshot_sha256": wire_route["catalog_snapshot_sha256"],
+        "catalog_model_entry_id": wire_route["catalog_model_entry_id"],
         "route_behavior_profile": trace_route.get("behavior_profile"),
     }
     return identity, status
@@ -673,9 +854,17 @@ def build_inventory(
     trace_data = _load_json(trace)
     wire_data = _load_json(wire_fixture)
     audit_data = _load_json(audit)
+    if (
+        trace_data.get("schema_version") != 4
+        or wire_data.get("schema_version") != 1
+        or wire_data.get("fixture_kind") != "sanitized_artifact_backed_replay"
+        or audit_data.get("schema_version") != 1
+        or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
+    ):
+        raise ValueError("Issue #62 evidence schema identity is invalid")
 
     items: list[dict[str, Any]] = []
-    items.extend(_classify_core_items(wire_data))
+    items.extend(_classify_core_items(wire_data, audit_data))
     items.extend(_classify_live_control_items(wire_data, audit_data))
     items.extend(_classify_advanced_items(trace_data))
 
@@ -685,7 +874,12 @@ def build_inventory(
             raise ValueError(f"duplicate scope: {item['scope']}")
         seen.add(item["scope"])
 
-    identity_control = _build_identity_control(items)
+    unknown_tagged_source_count = _count_unknown_tags(wire_data)
+    if unknown_tagged_source_count == 0:
+        raise ValueError("wire evidence contains no unknown-tag sentinel to classify")
+    identity_control = _build_identity_control(
+        items, unknown_tagged_source_count=unknown_tagged_source_count
+    )
     candidate_identity, candidate_version_status = _validate_candidate_binding(
         trace_data=trace_data,
         wire_data=wire_data,
@@ -708,6 +902,7 @@ def build_inventory(
         items,
         candidate_version_status,
         trace=trace_data,
+        wire=wire_data,
         audit=audit_data,
     )
 
@@ -776,6 +971,13 @@ def reconcile_inventory(
 ) -> dict[str, Any]:
     """Reconcile an inventory (possibly mutated) against the identity contract."""
     mismatches: list[str] = []
+
+    if inventory.get("schema_version") != SCHEMA_VERSION:
+        mismatches.append("inventory schema_version is invalid")
+    if inventory.get("artifact_kind") != ARTIFACT_KIND:
+        mismatches.append("inventory artifact_kind is invalid")
+    if inventory.get("disposition_vocabulary") != list(ALLOWED_DISPOSITIONS):
+        mismatches.append("inventory disposition_vocabulary is invalid")
 
     items = inventory.get("items", [])
     seen_scopes: set[str] = set()
@@ -866,17 +1068,31 @@ def reconcile_inventory(
         "complete_model_visible_plan",
         "clean_cold_start_current_binding",
         "full_pre_post_request_response",
+        "full_request_fingerprint",
+        "full_response_fingerprint",
+        "sse_identity",
+        "terminal_events",
+        "error_events",
         "non_streaming",
+        "non_streaming_fixture",
         "identity_replay",
+        "wire_identity_replay",
     }
     if set(evidence_gates) != expected_gate_keys:
         mismatches.append("qualification.evidence_gates has an unexpected key set")
     accepted_gate_statuses = {
         "complete_model_visible_plan": {"complete"},
         "clean_cold_start_current_binding": {"complete", "pass"},
-        "full_pre_post_request_response": {"complete", "observed"},
-        "non_streaming": {"complete", "observed"},
-        "identity_replay": {"complete", "observed"},
+        "full_pre_post_request_response": {"complete", "met"},
+        "full_request_fingerprint": {"captured", "complete", "met"},
+        "full_response_fingerprint": {"captured", "complete", "met"},
+        "sse_identity": {"captured", "complete", "met"},
+        "terminal_events": {"observed", "complete", "met"},
+        "error_events": {"observed", "complete", "met"},
+        "non_streaming": {"complete", "met"},
+        "non_streaming_fixture": {"captured", "complete", "met"},
+        "identity_replay": {"complete", "met"},
+        "wire_identity_replay": {"complete", "met"},
     }
     actual_blocking_gates = sorted(
         gate
@@ -917,7 +1133,14 @@ def reconcile_inventory(
         bound_paths: dict[str, Path] = {}
         for name in ("trace", "wire_fixture", "audit"):
             entry = evidence_binding[name]
-            path = evidence_root / entry["file"]
+            relative_name = str(entry["file"])
+            relative_path = Path(relative_name)
+            if relative_path.is_absolute() or relative_path.name != relative_name:
+                mismatches.append(
+                    f"loss: evidence binding file must be a basename: {relative_name}"
+                )
+                continue
+            path = evidence_root / relative_path
             bound_paths[name] = path
             if not path.is_file():
                 mismatches.append(f"loss: evidence binding file does not exist: {path}")
@@ -928,6 +1151,15 @@ def reconcile_inventory(
             trace_data = _load_json(bound_paths["trace"])
             wire_data = _load_json(bound_paths["wire_fixture"])
             audit_data = _load_json(bound_paths["audit"])
+            if (
+                trace_data.get("schema_version") != 4
+                or wire_data.get("schema_version") != 1
+                or wire_data.get("fixture_kind") != "sanitized_artifact_backed_replay"
+                or audit_data.get("schema_version") != 1
+                or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
+            ):
+                mismatches.append("mutation: bound evidence schema identity is invalid")
+                return {"reconciled": False, "mismatches": mismatches}
             try:
                 expected_identity, expected_status_from_evidence = _validate_candidate_binding(
                     trace_data=trace_data,
@@ -952,6 +1184,7 @@ def reconcile_inventory(
                     items,
                     expected_status_from_evidence,
                     trace=trace_data,
+                    wire=wire_data,
                     audit=audit_data,
                 )
                 for field in (
@@ -979,6 +1212,24 @@ def reconcile_inventory(
                 f"identity_control.unclassified_core_items={unclassified} "
                 f"does not match observed unclassified items={actual_unclassified}"
             )
+
+    unknown_tagged_source_count = inventory.get("identity_control", {}).get(
+        "unknown_tagged_source_count"
+    )
+    if not isinstance(unknown_tagged_source_count, int) or unknown_tagged_source_count <= 0:
+        mismatches.append("identity_control.unknown_tagged_source_count is invalid")
+    if evidence_root is not None and not mismatches:
+        wire_entry = evidence_binding.get("wire_fixture", {})
+        wire_path = evidence_root / str(wire_entry.get("file", ""))
+        if wire_path.is_file():
+            actual_unknown_tagged_source_count = _count_unknown_tags(
+                _load_json(wire_path)
+            )
+            if unknown_tagged_source_count != actual_unknown_tagged_source_count:
+                mismatches.append(
+                    "mutation: identity_control.unknown_tagged_source_count does not "
+                    "match bound wire evidence"
+                )
 
     return {"reconciled": not mismatches, "mismatches": mismatches}
 

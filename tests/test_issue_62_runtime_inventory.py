@@ -45,24 +45,41 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert candidate["inbound_format"] == "responses"
     assert candidate["upstream_format"] == "responses"
     assert candidate["catalog_binding"] == "official Codex catalog entry for openai/gpt-5.6-sol"
+    assert candidate["catalog_snapshot_sha256"] == "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876"
+    assert candidate["catalog_model_entry_id"] == "gpt-5.6-sol"
     assert candidate["route_behavior_profile"] == "official_codex_app_http_passthrough"
     assert len(candidate["evidence_manifest_sha256"]) == 64
     assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
     assert inventory["qualification"]["candidate_version_eligible"] is False
     assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["identity_control"]["unknown_tagged_source_count"] == 2
     assert inventory["qualification"]["blocking_gates"] == [
         "clean_cold_start_current_binding",
         "complete_model_visible_plan",
+        "error_events",
         "full_pre_post_request_response",
+        "full_request_fingerprint",
+        "full_response_fingerprint",
         "identity_replay",
         "non_streaming",
+        "non_streaming_fixture",
+        "sse_identity",
+        "terminal_events",
+        "wire_identity_replay",
     ]
     assert inventory["qualification"]["evidence_gates"] == {
         "clean_cold_start_current_binding": "not_run",
         "complete_model_visible_plan": "partial",
+        "error_events": "not_captured",
         "full_pre_post_request_response": "live_control_required",
+        "full_request_fingerprint": "not_captured",
+        "full_response_fingerprint": "not_captured",
         "identity_replay": "partial",
         "non_streaming": "live_control_required",
+        "non_streaming_fixture": "not_captured",
+        "sse_identity": "not_captured",
+        "terminal_events": "not_captured",
+        "wire_identity_replay": "not_captured",
     }
     assert inventory["evidence_binding"]["trace"]["file"] == TRACE.name
     assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
@@ -323,6 +340,80 @@ def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
     report = module.reconcile_inventory(tampered_status)
     assert report["reconciled"] is False
     assert any("CLI floor" in mismatch for mismatch in report["mismatches"])
+
+    tampered_unknown_count = json.loads(json.dumps(base))
+    tampered_unknown_count["identity_control"]["unknown_tagged_source_count"] = 1
+    report = module.reconcile_inventory(
+        tampered_unknown_count, evidence_root=evidence_root
+    )
+    assert report["reconciled"] is False
+    assert any("unknown_tagged_source_count" in mismatch for mismatch in report["mismatches"])
+
+
+def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() -> None:
+    module = load_inventory_module()
+    qualification = module._build_qualification(
+        [],
+        "eligible",
+        trace={
+            "gateway_observability": {
+                "full_request_body_fingerprint": "captured",
+                "full_response_body_fingerprint": "captured",
+            },
+            "capture_coverage": {
+                "complete_model_visible_plan": {"status": "complete"},
+                "clean_cold_start_current_binding": {"status": "complete"},
+            }
+        },
+        wire={
+            "response": {
+                "streaming": {
+                    "events": [
+                        {"event": "response.completed"},
+                        {"event": "response.error"},
+                    ]
+                },
+                "non_streaming": {
+                    "captured": True,
+                    "fixture_kind": "real_capture",
+                    "request_stream": False,
+                    "response_items": [{"type": "message"}],
+                },
+            }
+        },
+        audit={
+            "gateway_identity_route": {
+                "full_body_hmac_pairs": 1,
+                "request_starts": 1,
+                "full_body_hmac_equal": 1,
+                "full_body_hmac_mismatch": 0,
+                "full_body_hmac_unavailable": 0,
+                "response_body_fingerprint_fields_present": True,
+                "response_body_fingerprint_equal": 1,
+                "response_body_fingerprint_mismatch": 0,
+                "response_body_fingerprint_unavailable": 0,
+            },
+            "gate_classification": {
+                "full_pre_post_request_response": "met",
+                "full_request_body_fingerprint": "captured",
+                "full_response_body_fingerprint": "captured",
+                "non_streaming": "met",
+                "zero_unclassified_identity": "met",
+            },
+            "wire_identity_replay": {
+                "status": "met",
+                "fail_closed": True,
+                "cases": {
+                    "identity": "met",
+                    "mutation": "met",
+                    "deletion": "met",
+                    "loss": "met",
+                },
+            },
+        },
+    )
+    assert qualification["blocking_gates"] == []
+    assert qualification["ready_for_beta1"] is True
 
 
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])

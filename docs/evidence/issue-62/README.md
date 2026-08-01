@@ -159,6 +159,12 @@ and records a canonical-LF SHA-256 manifest for all three input artifacts.
 It never fabricates a `Supported` disposition for a gate the artifacts mark
 `live_control_required`.
 
+The qualification also has a separate `wire_identity_replay` gate. A full
+request/response fingerprint is not treated as replay proof by itself: a
+future capture must record fail-closed identity, mutation, deletion, and loss
+cases as complete/met. The current sanitized evidence has no such wire replay
+record, so this gate remains `not_captured`.
+
 ### Disposition vocabulary
 
 | Disposition | Meaning |
@@ -215,6 +221,10 @@ each core scope to point at its declared evidence path. A zero
 consumes planner completeness, current-binding cold-start, full-wire
 fingerprinting, non-streaming, and identity-replay statuses; item dispositions
 alone cannot make an incomplete evidence set ready.
+
+`identity_control.unknown_tagged_source_count` is recomputed from the bound wire
+fixture during reconciliation; changing the count without changing the source
+evidence fails closed.
 
 The live-control-required gates remain open until the separately authorized
 live control window documented above captures real evidence for each one.

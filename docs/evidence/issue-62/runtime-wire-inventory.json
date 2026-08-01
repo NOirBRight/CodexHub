@@ -2,10 +2,12 @@
   "artifact_kind": "runtime_wire_inventory",
   "candidate_identity": {
     "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "catalog_model_entry_id": "gpt-5.6-sol",
+    "catalog_snapshot_sha256": "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876",
     "cli_version": "0.144.0-alpha.4",
     "codex_source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
     "configured_provider_id": "custom",
-    "evidence_manifest_sha256": "3d0351fa23f87a982cfa4419cbebd14cde3cb5df570851c5e10fad4770cd6197",
+    "evidence_manifest_sha256": "9dfb5f48f52f27603d4d27066d0ed8a2e300600bcdbdff9a24f594a9892e5c22",
     "inbound_format": "responses",
     "model": "gpt-5.6-sol",
     "route_behavior_profile": "official_codex_app_http_passthrough",
@@ -33,7 +35,7 @@
     },
     "wire_fixture": {
       "file": "codexhub-runtime-wire-fixture.json",
-      "sha256": "e5bcd52ef094b0d4bd96a7d59b5f1d9d013d7bbf4f000f11dc0e299cfb59c278"
+      "sha256": "3a8654854539799b526bc013c50bc9f16c40c09319cff8da716b75e6deecbc3a"
     }
   },
   "evidence_sources": {
@@ -54,7 +56,8 @@
       "loss"
     ],
     "unclassified_core_items": 0,
-    "unclassified_scopes": []
+    "unclassified_scopes": [],
+    "unknown_tagged_source_count": 2
   },
   "items": [
     {
@@ -65,8 +68,8 @@
     },
     {
       "disposition": "live_control_required",
-      "evidence_source": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false",
-      "notes": "no real non-streaming request exists; contract sentinel only",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
+      "notes": "non-streaming response text is only qualified when a real captured fixture is present",
       "scope": "core_text_non_streaming"
     },
     {
@@ -212,9 +215,16 @@
     "blocking_gates": [
       "clean_cold_start_current_binding",
       "complete_model_visible_plan",
+      "error_events",
       "full_pre_post_request_response",
+      "full_request_fingerprint",
+      "full_response_fingerprint",
       "identity_replay",
-      "non_streaming"
+      "non_streaming",
+      "non_streaming_fixture",
+      "sse_identity",
+      "terminal_events",
+      "wire_identity_replay"
     ],
     "blocking_scopes": [
       "choice_controls",
@@ -233,9 +243,16 @@
     "evidence_gates": {
       "clean_cold_start_current_binding": "not_run",
       "complete_model_visible_plan": "partial",
+      "error_events": "not_captured",
       "full_pre_post_request_response": "live_control_required",
+      "full_request_fingerprint": "not_captured",
+      "full_response_fingerprint": "not_captured",
       "identity_replay": "partial",
-      "non_streaming": "live_control_required"
+      "non_streaming": "live_control_required",
+      "non_streaming_fixture": "not_captured",
+      "sse_identity": "not_captured",
+      "terminal_events": "not_captured",
+      "wire_identity_replay": "not_captured"
     },
     "ready_for_beta1": false
   },
