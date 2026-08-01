@@ -28,6 +28,19 @@ function Add-Mismatch {
     $script:mismatches.Add($Message)
 }
 
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Assert-Set {
     param(
         [string]$Name,
@@ -357,7 +370,9 @@ if (
 $inventoryItems = @($inventory.items)
 $inventoryScopes = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($entry in $inventoryItems) {
-    [void]$inventoryScopes.Add($entry.scope)
+    if (-not $inventoryScopes.Add($entry.scope)) {
+        Add-Mismatch "inventory contains duplicate scope: $($entry.scope)"
+    }
     if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
         Add-Mismatch "inventory item $($entry.scope) has disallowed disposition $($entry.disposition)"
     }
@@ -406,11 +421,85 @@ if (
 }
 $inventoryCandidate = $inventory.candidate_identity
 if (
-    $inventoryCandidate.cli_version -ne '0.144.0-alpha.4' -or
-    $inventoryCandidate.source_commit -ne '9e552e9d15ba52bed7077d5357f3e18e330f8f38' -or
-    $inventoryCandidate.route_upstream -ne 'official'
+    $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
+    $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
+    $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
+    $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
+    $inventoryCandidate.configured_provider_id -ne $trace.source.configured_provider_id -or
+    $inventoryCandidate.model -ne $trace.source.model -or
+    $wire.route.upstream_route -ne $trace.gateway_route.upstream -or
+    $wire.route.inbound_format -ne $trace.gateway_route.inbound_format -or
+    $wire.route.upstream_format -ne $trace.gateway_route.upstream_format -or
+    $wire.route.configured_provider_id -ne $trace.source.configured_provider_id -or
+    $wire.pre_gateway.model -ne $trace.source.model
 ) {
-    Add-Mismatch 'inventory candidate identity does not bind to the exact Codex CLI version and official route'
+    Add-Mismatch 'inventory candidate identity does not bind to the exact trace and wire candidate route'
+}
+$evidenceBindings = @{
+    trace = $TracePath
+    wire_fixture = $WireFixturePath
+    audit = $AuditPath
+}
+foreach ($name in $evidenceBindings.Keys) {
+    $binding = $inventory.evidence_binding.$name
+    $expectedHash = if ($binding) { [string]$binding.sha256 } else { '' }
+    if (-not $binding -or $binding.file -ne [System.IO.Path]::GetFileName($evidenceBindings[$name])) {
+        Add-Mismatch "inventory evidence binding $name has the wrong file name"
+        continue
+    }
+    $actualHash = Get-Sha256Hex -Path $evidenceBindings[$name]
+    if ($expectedHash -ne $actualHash) {
+        Add-Mismatch "inventory evidence binding $name hash does not match the input artifact"
+    }
+}
+$coreEvidence = @{
+    core_text_streaming = 'codexhub-runtime-wire-fixture.json#response.streaming.captured'
+    core_text_non_streaming = 'codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false'
+    core_history_multiturn = 'codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls'
+    core_history_item_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_history_call_ids = 'codexhub-runtime-wire-fixture.json#history.required_call_ids'
+    core_sse_streaming_events = 'codexhub-runtime-wire-fixture.json#response.streaming.events'
+    core_sse_terminal_events = 'read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts'
+    core_sse_errors = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response'
+    core_function_declaration = 'codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces'
+    core_function_call = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_function_result = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_function_replay = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    identity_item_call_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    identity_response_ids = 'codexhub-runtime-wire-fixture.json#response.streaming.response_id'
+    identity_request_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.request_id'
+}
+$coreAllowedDispositions = @('preserved','reversibly_adapted','live_control_required')
+foreach ($scope in $coreEvidence.Keys) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry) { continue }
+    if ($entry.evidence_source -ne $coreEvidence[$scope]) {
+        Add-Mismatch "inventory core scope $scope has evidence_source $($entry.evidence_source), expected $($coreEvidence[$scope])"
+    }
+    if ($entry.disposition -notin $coreAllowedDispositions) {
+        Add-Mismatch "inventory core scope $scope has disallowed incomplete disposition $($entry.disposition)"
+    }
+}
+$qualification = $inventory.qualification
+if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
+    Add-Mismatch 'inventory qualification candidate version status is invalid'
+}
+$observedBlockingScopes = @($inventoryItems | Where-Object {
+    $_.disposition -eq 'live_control_required' -or
+    ($coreEvidence.ContainsKey($_.scope) -and $_.disposition -in @('Unqualified','Unsupported'))
+} | ForEach-Object { $_.scope } | Sort-Object -Unique)
+$reportedBlockingScopes = @($qualification.blocking_scopes | Sort-Object -Unique)
+if (($observedBlockingScopes -join '|') -ne ($reportedBlockingScopes -join '|')) {
+    Add-Mismatch 'inventory qualification blocking_scopes does not match item dispositions'
+}
+$expectedCandidateEligible = ($qualification.candidate_version_status -eq 'eligible')
+if ([bool]$qualification.candidate_version_eligible -ne $expectedCandidateEligible) {
+    Add-Mismatch 'inventory qualification candidate_version_eligible is inconsistent with status'
+}
+$expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0
+if ([bool]$qualification.ready_for_beta1 -ne $expectedReady) {
+    Add-Mismatch 'inventory qualification ready_for_beta1 is inconsistent with evidence blockers'
 }
 $advancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
 foreach ($scope in $advancedScopes) {
@@ -465,7 +554,9 @@ $inventoryMismatches = [System.Collections.Generic.List[string]]::new()
 $replayScopes = [System.Collections.Generic.HashSet[string]]::new()
 $observedUnclassified = 0
 foreach ($entry in $inventory.items) {
-    [void]$replayScopes.Add($entry.scope)
+    if (-not $replayScopes.Add($entry.scope)) {
+        $inventoryMismatches.Add("mutation: duplicate scope $($entry.scope)")
+    }
     if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
         $inventoryMismatches.Add("mutation: $($entry.scope) disposition $($entry.disposition) not allowed")
         $observedUnclassified += 1

@@ -147,10 +147,15 @@ exposes over the core Responses contract and the explicitly-deferred advanced
 capabilities.
 
 The artifact is bound to CLI floor `0.145.0` and to the candidate identity
-captured by the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
+derived from the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
 source commit `9e552e9d15ba52bed7077d5357f3e18e330f8f38`, official Responses
-route). It is generated from the existing sanitized evidence only; it never
-fabricates a `Supported` disposition for a gate the artifacts mark
+route). Because the captured CLI is below the floor, the generated
+`qualification.ready_for_beta1` is `false` and the candidate is explicitly
+marked `legacy_below_floor`; this evidence cannot be used as the beta.1
+candidate. The generator rejects an explicitly supplied CLI/source value that
+does not match the trace, binds route/provider/model fields across trace and
+wire fixtures, and records SHA-256 fingerprints for all three input artifacts.
+It never fabricates a `Supported` disposition for a gate the artifacts mark
 `live_control_required`.
 
 ### Disposition vocabulary
@@ -168,8 +173,11 @@ fabricates a `Supported` disposition for a gate the artifacts mark
 
 Core items (`preserved`/`reversibly_adapted` where the bounded artifacts prove
 them): core text streaming, multi-turn history, item/call IDs, streaming SSE
-event kinds, standard function declaration/call/result/replay, and identity
-(request/response/item/call IDs).
+event kinds, standard function declaration/call/result, and identity
+(request/response/item/call IDs). Function replay remains
+`live_control_required`: the sanitized call-link fixture proves the shape of
+call/result pairs, while the tool-membership replay does not prove a complete
+real-wire function replay.
 
 Live-control items (`live_control_required` until a coordinated live window
 captures them): non-streaming text, choice controls (the wire fixture carries a
@@ -196,6 +204,13 @@ python scripts/build_issue_62_runtime_inventory.py --replay-case mutation
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1 -InventoryReplayCase mutation
 ```
+
+Regeneration is deterministic and covered by a test that compares the
+generated object to this committed JSON artifact. The PowerShell reconciliation
+also checks the input fingerprints, rejects duplicate scopes, and requires
+each core scope to point at its declared evidence path. A zero
+`unclassified_core_items` count therefore describes vocabulary validity only;
+`qualification.ready_for_beta1` is the separate completion gate.
 
 The live-control-required gates remain open until the separately authorized
 live control window documented above captures real evidence for each one.

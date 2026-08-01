@@ -18,6 +18,20 @@
     "Unqualified",
     "live_control_required"
   ],
+  "evidence_binding": {
+    "audit": {
+      "file": "read-only-gate-audit.json",
+      "sha256": "3afb8379097eccb86be5d271b8807d80b0c7efbe448103c31466c84e236d8811"
+    },
+    "trace": {
+      "file": "current-codexhub-thread-tool-surface.json",
+      "sha256": "b05c59b6290f23feef1ccb62338c0454e16301b64a0126b829df149cc1e91fa5"
+    },
+    "wire_fixture": {
+      "file": "codexhub-runtime-wire-fixture.json",
+      "sha256": "27f46edb21955ff0e14de159dd6e31927313e650a022be0cd18de044b52c7e79"
+    }
+  },
   "evidence_sources": {
     "audit": "read-only-gate-audit.json",
     "trace": "current-codexhub-thread-tool-surface.json",
@@ -106,9 +120,9 @@
       "scope": "core_function_result"
     },
     {
-      "disposition": "preserved",
-      "evidence_source": "check-codex-thread-tool-surface.ps1#required-membership-replay",
-      "notes": "required thread tool replay reconciles registered, Deferred, and discoverable membership",
+      "disposition": "live_control_required",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
       "scope": "core_function_replay"
     },
     {
@@ -190,5 +204,22 @@
       "scope": "chat_conversion"
     }
   ],
+  "qualification": {
+    "blocking_scopes": [
+      "choice_controls",
+      "core_function_replay",
+      "core_sse_errors",
+      "core_sse_terminal_events",
+      "core_text_non_streaming",
+      "default_runtime_fields",
+      "errors",
+      "hosted_only_declarations",
+      "terminal_events",
+      "unknown_tagged_sentinels"
+    ],
+    "candidate_version_eligible": false,
+    "candidate_version_status": "legacy_below_floor",
+    "ready_for_beta1": false
+  },
   "schema_version": 1
 }

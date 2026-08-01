@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +39,8 @@ from typing import Any
 SCHEMA_VERSION = 1
 ARTIFACT_KIND = "runtime_wire_inventory"
 DEFAULT_CLI_FLOOR = "0.145.0"
-DEFAULT_CANDIDATE_CLI_VERSION = "0.144.0-alpha.4"
-DEFAULT_CANDIDATE_SOURCE_COMMIT = "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+DEFAULT_CANDIDATE_CLI_VERSION = None
+DEFAULT_CANDIDATE_SOURCE_COMMIT = None
 
 ALLOWED_DISPOSITIONS = (
     "preserved",
@@ -77,14 +79,20 @@ ADVANCED_UNSUPPORTED_SCOPES = frozenset(
     }
 )
 
-# Core scopes with preserved/reversibly-adapted evidence from the sanitized
-# trace + wire fixture. These are the beta.1 core contract items.
-CORE_PRESERVED_SCOPES = frozenset(
+# Every core scope is required in the inventory, even when the current
+# evidence only justifies ``live_control_required``.  Keeping this set
+# separate from the disposition vocabulary prevents an incomplete fixture from
+# being mistaken for a completed beta gate.
+CORE_CONTRACT_SCOPES = frozenset(
     {
         "core_text_streaming",
+        "core_text_non_streaming",
         "core_history_multiturn",
         "core_history_item_ids",
         "core_history_call_ids",
+        "core_sse_streaming_events",
+        "core_sse_terminal_events",
+        "core_sse_errors",
         "core_function_declaration",
         "core_function_call",
         "core_function_result",
@@ -95,11 +103,67 @@ CORE_PRESERVED_SCOPES = frozenset(
     }
 )
 
-CORE_REVERSIBLY_ADAPTED_SCOPES = frozenset(
-    {
-        "core_sse_streaming_events",
-    }
+# Evidence references are part of the contract, not free-form annotations.
+# This map lets reconciliation detect a stale or hand-edited inventory that
+# silently points a core claim at an unrelated tool-surface check.
+CORE_SCOPE_EVIDENCE = {
+    "core_text_streaming": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
+    "core_text_non_streaming": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured=false",
+    "core_history_multiturn": "codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls",
+    "core_history_item_ids": "codexhub-runtime-wire-fixture.json#history.call_links",
+    "core_history_call_ids": "codexhub-runtime-wire-fixture.json#history.required_call_ids",
+    "core_sse_streaming_events": "codexhub-runtime-wire-fixture.json#response.streaming.events",
+    "core_sse_terminal_events": "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
+    "core_sse_errors": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
+    "core_function_declaration": "codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces",
+    "core_function_call": "codexhub-runtime-wire-fixture.json#history.call_links",
+    "core_function_result": "codexhub-runtime-wire-fixture.json#history.call_links",
+    "core_function_replay": "codexhub-runtime-wire-fixture.json#history.call_links",
+    "identity_item_call_ids": "codexhub-runtime-wire-fixture.json#history.call_links",
+    "identity_response_ids": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+    "identity_request_ids": "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
+}
+
+REQUIRED_CANDIDATE_FIELDS = (
+    "cli_version",
+    "source_commit",
+    "route_upstream",
+    "inbound_format",
+    "upstream_format",
+    "configured_provider_id",
+    "model",
 )
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _version_key(value: str) -> tuple[int, int, int, int, str]:
+    """Return a comparable key for Codex's semver-like CLI versions.
+
+    Stable releases sort after prereleases of the same core version.  Build
+    metadata is ignored for eligibility, while malformed values fail closed.
+    """
+
+    match = re.fullmatch(
+        r"(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+        r"(?P<pre>-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+        value,
+    )
+    if not match:
+        raise ValueError(f"invalid Codex CLI version: {value!r}")
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        0 if match.group("pre") else 1,
+        match.group("pre") or "",
+    )
+
+
+def _candidate_version_status(candidate: str, floor: str) -> str:
+    return "eligible" if _version_key(candidate) >= _version_key(floor) else "legacy_below_floor"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -125,9 +189,7 @@ def _item(
 
 
 def _classify_core_items(
-    trace: dict[str, Any],
     wire: dict[str, Any],
-    audit: dict[str, Any],
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -241,9 +303,9 @@ def _classify_core_items(
     items.append(
         _item(
             "core_function_replay",
-            "preserved" if call_links_have_function else "live_control_required",
-            "check-codex-thread-tool-surface.ps1#required-membership-replay",
-            "required thread tool replay reconciles registered, Deferred, and discoverable membership",
+            "live_control_required",
+            "codexhub-runtime-wire-fixture.json#history.call_links",
+            "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
         )
     )
 
@@ -280,7 +342,6 @@ def _classify_core_items(
 
 
 def _classify_live_control_items(
-    trace: dict[str, Any],
     wire: dict[str, Any],
     audit: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -355,7 +416,6 @@ def _classify_live_control_items(
 
 def _classify_advanced_items(
     trace: dict[str, Any],
-    wire: dict[str, Any],
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -405,11 +465,17 @@ def _classify_advanced_items(
 
 
 def _build_identity_control(items: list[dict[str, Any]]) -> dict[str, Any]:
-    unclassified = [
-        item["scope"]
-        for item in items
-        if item["disposition"] not in ALLOWED_DISPOSITIONS
-    ]
+    by_scope = {item.get("scope"): item for item in items}
+    core_allowed = {"preserved", "reversibly_adapted", "live_control_required"}
+    unclassified = []
+    for scope in sorted(CORE_CONTRACT_SCOPES):
+        item = by_scope.get(scope)
+        if (
+            item is None
+            or item.get("disposition") not in core_allowed
+            or item.get("evidence_source") != CORE_SCOPE_EVIDENCE[scope]
+        ):
+            unclassified.append(scope)
     return {
         "unclassified_core_items": len(unclassified),
         "unclassified_scopes": unclassified,
@@ -418,23 +484,123 @@ def _build_identity_control(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _build_qualification(
+    items: list[dict[str, Any]], candidate_version_status: str
+) -> dict[str, Any]:
+    live_control_scopes = sorted(
+        item["scope"]
+        for item in items
+        if item["disposition"] == "live_control_required"
+    )
+    unqualified_core_scopes = sorted(
+        item["scope"]
+        for item in items
+        if item["scope"] in CORE_CONTRACT_SCOPES
+        and item["disposition"] in {"Unqualified", "Unsupported"}
+    )
+    blocking_scopes = sorted(set(live_control_scopes) | set(unqualified_core_scopes))
+    candidate_version_eligible = candidate_version_status == "eligible"
+    return {
+        "candidate_version_status": candidate_version_status,
+        "candidate_version_eligible": candidate_version_eligible,
+        "blocking_scopes": blocking_scopes,
+        "ready_for_beta1": candidate_version_eligible and not blocking_scopes,
+    }
+
+
+def _validate_candidate_binding(
+    *,
+    trace_data: dict[str, Any],
+    wire_data: dict[str, Any],
+    cli_version_floor: str,
+    candidate_cli_version: str | None,
+    candidate_source_commit: str | None,
+) -> tuple[dict[str, Any], str]:
+    source = trace_data.get("source", {})
+    planner_gates = trace_data.get("planner_gates", {})
+    trace_cli_version = source.get("cli_version")
+    trace_source_commit = planner_gates.get("source_commit")
+    if not trace_cli_version or not trace_source_commit:
+        raise ValueError("trace evidence is missing source.cli_version or planner_gates.source_commit")
+
+    if candidate_cli_version is None:
+        candidate_cli_version = trace_cli_version
+    elif candidate_cli_version != trace_cli_version:
+        raise ValueError(
+            "candidate CLI version does not match trace evidence: "
+            f"requested={candidate_cli_version!r} observed={trace_cli_version!r}"
+        )
+
+    if candidate_source_commit is None:
+        candidate_source_commit = trace_source_commit
+    elif candidate_source_commit != trace_source_commit:
+        raise ValueError(
+            "candidate source commit does not match trace evidence: "
+            f"requested={candidate_source_commit!r} observed={trace_source_commit!r}"
+        )
+
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_source_commit):
+        raise ValueError(f"candidate source commit is not a 40-character SHA-1: {candidate_source_commit!r}")
+
+    trace_route = trace_data.get("gateway_route", {})
+    wire_route = wire_data.get("route", {})
+    route_fields = (
+        ("route_upstream", wire_route.get("upstream_route"), trace_route.get("upstream")),
+        ("inbound_format", wire_route.get("inbound_format"), trace_route.get("inbound_format")),
+        ("upstream_format", wire_route.get("upstream_format"), trace_route.get("upstream_format")),
+    )
+    for name, wire_value, trace_value in route_fields:
+        if not wire_value or wire_value != trace_value:
+            raise ValueError(
+                f"candidate route field {name} is not consistently bound: "
+                f"wire={wire_value!r} trace={trace_value!r}"
+            )
+
+    trace_provider = source.get("configured_provider_id")
+    wire_provider = wire_route.get("configured_provider_id")
+    if not trace_provider or wire_provider != trace_provider:
+        raise ValueError(
+            "candidate provider binding is inconsistent: "
+            f"wire={wire_provider!r} trace={trace_provider!r}"
+        )
+    trace_model = source.get("model")
+    wire_model = wire_data.get("pre_gateway", {}).get("model")
+    if not trace_model or wire_model != trace_model:
+        raise ValueError(
+            "candidate model binding is inconsistent: "
+            f"wire={wire_model!r} trace={trace_model!r}"
+        )
+
+    status = _candidate_version_status(candidate_cli_version, cli_version_floor)
+    identity = {
+        "cli_version": candidate_cli_version,
+        "source_commit": candidate_source_commit,
+        "route_upstream": wire_route["upstream_route"],
+        "inbound_format": wire_route["inbound_format"],
+        "upstream_format": wire_route["upstream_format"],
+        "configured_provider_id": trace_provider,
+        "model": trace_model,
+    }
+    return identity, status
+
+
 def build_inventory(
     *,
     trace: Path,
     wire_fixture: Path,
     audit: Path,
     cli_version_floor: str = DEFAULT_CLI_FLOOR,
-    candidate_cli_version: str = DEFAULT_CANDIDATE_CLI_VERSION,
-    candidate_source_commit: str = DEFAULT_CANDIDATE_SOURCE_COMMIT,
+    candidate_cli_version: str | None = DEFAULT_CANDIDATE_CLI_VERSION,
+    candidate_source_commit: str | None = DEFAULT_CANDIDATE_SOURCE_COMMIT,
 ) -> dict[str, Any]:
     trace_data = _load_json(trace)
     wire_data = _load_json(wire_fixture)
     audit_data = _load_json(audit)
 
     items: list[dict[str, Any]] = []
-    items.extend(_classify_core_items(trace_data, wire_data, audit_data))
-    items.extend(_classify_live_control_items(trace_data, wire_data, audit_data))
-    items.extend(_classify_advanced_items(trace_data, wire_data))
+    items.extend(_classify_core_items(wire_data))
+    items.extend(_classify_live_control_items(wire_data, audit_data))
+    items.extend(_classify_advanced_items(trace_data))
 
     seen: set[str] = set()
     for item in items:
@@ -443,23 +609,21 @@ def build_inventory(
         seen.add(item["scope"])
 
     identity_control = _build_identity_control(items)
-
-    route = wire_data.get("route", {})
-    candidate_identity = {
-        "cli_version": candidate_cli_version,
-        "source_commit": candidate_source_commit,
-        "route_upstream": route.get("upstream_route"),
-        "inbound_format": route.get("inbound_format"),
-        "upstream_format": route.get("upstream_format"),
-        "configured_provider_id": trace_data.get("source", {}).get("configured_provider_id"),
-        "model": trace_data.get("source", {}).get("model"),
-    }
+    candidate_identity, candidate_version_status = _validate_candidate_binding(
+        trace_data=trace_data,
+        wire_data=wire_data,
+        cli_version_floor=cli_version_floor,
+        candidate_cli_version=candidate_cli_version,
+        candidate_source_commit=candidate_source_commit,
+    )
+    qualification = _build_qualification(items, candidate_version_status)
 
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_kind": ARTIFACT_KIND,
         "cli_version_floor": cli_version_floor,
         "candidate_identity": candidate_identity,
+        "qualification": qualification,
         "disposition_vocabulary": list(ALLOWED_DISPOSITIONS),
         "items": items,
         "identity_control": identity_control,
@@ -471,6 +635,14 @@ def build_inventory(
             "trace": trace.name,
             "wire_fixture": wire_fixture.name,
             "audit": audit.name,
+        },
+        "evidence_binding": {
+            "trace": {"file": trace.name, "sha256": _sha256_file(trace)},
+            "wire_fixture": {
+                "file": wire_fixture.name,
+                "sha256": _sha256_file(wire_fixture),
+            },
+            "audit": {"file": audit.name, "sha256": _sha256_file(audit)},
         },
     }
 
@@ -533,10 +705,20 @@ def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
             mismatches.append(
                 f"mutation: {scope}: disposition {disposition!r} not in allowed vocabulary"
             )
+        expected_evidence = CORE_SCOPE_EVIDENCE.get(scope)
+        if expected_evidence and item.get("evidence_source") != expected_evidence:
+            mismatches.append(
+                f"mutation: {scope}: evidence_source {item.get('evidence_source')!r} "
+                f"does not match required {expected_evidence!r}"
+            )
+        if scope in CORE_CONTRACT_SCOPES and disposition in {"Unsupported", "Unqualified"}:
+            mismatches.append(
+                f"mutation: {scope}: core disposition {disposition!r} cannot replace "
+                "preserved, reversibly_adapted, or live_control_required"
+            )
 
     required_scopes = (
-        CORE_PRESERVED_SCOPES
-        | CORE_REVERSIBLY_ADAPTED_SCOPES
+        CORE_CONTRACT_SCOPES
         | LIVE_CONTROL_SCOPES
         | ADVANCED_UNSUPPORTED_SCOPES
         | {"choice_controls"}
@@ -545,8 +727,50 @@ def reconcile_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
     if missing:
         mismatches.append(f"deletion: missing scopes {missing}")
 
-    if "route_upstream" not in inventory.get("candidate_identity", {}):
-        mismatches.append("loss: candidate_identity.route_upstream is missing")
+    candidate_identity = inventory.get("candidate_identity", {})
+    for field in REQUIRED_CANDIDATE_FIELDS:
+        if field not in candidate_identity:
+            mismatches.append(f"loss: candidate_identity.{field} is missing")
+
+    qualification = inventory.get("qualification", {})
+    candidate_status = qualification.get("candidate_version_status")
+    if candidate_status not in {"eligible", "legacy_below_floor"}:
+        mismatches.append("qualification.candidate_version_status is invalid")
+    candidate_eligible = qualification.get("candidate_version_eligible")
+    if candidate_eligible is not (candidate_status == "eligible"):
+        mismatches.append(
+            "qualification.candidate_version_eligible does not match candidate version status"
+        )
+    actual_blocking_scopes = sorted(
+        set(
+            item.get("scope")
+            for item in items
+            if item.get("disposition") == "live_control_required"
+        )
+        | {
+            item.get("scope")
+            for item in items
+            if item.get("scope") in CORE_CONTRACT_SCOPES
+            and item.get("disposition") in {"Unqualified", "Unsupported"}
+        }
+    )
+    if qualification.get("blocking_scopes") != actual_blocking_scopes:
+        mismatches.append(
+            "qualification.blocking_scopes does not match observed blocking dispositions"
+        )
+    expected_ready = candidate_eligible is True and not actual_blocking_scopes
+    if qualification.get("ready_for_beta1") is not expected_ready:
+        mismatches.append(
+            "qualification.ready_for_beta1 is inconsistent with candidate eligibility and blockers"
+        )
+
+    evidence_binding = inventory.get("evidence_binding", {})
+    for name in ("trace", "wire_fixture", "audit"):
+        entry = evidence_binding.get(name, {})
+        if not isinstance(entry, dict) or not entry.get("file") or not re.fullmatch(
+            r"[0-9a-f]{64}", str(entry.get("sha256", ""))
+        ):
+            mismatches.append(f"loss: evidence_binding.{name} is missing or malformed")
 
     unclassified = inventory.get("identity_control", {}).get("unclassified_core_items")
     if not isinstance(unclassified, int) or unclassified < 0:

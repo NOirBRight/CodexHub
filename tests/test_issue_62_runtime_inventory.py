@@ -43,6 +43,11 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert candidate["route_upstream"] == "official"
     assert candidate["inbound_format"] == "responses"
     assert candidate["upstream_format"] == "responses"
+    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
+    assert inventory["qualification"]["candidate_version_eligible"] is False
+    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["evidence_binding"]["trace"]["file"] == TRACE.name
+    assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
 
 
 def test_inventory_covers_every_required_taxonomy_scope() -> None:
@@ -102,12 +107,13 @@ def test_core_items_have_preserved_or_reversibly_adapted_disposition() -> None:
         "core_function_declaration",
         "core_function_call",
         "core_function_result",
-        "core_function_replay",
         "identity_item_call_ids",
         "identity_response_ids",
         "identity_request_ids",
     ):
         assert by_scope[scope]["disposition"] in preserved_or_adapted, scope
+
+    assert by_scope["core_function_replay"]["disposition"] == "live_control_required"
 
 
 def test_advanced_capabilities_are_not_supported_or_unqualified() -> None:
@@ -145,6 +151,8 @@ def test_inventory_reports_zero_unclassified_core_items() -> None:
 
     assert inventory["identity_control"]["unclassified_core_items"] == 0
     assert inventory["identity_control"]["unclassified_scopes"] == []
+    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert "core_function_replay" in inventory["qualification"]["blocking_scopes"]
 
 
 def test_inventory_replay_fails_visibly_on_mutation_deletion_and_loss() -> None:
@@ -185,6 +193,7 @@ def test_committed_inventory_preserves_sanitization_boundary() -> None:
     assert not re.search(
         r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
         serialized,
+        re.IGNORECASE,
     )
 
 
@@ -207,17 +216,63 @@ def test_build_inventory_reads_existing_artifacts_and_clamps_live_gates() -> Non
     assert "core_text_streaming" in scopes
     assert "code_mode" in scopes
     assert inventory["identity_control"]["unclassified_core_items"] == 0
+    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
 
 
-@pytest.mark.parametrize(
-    "case,expected_scope",
-    [
-        ("mutation", None),
-        ("deletion", None),
-        ("loss", None),
-    ],
-)
-def test_replay_cases_each_touch_a_distinct_scope(case: str, expected_scope: object) -> None:
+def test_build_inventory_rejects_candidate_metadata_drift() -> None:
+    module = load_inventory_module()
+
+    with pytest.raises(ValueError, match="candidate CLI version"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+            candidate_cli_version="0.145.0",
+            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+        )
+
+    with pytest.raises(ValueError, match="candidate source commit"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+            candidate_cli_version="0.144.0-alpha.4",
+            candidate_source_commit="0" * 40,
+        )
+
+
+def test_committed_inventory_matches_generator_output() -> None:
+    module = load_inventory_module()
+
+    generated = module.build_inventory(
+        trace=TRACE,
+        wire_fixture=WIRE_FIXTURE,
+        audit=AUDIT,
+    )
+    committed = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    assert generated == committed
+
+
+def test_inventory_reconcile_rejects_duplicate_and_wrong_core_evidence() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    duplicate = json.loads(json.dumps(base))
+    duplicate["items"].append(json.loads(json.dumps(base["items"][0])))
+    report = module.reconcile_inventory(duplicate)
+    assert report["reconciled"] is False
+    assert any("duplicate scope" in mismatch for mismatch in report["mismatches"])
+
+    wrong_evidence = json.loads(json.dumps(base))
+    wrong_evidence["items"][0]["evidence_source"] = "unrelated-fixture.json#claim"
+    report = module.reconcile_inventory(wrong_evidence)
+    assert report["reconciled"] is False
+    assert any("evidence_source" in mismatch for mismatch in report["mismatches"])
+
+
+@pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
+def test_replay_cases_each_touch_a_distinct_scope(case: str) -> None:
     module = load_inventory_module()
     base = json.loads(INVENTORY.read_text(encoding="utf-8"))
 
