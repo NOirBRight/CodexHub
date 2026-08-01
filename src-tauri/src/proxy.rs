@@ -5088,22 +5088,22 @@ time.sleep(10)
         let new_port = free_port();
         write_settings(&paths, old_port);
 
-        let result = (|| {
-            let inspector = FastProcessInspector::new(&paths.proxy_script_path(), old_port);
-            let listener_inspector = super::SystemListenerInspector;
-            let backend = ControlledProxyLifecycleBackend {
-                delegate: ProxyLifecycleBackend {
-                    lifecycle_gate_path: paths.lifecycle_gate_path(),
-                    paths: paths.clone(),
-                    session_owned_identity: None,
-                    require_current_session_identity: false,
-                },
-                inspector: &inspector,
-                listener_inspector: &listener_inspector,
-                session_owned_identity: RefCell::new(None),
-            };
-            let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
+        let inspector = FastProcessInspector::new(&paths.proxy_script_path(), old_port);
+        let listener_inspector = super::SystemListenerInspector;
+        let backend = ControlledProxyLifecycleBackend {
+            delegate: ProxyLifecycleBackend {
+                lifecycle_gate_path: paths.lifecycle_gate_path(),
+                paths: paths.clone(),
+                session_owned_identity: None,
+                require_current_session_identity: false,
+            },
+            inspector: &inspector,
+            listener_inspector: &listener_inspector,
+            session_owned_identity: RefCell::new(None),
+        };
+        let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
 
+        let result = (|| {
             let old_status = coordinator.start(&backend, || Ok(()))?;
             *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
             ensure(
@@ -5128,8 +5128,20 @@ time.sleep(10)
             Ok::<(), String>(())
         })();
 
-        let _ = stop_with_paths(&paths);
-        result.expect("port-change restart lifecycle");
+        let cleanup = if read_pid(&paths).ok().flatten().is_some() {
+            *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
+            coordinator.stop(&backend).map(|_| ())
+        } else {
+            Ok(())
+        };
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => panic!("port-change restart lifecycle: {error}"),
+            (Ok(()), Err(error)) => panic!("port-change restart cleanup: {error}"),
+            (Err(error), Err(cleanup_error)) => {
+                panic!("port-change restart lifecycle: {error}; cleanup: {cleanup_error}")
+            }
+        }
     }
 
     #[test]
