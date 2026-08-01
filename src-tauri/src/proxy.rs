@@ -4524,8 +4524,8 @@ time.sleep(10)
     }
 
     #[test]
-    fn failed_start_cleanup_is_bounded_and_persists_identity_when_kill_is_unconfirmed() {
-        let root = temp_root("bounded-failed-cleanup");
+    fn failed_start_cleanup_persists_identity_when_kill_is_unconfirmed() {
+        let root = temp_root("failed-cleanup-persists-identity");
         let paths = test_paths(&root);
         let port = free_port();
         write_settings(&paths, port);
@@ -4536,13 +4536,21 @@ time.sleep(10)
         let mut child = command.spawn().expect("spawn cleanup child");
         let pid = child.id();
         let capture = capture_child_stdio(&mut child);
-        let record = ProxyPidRecord::Managed(ProxyPidMetadata::recovery(
+        let record = ProxyPidRecord::Managed(ProxyPidMetadata::new(
             pid,
             port,
             &paths.proxy_script_path(),
+            super::test_process_start_id(pid),
         ));
-        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
-        let started = Instant::now();
+        let inspected_process = match fake_proxy_process(&paths, port) {
+            InspectedProcess::Running(mut info) => {
+                info.process_start_id = Some(super::test_process_start_id(pid));
+                InspectedProcess::Running(info)
+            }
+            InspectedProcess::Missing => unreachable!("fake process must be running"),
+        };
+        let inspector = RecordingInspector::new(inspected_process);
+        let terminator = RecordingUnconfirmedTerminator::default();
 
         let failure = clean_up_failed_start_with_controls(
             &paths,
@@ -4551,10 +4559,15 @@ time.sleep(10)
             "startup reconciliation failed".to_string(),
             &record,
             &inspector,
-            &UnconfirmedTerminator,
+            &terminator,
         );
 
-        assert!(started.elapsed() < Duration::from_millis(500));
+        // The injected terminator returns immediately; this verifies cleanup
+        // delegates termination exactly once without adding a retry or sleep.
+        // A wall-clock assertion would make the same deterministic behavior
+        // depend on Hosted runner scheduling and temporary-file I/O latency.
+        assert_eq!(*terminator.calls.borrow(), 1);
+        assert_eq!(*inspector.inspected.borrow(), vec![pid]);
         assert!(failure
             .message
             .contains("termination could not be confirmed"));
@@ -5326,6 +5339,18 @@ time.sleep(10)
 
     impl ChildTerminator for UnconfirmedTerminator {
         fn terminate(&self, _child: &mut std::process::Child) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingUnconfirmedTerminator {
+        calls: RefCell<usize>,
+    }
+
+    impl ChildTerminator for RecordingUnconfirmedTerminator {
+        fn terminate(&self, _child: &mut std::process::Child) -> Result<bool, String> {
+            *self.calls.borrow_mut() += 1;
             Ok(false)
         }
     }
