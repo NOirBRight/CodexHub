@@ -13405,6 +13405,114 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["input"][0]["encrypted_content"], encrypted_content)
 
+    def test_official_passthrough_drops_foreign_reasoning_item_as_a_whole(self):
+        upstream = choose_upstream("gpt-5.5")
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "store": False,
+                "stream": True,
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_external_not_on_openai",
+                        "summary": [{"type": "summary_text", "text": "foreign summary"}],
+                        "encrypted_content": None,
+                    },
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            upstream,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"], [{"type": "message", "role": "user", "content": "continue"}])
+        self.assertNotIn("rs_external_not_on_openai", transformed.decode("utf-8"))
+        self.assertNotIn("foreign summary", transformed.decode("utf-8"))
+
+    def test_official_passthrough_keeps_portable_reasoning_and_tool_history_order(self):
+        upstream = choose_upstream("gpt-5.5")
+        encrypted_content = "gAAAAABqQFxWldgz0tjB8nSg51Eg5_bsIdx_8n85wX2RQLunO8HVW1mm"
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "store": False,
+                "input": [
+                    {"type": "message", "role": "user", "content": "use the tool"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_keep_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    },
+                    {"type": "function_call_output", "call_id": "call_keep_1", "output": "ok"},
+                    {
+                        "type": "reasoning",
+                        "id": "rs_official_portable",
+                        "summary": [],
+                        "encrypted_content": encrypted_content,
+                    },
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            upstream,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual([item["type"] for item in payload["input"]], [
+            "message",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+        ])
+        self.assertEqual(payload["input"][1]["call_id"], "call_keep_1")
+        self.assertEqual(payload["input"][2]["call_id"], "call_keep_1")
+        self.assertEqual(payload["input"][3]["encrypted_content"], encrypted_content)
+
+    def test_official_passthrough_sanitizes_reasoning_in_nested_input_containers(self):
+        upstream = choose_upstream("gpt-5.5")
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "store": False,
+                "input": [
+                    {
+                        "type": "tool_result_container",
+                        "input": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_nested_external",
+                                "encrypted_content": "provider-local",
+                            },
+                            {"type": "message", "role": "user", "content": "keep"},
+                        ],
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            upstream,
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            payload["input"][0]["input"],
+            [{"type": "message", "role": "user", "content": "keep"}],
+        )
+        self.assertNotIn("rs_nested_external", transformed.decode("utf-8"))
+
     def test_ollama_body_leaves_non_xhigh_reasoning_values_unchanged(self):
         upstream = choose_upstream("glm-5.2")
         for effort in ("low", "medium", "high", "max", "none"):

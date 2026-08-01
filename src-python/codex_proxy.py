@@ -2891,6 +2891,60 @@ def _sanitize_official_reasoning_items(value: Any) -> bool:
     return changed
 
 
+def _sanitize_official_input_reasoning_items(payload: dict[str, Any]) -> tuple[bool, dict[str, int]]:
+    """Remove non-portable reasoning references at the Official input boundary.
+
+    Codex stores third-party Responses reasoning items in the shared task
+    history.  An Official ``store=false`` request cannot resolve those
+    provider-local IDs, so forwarding the whole item turns a model switch into
+    a permanent 404/reconnect loop.  Only a self-contained Official encrypted
+    item is portable; every other reasoning item is dropped as a whole.  The
+    walk is deliberately limited to input containers so response metadata,
+    tool schemas, and ordinary transcript fields remain untouched.
+    """
+
+    counts = {
+        "removed_non_portable": 0,
+        "kept_official_encrypted": 0,
+    }
+
+    def sanitize_input_list(items: list[Any]) -> tuple[list[Any], bool]:
+        changed = False
+        rewritten: list[Any] = []
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                encrypted_content = item.get("encrypted_content")
+                if _looks_like_official_encrypted_content(encrypted_content):
+                    counts["kept_official_encrypted"] += 1
+                    rewritten.append(item)
+                else:
+                    counts["removed_non_portable"] += 1
+                    changed = True
+                continue
+
+            if isinstance(item, list):
+                nested_items, nested_changed = sanitize_input_list(item)
+                if nested_changed:
+                    item = nested_items
+                    changed = True
+            elif isinstance(item, dict) and isinstance(item.get("input"), list):
+                nested_items, nested_changed = sanitize_input_list(item["input"])
+                if nested_changed:
+                    item = {**item, "input": nested_items}
+                    changed = True
+            rewritten.append(item)
+        return rewritten, changed
+
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False, counts
+
+    rewritten_items, changed = sanitize_input_list(input_items)
+    if changed:
+        payload["input"] = rewritten_items
+    return changed, counts
+
+
 def _strip_reasoning_encrypted_content(value: Any) -> bool:
     changed = False
 
@@ -9078,6 +9132,15 @@ def official_passthrough_request_body(
         changed = True
     if next_payload.get("store") is not False:
         next_payload["store"] = False
+        changed = True
+    reasoning_changed, reasoning_counts = _sanitize_official_input_reasoning_items(next_payload)
+    if reasoning_changed:
+        write_proxy_event(
+            "official_reasoning_history_sanitized",
+            upstream="official",
+            reasoning_items_removed=reasoning_counts["removed_non_portable"],
+            reasoning_items_kept_official_encrypted=reasoning_counts["kept_official_encrypted"],
+        )
         changed = True
     if not changed:
         return body
