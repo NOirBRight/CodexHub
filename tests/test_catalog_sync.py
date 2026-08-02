@@ -733,6 +733,146 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertNotIn("tool_mode", by_slug[slug])
                 self.assertNotIn("multi_agent_version", by_slug[slug])
 
+    def test_sync_catalog_preserves_legacy_luna_multi_agent_override_across_restart(self):
+        official = [
+            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            generated = root / "model-catalogs" / catalog_sync.GENERATED_CATALOG_FILENAME
+            baseline = root / "model-catalogs" / catalog_sync.MANAGED_CATALOG_BASELINE_FILENAME
+            overrides = root / "model-catalogs" / catalog_sync.CATALOG_OVERRIDES_FILENAME
+            state_path = root / "model-catalogs" / "state.json"
+
+            def run_sync() -> dict:
+                with (
+                    patch.object(catalog_sync, "GENERATED_CATALOG_PATH", generated),
+                    patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                    patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides),
+                    patch.object(catalog_sync, "GENERATED_STATE_PATH", state_path),
+                    patch("catalog_sync.catalog_cache_is_fresh", return_value=False),
+                    patch("catalog_sync.load_policy", return_value=self.policy),
+                    patch("catalog_sync.load_include_official_models", return_value=True),
+                    patch("catalog_sync.load_official_model_sort_order", return_value=[]),
+                    patch("catalog_sync.load_official_disabled_models", return_value=[]),
+                    patch("catalog_sync.load_official_seed_snapshot", return_value=catalog_sync.OfficialSeedSnapshot(official, "direct", "fresh", True)),
+                    patch("catalog_sync.load_previous_official_context_budgets", return_value={}),
+                    patch("catalog_sync.load_fresh_direct_official_cache_authority", return_value=None),
+                    patch("catalog_sync.official_context_signals_from_snapshot", return_value={}),
+                    patch("catalog_sync.load_fallback_catalog_models", return_value=[]),
+                    patch("catalog_sync.read_client_version", return_value="0.146.0"),
+                    patch("catalog_sync.discover_ollama_ids", return_value=([], "test", "ok", "")),
+                    patch("catalog_sync.load_providers", return_value=[]),
+                    patch("catalog_sync.catalog_visible_ollama_cloud_models", return_value=(False, [])),
+                    patch("catalog_sync.catalog_visible_external_models", return_value=[]),
+                    patch("catalog_sync.discover_ollama_model_metadata", return_value=({}, "")),
+                ):
+                    return catalog_sync.sync_catalog()
+
+            run_sync()
+            initial = json.loads(generated.read_text(encoding="utf-8"))
+            initial["models"][0]["multi_agent_version"] = "v2"
+            generated.write_text(json.dumps(initial), encoding="utf-8")
+
+            state = run_sync()
+            effective = json.loads(generated.read_text(encoding="utf-8"))
+            managed = json.loads(baseline.read_text(encoding="utf-8"))
+            override_state = json.loads(overrides.read_text(encoding="utf-8"))
+
+            self.assertEqual(effective["models"][0]["multi_agent_version"], "v2")
+            self.assertEqual(managed["models"][0]["multi_agent_version"], "v1")
+            self.assertEqual(override_state["overrides"][0]["fields"], {"multi_agent_version": "v2"})
+            self.assertEqual(state["catalog_override_diagnostics"]["accepted"], 1)
+
+            # A second restart is idempotent and must not duplicate the sidecar
+            # entry or drift the effective value.
+            run_sync()
+            repeated = json.loads(generated.read_text(encoding="utf-8"))
+            repeated_overrides = json.loads(overrides.read_text(encoding="utf-8"))
+            self.assertEqual(repeated["models"][0]["multi_agent_version"], "v2")
+            self.assertEqual(len(repeated_overrides["overrides"]), 1)
+
+    def test_catalog_override_does_not_copy_official_planner_metadata_to_external_model(self):
+        external = {
+            "alias": "volc/gpt-5.6-luna",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "gpt-5.6-luna",
+        }
+        model = catalog_sync.build_external_provider_model(external, self.policy, None)
+        self.assertNotIn("multi_agent_version", model)
+        self.assertNotIn("tool_mode", model)
+        self.assertNotIn("prefer_websockets", model)
+
+    def test_catalog_override_rejects_invalid_unknown_and_cross_provider_entries(self):
+        valid_identity = ("openai", "official", "gpt-5.6-luna")
+        cases = {
+            "external-provider": {
+                "provider": "volc",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-luna",
+                "fields": {"multi_agent_version": "v2"},
+            },
+            "unknown-official": {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-9.9-luna",
+                "fields": {"multi_agent_version": "v2"},
+            },
+            "invalid-shape": {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-luna",
+                "fields": {"use_responses_lite": False},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "overrides.json"
+            path.write_text(
+                json.dumps({"schema_version": 1, "overrides": list(cases.values())}),
+                encoding="utf-8",
+            )
+            self.assertEqual(catalog_sync._load_catalog_override_state(path), {})
+            self.assertTrue(
+                catalog_sync._planner_override_is_valid(
+                    valid_identity,
+                    {"multi_agent_version": "v2"},
+                )
+            )
+
+    def test_catalog_override_matches_exact_identity_not_slug(self):
+        official_identity = ("openai", "official", "gpt-5.6-luna")
+        external_model = {
+            "slug": "volc/gpt-5.6-luna",
+            "codex_proxy_metadata": {
+                "provider": "volc",
+                "upstream_name": "volcengine",
+                "upstream_model": "gpt-5.6-luna",
+            },
+        }
+        catalog = {"models": [external_model]}
+        catalog_sync._apply_catalog_overrides(
+            catalog,
+            {official_identity: {"multi_agent_version": "v2"}},
+            {"accepted": 0, "rejected": 0},
+        )
+        self.assertNotIn("multi_agent_version", external_model)
+
+    def test_catalog_override_is_removed_when_managed_baseline_catches_up(self):
+        identity = ("openai", "official", "gpt-5.6-luna")
+        current = {"multi_agent_version": "v2"}
+        old_baseline = {"multi_agent_version": "v1"}
+        new_baseline = {"multi_agent_version": "v2"}
+
+        self.assertEqual(
+            catalog_sync._delta_override_fields(identity, current, old_baseline),
+            {"multi_agent_version": "v2"},
+        )
+        self.assertEqual(
+            catalog_sync._delta_override_fields(identity, current, new_baseline),
+            {},
+        )
+
     def test_pinned_official_catalog_metadata_rejects_an_incomplete_model_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "official-models.json"
