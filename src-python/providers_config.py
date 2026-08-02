@@ -331,12 +331,13 @@ def build_ollama_cloud_model_index(
                 alias_id = canonical_model_id(model_alias)
                 if not alias_id:
                     continue
-                _insert_provider_model_identity(result, alias_id, entry)
-                _insert_provider_model_identity(
-                    result,
-                    canonical_model_id(f"{provider_id}/{alias_id}"),
-                    entry,
-                )
+                alias_entry = dict(entry)
+                alias_entry["matched_alias"] = alias_id
+                _insert_provider_model_identity(result, alias_id, alias_entry)
+                qualified_alias = canonical_model_id(f"{provider_id}/{alias_id}")
+                qualified_alias_entry = dict(entry)
+                qualified_alias_entry["matched_alias"] = qualified_alias
+                _insert_provider_model_identity(result, qualified_alias, qualified_alias_entry)
     return configured, result
 
 

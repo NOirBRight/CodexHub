@@ -95,12 +95,14 @@ from codex_semantic_adapter import (
 )
 
 from catalog import (
+    CatalogVisibility,
     CatalogPolicy,
     canonical_model_id,
     deny_match_model_id,
     is_internal_model,
     load_catalog_models,
     load_policy,
+    model_visibility,
     should_include_external_provider_model,
     should_include_model,
 )
@@ -2559,6 +2561,38 @@ def _catalog_failure(
     )
 
 
+def _is_internal_route_identity(value: Any) -> bool:
+    """Return whether any route/config identity reserves the internal reviewer slug."""
+
+    values: list[Any]
+    if isinstance(value, Mapping):
+        if is_internal_model(value):
+            return True
+        values = [
+            value.get(key)
+            for key in (
+                "id",
+                "slug",
+                "model",
+                "name",
+                "alias",
+                "matched_alias",
+                "model_id",
+                "upstream_model",
+            )
+        ]
+    else:
+        values = [value]
+
+    for raw_value in values:
+        if not isinstance(raw_value, str):
+            continue
+        identity = canonical_model_id(raw_value).strip().lower()
+        if identity and any(part.strip() == "codex-auto-review" for part in identity.split("/")):
+            return True
+    return False
+
+
 def _safe_error_identity(value: Any) -> str | None:
     """Keep credential-like or malformed identities out of error payloads."""
 
@@ -2582,10 +2616,18 @@ def _validate_published_catalog_model_for_provider(
 ) -> None:
     """Reject catalog rows that are internal, unsupported, or cross-provider."""
 
-    if is_internal_model(model):
+    if _is_internal_route_identity(model):
         raise _identity_failure(
             f"model identity is internal and cannot be routed: {model_slug}",
             reason="internal_model",
+            provider_id=provider_id,
+            model_slug=model_slug,
+        )
+    visibility = model_visibility(model, missing_is_list=True)
+    if visibility is not CatalogVisibility.LIST:
+        raise _catalog_failure(
+            "published catalog model is not explicitly listable",
+            reason="unsupported_visibility",
             provider_id=provider_id,
             model_slug=model_slug,
         )
@@ -2605,6 +2647,13 @@ def _validate_published_catalog_model_for_provider(
             model_slug=model_slug,
         )
     metadata = model.get("codex_proxy_metadata")
+    if "codex_proxy_metadata" in model and not isinstance(metadata, Mapping):
+        raise _catalog_failure(
+            "published catalog model metadata is malformed",
+            reason="malformed_metadata",
+            provider_id=provider_id,
+            model_slug=model_slug,
+        )
     if isinstance(metadata, Mapping):
         catalog_provider = canonical_model_id(str(metadata.get("provider") or ""))
         allowed_providers = {provider_id, provider_id.replace("-", "_")}
@@ -2721,7 +2770,7 @@ def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | N
     model = _published_catalog_model(upstream_model)
     if not model:
         return None
-    if is_internal_model(model):
+    if _is_internal_route_identity(model):
         raise _identity_failure(
             f"model identity is internal and cannot be routed: {slug}",
             reason="internal_model",
@@ -2857,6 +2906,20 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
             provider_id="ollama-cloud",
             model_slug=slug,
         )
+    if _is_internal_route_identity(slug) or _is_internal_route_identity(runtime_model):
+        raise _identity_failure(
+            f"model identity is internal and cannot be routed: {slug}",
+            reason="internal_model",
+            provider_id="ollama-cloud",
+            model_slug=slug,
+        )
+    if runtime_model.get("matched_alias"):
+        raise _identity_failure(
+            "model aliases are presentation-only and cannot authorize routing",
+            reason="model_alias_not_routable",
+            provider_id="ollama-cloud",
+            model_slug=slug,
+        )
 
     policy_alias = runtime_model.get("alias", f"{OLLAMA_CLOUD_ALIAS_PREFIX}{slug}")
     upstream_model = runtime_model.get("upstream_model")
@@ -2873,13 +2936,6 @@ def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] 
         raise _catalog_failure(
             "Ollama Cloud configuration model identity does not match the request",
             reason="configured_model_mismatch",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    if is_internal_model(runtime_model):
-        raise _identity_failure(
-            f"model identity is internal and cannot be routed: {slug}",
-            reason="internal_model",
             provider_id="ollama-cloud",
             model_slug=slug,
         )
@@ -3035,6 +3091,13 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
 
     external_model = _resolve_external_model_alias(slug)
     if external_model is not None:
+        if _is_internal_route_identity(slug) or _is_internal_route_identity(external_model):
+            raise _identity_failure(
+                f"model identity is internal and cannot be routed: {slug}",
+                reason="internal_model",
+                provider_id=str(external_model.get("provider_alias") or "") or None,
+                model_slug=slug,
+            )
         policy_alias = external_model.get("alias", slug)
         if policy_denies_any_model((slug, policy_alias, external_model.get("matched_alias")), policy):
             raise _identity_failure(

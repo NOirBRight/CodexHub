@@ -242,6 +242,131 @@ def test_bare_ollama_catalog_fallback_includes_exact_upstream_identity():
     assert upstream["upstream_model"] == "glm-5.2"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("visibility", "hide"), ("visibility", "future"), ("hidden", True)],
+)
+def test_ollama_catalog_rejects_non_listable_visibility_before_io(field, value):
+    row = _catalog_row(
+        "ollama-cloud/glm-5.2",
+        provider="ollama-cloud",
+        upstream_model="glm-5.2",
+    )
+    row[field] = value
+    catalog = {"ollama-cloud/glm-5.2": row}
+
+    with (
+        patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None)),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("ollama-cloud/glm-5.2")
+
+    assert failure.value.classification == "catalog_inconsistency"
+    assert failure.value.reason == "unsupported_visibility"
+    urlopen.assert_not_called()
+
+
+def test_ollama_catalog_rejects_malformed_metadata_before_io():
+    row = _catalog_row(
+        "ollama-cloud/glm-5.2",
+        provider="ollama-cloud",
+        upstream_model="glm-5.2",
+    )
+    row["codex_proxy_metadata"] = "not-an-object"
+
+    with (
+        patch("codex_proxy.generated_catalog_by_slug", return_value={"ollama-cloud/glm-5.2": row}),
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None)),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("ollama-cloud/glm-5.2")
+
+    assert failure.value.classification == "catalog_inconsistency"
+    assert failure.value.reason == "malformed_metadata"
+    urlopen.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("requested", "field", "value"),
+    [
+        ("ollama-cloud/codex-auto-review", "alias", "ollama-cloud/codex-auto-review"),
+        ("codex-auto-review", "model_id", "codex-auto-review"),
+    ],
+)
+def test_ollama_runtime_rejects_internal_route_identity_before_io(requested, field, value):
+    runtime_model = {
+        "alias": "ollama-cloud/glm-5.2",
+        "provider_alias": "ollama-cloud",
+        "upstream_name": "ollama_cloud",
+        "base_url": "https://ollama.example.test/v1",
+        "api_key": "ollama-runtime-token",
+        "upstream_model": "glm-5.2",
+        field: value,
+    }
+
+    with (
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, runtime_model)),
+        patch("codex_proxy.resolve_external_model_alias", return_value=None),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream(requested)
+
+    assert failure.value.classification == "local_resolution_failure"
+    assert failure.value.reason == "internal_model"
+    urlopen.assert_not_called()
+
+
+def test_external_runtime_rejects_provider_qualified_internal_alias_before_io():
+    external = {
+        "alias": "volc/codex-auto-review",
+        "provider_alias": "volc",
+        "upstream_name": "volcengine",
+        "base_url": "https://example.test/v1",
+        "api_key": "test-key",
+        "upstream_model": "glm-5.2",
+    }
+
+    with (
+        patch("codex_proxy.resolve_external_model_alias", return_value=external),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("volc/codex-auto-review")
+
+    assert failure.value.classification == "local_resolution_failure"
+    assert failure.value.reason == "internal_model"
+    urlopen.assert_not_called()
+
+
+@pytest.mark.parametrize("requested", ["legacy-display", "ollama-cloud/legacy-display"])
+def test_ollama_runtime_alias_is_presentation_only(requested):
+    providers = [
+        ProviderConfig(
+            id="ollama-cloud",
+            name="Ollama",
+            base_url="https://ollama.example.test/v1",
+            api_key="test-key",
+            models=[ModelConfig(id="glm-5.2", aliases=("legacy-display",))],
+        )
+    ]
+    _, index = build_ollama_cloud_model_index(providers, require_api_key=False)
+
+    with (
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(True, index[requested])),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream(requested)
+
+    assert failure.value.classification == "local_resolution_failure"
+    assert failure.value.reason == "model_alias_not_routable"
+    urlopen.assert_not_called()
+
+
 def test_provider_model_index_rejects_duplicate_exact_ids_and_alias_collisions():
     providers = [
         ProviderConfig(
