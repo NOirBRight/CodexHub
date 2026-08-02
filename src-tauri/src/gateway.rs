@@ -1981,10 +1981,10 @@ fn official_models(settings: &Settings) -> Vec<GatewayModel> {
     // descriptive fields, but must never reintroduce a builtin fallback limit.
     let published_context_windows = official_refresh::published_official_context_windows()
         .unwrap_or_default();
-    let source_models = models::list_cached_official_subscription_models()
-        .ok()
-        .filter(|models| !models.is_empty())
-        .or_else(|| models::list_models().ok().filter(|models| !models.is_empty()));
+    let source_models = match models::list_cached_official_subscription_models_with_presence() {
+        Ok(Some(models)) => Some(models),
+        Ok(None) | Err(_) => models::list_models_with_presence().ok().flatten(),
+    };
     official_models_from_metadata(settings, source_models, &published_context_windows)
 }
 
@@ -2002,13 +2002,16 @@ fn official_models_from_metadata(
         return Vec::new();
     }
     let mut models: Vec<GatewayModel> =
-        match subscription_models.filter(|models| !models.is_empty()) {
+        match subscription_models {
             Some(source_models) => {
                 let mut models = Vec::<GatewayModel>::new();
                 let mut positions = HashMap::<String, usize>::new();
                 let mut bare_sources = HashMap::<String, bool>::new();
                 let mut enabled_by_id = HashMap::<String, bool>::new();
                 for model in source_models {
+                    if !models::model_is_catalog_visible(&model) {
+                        continue;
+                    }
                     let source_is_bare = !model.id.trim().starts_with("openai/");
                     let source_enabled = model.enabled;
                     let Some(gateway_model) = official_gateway_model_from_metadata(
@@ -8039,6 +8042,18 @@ mod tests {
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].display_name, "5.6 Sol");
         assert_eq!(models[0].context_window, Some(272_000));
+    }
+
+    #[test]
+    fn official_gateway_models_do_not_fallback_when_authoritative_catalog_is_empty() {
+        let published_contexts = published_context_windows(&[("gpt-5.6-terra", 272_000)]);
+        let models = official_models_from_metadata(
+            &Settings::default(),
+            Some(Vec::new()),
+            &published_contexts,
+        );
+
+        assert!(models.is_empty());
     }
 
     #[test]

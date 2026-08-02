@@ -1,6 +1,6 @@
 use crate::{
-    config, runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, Settings,
-    UpstreamFormat,
+    config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
+    Settings, UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -19,6 +19,7 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
 const RESOLVED_MODEL_LIMITS_JSON: &str = include_str!("../../config/resolved_model_limits.json");
@@ -253,13 +254,17 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
 }
 
 pub fn list_models() -> Result<Vec<Model>, String> {
+    Ok(list_models_with_presence()?.unwrap_or_default())
+}
+
+pub(crate) fn list_models_with_presence() -> Result<Option<Vec<Model>>, String> {
     let paths = ModelPaths::runtime()?;
     let catalog_path = paths.existing_generated_catalog_path();
     if !catalog_path.exists() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
 
-    read_catalog_models(&catalog_path)
+    read_catalog_models(&catalog_path).map(Some)
 }
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
@@ -273,16 +278,18 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
         &known_official_models,
     );
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    Ok(merge_metadata_with_overrides(
+    let merged = merge_metadata_with_overrides(
         cached,
         overrides,
         &known_official_models,
-    ))
+    );
+    Ok(merged.into_iter().filter(model_is_catalog_visible).collect())
 }
 
-pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
+pub(crate) fn list_cached_official_subscription_models_with_presence(
+) -> Result<Option<Vec<Model>>, String> {
     let paths = ModelPaths::runtime()?;
-    read_official_subscription_models_from_cache(&paths)
+    read_official_subscription_models_from_cache_with_presence(&paths)
 }
 
 pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
@@ -351,10 +358,54 @@ fn refresh_official_models_direct_with_runner(
 ) -> Result<Vec<Model>, String> {
     let subscription_models = runner
         .read_model_list()
-        .and_then(|payload| subscription_models_from_app_server_payload(&payload))?;
+        .and_then(|payload| {
+            let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
+            let subscription_models = subscription_models_from_app_server_payload(&payload)?;
+            Ok((subscription_models, visibility_diagnostics))
+        })?;
+    let (subscription_models, visibility_diagnostics) = subscription_models;
     let models = subscription_models_to_metadata_models(&subscription_models);
-    write_official_subscription_caches(paths, &subscription_models, &models)?;
+    write_official_subscription_caches(
+        paths,
+        &subscription_models,
+        &models,
+        &visibility_diagnostics,
+    )?;
     Ok(models)
+}
+
+fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
+    let items = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array());
+    let mut counts = Map::from_iter([
+        ("hidden".to_string(), json!(0u64)),
+        ("unknown".to_string(), json!(0u64)),
+        ("internal".to_string(), json!(0u64)),
+    ]);
+    for item in items.into_iter().flatten() {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let key = if item_has_internal_identity(object) {
+            "internal"
+        } else {
+            match catalog_visibility_from_item(object) {
+                CatalogVisibility::Hide => "hidden",
+                CatalogVisibility::Unknown => "unknown",
+                CatalogVisibility::List => continue,
+            }
+        };
+        if let Some(count) = counts.get(key).and_then(Value::as_u64) {
+            counts.insert(
+                key.to_string(),
+                json!(count.saturating_add(1).min(MAX_VISIBILITY_DIAGNOSTIC_COUNT)),
+            );
+        }
+    }
+    Value::Object(counts)
 }
 
 fn read_codex_app_server_model_list() -> Result<Value, String> {
@@ -628,11 +679,7 @@ struct ReasoningLevelEntry {
 fn subscription_models_from_app_server_payload(
     payload: &Value,
 ) -> Result<Vec<OfficialSubscriptionModel>, String> {
-    let models = subscription_models_from_payload(payload)?;
-    if models.is_empty() {
-        return Err("Codex subscription model list did not include visible GPT models".to_string());
-    }
-    Ok(models)
+    subscription_models_from_payload(payload)
 }
 
 fn subscription_models_from_payload(
@@ -850,12 +897,76 @@ fn is_pinned_official_legacy_model(slug: &str) -> bool {
     matches!(slug, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini")
 }
 
+const INTERNAL_MODEL_IDENTIFIERS: &[&str] = &["codex-auto-review"];
+
+pub(crate) fn model_is_catalog_visible(model: &Model) -> bool {
+    if model.visibility != CatalogVisibility::List {
+        return false;
+    }
+    let mut identities = vec![model.id.as_str()];
+    if let Some(upstream_model) = model.upstream_model.as_deref() {
+        identities.push(upstream_model);
+    }
+    identities.extend(model.aliases.iter().map(String::as_str));
+    !identities.iter().any(|value| {
+        let normalized = value
+            .trim()
+            .strip_prefix("openai/")
+            .unwrap_or(value.trim())
+            .to_ascii_lowercase();
+        let normalized = normalized.strip_suffix(":cloud").unwrap_or(&normalized);
+        INTERNAL_MODEL_IDENTIFIERS.iter().any(|identifier| {
+            normalized == *identifier || normalized.starts_with(&format!("{identifier}/"))
+        })
+    })
+}
+
+fn catalog_visibility_from_item(object: &Map<String, Value>) -> CatalogVisibility {
+    if object.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return CatalogVisibility::Hide;
+    }
+    match object
+        .get("visibility")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("list") => CatalogVisibility::List,
+        Some("hide") => CatalogVisibility::Hide,
+        Some(_) => CatalogVisibility::Unknown,
+        None if object.get("hidden").and_then(Value::as_bool) == Some(false) => {
+            CatalogVisibility::List
+        }
+        None => CatalogVisibility::Unknown,
+    }
+}
+
+fn item_has_internal_identity(object: &Map<String, Value>) -> bool {
+    object
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "id" | "slug" | "model" | "name" | "upstream_model"
+            )
+        })
+        .filter_map(|(_, value)| value.as_str())
+        .map(str::trim)
+        .map(|value| value.strip_prefix("openai/").unwrap_or(value))
+        .map(str::to_ascii_lowercase)
+        .map(|value| value.strip_suffix(":cloud").unwrap_or(&value).to_string())
+        .any(|value| {
+            INTERNAL_MODEL_IDENTIFIERS.iter().any(|identifier| {
+                value == *identifier || value.starts_with(&format!("{identifier}/"))
+            })
+        })
+}
+
 fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionModel> {
     let object = item.as_object()?;
-    if object
-        .get("hidden")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if item_has_internal_identity(object)
+        || catalog_visibility_from_item(object) != CatalogVisibility::List
     {
         return None;
     }
@@ -946,6 +1057,7 @@ fn subscription_models_to_metadata_models(
             locked: true,
             codex_enabled: true,
             gateway_exported: true,
+            visibility: CatalogVisibility::List,
             context_window: subscription_model
                 .context_window
                 .or_else(|| defaults.and_then(|model| model.context_window)),
@@ -1005,28 +1117,41 @@ fn write_official_subscription_caches(
     paths: &ModelPaths,
     subscription_models: &[OfficialSubscriptionModel],
     metadata_models: &[Model],
+    visibility_diagnostics: &Value,
 ) -> Result<(), String> {
     write_models_json(&paths.metadata_cache_path(), metadata_models)?;
     write_official_subscription_seed(
         &paths.official_subscription_cache_path(),
         subscription_models,
+        visibility_diagnostics,
     )
 }
 
-fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+fn read_official_subscription_models_from_cache_with_presence(
+    paths: &ModelPaths,
+) -> Result<Option<Vec<Model>>, String> {
+    if !paths.official_subscription_cache_path().exists() {
+        return Ok(None);
+    }
     let payload = load_json_file(&paths.official_subscription_cache_path())?;
     let subscription_models = subscription_models_from_payload(&payload)?;
-    if subscription_models.is_empty() {
-        return Err(
+    Ok(Some(subscription_models_to_metadata_models(&subscription_models)))
+}
+
+fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    match read_official_subscription_models_from_cache_with_presence(paths)? {
+        Some(models) if !models.is_empty() => Ok(models),
+        Some(_) => Err(
             "cached Codex subscription model list did not include visible GPT models".to_string(),
-        );
+        ),
+        None => Err("cached Codex subscription model list is missing".to_string()),
     }
-    Ok(subscription_models_to_metadata_models(&subscription_models))
 }
 
 fn write_official_subscription_seed(
     path: &Path,
     subscription_models: &[OfficialSubscriptionModel],
+    visibility_diagnostics: &Value,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1039,6 +1164,7 @@ fn write_official_subscription_seed(
     let payload = json!({
         "client_version": env!("CARGO_PKG_VERSION"),
         "fetched_at": current_unix_timestamp(),
+        "visibility_diagnostics": visibility_diagnostics,
         "models": models,
     });
     let text = serde_json::to_string_pretty(&payload)
@@ -1054,6 +1180,7 @@ fn write_official_subscription_seed(
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
     ensure_responses_lite_opt_in(&mut payload);
+    payload.insert("visibility".to_string(), json!(CatalogVisibility::List));
     payload.insert("slug".to_string(), json!(model.slug));
     payload
         .entry("display_name".to_string())
@@ -2011,6 +2138,14 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
     let original_enabled = base.enabled;
     let original_codex_enabled = base.codex_enabled;
     let original_gateway_exported = base.gateway_exported;
+    let original_visibility = base.visibility;
+    let visibility = match (original_visibility, override_model.visibility) {
+        (CatalogVisibility::Hide, _) | (_, CatalogVisibility::Hide) => CatalogVisibility::Hide,
+        (CatalogVisibility::Unknown, _) | (_, CatalogVisibility::Unknown) => {
+            CatalogVisibility::Unknown
+        }
+        _ => CatalogVisibility::List,
+    };
     let aliases = merge_model_aliases(base.aliases.clone(), override_model.aliases);
     *base = Model {
         id: override_model.id,
@@ -2024,6 +2159,7 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         locked: base.locked || override_model.locked,
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
+        visibility,
         context_window: override_model.context_window.or(base.context_window),
         max_context_window: override_model.max_context_window.or(base.max_context_window),
         effective_source: override_model.effective_source.or(base.effective_source.take()),
@@ -2282,6 +2418,19 @@ fn priced_metadata(
 
 fn catalog_model_from_item(item: &Value) -> Option<Model> {
     let object = item.as_object()?;
+    // Generated catalogs predate the typed visibility field and also contain
+    // trusted third-party provider entries that never carried an upstream
+    // visibility flag.  Preserve that legacy list default at this boundary;
+    // raw app-server/upstream ingestion remains fail-closed through
+    // `subscription_model_from_item` and `catalog_visibility_from_item`.
+    let listable = if object.contains_key("visibility") || object.contains_key("hidden") {
+        catalog_visibility_from_item(object) == CatalogVisibility::List
+    } else {
+        true
+    };
+    if item_has_internal_identity(object) || !listable {
+        return None;
+    }
     let id = object
         .get("slug")
         .or_else(|| object.get("id"))
@@ -2353,6 +2502,7 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .get("gateway_exported")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        visibility: CatalogVisibility::List,
         pricing: None,
         metadata_provenance: None,
     })
@@ -2470,12 +2620,13 @@ mod tests {
     use super::{
         desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
-        list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        list_models, load_json_file, merge_metadata_with_overrides, ollama_show_endpoint,
+        provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
         subscription_models_from_payload, subscription_models_to_metadata_models,
-        test_model_endpoint_with_timeout, AppServerModelListRunner, CatalogCommandOutcome,
-        CatalogSyncRunner, ModelPaths,
+        test_model_endpoint_with_timeout, visibility_diagnostics_from_payload,
+        AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
     use crate::{MetadataProvenance, Model, Settings, ToolSurfaceStrategy, UpstreamFormat};
     use reqwest::blocking::Client;
@@ -2773,6 +2924,62 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn subscription_models_apply_typed_visibility_and_internal_identity_policy() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "visibility": "hide",
+                    "hidden": false
+                },
+                {
+                    "id": "codex-auto-review",
+                    "model": "gpt-5.6-terra",
+                    "slug": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false
+                },
+                {
+                    "id": "gpt-5.6-luna",
+                    "model": "gpt-5.6-luna",
+                    "visibility": "future",
+                    "hidden": false
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let models = subscription_models_to_metadata_models(&subscription_models);
+
+        assert_eq!(model_ids(&models), ["gpt-5.6-terra"]);
+        assert_eq!(models[0].visibility, crate::CatalogVisibility::List);
+    }
+
+    #[test]
+    fn visibility_diagnostics_are_bounded_and_secret_free() {
+        let diagnostics = visibility_diagnostics_from_payload(&json!({
+            "data": [
+                {"id": "gpt-5.6-sol", "visibility": "hide"},
+                {"id": "gpt-5.6-luna", "visibility": "future"},
+                {"id": "codex-auto-review", "model": "gpt-5.6-terra", "visibility": "list"},
+                {"id": "gpt-5.6-terra", "visibility": "list"}
+            ]
+        }));
+
+        assert_eq!(diagnostics["hidden"], 1);
+        assert_eq!(diagnostics["unknown"], 1);
+        assert_eq!(diagnostics["internal"], 1);
+        assert!(!diagnostics.to_string().contains("gpt-5.6"));
+    }
+
+    #[test]
     fn subscription_refresh_converts_visible_codex_models_and_writes_caches() {
         let root = temp_root("subscription-refresh");
         let paths = test_paths(&root);
@@ -2862,6 +3069,35 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn subscription_refresh_preserves_empty_visibility_snapshot_and_diagnostics() {
+        let root = temp_root("subscription-empty-visibility-refresh");
+        let paths = test_paths(&root);
+        let runner = StaticAppServerModelListRunner::ok(json!({
+            "data": [
+                {"id": "gpt-hidden", "visibility": "hide"},
+                {"id": "gpt-unknown", "visibility": "future"},
+                {
+                    "id": "codex-auto-review",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list"
+                }
+            ]
+        }));
+
+        let models = refresh_official_models_with_runner(&paths, &runner)
+            .expect("empty visibility snapshot should publish fail-closed");
+
+        assert!(models.is_empty());
+        let payload = load_json_file(&paths.official_subscription_cache_path())
+            .expect("empty official subscription cache");
+        assert_eq!(payload["models"].as_array().map(Vec::len), Some(0));
+        assert_eq!(payload["visibility_diagnostics"]["hidden"], 1);
+        assert_eq!(payload["visibility_diagnostics"]["unknown"], 1);
+        assert_eq!(payload["visibility_diagnostics"]["internal"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn subscription_seed_preserves_app_cli_metadata_and_simple_slider_presets() {
         let subscription_models = subscription_models_from_payload(&json!({
             "data": [
@@ -2869,6 +3105,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-terra",
                     "model": "gpt-5.6-terra",
                     "displayName": "GPT-5.6-Terra",
+                    "hidden": false,
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low", "description": "Light"},
                         {"reasoningEffort": "medium", "description": "Medium"},
@@ -2883,6 +3120,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
                     "displayName": "GPT-5.6-Sol",
+                    "hidden": false,
                     "context_window": 400000,
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low", "description": "Light"},
@@ -2953,12 +3191,13 @@ for line in sys.stdin:
     fn subscription_seed_backfills_pinned_official_planner_metadata_per_model() {
         let subscription_models = subscription_models_from_payload(&json!({
             "data": [
-                {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol"},
-                {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra"},
-                {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna"},
+                {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "hidden": false},
+                {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "hidden": false},
+                {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna", "hidden": false},
                 {
                     "id": "gpt-5.5",
                     "model": "gpt-5.5",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -2966,6 +3205,7 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.4",
                     "model": "gpt-5.4",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -2973,6 +3213,7 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.4-mini",
                     "model": "gpt-5.4-mini",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -2980,12 +3221,14 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.3-codex-spark",
                     "model": "gpt-5.3-codex-spark",
+                    "hidden": false,
                     "use_responses_lite": true
                 },
-                {"id": "gpt-sparse", "model": "gpt-sparse"},
+                {"id": "gpt-sparse", "model": "gpt-sparse", "hidden": false},
                 {
                     "id": "gpt-explicit-lite",
                     "model": "gpt-explicit-lite",
+                    "hidden": false,
                     "use_responses_lite": true
                 }
             ]
@@ -3091,6 +3334,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
                     "displayName": "GPT-5.6-Sol",
+                    "hidden": false,
                     "context_window": 400000,
                     "max_context_window": 999999
                 }
@@ -3115,7 +3359,8 @@ for line in sys.stdin:
             "data": [
                 {
                     "slug": "openai/gpt-5.6-sol",
-                    "displayName": "GPT-5.6-Sol"
+                    "displayName": "GPT-5.6-Sol",
+                    "hidden": false
                 }
             ]
         }))
@@ -3132,6 +3377,7 @@ for line in sys.stdin:
             "id": "openai/gpt-5.6-sol",
             "model": "openai/gpt-5.6-sol",
             "displayName": "Legacy Sol",
+            "hidden": false,
             "context_window": 1,
             "enabled": true
         });
@@ -3139,13 +3385,15 @@ for line in sys.stdin:
             "id": "gpt-5.6-sol",
             "model": "gpt-5.6-sol",
             "displayName": "GPT-5.6-Sol",
+            "hidden": false,
             "context_window": 400000,
             "enabled": false
         });
         let other = json!({
             "id": "gpt-5.5",
             "model": "gpt-5.5",
-            "displayName": "GPT-5.5"
+            "displayName": "GPT-5.5",
+            "hidden": false
         });
 
         for items in [
@@ -3174,11 +3422,13 @@ for line in sys.stdin:
                 {
                     "id": "openai/gpt-5.6-sol",
                     "model": "openai/gpt-5.6-sol",
+                    "hidden": false,
                     "enabled": false
                 },
                 {
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
+                    "hidden": false,
                     "enabled": false
                 }
             ]
@@ -3202,6 +3452,7 @@ for line in sys.stdin:
                     {
                         "slug": "gpt-cached-subscription",
                         "display_name": "GPT Cached Subscription",
+                        "hidden": false,
                         "input_modalities": ["text"],
                         "supported_reasoning_levels": [
                             {"effort": "medium", "description": "Balanced"}

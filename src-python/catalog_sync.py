@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -15,9 +15,14 @@ from urllib.request import Request, urlopen
 
 from atomic_io import atomic_write_text
 from catalog import (
+    CatalogVisibility,
     CatalogPolicy,
+    MAX_VISIBILITY_DIAGNOSTIC_COUNT,
     canonical_model_id,
+    catalog_visibility_diagnostics,
     display_name_for,
+    is_catalog_model_listable,
+    is_internal_model,
     load_catalog_models,
     load_policy,
     should_include_external_provider_model,
@@ -426,6 +431,10 @@ class OfficialSeedSnapshot:
     models: list[dict[str, Any]]
     source: str
     context_freshness: str
+    source_present: bool = False
+    visibility_diagnostics: dict[str, int] = field(
+        default_factory=lambda: {"hidden": 0, "unknown": 0, "internal": 0}
+    )
 
 
 def _catalog_fetched_at_timestamp(value: Any) -> float | None:
@@ -488,14 +497,51 @@ def load_official_seed_snapshot(
         payload = load_json_file(candidate)
         payload_models = payload.get("models")
         if not isinstance(payload_models, list):
+            if candidate == runtime_path and candidate.exists():
+                freshness = _direct_catalog_context_freshness(payload, now_timestamp)
+                return OfficialSeedSnapshot(
+                    models=[],
+                    source=(
+                        CURRENT_DIRECT_OFFICIAL_SOURCE
+                        if freshness == "fresh"
+                        else "last_known_direct_official"
+                    ),
+                    context_freshness=freshness,
+                    source_present=True,
+                )
             payload_models = []
-        models = [
-            deepcopy(model)
-            for model in payload_models
-            if isinstance(model, dict) and str(model.get("slug", "")).startswith("gpt-")
-        ]
-        if not models:
-            continue
+        reported_diagnostics = payload.get("visibility_diagnostics")
+        if isinstance(reported_diagnostics, dict):
+            def bounded_reported_count(key: str) -> int:
+                value = reported_diagnostics.get(key)
+                return min(
+                    MAX_VISIBILITY_DIAGNOSTIC_COUNT,
+                    value
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    else 0,
+                )
+
+            visibility_diagnostics = {
+                key: bounded_reported_count(key)
+                for key in ("hidden", "unknown", "internal")
+            }
+        else:
+            visibility_diagnostics = catalog_visibility_diagnostics(payload_models)
+        models = []
+        for raw_model in payload_models:
+            if not isinstance(raw_model, dict):
+                continue
+            model = deepcopy(raw_model)
+            if not is_catalog_model_listable(model, missing_is_list=True):
+                continue
+            slug = canonical_model_id(str(model.get("slug", "")))
+            if slug.startswith("openai/gpt-"):
+                slug = slug.removeprefix("openai/")
+            if not slug.startswith("gpt-"):
+                continue
+            model["slug"] = slug
+            model["visibility"] = CatalogVisibility.LIST.value
+            models.append(model)
         if candidate == runtime_path:
             freshness = _direct_catalog_context_freshness(payload, now_timestamp)
             return OfficialSeedSnapshot(
@@ -506,8 +552,17 @@ def load_official_seed_snapshot(
                     else "last_known_direct_official"
                 ),
                 context_freshness=freshness,
+                source_present=True,
+                visibility_diagnostics=visibility_diagnostics,
             )
-        return OfficialSeedSnapshot(models=models, source="bundled_seed", context_freshness="missing")
+        if candidate.exists():
+            return OfficialSeedSnapshot(
+                models=models,
+                source="bundled_seed",
+                context_freshness="missing",
+                source_present=True,
+                visibility_diagnostics=visibility_diagnostics,
+            )
     return OfficialSeedSnapshot(models=[], source="missing", context_freshness="missing")
 
 
@@ -567,6 +622,8 @@ def _direct_official_model_index(
 ) -> dict[str, dict[str, Any]] | None:
     indexed: dict[str, dict[str, Any]] = {}
     for model in models:
+        if is_internal_model(model):
+            continue
         slug = _direct_official_model_identity(model)
         if slug is None or slug in indexed:
             return None
@@ -586,6 +643,8 @@ def _direct_official_cache_model_index(
 
     indexed: dict[str, dict[str, Any]] = {}
     for model in models:
+        if is_internal_model(model):
+            continue
         identities = _direct_official_model_identities(model)
         if identities is None:
             return None
@@ -1229,6 +1288,7 @@ def build_official_proxy_model(
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:
         apply_official_model_defaults(model, slug)
+    model["visibility"] = CatalogVisibility.LIST.value
     normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
     normalize_official_upgrade_for_codex(model)
@@ -1297,6 +1357,8 @@ def normalize_official_upgrade_for_codex(model: dict[str, Any]) -> None:
 def official_model_index(official_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for model in official_models:
+        if not is_catalog_model_listable(model, missing_is_list=True):
+            continue
         raw_slug = canonical_model_id(str(model.get("slug", "")))
         if not raw_slug:
             continue
@@ -1489,12 +1551,23 @@ def build_codex_catalog(
     official_context_signals: dict[str, dict[str, Any]] | None = None,
     use_ollama_policy_allowlist: bool = True,
     fetched_at: str | None = None,
+    official_source_present: bool | None = None,
+    visibility_diagnostics: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     models: list[dict[str, Any]] = []
     seen_slugs: set[str] = set()
+    official_models = list(official_models)
+    if official_source_present is None:
+        official_source_present = bool(official_models)
+    if visibility_diagnostics is None:
+        visibility_diagnostics = catalog_visibility_diagnostics(official_models)
     official_by_slug = official_model_index(official_models)
     disabled_official_slugs = {official_model_disable_key(str(model_id)) for model_id in disabled_official_model_ids or []}
-    official_source_slugs = list(official_by_slug.keys()) or list(policy.official_models)
+    official_source_slugs = (
+        list(official_by_slug.keys())
+        if official_source_present
+        else list(policy.official_models)
+    )
     official_slugs = sort_official_slugs(
         [
             slug
@@ -1547,6 +1620,7 @@ def build_codex_catalog(
     return {
         "fetched_at": fetched_at or utc_now_iso(),
         "client_version": client_version,
+        "visibility_diagnostics": visibility_diagnostics,
         "models": models,
     }
 
@@ -1582,6 +1656,7 @@ def load_cached_state(path: Path = GENERATED_STATE_PATH) -> dict[str, Any]:
         "discovery_status": "cache_missing",
         "discovery_detail": "cached state is missing",
         "metadata_detail": "",
+        "visibility_diagnostics": {"hidden": 0, "unknown": 0, "internal": 0},
         "ollama_model_metadata": {},
         "discovered_ollama_models": [],
         "external_provider_models": [],
@@ -1732,6 +1807,8 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         disabled_official_model_ids=disabled_official_models,
         official_context_signals=official_context_signals,
         use_ollama_policy_allowlist=not ollama_runtime_configured,
+        official_source_present=official_snapshot.source_present,
+        visibility_diagnostics=official_snapshot.visibility_diagnostics,
     )
     visible_slugs = [str(model["slug"]) for model in catalog["models"] if model.get("slug")]
     previous_visible_slugs = load_previous_visible_models(GENERATED_STATE_PATH)
@@ -1743,6 +1820,9 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         "discovery_status": discovery_status,
         "discovery_detail": discovery_detail,
         "metadata_detail": metadata_detail,
+        "visibility_diagnostics": catalog.get(
+            "visibility_diagnostics", {"hidden": 0, "unknown": 0, "internal": 0}
+        ),
         "ollama_model_metadata": ollama_model_metadata,
         "discovered_ollama_models": discovered_slugs,
         "external_provider_models": [str(model["alias"]) for model in external_models],

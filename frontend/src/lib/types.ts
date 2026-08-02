@@ -1,7 +1,9 @@
 export interface Model {
   id: string;
+  visibility?: CatalogVisibility;
   display_name?: string | null;
   upstream_model?: string | null;
+  aliases?: string[];
   tool_surface_strategy?: ToolSurfaceStrategy | null;
   source_kind?: string | null;
   locked?: boolean;
@@ -22,6 +24,8 @@ export interface Model {
   sort_order?: number | null;
   enabled: boolean;
 }
+
+export type CatalogVisibility = "list" | "hide" | "unknown";
 
 export interface OfficialRefreshResult {
   models: Model[];
