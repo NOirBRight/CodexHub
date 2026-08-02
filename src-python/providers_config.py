@@ -245,16 +245,16 @@ def build_external_model_index(
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
             }
-            result[alias] = entry
+            _insert_provider_model_identity(result, alias, entry)
             for model_alias in model.aliases:
                 alias_id = canonical_model_id(model_alias)
                 if not alias_id:
                     continue
                 qualified_alias = alias_id if "/" in alias_id else canonical_model_id(f"{provider_id}/{alias_id}")
-                if qualified_alias and qualified_alias not in result:
+                if qualified_alias:
                     alias_entry = dict(entry)
                     alias_entry["matched_alias"] = qualified_alias
-                    result[qualified_alias] = alias_entry
+                    _insert_provider_model_identity(result, qualified_alias, alias_entry)
     return result
 
 
@@ -325,15 +325,33 @@ def build_ollama_cloud_model_index(
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
             }
-            result[model_id] = entry
-            result[qualified_alias] = entry
+            _insert_provider_model_identity(result, model_id, entry)
+            _insert_provider_model_identity(result, qualified_alias, entry)
             for model_alias in model.aliases:
                 alias_id = canonical_model_id(model_alias)
                 if not alias_id:
                     continue
-                result.setdefault(alias_id, entry)
-                result.setdefault(canonical_model_id(f"{provider_id}/{alias_id}"), entry)
+                _insert_provider_model_identity(result, alias_id, entry)
+                _insert_provider_model_identity(
+                    result,
+                    canonical_model_id(f"{provider_id}/{alias_id}"),
+                    entry,
+                )
     return configured, result
+
+
+def _insert_provider_model_identity(
+    index: dict[str, dict[str, Any]],
+    identity: str,
+    entry: dict[str, Any],
+) -> None:
+    """Insert one exported model identity without silently overwriting it."""
+
+    if not identity:
+        return
+    if identity in index:
+        raise ValueError(f"duplicate provider model identity: {identity}")
+    index[identity] = entry
 
 
 def catalog_visible_ollama_cloud_models(
