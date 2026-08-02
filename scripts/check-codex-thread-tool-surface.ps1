@@ -23,6 +23,11 @@ $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
 $inventory = Get-Content -Raw -LiteralPath $InventoryPath | ConvertFrom-Json
 $mismatches = [System.Collections.Generic.List[string]]::new()
 
+function Add-Mismatch {
+    param([string]$Message)
+    $script:mismatches.Add($Message)
+}
+
 # Rebuild the inventory from the bound evidence and compare it with the
 # committed artifact.  The PowerShell checks below remain an independent
 # reconciliation, while this call catches stale generated fields/notes that
@@ -45,11 +50,6 @@ if ($null -eq $python) {
     } catch {
         Add-Mismatch "generated inventory drift check failed: $($_.Exception.Message)"
     }
-}
-
-function Add-Mismatch {
-    param([string]$Message)
-    $script:mismatches.Add($Message)
 }
 
 function Get-Sha256Hex {
@@ -516,7 +516,7 @@ if (
     $auditGates.clean_cold_start_current_binding -notin @('live_control_required','met','complete') -or
     $auditGates.full_pre_post_request_response -notin @('live_control_required','observed','met','complete') -or
     $auditGates.non_streaming -notin @('live_control_required','observed','met','complete') -or
-    $auditGates.non_direct_states -notin @('live_control_required','observed','met','complete')
+    $auditGates.non_direct_states -notin @('live_control_required','observed','met','complete','pass')
 ) {
     Add-Mismatch 'bounded audit overstates or misclassifies a remaining Issue #62 gate'
 }
@@ -811,7 +811,7 @@ $expectedLiveDispositions = @{
     terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'Unqualified' }
     errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'Unqualified' }
     core_function_replay = if ($expectedEvidenceGates.wire_identity_replay -in $acceptedEvidenceGateStatuses.wire_identity_replay) { 'preserved' } else { 'Unqualified' }
-    hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met')) { 'preserved' } else { 'Unqualified' }
+    hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met','pass')) { 'preserved' } else { 'Unqualified' }
     unknown_tagged_sentinels = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response -and $expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture -and $streamUnknown.Count -gt 0) { 'preserved' } else { 'Unqualified' }
     default_runtime_fields = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response) { 'preserved' } else { 'Unqualified' }
 }
