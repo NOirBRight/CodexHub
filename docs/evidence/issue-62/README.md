@@ -230,3 +230,71 @@ evidence fails closed.
 
 The live-control-required gates remain open until the separately authorized
 live control window documented above captures real evidence for each one.
+
+## Isolated live-evidence sidecar lane
+
+`scripts/capture_issue_62_live_evidence.py` is a standalone, standard-library
+capture sidecar for a future, separately authorized live-control window. It is
+not imported by Desktop or Gateway, has no settings/environment activation
+path, and refuses to listen without `--enable-live-capture`. It accepts only a
+loopback listen address.
+
+Run two independent instances around an isolated Gateway process:
+
+```text
+isolated client -> pre sidecar -> isolated Gateway -> post sidecar -> upstream
+```
+
+The two commands require distinct output directories and a shared, isolated
+32-byte-or-longer HMAC key file. The operator must replace every angle-bracket
+token only after the live window identifies the exact candidate, isolated
+Gateway port, authorized upstream base URL, bounds, and cleanup owner.
+
+```powershell
+py -3.13 scripts/capture_issue_62_live_evidence.py `
+  --enable-live-capture `
+  --hop pre `
+  --listen-host 127.0.0.1 `
+  --listen-port 19162 `
+  --forward-base-url http://127.0.0.1:<ISOLATED_GATEWAY_PORT> `
+  --output-dir <ISOLATED_OUTPUT_ROOT>\pre `
+  --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
+  --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
+  --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
+  --read-timeout-seconds <AUTHORIZED_READ_TIMEOUT> `
+  --overall-timeout-seconds <AUTHORIZED_OVERALL_TIMEOUT>
+
+py -3.13 scripts/capture_issue_62_live_evidence.py `
+  --enable-live-capture `
+  --hop post `
+  --listen-host 127.0.0.1 `
+  --listen-port 19163 `
+  --forward-base-url <AUTHORIZED_UPSTREAM_BASE_URL> `
+  --output-dir <ISOLATED_OUTPUT_ROOT>\post `
+  --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
+  --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
+  --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
+  --read-timeout-seconds <AUTHORIZED_READ_TIMEOUT> `
+  --overall-timeout-seconds <AUTHORIZED_OVERALL_TIMEOUT>
+```
+
+Each hop writes only an atomic sanitized JSON record: complete application-body
+byte counts, SHA-256/HMAC-SHA-256 values, an ordered SSE-frame digest, bounded
+terminal classifications, or a fixed incomplete failure code. URLs, paths,
+headers, credentials, key material, raw bodies, prompt/tool content, wire
+identifiers, and exception text are never artifact fields. Overflow, timeout,
+cancellation, forwarding failure, incomplete SSE framing, and server lifecycle
+failure cannot produce a complete record and leave no `.partial` artifact.
+
+The focused tests use loopback fake servers only:
+
+```powershell
+py -3.13 -m pytest -q tests/test_issue_62_live_evidence_sidecar.py
+```
+
+A passing test means only `synthetic_lane_verified`. Do not aim these commands
+at the currently running Desktop or Gateway, perform an upstream request,
+change the runtime inventory, or infer Issue #62 qualification without a new
+maintainer-authorized live-control window and artifact readback.
