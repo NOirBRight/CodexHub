@@ -84,6 +84,18 @@ export function refreshedOfficialModelOrder(currentOrder: string[], refreshedMod
 
 export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   const knownOfficialIds = officialModelIdSet(catalog, metadata);
+  const blockedOfficialIds = new Set<string>();
+  for (const model of catalog) {
+    if (isCatalogModelListable(model)) {
+      continue;
+    }
+    for (const value of [model.id, model.upstream_model ?? "", ...(model.aliases ?? [])]) {
+      const bare = value.trim().toLowerCase().replace(/^openai\//, "");
+      if (bare.startsWith("gpt-")) {
+        blockedOfficialIds.add(bare);
+      }
+    }
+  }
   const resolvedCatalogLimitFields = [
     "context_window",
     "max_context_window",
@@ -111,7 +123,7 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   const publishedCatalogModels = new Map(merged);
   for (const model of metadata.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
-    if (!canonicalId) {
+    if (!canonicalId || blockedOfficialIds.has(canonicalId)) {
       continue;
     }
     const existing = merged.get(canonicalId);
@@ -175,12 +187,16 @@ export function filterCodexVisibleOfficialModels(models: Model[]) {
 }
 
 export function isCatalogModelListable(model: Model) {
-  if (model.visibility !== "list") {
+  if (model.visibility !== "list" || (model as Model & { hidden?: unknown }).hidden === true) {
     return false;
   }
   const identities = [model.id, model.upstream_model ?? "", ...(model.aliases ?? [])];
   return !identities.some((value) => {
-    const normalized = value.trim().toLowerCase().replace(/^openai\//, "");
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/^openai\//, "")
+      .replace(/:cloud$/, "");
     return normalized === "codex-auto-review" || normalized.startsWith("codex-auto-review/");
   });
 }

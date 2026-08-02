@@ -48,3 +48,12 @@ test("combined Official catalogs exclude hidden, unknown, and internal duplicate
 
   assert.deepEqual(combined.map((item) => item.id), ["gpt-5.6-terra"]);
 });
+
+test("catalog hide vetoes a metadata-only Official model", () => {
+  const combined = mergeOfficialModelSources(
+    [model("gpt-5.6-terra", { visibility: "hide" })],
+    [model("gpt-5.6-terra", { visibility: "list" })],
+  );
+
+  assert.deepEqual(combined, []);
+});

@@ -65,6 +65,8 @@ def model_visibility(
 
     if not isinstance(model, dict):
         return CatalogVisibility.UNKNOWN
+    if model.get("hidden") is True:
+        return CatalogVisibility.HIDE
     if "visibility" in model:
         return catalog_visibility(model.get("visibility"))
     hidden = model.get("hidden")

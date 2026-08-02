@@ -92,6 +92,23 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertEqual(catalog["models"][0]["visibility"], "list")
 
+    def test_hidden_flag_overrides_list_visibility(self):
+        catalog = build_codex_catalog(
+            [
+                {
+                    "slug": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": True,
+                }
+            ],
+            [],
+            self.policy,
+            "0.144.0",
+        )
+
+        self.assertEqual(catalog["models"], [])
+        self.assertEqual(catalog["visibility_diagnostics"]["hidden"], 1)
+
     def test_official_seed_snapshot_fails_closed_for_unknown_visibility(self):
         with tempfile.TemporaryDirectory() as tmp:
             seed_path = Path(tmp) / "runtime-seed.json"
@@ -132,6 +149,98 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual([model["slug"] for model in snapshot.models], ["gpt-5.6-terra"])
         self.assertEqual(snapshot.models[0]["visibility"], "list")
+
+    def test_runtime_seed_all_hidden_does_not_fallback_to_bundled_or_policy_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = Path(tmp) / "runtime-seed.json"
+            runtime_path.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": 1_000,
+                        "models": [
+                            {"slug": "gpt-5.6-terra", "visibility": "hide"},
+                            {"slug": "gpt-5.6-sol", "visibility": "future"},
+                            {
+                                "id": "codex-auto-review",
+                                "slug": "gpt-5.6-terra",
+                                "visibility": "list",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bundled_path = Path(tmp) / "bundled-seed.json"
+            bundled_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {"slug": "gpt-5.5", "visibility": "list"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = catalog_sync.load_official_seed_snapshot(
+                bundled_path,
+                runtime_path=runtime_path,
+                now_timestamp=1_001,
+            )
+            catalog = build_codex_catalog(
+                snapshot.models,
+                [],
+                self.policy,
+                "0.144.0",
+                official_source_present=snapshot.source_present,
+                visibility_diagnostics=snapshot.visibility_diagnostics,
+            )
+
+        self.assertEqual(snapshot.models, [])
+        self.assertTrue(snapshot.source_present)
+        self.assertEqual(snapshot.visibility_diagnostics, {"hidden": 1, "unknown": 1, "internal": 1})
+        self.assertEqual([model["slug"] for model in catalog["models"]], [])
+        self.assertEqual(catalog["visibility_diagnostics"], snapshot.visibility_diagnostics)
+
+    def test_seed_uses_bounded_upstream_visibility_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = Path(tmp) / "runtime-seed.json"
+            runtime_path.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": 1_000,
+                        "visibility_diagnostics": {
+                            "hidden": 101,
+                            "unknown": 2,
+                            "internal": 1,
+                        },
+                        "models": [{"slug": "gpt-5.6-terra", "visibility": "list"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = catalog_sync.load_official_seed_snapshot(
+                Path(tmp) / "missing-bundled.json",
+                runtime_path=runtime_path,
+                now_timestamp=1_001,
+            )
+
+        self.assertEqual(
+            snapshot.visibility_diagnostics,
+            {"hidden": 100, "unknown": 2, "internal": 1},
+        )
+
+    def test_unknown_official_source_does_not_recreate_policy_models(self):
+        catalog = build_codex_catalog(
+            [{"slug": "gpt-5.6-terra", "visibility": "future"}],
+            [],
+            self.policy,
+            "0.144.0",
+        )
+
+        self.assertEqual([model["slug"] for model in catalog["models"]], [])
+        self.assertEqual(catalog["visibility_diagnostics"]["unknown"], 1)
 
     def test_direct_cache_internal_duplicate_terra_is_ignored_for_authority(self):
         fixture_path = Path(__file__).parent / "fixtures" / "codex_0_144_2_direct_models_cache.json"
