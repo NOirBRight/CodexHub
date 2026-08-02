@@ -5,16 +5,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_read_or_create_text, atomic_write_text
 from catalog import (
     CatalogVisibility,
     CatalogPolicy,
@@ -313,8 +315,10 @@ CATALOG_OVERRIDE_SCHEMA_VERSION = 1
 CATALOG_OWNER_METADATA_KEY = "catalog_owner"
 CATALOG_OWNER_METADATA_VERSION_KEY = "catalog_owner_version"
 CATALOG_OWNER_IDENTITY_KEY = "catalog_identity_digest"
+CATALOG_OWNER_SIGNATURE_KEY = "catalog_owner_signature"
 CATALOG_OWNER_METADATA_VALUE = "codexhub"
 CATALOG_OWNER_METADATA_VERSION = 1
+CATALOG_OWNER_SECRET_FILENAME = ".codexhub-catalog-owner-key"
 CATALOG_OVERRIDE_REJECTION_REASONS = frozenset(
     {
         "invalid_sidecar",
@@ -325,6 +329,8 @@ CATALOG_OVERRIDE_REJECTION_REASONS = frozenset(
         "missing_managed_model",
     }
 )
+
+_CATALOG_OWNER_SECRET_CACHE: tuple[Path, bytes] | None = None
 
 
 def load_pinned_official_catalog_metadata(
@@ -429,6 +435,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         PROXY_DIR / "providers_config.py",
         MANAGED_CATALOG_BASELINE_PATH,
         CATALOG_OVERRIDES_PATH,
+        catalog_owner_secret_path(),
     )
 
 
@@ -437,6 +444,8 @@ def catalog_cache_is_fresh(max_age_seconds: int, catalog_path: Path = GENERATED_
         return False
     catalog_mtime = catalog_path.stat().st_mtime
     for dependency in catalog_cache_dependency_paths():
+        if dependency == catalog_owner_secret_path() and not dependency.exists():
+            return False
         if dependency.exists() and dependency.stat().st_mtime > catalog_mtime:
             return False
     age_seconds = datetime.now(timezone.utc).timestamp() - catalog_mtime
@@ -479,9 +488,12 @@ def catalog_model_identity(model: Any) -> CatalogModelIdentity | None:
     upstream_model = metadata.get("upstream_model")
     if not all(isinstance(value, str) and value.strip() for value in (provider, upstream_name, upstream_model)):
         return None
+    # ``:cloud`` is an Ollama model-suffix normalization, not a provider or
+    # upstream-name alias.  Keep the first two components exact so an edited
+    # ``openai:cloud``/``official:cloud`` row cannot collapse into Official.
     return (
-        canonical_model_id(provider),
-        canonical_model_id(upstream_name),
+        provider.strip(),
+        upstream_name.strip(),
         canonical_model_id(upstream_model),
     )
 
@@ -495,7 +507,11 @@ def _identity_from_payload(value: Any) -> CatalogModelIdentity | None:
         return None
     if not all(isinstance(item, str) and item.strip() for item in values):
         return None
-    return tuple(canonical_model_id(str(item)) for item in values)  # type: ignore[return-value]
+    return (
+        str(values[0]).strip(),
+        str(values[1]).strip(),
+        canonical_model_id(str(values[2])),
+    )
 
 
 def _official_identity(identity: CatalogModelIdentity | None) -> bool:
@@ -536,7 +552,11 @@ def _planner_override_is_valid(
             # v1/v2 are the only native planner versions.  The selected model
             # must itself be one of the pinned Code Mode rows; legacy Official
             # rows intentionally have a null version and reject this field.
-            if slug not in PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS or value not in {"v1", "v2"}:
+            if (
+                slug not in PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS
+                or not isinstance(value, str)
+                or value not in {"v1", "v2"}
+            ):
                 return False
             continue
         # Every other planner field is an invariant of the pinned model shape.
@@ -599,16 +619,46 @@ def _catalog_override_row_is_eligible(
         if isinstance(baseline_model, dict)
         else None
     )
-    if (
-        isinstance(baseline_metadata, dict)
-        and CATALOG_OWNER_METADATA_KEY in baseline_metadata
-    ) or CATALOG_OWNER_METADATA_KEY in metadata:
-        return (
-            metadata.get(CATALOG_OWNER_METADATA_KEY) == CATALOG_OWNER_METADATA_VALUE
-            and metadata.get(CATALOG_OWNER_METADATA_VERSION_KEY)
-            == CATALOG_OWNER_METADATA_VERSION
-            and metadata.get(CATALOG_OWNER_IDENTITY_KEY)
-            == catalog_identity_digest(identity)
+    if baseline_model is not None and (
+        not isinstance(baseline_metadata, dict)
+        or CATALOG_OWNER_METADATA_KEY not in baseline_metadata
+    ):
+        # Once a managed baseline exists, a markerless row is not an
+        # ownership boundary.  Treating it as a legacy snapshot would let a
+        # hand-authored baseline mint a planner override on the next sync.
+        return False
+    baseline_has_owner_marker = isinstance(baseline_metadata, dict) and (
+        CATALOG_OWNER_METADATA_KEY in baseline_metadata
+        or CATALOG_OWNER_SIGNATURE_KEY in baseline_metadata
+    )
+    current_has_owner_marker = (
+        CATALOG_OWNER_METADATA_KEY in metadata
+        or CATALOG_OWNER_METADATA_VERSION_KEY in metadata
+        or CATALOG_OWNER_IDENTITY_KEY in metadata
+        or CATALOG_OWNER_SIGNATURE_KEY in metadata
+    )
+    if baseline_has_owner_marker or current_has_owner_marker:
+        if (
+            baseline_model is not None
+            and _catalog_owner_canonical_row(model)
+            != _catalog_owner_canonical_row(baseline_model)
+        ):
+            return False
+        require_signature = (
+            isinstance(baseline_metadata, dict)
+            and CATALOG_OWNER_SIGNATURE_KEY in baseline_metadata
+        ) or CATALOG_OWNER_SIGNATURE_KEY in metadata
+        return _catalog_owner_metadata_is_valid(
+            metadata,
+            identity,
+            # A marker-only baseline/current pair may have been written by
+            # the pre-HMAC Beta2 build.  The exact immutable-row comparison
+            # above is the migration proof; the next publication upgrades it
+            # to a signed baseline.  A newly signed side of the pair still
+            # forces signature validation.
+            require_signature=require_signature,
+            model=model,
+            baseline_model=baseline_model,
         )
 
     # Pre-Beta2 catalogs have no marker. Retain migration compatibility only
@@ -707,18 +757,20 @@ def _managed_baseline_shape_is_valid(payload: Any) -> bool:
             for field in supported_fields:
                 value = model.get(field)
                 if field == "multi_agent_version":
-                    if value not in {"v1", "v2"}:
+                    if not isinstance(value, str) or value not in {"v1", "v2"}:
                         return False
                 elif value != expected.get(field):
                     return False
             metadata = model.get("codex_proxy_metadata")
-            if isinstance(metadata, dict) and CATALOG_OWNER_METADATA_KEY in metadata:
-                if (
-                    metadata.get(CATALOG_OWNER_METADATA_KEY) != CATALOG_OWNER_METADATA_VALUE
-                    or metadata.get(CATALOG_OWNER_METADATA_VERSION_KEY)
-                    != CATALOG_OWNER_METADATA_VERSION
-                    or metadata.get(CATALOG_OWNER_IDENTITY_KEY)
-                    != catalog_identity_digest(identity)
+            if isinstance(metadata, dict) and (
+                CATALOG_OWNER_METADATA_KEY in metadata
+                or CATALOG_OWNER_SIGNATURE_KEY in metadata
+            ):
+                if not _catalog_owner_metadata_is_valid(
+                    metadata,
+                    identity,
+                    require_signature=CATALOG_OWNER_SIGNATURE_KEY in metadata,
+                    model=model,
                 ):
                     return False
     return True
@@ -834,7 +886,11 @@ def _legacy_override_fields(
 ) -> dict[str, Any]:
     """Extract supported edits from a pre-sidecar single-file catalog."""
 
-    if not _official_identity(identity):
+    # The legacy migration boundary is deliberately narrow: the reported
+    # Beta2 regression is Luna's explicit v1 -> v2 planner override.  Do not
+    # infer unrelated historical edits for other Official rows while there is
+    # no managed baseline proving their ownership.
+    if not _official_identity(identity) or identity[2] != "gpt-5.6-luna":
         return {}
     slug = identity[2]
     baseline = PINNED_OFFICIAL_CATALOG_METADATA.get(slug)
@@ -845,7 +901,7 @@ def _legacy_override_fields(
         for key in sorted(CATALOG_OVERRIDE_FIELDS)
         if key in model and model.get(key) != baseline.get(key)
     }
-    return fields
+    return fields if fields == {"multi_agent_version": "v2"} else {}
 
 
 def _delta_override_fields(
@@ -1011,8 +1067,15 @@ def _apply_catalog_overrides(
 def _bounded_catalog_override_diagnostics(
     diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
+    def bounded_counter(value: Any) -> int:
+        return (
+            min(value, MAX_VISIBILITY_DIAGNOSTIC_COUNT)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            else 0
+        )
+
     result = {
-        key: min(max(int(diagnostics.get(key, 0)), 0), MAX_VISIBILITY_DIAGNOSTIC_COUNT)
+        key: bounded_counter(diagnostics.get(key, 0))
         for key in ("accepted", "rejected", "migrated")
     }
     raw_reasons = diagnostics.get("reasons")
@@ -1795,6 +1858,135 @@ def catalog_identity_digest(identity: CatalogModelIdentity) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def catalog_owner_secret_path(overrides_path: Path | None = None) -> Path:
+    """Return the per-runtime secret used to authenticate managed rows.
+
+    Keeping the key beside the override sidecar makes the ownership boundary
+    explicit and lets tests redirect the complete catalog state to a temporary
+    directory by patching ``CATALOG_OVERRIDES_PATH``.
+    """
+
+    path = overrides_path if overrides_path is not None else CATALOG_OVERRIDES_PATH
+    return path.with_name(CATALOG_OWNER_SECRET_FILENAME)
+
+
+def _parse_catalog_owner_secret(raw: str, path: Path) -> bytes:
+    try:
+        secret = bytes.fromhex(raw.strip())
+    except ValueError as error:
+        raise ValueError(f"catalog owner secret is invalid: {path}") from error
+    if len(secret) != 32:
+        raise ValueError(f"catalog owner secret has an invalid length: {path}")
+    return secret
+
+
+def _load_catalog_owner_secret(*, create: bool) -> bytes | None:
+    """Load the runtime HMAC key, creating it only for a real sync.
+
+    Direct catalog-builder unit tests should remain pure and must not create a
+    key in the user's Codex directory.  ``sync_catalog`` calls this with
+    ``create=True`` before it builds a publishable catalog; standalone builder
+    calls therefore retain the pre-signature compatibility shape.
+    """
+
+    global _CATALOG_OWNER_SECRET_CACHE
+    path = catalog_owner_secret_path()
+    cached = _CATALOG_OWNER_SECRET_CACHE
+    if cached is not None and cached[0] == path:
+        return cached[1]
+
+    if create:
+        raw = atomic_read_or_create_text(
+            path,
+            lambda: secrets.token_hex(32) + "\n",
+            encoding="ascii",
+            mode=0o600,
+        )
+    else:
+        try:
+            raw = path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"catalog owner secret is unreadable: {path}") from error
+
+    secret = _parse_catalog_owner_secret(raw, path)
+    _CATALOG_OWNER_SECRET_CACHE = (path, secret)
+    return secret
+
+
+def _catalog_owner_canonical_row(model: dict[str, Any]) -> str:
+    """Canonicalize the immutable portion of a managed catalog row.
+
+    Planner fields are the only supported user override surface.  Ownership
+    signatures therefore exclude those fields and the ownership metadata
+    itself, while retaining identity, visibility, limits, descriptions, and
+    every other generated field.  A copied marker cannot authenticate a row
+    whose non-overridable content was replaced.
+    """
+
+    projected = deepcopy(model)
+    for field in CATALOG_OVERRIDE_FIELDS:
+        projected.pop(field, None)
+    metadata = projected.get("codex_proxy_metadata")
+    if isinstance(metadata, dict):
+        metadata = dict(metadata)
+        for key in (
+            CATALOG_OWNER_METADATA_KEY,
+            CATALOG_OWNER_METADATA_VERSION_KEY,
+            CATALOG_OWNER_IDENTITY_KEY,
+            CATALOG_OWNER_SIGNATURE_KEY,
+        ):
+            metadata.pop(key, None)
+        if metadata:
+            projected["codex_proxy_metadata"] = metadata
+        else:
+            projected.pop("codex_proxy_metadata", None)
+    return json.dumps(projected, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def catalog_owner_signature(model: dict[str, Any], secret: bytes) -> str:
+    value = _catalog_owner_canonical_row(model).encode("utf-8")
+    return hmac.new(secret, value, hashlib.sha256).hexdigest()
+
+
+def _catalog_owner_metadata_is_valid(
+    metadata: Any,
+    identity: CatalogModelIdentity,
+    *,
+    require_signature: bool,
+    model: dict[str, Any] | None = None,
+    baseline_model: dict[str, Any] | None = None,
+) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if (
+        metadata.get(CATALOG_OWNER_METADATA_KEY) != CATALOG_OWNER_METADATA_VALUE
+        or metadata.get(CATALOG_OWNER_METADATA_VERSION_KEY) != CATALOG_OWNER_METADATA_VERSION
+        or metadata.get(CATALOG_OWNER_IDENTITY_KEY) != catalog_identity_digest(identity)
+    ):
+        return False
+    signature = metadata.get(CATALOG_OWNER_SIGNATURE_KEY)
+    if signature is None:
+        return not require_signature
+    if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+        return False
+    try:
+        secret = _load_catalog_owner_secret(create=False)
+    except ValueError:
+        return False
+    if secret is None:
+        return False
+    signed_model = baseline_model or model
+    if signed_model is None:
+        return False
+    if not hmac.compare_digest(signature, catalog_owner_signature(signed_model, secret)):
+        return False
+    if baseline_model is not None and model is not None:
+        return _catalog_owner_canonical_row(model) == _catalog_owner_canonical_row(baseline_model)
+    return True
+
+
 def stamp_catalog_owner_metadata(model: dict[str, Any]) -> None:
     metadata = dict(model.get("codex_proxy_metadata", {}))
     metadata[CATALOG_OWNER_METADATA_KEY] = CATALOG_OWNER_METADATA_VALUE
@@ -1802,6 +1994,16 @@ def stamp_catalog_owner_metadata(model: dict[str, Any]) -> None:
     identity = catalog_model_identity(model)
     if identity is not None:
         metadata[CATALOG_OWNER_IDENTITY_KEY] = catalog_identity_digest(identity)
+        secret = _load_catalog_owner_secret(create=False)
+        if secret is not None:
+            metadata[CATALOG_OWNER_SIGNATURE_KEY] = catalog_owner_signature(model, secret)
+        else:
+            # Standalone builder calls may not have a runtime sidecar yet.
+            # A real sync creates the key before publishing and stamps a
+            # signed row; old unsigned rows remain migration-compatible.
+            metadata.pop(CATALOG_OWNER_SIGNATURE_KEY, None)
+    else:
+        metadata.pop(CATALOG_OWNER_SIGNATURE_KEY, None)
     model["codex_proxy_metadata"] = metadata
 
 
@@ -2155,7 +2357,12 @@ def build_external_provider_model(
     if isinstance(max_output_tokens, int) and max_output_tokens > 0:
         model["max_output_tokens"] = max_output_tokens
 
-    proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
+    inherited_metadata = model.get("codex_proxy_metadata")
+    proxy_metadata = {
+        key: inherited_metadata[key]
+        for key in ("context_source", "max_output_source")
+        if isinstance(inherited_metadata, dict) and key in inherited_metadata
+    }
     proxy_metadata.update(
         {
             "provider": external_model["provider_alias"],
@@ -2390,6 +2597,12 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         state = load_cached_state(GENERATED_STATE_PATH)
         state["cache_status"] = "fresh"
         return state
+
+    # Ensure every newly published managed row is authenticated before any
+    # builder stamps its ownership metadata.  Legacy catalogs without a key
+    # are migrated by the normal unsigned compatibility path, then receive a
+    # signed baseline/effective catalog in this sync.
+    _load_catalog_owner_secret(create=True)
 
     policy = load_policy(POLICY_PATH)
     include_official = load_include_official_models()

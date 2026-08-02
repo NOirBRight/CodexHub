@@ -386,6 +386,31 @@ test("provider page state, editors, actions, and shared helpers stay in focused 
   assert.match(formSource, /export const emptyProvider/);
 });
 
+test("catalog override diagnostics stay bounded and disclose the Codex restart", async () => {
+  const [actionsSource, tauriSource, typesSource, mainSource, bridgeSource, enSource, zhSource] =
+    await Promise.all([
+      readFile(providerCatalogActionsPath, "utf8"),
+      readFile(tauriSourcePath, "utf8"),
+      readFile(typesPath, "utf8"),
+      readFile(tauriMainPath, "utf8"),
+      readFile(tauriWebBridgePath, "utf8"),
+      readFile(enLocalePath, "utf8"),
+      readFile(zhLocalePath, "utf8"),
+    ]);
+
+  assert.match(tauriSource, /catalogOverrideDiagnostics: \(\) =>/);
+  assert.match(tauriSource, /get_catalog_override_diagnostics/);
+  assert.match(typesSource, /interface CatalogOverrideDiagnostics/);
+  assert.match(typesSource, /catalog_override_diagnostics\?: CatalogOverrideDiagnostics/);
+  assert.match(actionsSource, /api\.catalogOverrideDiagnostics\(\)/);
+  assert.match(actionsSource, /catalogOverrideDiagnostics/);
+  assert.match(actionsSource, /catalogOverrideRestartCodex/);
+  assert.match(mainSource, /get_catalog_override_diagnostics/);
+  assert.match(bridgeSource, /get_catalog_override_diagnostics/);
+  assert.match(enSource, /Restart Codex App to apply/);
+  assert.match(zhSource, /请重启 Codex App 使其生效/);
+});
+
 test("ui contract keeps ids and paths but no localizable display copy", async () => {
   const contract = await readContract();
 
