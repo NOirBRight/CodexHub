@@ -193,6 +193,23 @@ def test_config_rejects_nonfinite_timeouts(field: str, value: float, code: str, 
         sidecar.validate_config(dataclasses.replace(base_config, **{field: value}))
 
 
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ("connect_timeout_seconds", "connect_timeout_invalid"),
+        ("read_timeout_seconds", "read_timeout_invalid"),
+        ("overall_timeout_seconds", "overall_timeout_invalid"),
+    ],
+)
+def test_config_rejects_arbitrarily_large_positive_integer_timeout(
+    field: str,
+    code: str,
+    base_config,
+) -> None:
+    with pytest.raises(sidecar.ConfigurationError, match=code):
+        sidecar.validate_config(dataclasses.replace(base_config, **{field: 10**1000}))
+
+
 def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> None:
     record = {
         "schema": "codexhub.issue62.live-evidence-lane.v1",
@@ -424,6 +441,31 @@ def test_sse_sequence_fails_closed_when_any_frame_follows_terminal() -> None:
     assert observed["sequence_sha256"] is None
     assert observed["sequence_hmac_sha256"] is None
     assert observed["terminal_classes"] == ["response.completed"]
+
+
+def test_terminal_followed_by_frame_uses_fixed_failure_code(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = (
+        b'data: {"type":"response.completed"}\n\n'
+        b'data: {"type":"response.output_text.delta","delta":"after"}\n\n'
+    )
+    with _fake_upstream(response_body) as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(tmp_path, hmac_key_file, upstream_url)
+        with _running_sidecar(config) as server:
+            connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+            connection.request("POST", "/responses", body=b"{}")
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+
+    record = _read_only_record(config.output_dir)
+    assert record["outcome"] == "incomplete"
+    assert record["failure"] == "sse_frame_after_terminal"
+    assert record["response"]["complete"] is False  # type: ignore[index]
+    assert record["sse"]["complete"] is False  # type: ignore[index]
 
 
 def test_two_hops_capture_matching_complete_request_response_and_sse(
@@ -828,6 +870,81 @@ def test_cli_explicit_enable_starts_and_cleans_up_on_interrupt(
     finally:
         rebound.close()
     assert not list(tmp_path.rglob("*.partial"))
+
+
+def _unused_loopback_port() -> int:
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+    finally:
+        probe.close()
+
+
+def _enabled_cli_args(tmp_path: Path, hmac_key_file: Path, port: int) -> list[str]:
+    return [
+        "--enable-live-capture",
+        "--hop",
+        "pre",
+        "--listen-host",
+        "127.0.0.1",
+        "--listen-port",
+        str(port),
+        "--forward-base-url",
+        "http://127.0.0.1:1",
+        "--output-dir",
+        str(tmp_path / "records"),
+        "--hmac-key-file",
+        str(hmac_key_file),
+        "--max-request-bytes",
+        "1024",
+        "--max-response-bytes",
+        "4096",
+        "--connect-timeout-seconds",
+        "1",
+        "--read-timeout-seconds",
+        "1",
+        "--overall-timeout-seconds",
+        "2",
+    ]
+
+
+def test_cli_reports_false_shutdown_drain_with_fixed_failure(
+    tmp_path: Path,
+    hmac_key_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_shutdown = sidecar.CaptureSidecarServer.shutdown
+
+    def interrupt_wait(_server: object) -> bool:
+        raise KeyboardInterrupt
+
+    def cleanup_but_report_false(server: object) -> bool:
+        original_shutdown(server)
+        return False
+
+    monkeypatch.setattr(sidecar.CaptureSidecarServer, "wait", interrupt_wait)
+    monkeypatch.setattr(sidecar.CaptureSidecarServer, "shutdown", cleanup_but_report_false)
+
+    result = sidecar.main(_enabled_cli_args(tmp_path, hmac_key_file, _unused_loopback_port()))
+
+    assert result == 1
+    assert capsys.readouterr().err.strip() == "shutdown_drain_failed"
+
+
+def test_cli_reports_server_thread_failure_with_fixed_failure(
+    tmp_path: Path,
+    hmac_key_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sidecar.CaptureSidecarServer, "wait", lambda _server: False)
+
+    result = sidecar.main(_enabled_cli_args(tmp_path, hmac_key_file, _unused_loopback_port()))
+
+    assert result == 1
+    assert capsys.readouterr().err.strip() == "server_thread_failed"
 
 
 def test_shutdown_closes_active_client_and_upstream_and_waits_bounded(

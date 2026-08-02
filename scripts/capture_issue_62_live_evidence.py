@@ -43,7 +43,9 @@ _FAILURES = frozenset(
         "response_overflow",
         "server_start_failed",
         "server_thread_failed",
+        "shutdown_drain_failed",
         "sse_frame_incomplete",
+        "sse_frame_after_terminal",
         "sse_terminal_missing",
         "upstream_timeout",
     }
@@ -201,6 +203,10 @@ class SseSequenceFingerprint:
     def has_trailing_bytes(self) -> bool:
         return bool(self._buffer)
 
+    @property
+    def invalid_after_terminal(self) -> bool:
+        return self._invalid_after_terminal
+
 
 def _classify_sse_terminal(frame: bytes) -> str | None:
     event_name: bytes | None = None
@@ -270,12 +276,7 @@ def validate_config(config: SidecarConfig) -> bytes:
         (config.read_timeout_seconds, "read_timeout_invalid"),
         (config.overall_timeout_seconds, "overall_timeout_invalid"),
     ):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-        ):
+        if not _is_positive_timeout(value):
             raise ConfigurationError(code)
 
     try:
@@ -285,6 +286,16 @@ def validate_config(config: SidecarConfig) -> bytes:
     if not 32 <= len(key) <= 4096:
         raise ConfigurationError("hmac_key_invalid")
     return key
+
+
+def _is_positive_timeout(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric > 0
 
 
 def _require_exact_fields(value: Mapping[str, Any], expected: frozenset[str], code: str) -> None:
@@ -748,11 +759,12 @@ class CaptureSidecarServer:
             if sse_fingerprint is not None:
                 sse_result = sse_fingerprint.complete()
                 if not sse_result["complete"]:
-                    failure = (
-                        "sse_frame_incomplete"
-                        if sse_fingerprint.has_trailing_bytes
-                        else "sse_terminal_missing"
-                    )
+                    if sse_fingerprint.invalid_after_terminal:
+                        failure = "sse_frame_after_terminal"
+                    elif sse_fingerprint.has_trailing_bytes:
+                        failure = "sse_frame_incomplete"
+                    else:
+                        failure = "sse_terminal_missing"
                     response_complete = False
         except (TimeoutError, socket.timeout):
             failure = "upstream_timeout"
@@ -871,19 +883,25 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 2
     server = CaptureSidecarServer(config)
+    result_code = 1
+    failure_code: str | None = None
     try:
         server.start()
-        if not server.wait():
-            print("server_thread_failed", file=sys.stderr)
-            return 1
-        return 0
+        if server.wait():
+            result_code = 0
+        else:
+            failure_code = "server_thread_failed"
     except KeyboardInterrupt:
-        return 0
+        result_code = 0
     except SidecarStartError as error:
-        print(str(error), file=sys.stderr)
-        return 1
+        failure_code = str(error)
     finally:
-        server.shutdown()
+        if not server.shutdown():
+            result_code = 1
+            failure_code = "shutdown_drain_failed"
+    if failure_code is not None:
+        print(failure_code, file=sys.stderr)
+    return result_code
 
 
 if __name__ == "__main__":
