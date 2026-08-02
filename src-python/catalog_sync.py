@@ -771,11 +771,14 @@ def _catalog_payload_shape_is_valid(
         if require_identity:
             identity = catalog_model_identity(model)
             if identity is not None and _official_identity(identity):
-                if identity[2] not in PINNED_OFFICIAL_MODEL_IDS:
-                    return False
-                if any(
+                # Direct Official snapshots may introduce a visible model
+                # before its planner contract is pinned locally.  Keep that
+                # generated row in the catalog shape, but do not treat it as
+                # an authority for planner overrides (the override validator
+                # remains pinned-only).
+                if identity[2] in PINNED_OFFICIAL_MODEL_IDS and any(
                     field not in model
-                    for field in PINNED_OFFICIAL_MODEL_FIELD_SETS.get(identity[2], ())
+                    for field in PINNED_OFFICIAL_MODEL_FIELD_SETS[identity[2]]
                 ):
                     return False
     return True
@@ -796,7 +799,11 @@ def _managed_baseline_shape_is_valid(payload: Any) -> bool:
             return False
         if _official_identity(identity):
             if identity[2] not in PINNED_OFFICIAL_MODEL_IDS:
-                return False
+                # Unknown Official rows are generated catalog entries, not a
+                # supported planner-override surface.  Preserve them in the
+                # managed baseline while _planner_override_is_valid keeps
+                # their overrides fail-closed.
+                continue
             supported_fields = PINNED_OFFICIAL_MODEL_FIELD_SETS.get(identity[2], ())
             if any(field not in model for field in supported_fields):
                 return False
