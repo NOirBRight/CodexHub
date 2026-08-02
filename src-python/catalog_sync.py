@@ -609,7 +609,11 @@ def _catalog_override_row_is_eligible(
     normalized_slug = canonical_model_id(slug)
     if normalized_slug.startswith("openai/gpt-"):
         normalized_slug = normalized_slug.removeprefix("openai/")
-    if normalized_slug != identity[2]:
+    # Official rows use the bare pinned slug as part of their ownership
+    # proof.  Third-party rows may intentionally expose a provider-prefixed
+    # alias (for example ``volc/glm-5.2``) while their stable identity remains
+    # the metadata tuple; planner overrides are not valid for them anyway.
+    if _official_identity(identity) and normalized_slug != identity[2]:
         return False
 
     metadata = model.get("codex_proxy_metadata")

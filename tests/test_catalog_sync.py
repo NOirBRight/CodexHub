@@ -856,6 +856,14 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertIs(model["use_responses_lite"], False)
         self.assertNotIn("official_context_budget", model["codex_proxy_metadata"])
         self.assertEqual(model["codex_proxy_metadata"]["provider"], "volc")
+        external_identity = catalog_sync.catalog_model_identity(model)
+        self.assertIsNotNone(external_identity)
+        self.assertTrue(
+            catalog_sync._catalog_override_row_is_eligible(
+                external_identity,
+                model,
+            )
+        )
 
         ollama = catalog_sync.build_ollama_model(
             "glm-5.2",
