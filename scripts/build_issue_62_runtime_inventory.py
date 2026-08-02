@@ -118,6 +118,12 @@ BLOCKING_UNQUALIFIED_SCOPES = frozenset(
 # Evidence references are part of the contract, not free-form annotations.
 # This map lets reconciliation detect a stale or hand-edited inventory that
 # silently points a core claim at an unrelated tool-surface check.
+IDENTITY_RESPONSE_EVIDENCE = (
+    "codexhub-runtime-wire-fixture.json#"
+    "pre_gateway.response.streaming.response_id|"
+    "post_gateway.response.streaming.response_id"
+)
+
 CORE_SCOPE_EVIDENCE = {
     "core_text_streaming": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
     "core_text_non_streaming": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
@@ -132,8 +138,122 @@ CORE_SCOPE_EVIDENCE = {
     "core_function_result": "codexhub-runtime-wire-fixture.json#history.call_links",
     "core_function_replay": "codexhub-runtime-wire-fixture.json#history.call_links",
     "identity_item_call_ids": "codexhub-runtime-wire-fixture.json#history.call_links",
-    "identity_response_ids": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+    "identity_response_ids": IDENTITY_RESPONSE_EVIDENCE,
     "identity_request_ids": "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
+}
+
+# Every emitted inventory scope has a fixed evidence reference.  Keeping this
+# separate from the classifier implementation lets reconciliation reject a
+# hand-edited source pointer even when the disposition itself is valid.  The
+# choice-control reference has two historical forms because a future captured
+# fixture may legitimately flip the ``captured`` sentinel to true.
+SCOPE_EVIDENCE_SOURCES = {
+    **CORE_SCOPE_EVIDENCE,
+    "choice_controls": frozenset(
+        {
+            "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false",
+            "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=true",
+        }
+    ),
+    "terminal_events": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+    "errors": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+    "hosted_only_declarations": "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
+    "unknown_tagged_sentinels": "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
+    "default_runtime_fields": "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
+    "code_mode": "issue-248#beta.1-scope",
+    "tool_search": "current-codexhub-thread-tool-surface.json#planner_gates.caller_request",
+    "collaboration_v2": "issue-248#beta.3-scope",
+    "chat_conversion": "issue-248#beta.4-scope",
+}
+
+# These are the core contract claims for which the retained bounded evidence
+# already proves a final preserved/adapted disposition.  They may not be
+# downgraded to ``Unqualified`` or ``local_consume`` by a hand-edited artifact.
+CORE_REQUIRED_PRESERVED_SCOPES = frozenset(
+    {
+        "core_text_streaming",
+        "core_history_multiturn",
+        "core_history_item_ids",
+        "core_history_call_ids",
+        "core_sse_streaming_events",
+        "core_function_declaration",
+        "core_function_call",
+        "core_function_result",
+        "identity_item_call_ids",
+        "identity_response_ids",
+        "identity_request_ids",
+    }
+)
+
+CORE_FINAL_DISPOSITIONS = frozenset({"preserved", "reversibly_adapted", "Unqualified"})
+
+# JSON paths behind the core evidence references.  Most scopes point at one
+# value; the response identity claim deliberately points at a pre/post pair
+# and additionally requires those two aliases to agree.
+CORE_EVIDENCE_POINTERS = {
+    "core_text_streaming": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "streaming", "captured"),),
+    ),
+    "core_text_non_streaming": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "non_streaming", "captured"),),
+    ),
+    "core_history_multiturn": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "captured_source_counts", "paired_calls"),),
+    ),
+    "core_history_item_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_history_call_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "required_call_ids"),),
+    ),
+    "core_sse_streaming_events": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "streaming", "events"),),
+    ),
+    "core_sse_terminal_events": (
+        "read-only-gate-audit.json",
+        (("gateway_identity_route", "observed_sse_event_type_counts"),),
+    ),
+    "core_sse_errors": (
+        "read-only-gate-audit.json",
+        (("gate_classification", "full_pre_post_request_response"),),
+    ),
+    "core_function_declaration": (
+        "codexhub-runtime-wire-fixture.json",
+        (("pre_gateway", "tool_surface", "namespaces"),),
+    ),
+    "core_function_call": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_function_result": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_function_replay": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "identity_item_call_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "identity_response_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (
+            ("pre_gateway", "response", "streaming", "response_id"),
+            ("post_gateway", "response", "streaming", "response_id"),
+        ),
+    ),
+    "identity_request_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("pre_gateway", "request_id"),),
+    ),
 }
 
 REQUIRED_CANDIDATE_FIELDS = (
@@ -210,6 +330,120 @@ def _validate_supported_floor(value: str) -> str:
             f"{SUPPORTED_CLI_FLOOR}, got {value!r}"
         )
     return value
+
+
+def _candidate_identity_mismatches(candidate_identity: Any) -> list[str]:
+    """Validate candidate metadata that is self-contained in the inventory.
+
+    Reconciliation is also used for in-memory replay controls where no evidence
+    root is available.  These checks therefore cover contradictions that can be
+    detected without reopening the source fixtures; the evidence-root path
+    below performs the stronger exact binding against the trace and wire data.
+    """
+
+    mismatches: list[str] = []
+    if not isinstance(candidate_identity, dict):
+        return ["candidate_identity must be an object"]
+
+    candidate_cli_version = candidate_identity.get("cli_version")
+    if not isinstance(candidate_cli_version, str):
+        mismatches.append("candidate_identity.cli_version must be a string")
+    else:
+        try:
+            _version_key(candidate_cli_version)
+        except ValueError:
+            mismatches.append("candidate_identity.cli_version is malformed")
+
+    source_commit = candidate_identity.get("source_commit")
+    codex_source_commit = candidate_identity.get("codex_source_commit")
+    for field, value in (
+        ("source_commit", source_commit),
+        ("codex_source_commit", codex_source_commit),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+            mismatches.append(
+                f"candidate_identity.{field} is not a lowercase 40-character SHA-1"
+            )
+    if (
+        isinstance(source_commit, str)
+        and isinstance(codex_source_commit, str)
+        and source_commit != codex_source_commit
+    ):
+        mismatches.append(
+            "candidate_identity.source_commit and codex_source_commit contradict each other"
+        )
+
+    for field in (
+        "route_upstream",
+        "inbound_format",
+        "upstream_format",
+        "configured_provider_id",
+        "model",
+        "catalog_binding",
+        "catalog_model_entry_id",
+        "route_behavior_profile",
+    ):
+        value = candidate_identity.get(field)
+        if not isinstance(value, str) or not value.strip():
+            mismatches.append(f"candidate_identity.{field} is missing or blank")
+
+    for field in ("catalog_snapshot_sha256", "evidence_manifest_sha256"):
+        value = candidate_identity.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            mismatches.append(
+                f"candidate_identity.{field} is not a lowercase 64-character SHA-256"
+            )
+    return mismatches
+
+
+def _evidence_source_allowed(scope: str, evidence_source: Any) -> bool:
+    expected = SCOPE_EVIDENCE_SOURCES.get(scope)
+    if expected is None:
+        return False
+    if isinstance(expected, frozenset):
+        return evidence_source in expected
+    return evidence_source == expected
+
+
+def _resolve_fixture_pointer(document: Any, path: tuple[str, ...]) -> Any:
+    current = document
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            raise KeyError(".".join(path))
+        current = current[segment]
+    return current
+
+
+def _validate_core_evidence_pointers(
+    *, wire: dict[str, Any], audit: dict[str, Any]
+) -> None:
+    """Require every core evidence reference to resolve in its bound fixture."""
+
+    documents = {
+        "codexhub-runtime-wire-fixture.json": wire,
+        "read-only-gate-audit.json": audit,
+    }
+    for scope, (filename, pointers) in CORE_EVIDENCE_POINTERS.items():
+        document = documents[filename]
+        values: list[Any] = []
+        for pointer in pointers:
+            try:
+                value = _resolve_fixture_pointer(document, pointer)
+            except KeyError as exc:
+                raise ValueError(
+                    f"evidence pointer for {scope} is missing: {filename}#{exc.args[0]}"
+                ) from exc
+            values.append(value)
+        if scope == "identity_response_ids":
+            if (
+                len(values) != 2
+                or not all(isinstance(value, str) and value for value in values)
+                or values[0] != values[1]
+            ):
+                raise ValueError(
+                    "identity_response_ids evidence pointer must bind equal, non-empty "
+                    "pre_gateway and post_gateway response_id values"
+                )
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -503,8 +737,18 @@ def _classify_core_items(
     items.append(
         _item(
             "identity_response_ids",
-            "preserved" if streaming_captured else "Unqualified",
-            "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+            "preserved"
+            if streaming_captured
+            and wire.get("pre_gateway", {})
+            .get("response", {})
+            .get("streaming", {})
+            .get("response_id")
+            == wire.get("post_gateway", {})
+            .get("response", {})
+            .get("streaming", {})
+            .get("response_id")
+            else "Unqualified",
+            IDENTITY_RESPONSE_EVIDENCE,
             "response_id aliases preserved across pre/post-Gateway replay",
         )
     )
@@ -803,8 +1047,12 @@ def _validate_candidate_binding(
     planner_gates = trace_data.get("planner_gates", {})
     trace_cli_version = source.get("cli_version")
     trace_source_commit = planner_gates.get("source_commit")
-    if not trace_cli_version or not trace_source_commit:
-        raise ValueError("trace evidence is missing source.cli_version or planner_gates.source_commit")
+    trace_capture_id = source.get("capture_id")
+    if not trace_cli_version or not trace_source_commit or not trace_capture_id:
+        raise ValueError(
+            "trace evidence is missing source.cli_version, source.capture_id, "
+            "or planner_gates.source_commit"
+        )
     if not isinstance(trace_cli_version, str):
         raise ValueError("trace source.cli_version must be a string")
     try:
@@ -889,7 +1137,7 @@ def _validate_candidate_binding(
     if (
         wire_provenance.get("cli_version") != trace_cli_version
         or wire_provenance.get("source_commit") != trace_source_commit
-        or wire_provenance.get("capture_id") != source.get("capture_id")
+        or wire_provenance.get("capture_id") != trace_capture_id
     ):
         raise ValueError("wire provenance is not bound to the trace candidate")
     catalog_snapshot = (
@@ -953,6 +1201,7 @@ def build_inventory(
         or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
     ):
         raise ValueError("Issue #62 evidence schema identity is invalid")
+    _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
 
     items: list[dict[str, Any]] = []
     items.extend(
@@ -1081,8 +1330,14 @@ def reconcile_inventory(
         mismatches.append("inventory disposition_vocabulary is invalid")
 
     items = inventory.get("items", [])
+    if not isinstance(items, list):
+        mismatches.append("inventory items must be an array")
+        items = []
     seen_scopes: set[str] = set()
     for item in items:
+        if not isinstance(item, dict):
+            mismatches.append("item must be an object")
+            continue
         scope = item.get("scope")
         if not scope:
             mismatches.append("item missing scope")
@@ -1098,16 +1353,26 @@ def reconcile_inventory(
             mismatches.append(
                 f"mutation: {scope}: disposition {disposition!r} not in allowed vocabulary"
             )
-        expected_evidence = CORE_SCOPE_EVIDENCE.get(scope)
-        if expected_evidence and item.get("evidence_source") != expected_evidence:
+        evidence_source = item.get("evidence_source")
+        if not isinstance(evidence_source, str) or not evidence_source:
+            mismatches.append(f"mutation: {scope}: evidence_source is missing")
+        elif not _evidence_source_allowed(scope, evidence_source):
             mismatches.append(
-                f"mutation: {scope}: evidence_source {item.get('evidence_source')!r} "
-                f"does not match required {expected_evidence!r}"
+                f"mutation: {scope}: evidence_source {evidence_source!r} "
+                "does not match the expected fixture path/scope"
             )
-        if scope in CORE_CONTRACT_SCOPES and disposition == "Unsupported":
+        if scope in CORE_CONTRACT_SCOPES and disposition not in CORE_FINAL_DISPOSITIONS:
             mismatches.append(
-                f"mutation: {scope}: core disposition {disposition!r} cannot replace "
-                "preserved, reversibly_adapted, local_consume, or Unqualified"
+                f"mutation: {scope}: core disposition {disposition!r} is not a final "
+                "preserved, reversibly_adapted, or Unqualified disposition"
+            )
+        if (
+            scope in CORE_REQUIRED_PRESERVED_SCOPES
+            and disposition not in {"preserved", "reversibly_adapted"}
+        ):
+            mismatches.append(
+                f"mutation: {scope}: bounded contract evidence requires a preserved "
+                "or reversibly_adapted disposition"
             )
 
     required_scopes = (
@@ -1121,11 +1386,17 @@ def reconcile_inventory(
         mismatches.append(f"deletion: missing scopes {missing}")
 
     candidate_identity = inventory.get("candidate_identity", {})
+    mismatches.extend(_candidate_identity_mismatches(candidate_identity))
+    if not isinstance(candidate_identity, dict):
+        candidate_identity = {}
     for field in REQUIRED_CANDIDATE_FIELDS:
         if field not in candidate_identity:
             mismatches.append(f"loss: candidate_identity.{field} is missing")
 
     qualification = inventory.get("qualification", {})
+    if not isinstance(qualification, dict):
+        mismatches.append("qualification must be an object")
+        qualification = {}
     try:
         _validate_supported_floor(str(inventory.get("cli_version_floor", "")))
     except ValueError as exc:
@@ -1214,6 +1485,9 @@ def reconcile_inventory(
         )
 
     evidence_binding = inventory.get("evidence_binding", {})
+    if not isinstance(evidence_binding, dict):
+        mismatches.append("evidence_binding must be an object")
+        evidence_binding = {}
     for name in ("trace", "wire_fixture", "audit"):
         entry = evidence_binding.get(name, {})
         if not isinstance(entry, dict) or not entry.get("file") or not re.fullmatch(
@@ -1259,6 +1533,11 @@ def reconcile_inventory(
                 or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
             ):
                 mismatches.append("mutation: bound evidence schema identity is invalid")
+                return {"reconciled": False, "mismatches": mismatches}
+            try:
+                _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
+            except ValueError as exc:
+                mismatches.append(f"mutation: bound evidence pointer validation failed: {exc}")
                 return {"reconciled": False, "mismatches": mismatches}
             try:
                 expected_identity, expected_status_from_evidence = _validate_candidate_binding(
@@ -1318,6 +1597,9 @@ def reconcile_inventory(
                         )
 
     identity_control = inventory.get("identity_control", {})
+    if not isinstance(identity_control, dict):
+        mismatches.append("identity_control must be an object")
+        identity_control = {}
     if identity_control.get("fail_closed") is not True:
         mismatches.append("identity_control.fail_closed must be true")
     if identity_control.get("replay_cases") != [

@@ -630,6 +630,37 @@ if ([string]$inventoryCandidate.source_commit -notmatch '^[0-9a-f]{40}$') {
 if ($null -eq (Get-CliVersionKey -Value ([string]$inventoryCandidate.cli_version))) {
     Add-Mismatch 'inventory candidate CLI version is malformed'
 }
+if ([string]$inventoryCandidate.codex_source_commit -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate Codex source commit is not a lowercase 40-character SHA-1'
+}
+if ($inventoryCandidate.source_commit -ne $inventoryCandidate.codex_source_commit) {
+    Add-Mismatch 'inventory candidate source and Codex source commits contradict each other'
+}
+foreach ($field in @(
+    'route_upstream',
+    'inbound_format',
+    'upstream_format',
+    'configured_provider_id',
+    'model',
+    'catalog_binding',
+    'catalog_model_entry_id',
+    'route_behavior_profile'
+)) {
+    if ([string]::IsNullOrWhiteSpace([string]$inventoryCandidate.$field)) {
+        Add-Mismatch "inventory candidate $field is missing or blank"
+    }
+}
+foreach ($field in @('catalog_snapshot_sha256','evidence_manifest_sha256')) {
+    if ([string]$inventoryCandidate.$field -notmatch '^[0-9a-f]{64}$') {
+        Add-Mismatch "inventory candidate $field is not a lowercase 64-character SHA-256"
+    }
+}
+if (
+    [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
+    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
+) {
+    Add-Mismatch 'candidate trace/wire capture identity is missing'
+}
 if (
     $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
     $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
@@ -703,19 +734,83 @@ $coreEvidence = @{
     core_function_result = 'codexhub-runtime-wire-fixture.json#history.call_links'
     core_function_replay = 'codexhub-runtime-wire-fixture.json#history.call_links'
     identity_item_call_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
-    identity_response_ids = 'codexhub-runtime-wire-fixture.json#response.streaming.response_id'
+    identity_response_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id'
     identity_request_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.request_id'
 }
-$coreAllowedDispositions = @('preserved','reversibly_adapted','local_consume','Unqualified')
+$expectedEvidenceSources = @{
+    core_text_streaming = $coreEvidence.core_text_streaming
+    core_text_non_streaming = $coreEvidence.core_text_non_streaming
+    core_history_multiturn = $coreEvidence.core_history_multiturn
+    core_history_item_ids = $coreEvidence.core_history_item_ids
+    core_history_call_ids = $coreEvidence.core_history_call_ids
+    core_sse_streaming_events = $coreEvidence.core_sse_streaming_events
+    core_sse_terminal_events = $coreEvidence.core_sse_terminal_events
+    core_sse_errors = $coreEvidence.core_sse_errors
+    core_function_declaration = $coreEvidence.core_function_declaration
+    core_function_call = $coreEvidence.core_function_call
+    core_function_result = $coreEvidence.core_function_result
+    core_function_replay = $coreEvidence.core_function_replay
+    identity_item_call_ids = $coreEvidence.identity_item_call_ids
+    identity_response_ids = $coreEvidence.identity_response_ids
+    identity_request_ids = $coreEvidence.identity_request_ids
+    choice_controls = @(
+        'codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false',
+        'codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=true'
+    )
+    terminal_events = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required'
+    errors = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required'
+    hosted_only_declarations = 'current-codexhub-thread-tool-surface.json#exposure_state_catalog'
+    unknown_tagged_sentinels = 'codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown'
+    default_runtime_fields = 'read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence'
+    code_mode = 'issue-248#beta.1-scope'
+    tool_search = 'current-codexhub-thread-tool-surface.json#planner_gates.caller_request'
+    collaboration_v2 = 'issue-248#beta.3-scope'
+    chat_conversion = 'issue-248#beta.4-scope'
+}
+$coreAllowedDispositions = @('preserved','reversibly_adapted','Unqualified')
+$coreRequiredPreservedScopes = @(
+    'core_text_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_sse_streaming_events',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids'
+)
 foreach ($scope in $coreEvidence.Keys) {
     $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
     if (-not $entry) { continue }
-    if ($entry.evidence_source -ne $coreEvidence[$scope]) {
-        Add-Mismatch "inventory core scope $scope has evidence_source $($entry.evidence_source), expected $($coreEvidence[$scope])"
+    $expectedSources = @($expectedEvidenceSources[$scope])
+    if ($entry.evidence_source -notin $expectedSources) {
+        Add-Mismatch "inventory core scope $scope has evidence_source $($entry.evidence_source), expected fixture path/scope $($expectedSources -join ', ')"
     }
     if ($entry.disposition -notin $coreAllowedDispositions) {
-        Add-Mismatch "inventory core scope $scope has disallowed incomplete disposition $($entry.disposition)"
+        Add-Mismatch "inventory core scope $scope has disallowed disposition $($entry.disposition)"
     }
+    if ($scope -in $coreRequiredPreservedScopes -and $entry.disposition -notin @('preserved','reversibly_adapted')) {
+        Add-Mismatch "inventory core scope $scope requires preserved or reversibly_adapted disposition"
+    }
+}
+foreach ($scope in $allRequiredScopes) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry) { continue }
+    $expectedSources = @($expectedEvidenceSources[$scope])
+    if ($entry.evidence_source -notin $expectedSources) {
+        Add-Mismatch "inventory scope $scope has evidence_source $($entry.evidence_source), expected fixture path/scope $($expectedSources -join ', ')"
+    }
+}
+$preResponseId = [string]$wire.pre_gateway.response.streaming.response_id
+$postResponseId = [string]$wire.post_gateway.response.streaming.response_id
+if (
+    [string]::IsNullOrWhiteSpace($preResponseId) -or
+    [string]::IsNullOrWhiteSpace($postResponseId) -or
+    $preResponseId -ne $postResponseId
+) {
+    Add-Mismatch 'wire identity_response_ids evidence pointer is missing or pre/post aliases differ'
 }
 $qualification = $inventory.qualification
 if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {

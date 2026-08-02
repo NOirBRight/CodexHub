@@ -224,6 +224,18 @@ consumes planner completeness, current-binding cold-start, full-wire
 fingerprinting, non-streaming, and identity-replay statuses; item dispositions
 alone cannot make an incomplete evidence set ready.
 
+The reconciler also binds every taxonomy item's `evidence_source` to the
+declared fixture path/scope (including advanced and live-control sentinels).
+The `identity_response_ids` source is an explicit pair, written as
+`pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id`;
+both pointers must exist and contain equal non-empty aliases.
+Core claims already proven by this bounded capture must remain `preserved` or
+`reversibly_adapted`; `local_consume` and `Unsupported` cannot downgrade those
+claims. Candidate source and Codex source commits must agree, and the trace,
+wire fixture, and capture identity are reopened and compared when an evidence
+root is supplied. Contradictory self-contained candidate metadata is rejected
+even for in-memory replay checks without a live or upstream control.
+
 `identity_control.unknown_tagged_source_count` is recomputed from the bound wire
 fixture during reconciliation; changing the count without changing the source
 evidence fails closed.

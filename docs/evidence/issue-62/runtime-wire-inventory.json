@@ -139,7 +139,7 @@
     },
     {
       "disposition": "preserved",
-      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id",
       "notes": "response_id aliases preserved across pre/post-Gateway replay",
       "scope": "identity_response_ids"
     },
