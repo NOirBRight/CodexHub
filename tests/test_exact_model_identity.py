@@ -111,6 +111,22 @@ def test_catalog_upstream_model_mismatch_is_catalog_inconsistency():
     assert failure.value.reason == "upstream_model_mismatch"
 
 
+@pytest.mark.parametrize("visibility", ["hide", "future"])
+def test_official_catalog_rejects_non_listable_visibility_before_io(visibility):
+    row = _catalog_row("gpt-5.6-terra")
+    row["visibility"] = visibility
+
+    with patch("codex_proxy.existing_generated_catalog_path", return_value=Path("missing.json")), patch(
+        "codex_proxy.load_catalog_models", return_value=[row]
+    ), patch("codex_proxy.urlopen") as urlopen:
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("gpt-5.6-terra")
+
+    assert failure.value.classification == "catalog_inconsistency"
+    assert failure.value.reason == "unsupported_visibility"
+    urlopen.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "requested",
     [

@@ -2777,6 +2777,13 @@ def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | N
             provider_id="openai",
             model_slug=upstream_model,
         )
+    if model_visibility(model, missing_is_list=True) is not CatalogVisibility.LIST:
+        raise _catalog_failure(
+            "published catalog model is not explicitly listable",
+            reason="unsupported_visibility",
+            provider_id="openai",
+            model_slug=upstream_model,
+        )
     if model.get("supported_in_api") is False:
         raise _identity_failure(
             f"model identity is not supported in the API: {slug}",
