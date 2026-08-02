@@ -57,3 +57,12 @@ test("catalog hide vetoes a metadata-only Official model", () => {
 
   assert.deepEqual(combined, []);
 });
+
+test("metadata cannot create an Official model absent from the catalog", () => {
+  const combined = mergeOfficialModelSources(
+    [],
+    [model("gpt-5.6-terra", { visibility: "list" })],
+  );
+
+  assert.deepEqual(combined, []);
+});

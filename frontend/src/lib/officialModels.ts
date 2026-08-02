@@ -123,7 +123,11 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   const publishedCatalogModels = new Map(merged);
   for (const model of metadata.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
-    if (!canonicalId || blockedOfficialIds.has(canonicalId)) {
+    if (
+      !canonicalId ||
+      blockedOfficialIds.has(canonicalId) ||
+      !publishedCatalogModels.has(canonicalId)
+    ) {
       continue;
     }
     const existing = merged.get(canonicalId);
