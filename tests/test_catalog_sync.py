@@ -1221,6 +1221,49 @@ class CatalogSyncTests(unittest.TestCase):
             )
             self.assertEqual(diagnostics["accepted"], 1)
 
+    def test_generated_legacy_baseline_rejects_markerless_forged_row(self):
+        official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            overrides_path = root / "overrides.json"
+            current_path = root / "catalog.json"
+            (root / catalog_sync.CATALOG_OWNER_SECRET_FILENAME).write_text(
+                "66" * 32,
+                encoding="ascii",
+            )
+            with (
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides_path),
+                patch.object(catalog_sync, "_CATALOG_OWNER_SECRET_CACHE", None),
+            ):
+                generated = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+                current = json.loads(json.dumps(generated))
+                row = current["models"][0]
+                row["multi_agent_version"] = "v2"
+                row["description"] = "forged Official row"
+                metadata = row["codex_proxy_metadata"]
+                for key in (
+                    catalog_sync.CATALOG_OWNER_METADATA_KEY,
+                    catalog_sync.CATALOG_OWNER_METADATA_VERSION_KEY,
+                    catalog_sync.CATALOG_OWNER_IDENTITY_KEY,
+                    catalog_sync.CATALOG_OWNER_SIGNATURE_KEY,
+                ):
+                    metadata.pop(key, None)
+                current_path.write_text(json.dumps(current), encoding="utf-8")
+                with (
+                    patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                    patch.object(
+                        catalog_sync,
+                        "MANAGED_CATALOG_BASELINE_PATH",
+                        root / "missing-baseline.json",
+                    ),
+                ):
+                    collected, diagnostics = catalog_sync._collect_catalog_overrides(
+                        legacy_baseline=generated,
+                    )
+
+            self.assertEqual(collected, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
+
     def test_marker_only_catalog_without_baseline_rejects_forged_row_when_key_exists(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         identity = ("openai", "official", "gpt-5.6-luna")
