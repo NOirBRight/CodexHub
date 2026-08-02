@@ -480,6 +480,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         }
         "subagent_matrix_status" => to_value(gateway::subagent_matrix_status()),
         "generate_catalog" => to_value(catalog::generate_catalog()),
+        "get_catalog_override_diagnostics" => to_value(catalog::catalog_override_diagnostics()),
         "list_models" => to_value(models::list_models()),
         "refresh_model_metadata" => to_value(models::refresh_model_metadata()),
         "list_model_metadata" => to_value(models::list_model_metadata()),

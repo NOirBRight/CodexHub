@@ -141,6 +141,97 @@ function Remove-TopLevelKeys {
     return ($result -join "`n")
 }
 
+function Get-TopLevelConfigValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+
+    $inTopLevel = $true
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s*\[') {
+            $inTopLevel = $false
+        }
+        if (-not $inTopLevel) {
+            continue
+        }
+        $match = [regex]::Match($line, "^\s*$([regex]::Escape($Key))\s*=\s*(.*)$")
+        if (-not $match.Success) {
+            continue
+        }
+        $raw = $match.Groups[1].Value.Trim()
+        $quote = ''
+        for ($index = 0; $index -lt $raw.Length; $index++) {
+            $char = $raw[$index]
+            if ($quote -eq "'") {
+                if ($char -eq "'") {
+                    if ($index + 1 -lt $raw.Length -and $raw[$index + 1] -eq "'") {
+                        $index++
+                        continue
+                    }
+                    $quote = ''
+                }
+                continue
+            }
+            if ($quote -eq '"') {
+                if ($char -eq '\') {
+                    $index++
+                    continue
+                }
+                if ($char -eq '"') {
+                    $quote = ''
+                }
+                continue
+            }
+            if ($char -eq "'" -or $char -eq '"') {
+                $quote = [string]$char
+                continue
+            }
+            if ($char -eq '#') {
+                $raw = $raw.Substring(0, $index).Trim()
+                break
+            }
+        }
+        if ($raw.Length -ge 2 -and $raw.StartsWith("'") -and $raw.EndsWith("'")) {
+            return $raw.Substring(1, $raw.Length - 2).Replace("''", "'")
+        }
+        if ($raw.Length -ge 2 -and $raw.StartsWith('"') -and $raw.EndsWith('"')) {
+            try {
+                return ($raw | ConvertFrom-Json)
+            }
+            catch {
+                return $raw.Substring(1, $raw.Length - 2)
+            }
+        }
+        return $raw
+    }
+    return $null
+}
+
+function Test-CodexHubManagedCatalogPath {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    $normalized = $Value.Trim().Replace('/', '\').TrimEnd('\')
+    $leaf = Split-Path -Leaf $normalized
+    if ($leaf -notin @('codexhub-model-catalog.json', 'codex-proxy-official-ollama.json')) {
+        return $false
+    }
+    if ($normalized -ieq (Join-Path 'model-catalogs' $leaf)) {
+        return $true
+    }
+    try {
+        $candidate = [System.IO.Path]::GetFullPath($normalized)
+        $managed = [System.IO.Path]::GetFullPath((Join-Path $CodexDir (Join-Path 'model-catalogs' $leaf)))
+        return $candidate -ieq $managed
+    }
+    catch {
+        return $false
+    }
+}
+
 function Remove-TomlSectionsMatching {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
@@ -274,15 +365,27 @@ function Set-ConfigForMode {
         [Parameter(Mandatory = $true)][ValidateSet('official', 'proxy')][string]$TargetMode
     )
 
-    $base = Get-CleanBaseConfig -Text (Read-TextIfExists -Path $ConfigPath)
+    $original = Read-TextIfExists -Path $ConfigPath
+    $existingCatalogValue = Get-TopLevelConfigValue -Text $original -Key 'model_catalog_json'
+    $preserveCatalog = -not [string]::IsNullOrWhiteSpace($existingCatalogValue) -and -not (Test-CodexHubManagedCatalogPath $existingCatalogValue)
+    $base = Get-CleanBaseConfig -Text $original
     Backup-ConfigBeforeWrite -ConfigPath $ConfigPath -TargetMode $TargetMode
     if ($TargetMode -eq 'official') {
-        $prefix = "model = `"gpt-5.5`"`nmodel_provider = `"openai`"`n`n"
+        $prefix = "model = `"gpt-5.5`"`nmodel_provider = `"openai`"`n"
+        if ($preserveCatalog) {
+            $prefix += "model_catalog_json = $(Convert-ToTomlLiteral -Value $existingCatalogValue)`n"
+        }
+        $prefix += "`n"
         Write-Utf8NoBom -Path $ConfigPath -Text ($prefix + $base)
         return
     }
 
-    $catalogValue = Convert-ToTomlLiteral -Value 'model-catalogs/codexhub-model-catalog.json'
+    $catalogValue = if ($preserveCatalog) {
+        Convert-ToTomlLiteral -Value $existingCatalogValue
+    }
+    else {
+        Convert-ToTomlLiteral -Value 'model-catalogs/codexhub-model-catalog.json'
+    }
     $baseUrlValue = Convert-ToTomlLiteral -Value 'http://127.0.0.1:9099/v1'
     $prefix = @(
         '# BEGIN CODEX PROXY CONFIG',

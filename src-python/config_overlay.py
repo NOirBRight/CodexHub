@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hmac
 import json
+import os
 from pathlib import Path
+import secrets
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_read_or_create_text, atomic_write_text
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
     DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
@@ -26,6 +29,12 @@ PROXY_FEATURE_FLAGS = {
 PROXY_PROVIDER_ID = "custom"
 PROXY_PROVIDER_NAME = "Codex Proxy"
 UNIFIED_OFFICIAL_PROVIDER_NAME = "OpenAI"
+CATALOG_OWNER_MARKER = "# catalog_owner = codexhub"
+CATALOG_OWNER_SECRET_FILENAME = ".codexhub-catalog-owner-key"
+MANAGED_CATALOG_FILENAMES = {
+    "codexhub-model-catalog.json",
+    "codex-proxy-official-ollama.json",
+}
 STALE_PROXY_PROVIDER_SECTIONS = (
     "model_providers.openai",
     "model_providers.custom",
@@ -85,9 +94,45 @@ def strip_section(text: str, section_name: str) -> str:
     return "".join(result)
 
 
+def _toml_value_without_comment(raw: str) -> str:
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if quote == "'":
+            if char == "'":
+                if index + 1 < len(raw) and raw[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+        elif quote == '"':
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "#":
+            return raw[:index].rstrip()
+        index += 1
+    return raw.strip()
+
+
+def _decode_toml_string(raw: str) -> str:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        if raw[0] == "'":
+            return raw[1:-1].replace("''", "'")
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return raw[1:-1]
+    return raw
+
+
 def top_level_value(text: str, key: str) -> str | None:
     in_top_level = True
-    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*(?:#.*)?$")
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.*)$")
     for line in text.splitlines():
         if re.match(r"^\s*\[", line):
             in_top_level = False
@@ -96,11 +141,105 @@ def top_level_value(text: str, key: str) -> str | None:
         match = key_pattern.match(line)
         if not match:
             continue
-        raw = match.group(1).strip()
-        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
-            return raw[1:-1]
-        return raw
+        raw = _toml_value_without_comment(match.group(1))
+        return _decode_toml_string(raw)
     return None
+
+
+def _looks_like_managed_catalog_path(value: str | None) -> bool:
+    """Recognize only the standard CodexHub catalog location shape.
+
+    A custom path may use the same basename, so a basename alone is not an
+    ownership proof.  The managed catalogs are always emitted below a
+    ``model-catalogs`` directory (or as the documented relative path).
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.strip().replace("\\", "/").rstrip("/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or parts[-1] not in MANAGED_CATALOG_FILENAMES:
+        return False
+    # The documented relative handoff is unambiguous.  Absolute paths are
+    # owned only when they resolve below the active CODEX_HOME; an unrelated
+    # custom directory containing the same basename remains user-owned.
+    if len(parts) == 2 and parts[0] == "model-catalogs":
+        return True
+    try:
+        codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+        candidate = Path(value).expanduser().resolve()
+        return candidate == (codex_home / "model-catalogs" / parts[-1]).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _catalog_owner_secret_path(catalog_value: str) -> Path:
+    return Path(catalog_value).expanduser().resolve().parent / CATALOG_OWNER_SECRET_FILENAME
+
+
+def _load_catalog_owner_secret(catalog_value: str, *, create: bool) -> bytes | None:
+    path = _catalog_owner_secret_path(catalog_value)
+    if create:
+        raw = atomic_read_or_create_text(
+            path,
+            lambda: secrets.token_hex(32) + "\n",
+            encoding="ascii",
+            mode=0o600,
+        )
+    else:
+        try:
+            raw = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError):
+            return None
+    try:
+        secret = bytes.fromhex(raw.strip())
+    except ValueError:
+        return None
+    return secret if len(secret) == 32 else None
+
+
+def _catalog_owner_marker_digest(catalog_value: str, *, create: bool) -> str | None:
+    secret = _load_catalog_owner_secret(catalog_value, create=create)
+    if secret is None:
+        return None
+    normalized = str(Path(catalog_value).expanduser().resolve())
+    return hmac.new(secret, normalized.encode("utf-8"), "sha256").hexdigest()
+
+
+def _overlay_marks_managed_catalog(text: str) -> bool:
+    marker_pattern = re.compile(
+        rf"(?ms)^\s*{re.escape(MARKER_BEGIN)}\s*$.*?^\s*{re.escape(MARKER_END)}\s*$"
+    )
+    match = marker_pattern.search(text)
+    if not match:
+        return False
+    block = match.group(0)
+    catalog_value = top_level_value(block, "model_catalog_json")
+    if not catalog_value:
+        return False
+    marker = re.search(
+        rf"(?m)^\s*{re.escape(CATALOG_OWNER_MARKER)}:([0-9a-f]{{64}})\s*$",
+        block,
+    )
+    if marker is None:
+        return False
+    digest = _catalog_owner_marker_digest(catalog_value, create=False)
+    return digest is not None and hmac.compare_digest(marker.group(1), digest)
+
+
+def is_managed_catalog_path(value: str | None, managed_path: Path | None = None) -> bool:
+    """Return whether a config path is owned by CodexHub's catalog layer."""
+
+    if managed_path is not None and isinstance(value, str) and value.strip():
+        try:
+            candidate = Path(value).expanduser().resolve()
+            if candidate == managed_path.expanduser().resolve():
+                return True
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return _looks_like_managed_catalog_path(value)
 
 
 def set_top_level_values(text: str, values: dict[str, str | None]) -> str:
@@ -534,6 +673,7 @@ class UnifiedConfigState:
     custom_section: dict[str, str] | None
     exact_unified: bool
     managed_gateway: bool
+    managed_catalog: bool
     stale_catalog: bool
 
 
@@ -560,12 +700,14 @@ def is_managed_gateway_provider(values: dict[str, str] | None) -> bool:
 def unified_config_state(text: str) -> UnifiedConfigState:
     provider_id = top_level_value(text, "model_provider")
     custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
+    managed_catalog = is_managed_catalog_path(top_level_value(text, "model_catalog_json")) or _overlay_marks_managed_catalog(text)
     return UnifiedConfigState(
         provider_id=provider_id,
         custom_section=custom_section,
         exact_unified=custom_section == unified_official_provider_values(),
         managed_gateway=is_managed_gateway_provider(custom_section),
-        stale_catalog=top_level_value(text, "model_catalog_json") is not None,
+        managed_catalog=managed_catalog,
+        stale_catalog=managed_catalog,
     )
 
 
@@ -611,7 +753,10 @@ def inject_unified_history_config(text: str) -> tuple[str, str]:
     if state.custom_section is not None and not (state.exact_unified or state.managed_gateway):
         return text, "conflicting_custom_provider"
 
-    updated = strip_top_level_keys(text, {"model_provider", "model_catalog_json", "openai_base_url"})
+    keys_to_strip = {"model_provider", "openai_base_url"}
+    if state.managed_catalog:
+        keys_to_strip.add("model_catalog_json")
+    updated = strip_top_level_keys(text, keys_to_strip)
     if state.custom_section is not None:
         updated = strip_section(updated, f"model_providers.{PROXY_PROVIDER_ID}")
     updated = insert_provider_section(updated, build_unified_official_provider_section())
@@ -629,11 +774,15 @@ def inject_unified_history_config(text: str) -> tuple[str, str]:
 
 
 def strip_unified_history_config(text: str) -> str:
+    managed_catalog = is_managed_catalog_path(top_level_value(text, "model_catalog_json")) or _overlay_marks_managed_catalog(text)
     custom_section = section_key_values(text, f"model_providers.{PROXY_PROVIDER_ID}")
     if custom_section != unified_official_provider_values() and not is_managed_gateway_provider(custom_section):
         return text
     stripped = strip_section(text, f"model_providers.{PROXY_PROVIDER_ID}")
-    stripped = strip_top_level_keys(stripped, {"model_provider", "model_catalog_json", "openai_base_url"})
+    keys_to_strip = {"model_provider", "openai_base_url"}
+    if managed_catalog:
+        keys_to_strip.add("model_catalog_json")
+    stripped = strip_top_level_keys(stripped, keys_to_strip)
     return stripped.lstrip() if text.startswith("model_provider") else stripped
 
 
@@ -784,6 +933,7 @@ def build_overlay(
     catalog_value: str | None,
     owner: str,
     context_budget: tuple[int, int] | None = None,
+    catalog_owned: bool = True,
 ) -> str:
     # Context limits are model-scoped catalog metadata.  The old global
     # projection is intentionally ignored even when callers still pass the
@@ -793,6 +943,10 @@ def build_overlay(
         f"# owner = {owner}",
         f'model_provider = "{PROXY_PROVIDER_ID}"',
     ]
+    if catalog_value is not None and catalog_owned:
+        digest = _catalog_owner_marker_digest(catalog_value, create=True)
+        if digest is not None:
+            lines.append(f"{CATALOG_OWNER_MARKER}:{digest}")
     if catalog_value is not None:
         lines.append(f"model_catalog_json = {toml_literal(catalog_value)}")
     return "\n".join([*lines, MARKER_END, ""])
@@ -905,14 +1059,36 @@ def apply_overlay(
 
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
+    existing_catalog_value = top_level_value(original, "model_catalog_json")
+    catalog_value = (
+        existing_catalog_value
+        if existing_catalog_value is not None
+        and not is_managed_catalog_path(existing_catalog_value, catalog_path)
+        else (
+            catalog_config_value(config_path, catalog_path)
+            if catalog_path is not None
+            else existing_catalog_value
+        )
+    )
+    catalog_owned = catalog_value is not None and is_managed_catalog_path(catalog_value, catalog_path)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
     updated = build_overlay(
-        catalog_config_value(config_path, catalog_path) if catalog_path is not None else None,
+        catalog_value,
         owner,
+        catalog_owned=catalog_owned,
     ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
+
+
+def _preserve_user_catalog_path(current: str, restored: str) -> str:
+    current_value = top_level_value(current, "model_catalog_json")
+    if not current_value or is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
+        return restored
+    if current_value == top_level_value(restored, "model_catalog_json"):
+        return restored
+    return set_top_level_values(restored, {"model_catalog_json": toml_literal(current_value)})
 
 
 def restore_overlay(
@@ -934,6 +1110,7 @@ def restore_overlay(
             restored,
             context_guard_state_path,
         )
+        restored = _preserve_user_catalog_path(current, restored)
         restore_from_backup = True
         if is_active_takeover_backup(current, restored, backup_path):
             restored_owner = overlay_owner(restored)

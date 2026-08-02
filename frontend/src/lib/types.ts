@@ -562,4 +562,12 @@ export interface GatewayClientSyncSummary {
   failed: number;
   results: GatewayClientSyncItem[];
   message: string;
+  catalog_override_diagnostics?: CatalogOverrideDiagnostics | null;
+}
+
+export interface CatalogOverrideDiagnostics {
+  accepted: number;
+  rejected: number;
+  migrated: number;
+  reasons: Record<string, number>;
 }

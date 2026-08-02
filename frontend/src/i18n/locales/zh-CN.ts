@@ -445,6 +445,8 @@ const zhCN = {
     pricingUnknown: "价格未知",
     providerCatalogUpdated: "供应商目录已更新",
     providerCatalogUpdateFailed: "供应商目录更新失败",
+    catalogOverrideDiagnostics: "模型目录覆盖：接受 {{accepted}} 项，迁移 {{migrated}} 项，拒绝 {{rejected}} 项。{{restart}}",
+    catalogOverrideRestartCodex: "请重启 Codex App 使其生效",
     providerAdded: "{{name}} 已添加",
     providerAlreadyExists: "供应商已存在：{{name}}",
     providerDeleted: "{{name}} 已删除",

@@ -1,10 +1,23 @@
 use crate::{config, models, runtime_paths, Model};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
+const GENERATED_STATE_FILE: &str = "codex-proxy-state.json";
 const CODEX_TARGET_HOME_ENV: &str = "CODEXHUB_CODEX_TARGET_HOME";
+const MAX_DIAGNOSTIC_COUNT: u64 = 100;
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct CatalogOverrideDiagnostics {
+    pub accepted: u64,
+    pub rejected: u64,
+    pub migrated: u64,
+    pub reasons: BTreeMap<String, u64>,
+}
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     models::generate_catalog()
@@ -16,6 +29,65 @@ pub fn sync_catalog() -> Result<String, String> {
     let runner = ProcessCatalogSyncCommandRunner;
 
     sync_catalog_with_paths(&paths, &python, &runner)
+}
+
+/// Read the bounded catalog ownership diagnostics emitted by Python sync.
+///
+/// The state file is an implementation detail and may be missing while a
+/// first-run sync is in progress.  A malformed or unknown payload therefore
+/// degrades to an empty diagnostic set instead of turning a successful catalog
+/// publication into a UI error.  Only the whitelisted counters/reasons cross
+/// the Rust/frontend boundary.
+pub fn catalog_override_diagnostics() -> Result<CatalogOverrideDiagnostics, String> {
+    let paths = CatalogPaths::runtime()?;
+    Ok(read_catalog_override_diagnostics(
+        &paths.catalog_state_path(),
+    ))
+}
+
+fn read_catalog_override_diagnostics(path: &Path) -> CatalogOverrideDiagnostics {
+    let Ok(text) = fs::read_to_string(path) else {
+        return CatalogOverrideDiagnostics::default();
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&text) else {
+        return CatalogOverrideDiagnostics::default();
+    };
+    let Some(diagnostics) = payload.get("catalog_override_diagnostics") else {
+        return CatalogOverrideDiagnostics::default();
+    };
+    let Some(object) = diagnostics.as_object() else {
+        return CatalogOverrideDiagnostics::default();
+    };
+    let mut result = CatalogOverrideDiagnostics {
+        accepted: bounded_count(object.get("accepted")),
+        rejected: bounded_count(object.get("rejected")),
+        migrated: bounded_count(object.get("migrated")),
+        reasons: BTreeMap::new(),
+    };
+    let Some(reasons) = object.get("reasons").and_then(Value::as_object) else {
+        return result;
+    };
+    for reason in [
+        "invalid_sidecar",
+        "invalid_catalog",
+        "invalid_baseline",
+        "invalid_row_identity",
+        "invalid_override_fields",
+        "missing_managed_model",
+    ] {
+        let count = bounded_count(reasons.get(reason));
+        if count > 0 {
+            result.reasons.insert(reason.to_string(), count);
+        }
+    }
+    result
+}
+
+fn bounded_count(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_u64)
+        .map(|count| count.min(MAX_DIAGNOSTIC_COUNT))
+        .unwrap_or(0)
 }
 
 fn sync_catalog_with_paths(
@@ -97,6 +169,12 @@ impl CatalogPaths {
             .join("model-catalogs")
             .join(GENERATED_CATALOG_FILE)
     }
+
+    fn catalog_state_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join(GENERATED_STATE_FILE)
+    }
 }
 
 type CatalogCommandOutcome = config::CommandOutcome;
@@ -141,8 +219,9 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        sync_catalog_with_paths, CatalogCommandOutcome, CatalogPaths, CatalogSyncCommandRunner,
-        CODEX_TARGET_HOME_ENV, GENERATED_CATALOG_FILE,
+        read_catalog_override_diagnostics, sync_catalog_with_paths, CatalogCommandOutcome,
+        CatalogOverrideDiagnostics, CatalogPaths, CatalogSyncCommandRunner, CODEX_TARGET_HOME_ENV,
+        GENERATED_CATALOG_FILE,
     };
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -218,6 +297,48 @@ mod tests {
         assert!(error.contains("--sync"));
         assert!(error.contains("printed stdout"));
         assert!(error.contains("printed stderr"));
+    }
+
+    #[test]
+    fn catalog_override_diagnostics_are_bounded_and_whitelisted() {
+        let root = temp_root("catalog-diagnostics");
+        let path = root.join("codex-proxy-state.json");
+        fs::write(
+            &path,
+            r#"{
+                "catalog_override_diagnostics": {
+                    "accepted": 999,
+                    "rejected": 2,
+                    "migrated": 1,
+                    "reasons": {
+                        "invalid_row_identity": 101,
+                        "unknown": 77
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let diagnostics = read_catalog_override_diagnostics(&path);
+        assert_eq!(diagnostics.accepted, 100);
+        assert_eq!(diagnostics.rejected, 2);
+        assert_eq!(diagnostics.migrated, 1);
+        assert_eq!(diagnostics.reasons.get("invalid_row_identity"), Some(&100));
+        assert!(!diagnostics.reasons.contains_key("unknown"));
+    }
+
+    #[test]
+    fn malformed_or_missing_catalog_override_diagnostics_are_empty() {
+        let root = temp_root("catalog-diagnostics-malformed");
+        let missing = read_catalog_override_diagnostics(&root.join("missing.json"));
+        assert_eq!(missing, CatalogOverrideDiagnostics::default());
+
+        let malformed_path = root.join("malformed.json");
+        fs::write(&malformed_path, "not json").unwrap();
+        assert_eq!(
+            read_catalog_override_diagnostics(&malformed_path),
+            CatalogOverrideDiagnostics::default()
+        );
     }
 
     #[derive(Debug, Clone)]

@@ -617,6 +617,11 @@ async fn generate_catalog() -> Result<Vec<Model>, String> {
 }
 
 #[tauri::command]
+fn get_catalog_override_diagnostics() -> Result<catalog::CatalogOverrideDiagnostics, String> {
+    catalog::catalog_override_diagnostics()
+}
+
+#[tauri::command]
 fn list_models() -> Result<Vec<Model>, String> {
     models::list_models()
 }
@@ -1124,6 +1129,7 @@ fn run_gui() {
             sync_gateway_clients,
             subagent_matrix_status,
             generate_catalog,
+            get_catalog_override_diagnostics,
             list_models,
             refresh_model_metadata,
             list_model_metadata,

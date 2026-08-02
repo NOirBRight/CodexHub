@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import hashlib
 import io
+import re
 import json
 import tempfile
 from pathlib import Path
@@ -11,8 +13,10 @@ from unittest.mock import patch
 from config_overlay import (
     MARKER_BEGIN,
     MARKER_END,
+    CATALOG_OWNER_MARKER,
     _migrate_legacy_context_guard_values,
     _migrate_legacy_context_guard_values_for_backups,
+    _overlay_marks_managed_catalog,
     _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
@@ -216,6 +220,143 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
             self.assertFalse(backup_path.exists())
+
+    def test_apply_and_restore_overlay_preserves_user_owned_catalog_path(self):
+        original = (
+            'model = "volc/glm-5.2"\n'
+            'model_catalog_json = "C:/user/catalogs/custom.json"\n'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "model-catalogs" / "codexhub-model-catalog.json"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            active = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_catalog_json = 'C:/user/catalogs/custom.json'", active)
+            self.assertNotIn(str(managed_catalog.resolve()), active)
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_unified_history_injection_preserves_user_owned_catalog_path(self):
+        original = (
+            'model_provider = "openai"\n'
+            'model_catalog_json = "C:/user/catalogs/custom.json"\n'
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "injected")
+        self.assertIn('model_catalog_json = "C:/user/catalogs/custom.json"', updated)
+        self.assertNotIn("codexhub-model-catalog.json", updated)
+
+    def test_relative_custom_catalog_with_managed_basename_is_not_claimed(self):
+        original = (
+            'model_provider = "openai"\n'
+            'model_catalog_json = "custom-model-catalogs/codexhub-model-catalog.json"\n'
+        )
+
+        updated, status = inject_unified_history_config(original)
+
+        self.assertEqual(status, "injected")
+        self.assertIn(
+            'model_catalog_json = "custom-model-catalogs/codexhub-model-catalog.json"',
+            updated,
+        )
+
+    def test_user_edit_inside_managed_overlay_invalidates_catalog_owner_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "arbitrary-managed-location" / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            active = config_path.read_text(encoding="utf-8")
+            active = active.replace(
+                f"model_catalog_json = '{managed_catalog.resolve()}'",
+                'model_catalog_json = "C:/user/catalogs/after-edit.json"',
+            )
+            config_path.write_text(active, encoding="utf-8")
+
+            updated, status = inject_unified_history_config(active)
+
+            self.assertEqual(status, "replaced_managed_gateway")
+            self.assertIn(
+                'model_catalog_json = "C:/user/catalogs/after-edit.json"',
+                updated,
+            )
+
+    def test_public_catalog_owner_digest_cannot_claim_an_overlay_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "arbitrary-managed-location" / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            active = config_path.read_text(encoding="utf-8")
+            public_digest = hashlib.sha256(
+                str(managed_catalog.resolve()).encode("utf-8")
+            ).hexdigest()
+            active = re.sub(
+                r"(?m)^# catalog_owner = codexhub:[0-9a-f]{64}$",
+                f"{CATALOG_OWNER_MARKER}:{public_digest}",
+                active,
+            )
+
+            self.assertFalse(_overlay_marks_managed_catalog(active))
+
+    def test_restore_overlay_keeps_catalog_path_edited_while_connected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "arbitrary-managed-location" / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            edited = config_path.read_text(encoding="utf-8").replace(
+                f"model_catalog_json = '{managed_catalog.resolve()}'",
+                'model_catalog_json = "C:/user/catalogs/edited.json"',
+            )
+            config_path.write_text(edited, encoding="utf-8")
+
+            restore_overlay(config_path, backup_path)
+
+            restored = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_catalog_json = 'C:/user/catalogs/edited.json'", restored)
+
+    def test_apply_overlay_without_catalog_argument_does_not_drop_existing_catalog(self):
+        original = 'model = "volc/glm-5.2"\nmodel_catalog_json = "C:/user/catalogs/custom.json"\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, None, "http://127.0.0.1:9099")
+
+            self.assertIn("model_catalog_json = 'C:/user/catalogs/custom.json'", config_path.read_text(encoding="utf-8"))
+
+    def test_user_owned_catalog_path_with_hash_and_apostrophe_is_preserved(self):
+        original = "model = \"volc/glm-5.2\"\nmodel_catalog_json = \"C:/user/#catalog's/custom.json\"\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, None, "http://127.0.0.1:9099")
+
+            active = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_catalog_json = 'C:/user/#catalog''s/custom.json'", active)
 
     def test_overlay_projects_safe_catalog_budget_across_restart_and_missing_catalog_fallback(self):
         original = "\n".join(
