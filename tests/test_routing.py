@@ -482,6 +482,8 @@ class RoutingTests(unittest.TestCase):
             "codex_proxy.generated_catalog_slugs",
             return_value={
                 "openai/gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
                 "minimax-m3",
                 "glm-5.2",
                 "ollama-cloud/glm-5.2",
@@ -504,6 +506,24 @@ class RoutingTests(unittest.TestCase):
             "codex_proxy.generated_catalog_by_slug",
             return_value={
                 "openai/gpt-5.5": {"slug": "openai/gpt-5.5"},
+                "gpt-5.4": {
+                    "slug": "gpt-5.4",
+                    "supported_in_api": True,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.4",
+                    },
+                },
+                "gpt-5.4-mini": {
+                    "slug": "gpt-5.4-mini",
+                    "supported_in_api": True,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.4-mini",
+                    },
+                },
                 "minimax-m3": {"slug": "minimax-m3", "max_output_tokens": 524288},
                 "glm-5.2": {"slug": "glm-5.2", "max_output_tokens": 131072},
                 "ollama-cloud/glm-5.2": {"slug": "ollama-cloud/glm-5.2", "max_output_tokens": 131072},
@@ -906,7 +926,7 @@ class RoutingTests(unittest.TestCase):
                 "provider_hint": None,
                 "expected": {
                     "behavior_profile": codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
-                    "provider_id": "official",
+                    "provider_id": "openai",
                     "canonical_model": "openai/gpt-5.5",
                     "upstream_model": "gpt-5.5",
                     "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
@@ -940,7 +960,7 @@ class RoutingTests(unittest.TestCase):
                 "provider_hint": None,
                 "expected": {
                     "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
-                    "provider_id": "ollama_cloud",
+                    "provider_id": "ollama-cloud",
                     "canonical_model": "ollama-cloud/glm-5.2",
                     "upstream_model": "glm-5.2",
                     "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
@@ -976,7 +996,7 @@ class RoutingTests(unittest.TestCase):
                 "provider_hint": "volc",
                 "expected": {
                     "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                    "provider_id": "volcengine",
+                    "provider_id": "volc",
                     "canonical_model": "volc/glm-5.2",
                     "upstream_model": "glm-5.2",
                     "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
@@ -1009,7 +1029,7 @@ class RoutingTests(unittest.TestCase):
                 "provider_hint": "volc",
                 "expected": {
                     "behavior_profile": codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
-                    "provider_id": "volcengine",
+                    "provider_id": "volc",
                     "canonical_model": "volc/glm-5.2",
                     "upstream_model": "glm-5.2",
                     "inbound_protocol": codex_proxy.RouteProtocol.RESPONSES,
@@ -1040,7 +1060,7 @@ class RoutingTests(unittest.TestCase):
                 "provider_hint": None,
                 "expected": {
                     "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
-                    "provider_id": "ollama_cloud",
+                    "provider_id": "ollama-cloud",
                     "canonical_model": "ollama-cloud/glm-5.2",
                     "upstream_model": "glm-5.2",
                     "inbound_protocol": codex_proxy.RouteProtocol.CHAT_COMPLETIONS,
@@ -4166,7 +4186,14 @@ class RoutingTests(unittest.TestCase):
         handler, fake = post_handler("/v1/responses", body)
 
         with (
-            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch(
+                "codex_proxy.choose_upstream",
+                return_value={
+                    **official_upstream(),
+                    "model_id": "openai/gpt-5.6-sol",
+                    "upstream_model": "gpt-5.6-sol",
+                },
+            ),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch(
@@ -4193,7 +4220,14 @@ class RoutingTests(unittest.TestCase):
         handler, fake = post_handler("/v1/responses", body)
 
         with (
-            patch("codex_proxy.choose_upstream", return_value=official_upstream()),
+            patch(
+                "codex_proxy.choose_upstream",
+                return_value={
+                    **official_upstream(),
+                    "model_id": "openai/gpt-5.6-terra",
+                    "upstream_model": "gpt-5.6-terra",
+                },
+            ),
             patch("codex_proxy.codex_access_token", return_value="sub-token"),
             patch("codex_proxy.codex_account_id", return_value="acct-1"),
             patch(
@@ -11687,8 +11721,11 @@ class RoutingTests(unittest.TestCase):
         }
 
         with patch("codex_proxy.generated_catalog_by_slug", return_value=catalog):
-            with self.assertRaisesRegex(ValueError, "model is not allowed"):
+            with self.assertRaises(codex_proxy.ModelIdentityResolutionError) as context:
                 choose_upstream("gpt-untrusted")
+
+        self.assertEqual(context.exception.classification, "catalog_inconsistency")
+        self.assertEqual(context.exception.reason, "upstream_model_mismatch")
 
     def test_runtime_official_route_respects_policy_denylist(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -12386,11 +12423,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(upstream["auth"], "api_key")
         self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
 
-    def test_external_provider_explicit_alias_routes_without_lowercasing(self):
-        upstream = choose_upstream("minimax-cn/minimax-m3")
-
-        self.assertEqual(upstream["name"], "minimax_cn")
-        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
+    def test_external_provider_presentation_alias_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "presentation-only"):
+            choose_upstream("minimax-cn/minimax-m3")
 
     def test_denied_provider_qualified_ollama_alias_is_rejected(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -12434,7 +12469,7 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("model is not allowed", str(context.exception))
 
     def test_provider_qualified_ollama_alias_requires_generated_catalog_entry(self):
-        with patch("codex_proxy.generated_catalog_slugs", return_value=set()):
+        with patch("codex_proxy.generated_catalog_by_slug", return_value={}):
             with self.assertRaises(ValueError) as context:
                 choose_upstream("ollama-cloud/glm-5.2")
 
@@ -13009,7 +13044,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_compaction_input_to_developer_message(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/MiniMax-M3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = dict(choose_upstream(model_id))
@@ -13220,7 +13255,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_converts_custom_tool_items_to_developer_messages(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/MiniMax-M3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = dict(choose_upstream(model_id))
@@ -13265,7 +13300,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_body_normalizes_real_history_artifact_items(self):
         for model_id, upstream_model in (
             ("volc/glm-5.2", "glm-5.2"),
-            ("minimax-cn/minimax-m3", "MiniMax-M3"),
+            ("minimax-cn/MiniMax-M3", "MiniMax-M3"),
         ):
             with self.subTest(model_id=model_id):
                 upstream = dict(choose_upstream(model_id))
@@ -13340,7 +13375,7 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b'"model":"glm-5.2"', transformed)
         self.assertNotIn(b'"model":"volc/glm-5.2"', transformed)
 
-    def test_default_minimax_provider_rewrites_to_live_upstream_model_case(self):
+    def test_default_minimax_provider_presentation_alias_fails_closed(self):
         from providers_config import DEFAULT_PROVIDERS_PATH
         from providers_config import resolve_external_model_alias as real_resolve_external_model_alias
 
@@ -13351,14 +13386,8 @@ class RoutingTests(unittest.TestCase):
             patch("codex_proxy.resolve_external_model_alias", side_effect=bundled_resolve_external_model_alias),
             patch.dict(os.environ, {"MINIMAX_API_KEY": "minimax-live-case-token"}, clear=False),
         ):
-            upstream = choose_upstream("minimax-cn/minimax-m3")
-
-            body = b'{"model":"minimax-cn/minimax-m3","input":"hi"}'
-            transformed = compatible_request_body(body, upstream, "minimax-cn/minimax-m3")
-
-        self.assertEqual(upstream["name"], "minimax_cn")
-        self.assertEqual(upstream["upstream_model"], "MiniMax-M3")
-        self.assertEqual(json.loads(transformed)["model"], "MiniMax-M3")
+            with self.assertRaisesRegex(ValueError, "presentation-only"):
+                choose_upstream("minimax-cn/minimax-m3")
 
     def test_official_responses_url_preserves_backend_subpath_and_query(self):
         upstream = official_upstream()

@@ -445,6 +445,20 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
         with (
             patch.object(
                 codex_proxy,
+                "choose_upstream",
+                return_value={
+                    "name": "official",
+                    "provider_id": "openai",
+                    "model_id": "gpt-5.6-terra",
+                    "upstream_model": "gpt-5.6-terra",
+                    "auth": "codex_auth",
+                    "base_url": "https://example.test/v1",
+                    "upstream_format": "responses",
+                    "reports_cached_input_tokens": True,
+                },
+            ) as choose_upstream,
+            patch.object(
+                codex_proxy,
                 "upstream_headers",
                 return_value={"Authorization": "Bearer test-token"},
             ) as build_upstream_headers,
@@ -479,6 +493,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
                 "payload": codex_proxy.user_requested_shutdown_payload("responses"),
             }
             assert open_upstream.call_count == 1
+            choose_upstream.assert_called_once()
             build_upstream_headers.assert_called_once()
             access_token.assert_called_once_with()
             account_id.assert_called_once_with()
