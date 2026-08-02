@@ -3105,6 +3105,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-terra",
                     "model": "gpt-5.6-terra",
                     "displayName": "GPT-5.6-Terra",
+                    "hidden": false,
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low", "description": "Light"},
                         {"reasoningEffort": "medium", "description": "Medium"},
@@ -3119,6 +3120,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
                     "displayName": "GPT-5.6-Sol",
+                    "hidden": false,
                     "context_window": 400000,
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low", "description": "Light"},
@@ -3189,12 +3191,13 @@ for line in sys.stdin:
     fn subscription_seed_backfills_pinned_official_planner_metadata_per_model() {
         let subscription_models = subscription_models_from_payload(&json!({
             "data": [
-                {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol"},
-                {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra"},
-                {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna"},
+                {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "hidden": false},
+                {"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "hidden": false},
+                {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna", "hidden": false},
                 {
                     "id": "gpt-5.5",
                     "model": "gpt-5.5",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -3202,6 +3205,7 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.4",
                     "model": "gpt-5.4",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -3209,6 +3213,7 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.4-mini",
                     "model": "gpt-5.4-mini",
+                    "hidden": false,
                     "use_responses_lite": true,
                     "tool_mode": "code_mode_only",
                     "multi_agent_version": "v2"
@@ -3216,12 +3221,14 @@ for line in sys.stdin:
                 {
                     "id": "gpt-5.3-codex-spark",
                     "model": "gpt-5.3-codex-spark",
+                    "hidden": false,
                     "use_responses_lite": true
                 },
-                {"id": "gpt-sparse", "model": "gpt-sparse"},
+                {"id": "gpt-sparse", "model": "gpt-sparse", "hidden": false},
                 {
                     "id": "gpt-explicit-lite",
                     "model": "gpt-explicit-lite",
+                    "hidden": false,
                     "use_responses_lite": true
                 }
             ]
@@ -3327,6 +3334,7 @@ for line in sys.stdin:
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
                     "displayName": "GPT-5.6-Sol",
+                    "hidden": false,
                     "context_window": 400000,
                     "max_context_window": 999999
                 }
@@ -3351,7 +3359,8 @@ for line in sys.stdin:
             "data": [
                 {
                     "slug": "openai/gpt-5.6-sol",
-                    "displayName": "GPT-5.6-Sol"
+                    "displayName": "GPT-5.6-Sol",
+                    "hidden": false
                 }
             ]
         }))
@@ -3368,6 +3377,7 @@ for line in sys.stdin:
             "id": "openai/gpt-5.6-sol",
             "model": "openai/gpt-5.6-sol",
             "displayName": "Legacy Sol",
+            "hidden": false,
             "context_window": 1,
             "enabled": true
         });
@@ -3375,13 +3385,15 @@ for line in sys.stdin:
             "id": "gpt-5.6-sol",
             "model": "gpt-5.6-sol",
             "displayName": "GPT-5.6-Sol",
+            "hidden": false,
             "context_window": 400000,
             "enabled": false
         });
         let other = json!({
             "id": "gpt-5.5",
             "model": "gpt-5.5",
-            "displayName": "GPT-5.5"
+            "displayName": "GPT-5.5",
+            "hidden": false
         });
 
         for items in [
@@ -3410,11 +3422,13 @@ for line in sys.stdin:
                 {
                     "id": "openai/gpt-5.6-sol",
                     "model": "openai/gpt-5.6-sol",
+                    "hidden": false,
                     "enabled": false
                 },
                 {
                     "id": "gpt-5.6-sol",
                     "model": "gpt-5.6-sol",
+                    "hidden": false,
                     "enabled": false
                 }
             ]
@@ -3438,6 +3452,7 @@ for line in sys.stdin:
                     {
                         "slug": "gpt-cached-subscription",
                         "display_name": "GPT Cached Subscription",
+                        "hidden": false,
                         "input_modalities": ["text"],
                         "supported_reasoning_levels": [
                             {"effort": "medium", "description": "Balanced"}
