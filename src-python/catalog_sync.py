@@ -804,7 +804,14 @@ def _managed_baseline_shape_is_valid(payload: Any) -> bool:
             for field in supported_fields:
                 value = model.get(field)
                 if field == "multi_agent_version":
-                    if not isinstance(value, str) or value not in {"v1", "v2"}:
+                    expected_version = expected.get(field)
+                    if expected_version is None:
+                        # Legacy Official rows deliberately carry a null
+                        # multi-agent version.  Keep accepting that pinned
+                        # shape while still rejecting arbitrary values.
+                        if value is not None:
+                            return False
+                    elif not isinstance(value, str) or value != expected_version:
                         return False
                 else:
                     expected_value = expected.get(field)

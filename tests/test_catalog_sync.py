@@ -1363,6 +1363,20 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(collected, {})
             self.assertEqual(diagnostics["reasons"]["invalid_baseline"], 1)
 
+    def test_managed_baseline_accepts_pinned_legacy_null_multi_agent_versions(self):
+        official = [
+            {"slug": slug, "display_name": slug, "visibility": "list"}
+            for slug in catalog_sync.PINNED_OFFICIAL_MODEL_IDS
+        ]
+        baseline = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+        baseline.update({"schema_version": 1, "managed_baseline": True})
+
+        self.assertTrue(catalog_sync._managed_baseline_shape_is_valid(baseline))
+        by_slug = {model["slug"]: model for model in baseline["models"]}
+        for slug in catalog_sync.PINNED_OFFICIAL_LEGACY_MODEL_IDS:
+            with self.subTest(slug=slug):
+                self.assertIsNone(by_slug[slug]["multi_agent_version"])
+
     def test_managed_baseline_rejects_numeric_boolean_planner_values(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         with tempfile.TemporaryDirectory() as tmpdir:
