@@ -3130,6 +3130,7 @@ def choose_upstream(model_id: str) -> dict[str, Any]:
             "base_url": ollama_cloud_base_url(),
             "auth": "ollama_api_key",
             "reports_cached_input_tokens": False,
+            "upstream_model": slug,
         }
 
     raise _identity_failure(

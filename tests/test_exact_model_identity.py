@@ -227,6 +227,21 @@ def test_ollama_catalog_rejects_supported_in_api_false_before_io(requested):
     urlopen.assert_not_called()
 
 
+def test_bare_ollama_catalog_fallback_includes_exact_upstream_identity():
+    row = _catalog_row("glm-5.2", provider="ollama-cloud", upstream_model="glm-5.2")
+
+    with (
+        patch("codex_proxy._published_catalog_model", return_value=row),
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None)),
+        patch("codex_proxy.should_include_model", return_value=True),
+    ):
+        upstream = codex_proxy.choose_upstream("glm-5.2")
+
+    assert upstream["provider_id"] == "ollama-cloud"
+    assert upstream["model_id"] == "glm-5.2"
+    assert upstream["upstream_model"] == "glm-5.2"
+
+
 def test_provider_model_index_rejects_duplicate_exact_ids_and_alias_collisions():
     providers = [
         ProviderConfig(
