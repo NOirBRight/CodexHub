@@ -49,21 +49,15 @@ struct TrayToast {
     tone: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CatalogVisibility {
+    // Provider models and older persisted metadata were user-listable before
+    // visibility became explicit; upstream parsers assign Unknown explicitly.
+    #[default]
     List,
     Hide,
     Unknown,
-}
-
-impl Default for CatalogVisibility {
-    fn default() -> Self {
-        // Provider models and older persisted metadata were user-listable
-        // before visibility became explicit. Upstream/catalog parsers still
-        // assign Unknown when a record is missing or malformed.
-        Self::List
-    }
 }
 
 impl<'de> Deserialize<'de> for CatalogVisibility {
