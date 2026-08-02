@@ -322,6 +322,21 @@ def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
         )
 
 
+def test_build_inventory_rejects_missing_capture_provenance(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    trace = json.loads(TRACE.read_text(encoding="utf-8"))
+    trace["source"].pop("capture_id", None)
+    trace_path = tmp_path / TRACE.name
+    trace_path.write_text(json.dumps(trace, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="capture_id"):
+        module.build_inventory(
+            trace=trace_path,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
 def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
@@ -398,6 +413,58 @@ def test_inventory_reconcile_rejects_duplicate_and_wrong_core_evidence() -> None
     report = module.reconcile_inventory(unknown_scope)
     assert report["reconciled"] is False
     assert any("unknown scope" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_provenance_contradictions_without_evidence_root() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    contradictory = json.loads(json.dumps(base))
+    contradictory["candidate_identity"]["codex_source_commit"] = "0" * 40
+    report = module.reconcile_inventory(contradictory)
+
+    assert report["reconciled"] is False
+    assert any("contradict" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_nonfinal_core_disposition_without_evidence_root() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    mutated = json.loads(json.dumps(base))
+    mutated["items"] = [
+        {
+            **item,
+            "disposition": "local_consume",
+        }
+        if item["scope"] == "core_text_streaming"
+        else item
+        for item in mutated["items"]
+    ]
+    report = module.reconcile_inventory(mutated)
+
+    assert report["reconciled"] is False
+    assert any("final" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_binds_every_scope_evidence_source() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    mutated = json.loads(json.dumps(base))
+    mutated["items"] = [
+        {
+            **item,
+            "evidence_source": "unrelated-fixture.json#claim",
+        }
+        if item["scope"] == "tool_search"
+        else item
+        for item in mutated["items"]
+    ]
+    report = module.reconcile_inventory(mutated)
+
+    assert report["reconciled"] is False
+    assert any("expected fixture path/scope" in mismatch for mismatch in report["mismatches"])
 
 
 def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
