@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
+import secrets
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_read_or_create_text, atomic_write_text
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
     DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
@@ -29,6 +30,7 @@ PROXY_PROVIDER_ID = "custom"
 PROXY_PROVIDER_NAME = "Codex Proxy"
 UNIFIED_OFFICIAL_PROVIDER_NAME = "OpenAI"
 CATALOG_OWNER_MARKER = "# catalog_owner = codexhub"
+CATALOG_OWNER_SECRET_FILENAME = ".codexhub-catalog-owner-key"
 MANAGED_CATALOG_FILENAMES = {
     "codexhub-model-catalog.json",
     "codex-proxy-official-ollama.json",
@@ -171,6 +173,41 @@ def _looks_like_managed_catalog_path(value: str | None) -> bool:
         return False
 
 
+def _catalog_owner_secret_path(catalog_value: str) -> Path:
+    return Path(catalog_value).expanduser().resolve().parent / CATALOG_OWNER_SECRET_FILENAME
+
+
+def _load_catalog_owner_secret(catalog_value: str, *, create: bool) -> bytes | None:
+    path = _catalog_owner_secret_path(catalog_value)
+    if create:
+        raw = atomic_read_or_create_text(
+            path,
+            lambda: secrets.token_hex(32) + "\n",
+            encoding="ascii",
+            mode=0o600,
+        )
+    else:
+        try:
+            raw = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError):
+            return None
+    try:
+        secret = bytes.fromhex(raw.strip())
+    except ValueError:
+        return None
+    return secret if len(secret) == 32 else None
+
+
+def _catalog_owner_marker_digest(catalog_value: str, *, create: bool) -> str | None:
+    secret = _load_catalog_owner_secret(catalog_value, create=create)
+    if secret is None:
+        return None
+    normalized = str(Path(catalog_value).expanduser().resolve())
+    return hmac.new(secret, normalized.encode("utf-8"), "sha256").hexdigest()
+
+
 def _overlay_marks_managed_catalog(text: str) -> bool:
     marker_pattern = re.compile(
         rf"(?ms)^\s*{re.escape(MARKER_BEGIN)}\s*$.*?^\s*{re.escape(MARKER_END)}\s*$"
@@ -188,8 +225,8 @@ def _overlay_marks_managed_catalog(text: str) -> bool:
     )
     if marker is None:
         return False
-    digest = hashlib.sha256(catalog_value.encode("utf-8")).hexdigest()
-    return marker.group(1) == digest
+    digest = _catalog_owner_marker_digest(catalog_value, create=False)
+    return digest is not None and hmac.compare_digest(marker.group(1), digest)
 
 
 def is_managed_catalog_path(value: str | None, managed_path: Path | None = None) -> bool:
@@ -907,8 +944,9 @@ def build_overlay(
         f'model_provider = "{PROXY_PROVIDER_ID}"',
     ]
     if catalog_value is not None and catalog_owned:
-        digest = hashlib.sha256(catalog_value.encode("utf-8")).hexdigest()
-        lines.append(f"{CATALOG_OWNER_MARKER}:{digest}")
+        digest = _catalog_owner_marker_digest(catalog_value, create=True)
+        if digest is not None:
+            lines.append(f"{CATALOG_OWNER_MARKER}:{digest}")
     if catalog_value is not None:
         lines.append(f"model_catalog_json = {toml_literal(catalog_value)}")
     return "\n".join([*lines, MARKER_END, ""])

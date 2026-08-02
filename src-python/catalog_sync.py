@@ -588,6 +588,8 @@ def _catalog_override_row_is_eligible(
     identity: CatalogModelIdentity,
     model: dict[str, Any],
     baseline_model: dict[str, Any] | None = None,
+    *,
+    allow_markerless_legacy: bool = False,
 ) -> bool:
     """Require the edited row to be a visible, exact managed row.
 
@@ -637,6 +639,24 @@ def _catalog_override_row_is_eligible(
         or CATALOG_OWNER_IDENTITY_KEY in metadata
         or CATALOG_OWNER_SIGNATURE_KEY in metadata
     )
+    if allow_markerless_legacy and baseline_model is not None:
+        # The caller supplied the freshly generated managed catalog as the
+        # legacy migration baseline.  A markerless Beta1 row is accepted only
+        # when every immutable field is byte-for-byte equal to that baseline;
+        # the planner delta is the sole supported user edit.  This prevents a
+        # forged Official-shaped row from entering the migration path.
+        if _catalog_owner_canonical_row(model) != _catalog_owner_canonical_row(baseline_model):
+            return False
+        if not current_has_owner_marker:
+            return True
+        if CATALOG_OWNER_SIGNATURE_KEY not in metadata:
+            return _catalog_owner_metadata_is_valid(
+                metadata,
+                identity,
+                require_signature=False,
+                model=model,
+                baseline_model=baseline_model,
+            )
     if baseline_has_owner_marker or current_has_owner_marker:
         if (
             baseline_model is not None
@@ -677,6 +697,14 @@ def _catalog_override_row_is_eligible(
     # metadata/slug spoof is not a legacy catalog record.
     if not _official_identity(identity):
         return True
+    # A real sync creates the owner key before reconciliation.  Without the
+    # generated legacy baseline supplied by sync_catalog, a markerless row
+    # has no immutable provenance and is not a migration source.
+    try:
+        if _load_catalog_owner_secret(create=False) is not None:
+            return False
+    except ValueError:
+        return False
     required_legacy_keys = (
         "description",
         "shell_type",
@@ -930,7 +958,10 @@ def _delta_override_fields(
     return fields
 
 
-def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, Any]], dict[str, Any]]:
+def _collect_catalog_overrides(
+    *,
+    legacy_baseline: dict[str, Any] | None = None,
+) -> tuple[dict[CatalogModelIdentity, dict[str, Any]], dict[str, Any]]:
     """Capture user edits before the effective catalog is replaced.
 
     A baseline sidecar is the ownership boundary for new installations.  If
@@ -965,6 +996,7 @@ def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, A
         _record_override_rejection(diagnostics, "invalid_catalog")
 
     baseline_exists = MANAGED_CATALOG_BASELINE_PATH.exists()
+    using_legacy_baseline = not baseline_exists and legacy_baseline is not None
     if baseline_exists:
         try:
             baseline = load_json_file(MANAGED_CATALOG_BASELINE_PATH)
@@ -987,6 +1019,13 @@ def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, A
             current = {}
             diagnostics["current_catalog_valid"] = False
             _record_override_rejection(diagnostics, "invalid_catalog")
+    elif legacy_baseline is not None:
+        baseline = deepcopy(legacy_baseline)
+        baseline["schema_version"] = CATALOG_OVERRIDE_SCHEMA_VERSION
+        baseline["managed_baseline"] = True
+        if not _managed_baseline_shape_is_valid(baseline):
+            _record_override_rejection(diagnostics, "invalid_baseline")
+            return {}, diagnostics
     else:
         baseline = {}
 
@@ -1023,11 +1062,16 @@ def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, A
             _record_override_rejection(diagnostics, "missing_managed_model")
     for identity, model in current_models.items():
         baseline_model = baseline_models.get(identity)
-        if not _catalog_override_row_is_eligible(identity, model, baseline_model):
+        if not _catalog_override_row_is_eligible(
+            identity,
+            model,
+            baseline_model,
+            allow_markerless_legacy=using_legacy_baseline,
+        ):
             overrides.pop(identity, None)
             _record_override_rejection(diagnostics, "invalid_row_identity")
             continue
-        if baseline_exists and baseline_model is None:
+        if (baseline_exists or using_legacy_baseline) and baseline_model is None:
             # A row unknown to the managed baseline is not an authority for
             # another row; it can be safely ignored during migration.
             overrides.pop(identity, None)
@@ -2664,12 +2708,6 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     if ollama_runtime_configured:
         ollama_model_metadata.update(ollama_provider_model_metadata(runtime_ollama_models))
 
-    # Read the old effective catalog before publishing a new one.  This is the
-    # only point at which an edit made by the user is distinguishable from the
-    # next managed baseline.  The sidecars are written below in the same
-    # atomic-publication sequence as the catalog itself.
-    catalog_overrides, override_diagnostics = _collect_catalog_overrides()
-
     managed_catalog = build_codex_catalog(
         official_models,
         ollama_catalog_ids,
@@ -2684,6 +2722,13 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         use_ollama_policy_allowlist=not ollama_runtime_configured,
         official_source_present=official_snapshot.source_present,
         visibility_diagnostics=official_snapshot.visibility_diagnostics,
+    )
+    # Read the old effective catalog before publishing a new one.  Supplying
+    # this freshly generated catalog gives markerless Beta1 migration a
+    # complete immutable provenance check; the sidecars are still written
+    # below in the same atomic-publication sequence as the catalog itself.
+    catalog_overrides, override_diagnostics = _collect_catalog_overrides(
+        legacy_baseline=managed_catalog,
     )
     catalog = _apply_catalog_overrides(
         deepcopy(managed_catalog),

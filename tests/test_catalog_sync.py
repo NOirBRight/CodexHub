@@ -1180,6 +1180,47 @@ class CatalogSyncTests(unittest.TestCase):
             )
             self.assertEqual(diagnostics["accepted"], 1)
 
+    def test_marker_only_legacy_catalog_migrates_against_fresh_generated_baseline(self):
+        official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
+        identity = ("openai", "official", "gpt-5.6-luna")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            overrides_path = root / "overrides.json"
+            current_path = root / "catalog.json"
+            (root / catalog_sync.CATALOG_OWNER_SECRET_FILENAME).write_text(
+                "55" * 32,
+                encoding="ascii",
+            )
+            with (
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides_path),
+                patch.object(catalog_sync, "_CATALOG_OWNER_SECRET_CACHE", None),
+            ):
+                generated = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+                current = json.loads(json.dumps(generated))
+                current["models"][0]["multi_agent_version"] = "v2"
+                current["models"][0]["codex_proxy_metadata"].pop(
+                    catalog_sync.CATALOG_OWNER_SIGNATURE_KEY,
+                    None,
+                )
+                current_path.write_text(json.dumps(current), encoding="utf-8")
+                with (
+                    patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                    patch.object(
+                        catalog_sync,
+                        "MANAGED_CATALOG_BASELINE_PATH",
+                        root / "missing-baseline.json",
+                    ),
+                ):
+                    collected, diagnostics = catalog_sync._collect_catalog_overrides(
+                        legacy_baseline=generated,
+                    )
+
+            self.assertEqual(
+                collected,
+                {identity: {"multi_agent_version": "v2"}},
+            )
+            self.assertEqual(diagnostics["accepted"], 1)
+
     def test_marker_only_catalog_without_baseline_rejects_forged_row_when_key_exists(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         identity = ("openai", "official", "gpt-5.6-luna")
