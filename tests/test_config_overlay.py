@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import hashlib
 import io
+import re
 import json
 import tempfile
 from pathlib import Path
@@ -11,8 +13,10 @@ from unittest.mock import patch
 from config_overlay import (
     MARKER_BEGIN,
     MARKER_END,
+    CATALOG_OWNER_MARKER,
     _migrate_legacy_context_guard_values,
     _migrate_legacy_context_guard_values_for_backups,
+    _overlay_marks_managed_catalog,
     _selected_official_context_budget,
     apply_overlay,
     context_guard_status,
@@ -287,6 +291,27 @@ class ConfigOverlayTests(unittest.TestCase):
                 'model_catalog_json = "C:/user/catalogs/after-edit.json"',
                 updated,
             )
+
+    def test_public_catalog_owner_digest_cannot_claim_an_overlay_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "arbitrary-managed-location" / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            active = config_path.read_text(encoding="utf-8")
+            public_digest = hashlib.sha256(
+                str(managed_catalog.resolve()).encode("utf-8")
+            ).hexdigest()
+            active = re.sub(
+                r"(?m)^# catalog_owner = codexhub:[0-9a-f]{64}$",
+                f"{CATALOG_OWNER_MARKER}:{public_digest}",
+                active,
+            )
+
+            self.assertFalse(_overlay_marks_managed_catalog(active))
 
     def test_restore_overlay_keeps_catalog_path_edited_while_connected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
