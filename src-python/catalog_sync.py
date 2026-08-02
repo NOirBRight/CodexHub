@@ -644,6 +644,17 @@ def _catalog_override_row_is_eligible(
             != _catalog_owner_canonical_row(baseline_model)
         ):
             return False
+        if baseline_model is None and CATALOG_OWNER_SIGNATURE_KEY not in metadata:
+            # A real sync creates the HMAC key before reconciliation.  An
+            # old public marker without a managed baseline therefore has no
+            # trustworthy immutable-row proof and must not be treated as a
+            # legacy migration source; only truly markerless Beta1 catalogs
+            # use the narrow shape-checked migration below.
+            try:
+                if _load_catalog_owner_secret(create=False) is not None:
+                    return False
+            except ValueError:
+                return False
         require_signature = (
             isinstance(baseline_metadata, dict)
             and CATALOG_OWNER_SIGNATURE_KEY in baseline_metadata
