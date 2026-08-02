@@ -4460,6 +4460,47 @@ model_catalog_json = "model-catalogs/codex-proxy-official-ollama.json"
     }
 
     #[test]
+    fn session_shutdown_deadline_refuses_force_close_without_current_session_identity() {
+        let root = temp_root("session-shutdown-no-owned-identity");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_pid(&paths, pid, port, &paths.proxy_script_path()).expect("write pid");
+        let clock = FakeShutdownClock::default();
+        let alive = Arc::new(AtomicBool::new(true));
+        let listener_pid = Arc::new(AtomicU32::new(pid));
+        let killer = KillAwareKiller::new(Arc::clone(&alive), Arc::clone(&listener_pid));
+        let inspector =
+            KillAwareInspector::new(Arc::clone(&alive), fake_proxy_process(&paths, port));
+        let listener = AtomicListenerInspector::new(listener_pid);
+        let shutdown_request = |_port: u16, _key: &str, timeout: Duration| -> Result<(), String> {
+            assert_eq!(timeout, Duration::from_millis(800));
+            Ok(())
+        };
+        let health_probe =
+            |_port, _timeout| Ok(alive.load(Ordering::SeqCst).then(healthy_response));
+        let controls = UserRequestedShutdownControls {
+            killer: &killer,
+            inspector: &inspector,
+            listener_inspector: &listener,
+            shutdown_request: &shutdown_request,
+            health_probe: &health_probe,
+            clock: &clock,
+        };
+
+        let error = stop_session_owned_with_paths_and_controls(&paths, None, &controls)
+            .expect_err("missing current-session identity must refuse force-close");
+
+        assert!(error.contains("no current-session identity"), "{error}");
+        assert!(error.contains("force-close"), "{error}");
+        assert!(killer.killed.borrow().is_empty());
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(clock.elapsed(), Duration::from_secs(2));
+        assert_eq!(read_pid(&paths).expect("pid preserved"), Some(pid));
+    }
+
+    #[test]
     fn session_shutdown_deadline_reconciles_an_already_stopped_current_identity() {
         let root = temp_root("session-shutdown-deadline-already-stopped");
         let paths = test_paths(&root);
@@ -5217,12 +5258,37 @@ time.sleep(10)
 
         let result = (|| {
             let old_status = coordinator.start(&backend, || Ok(()))?;
-            *backend.session_owned_identity.borrow_mut() = coordinator.session_owned_identity();
             ensure(
                 old_status.status.proxy_port == old_port,
                 "old Gateway should use old port",
             )?;
             let old_pid = read_pid(&paths)?.ok_or_else(|| "old PID missing".to_string())?;
+            let old_identity = coordinator
+                .session_owned_identity()
+                .ok_or_else(|| "coordinator must acquire the old Gateway identity".to_string())?;
+            ensure(
+                old_identity.pid > 0
+                    && old_identity.port == old_port
+                    && !old_identity.script_path.is_empty()
+                    && old_identity
+                        .script_sha256
+                        .as_ref()
+                        .is_some_and(|sha256| !sha256.is_empty())
+                    && old_identity
+                        .process_start_id
+                        .as_ref()
+                        .is_some_and(|start_id| !start_id.is_empty())
+                    && old_identity.started_at_unix_ms > 0,
+                "coordinator must acquire a non-empty exact current-session identity",
+            )?;
+            let durable_identity = read_pid_record(&paths)?
+                .and_then(|record| record.gateway_identity())
+                .ok_or_else(|| "old Gateway must persist an exact identity".to_string())?;
+            ensure(
+                old_identity == durable_identity && old_identity.pid == old_pid,
+                "coordinator identity must match the durable old Gateway identity",
+            )?;
+            *backend.session_owned_identity.borrow_mut() = Some(old_identity);
             write_settings(&paths, new_port);
 
             let replacement = coordinator.restart(&backend, || Ok(()))?;
