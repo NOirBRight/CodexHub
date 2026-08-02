@@ -2009,6 +2009,9 @@ fn official_models_from_metadata(
                 let mut bare_sources = HashMap::<String, bool>::new();
                 let mut enabled_by_id = HashMap::<String, bool>::new();
                 for model in source_models {
+                    if !models::model_is_catalog_visible(&model) {
+                        continue;
+                    }
                     let source_is_bare = !model.id.trim().starts_with("openai/");
                     let source_enabled = model.enabled;
                     let Some(gateway_model) = official_gateway_model_from_metadata(

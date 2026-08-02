@@ -93,7 +93,7 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     "verified_at",
   ] as const;
   const merged = new Map<string, Model>();
-  for (const model of catalog.filter(isOfficialModel)) {
+  for (const model of catalog.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
     if (!canonicalId) {
       continue;
@@ -109,7 +109,7 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     });
   }
   const publishedCatalogModels = new Map(merged);
-  for (const model of metadata.filter(isOfficialModel)) {
+  for (const model of metadata.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
     const canonicalId = normalizeOfficialModelId(model.id, knownOfficialIds);
     if (!canonicalId) {
       continue;
@@ -152,7 +152,9 @@ export function resolveOfficialModelContextWindow(
 
 export function officialModelIdSet(...groups: Model[][]) {
   const known = new Set<string>();
-  for (const model of groups.flatMap((group) => group).filter(isOfficialModel)) {
+  for (const model of groups
+    .flatMap((group) => group)
+    .filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
     const value = model.id.trim();
     const bare = value.startsWith("openai/gpt-") ? value.slice("openai/".length) : value;
     if (bare.startsWith("gpt-")) {
@@ -167,7 +169,20 @@ export function isOfficialModel(model: Model) {
 }
 
 export function filterCodexVisibleOfficialModels(models: Model[]) {
-  return models.filter((model) => !isOfficialGatewayFastVariant(model));
+  return models.filter(
+    (model) => isCatalogModelListable(model) && !isOfficialGatewayFastVariant(model),
+  );
+}
+
+export function isCatalogModelListable(model: Model) {
+  if (model.visibility !== "list") {
+    return false;
+  }
+  const identities = [model.id, model.upstream_model ?? "", ...(model.aliases ?? [])];
+  return !identities.some((value) => {
+    const normalized = value.trim().toLowerCase().replace(/^openai\//, "");
+    return normalized === "codex-auto-review" || normalized.startsWith("codex-auto-review/");
+  });
 }
 
 export function isOfficialGatewayFastVariant(model: Model) {

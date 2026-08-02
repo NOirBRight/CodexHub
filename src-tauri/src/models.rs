@@ -1,6 +1,6 @@
 use crate::{
-    config, runtime_paths, safe_file, MetadataProvenance, Model, ModelPricing, Settings,
-    UpstreamFormat,
+    config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
+    Settings, UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -273,11 +273,12 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
         &known_official_models,
     );
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    Ok(merge_metadata_with_overrides(
+    let merged = merge_metadata_with_overrides(
         cached,
         overrides,
         &known_official_models,
-    ))
+    );
+    Ok(merged.into_iter().filter(model_is_catalog_visible).collect())
 }
 
 pub(crate) fn list_cached_official_subscription_models() -> Result<Vec<Model>, String> {
@@ -850,12 +851,74 @@ fn is_pinned_official_legacy_model(slug: &str) -> bool {
     matches!(slug, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini")
 }
 
+const INTERNAL_MODEL_IDENTIFIERS: &[&str] = &["codex-auto-review"];
+
+pub(crate) fn model_is_catalog_visible(model: &Model) -> bool {
+    if model.visibility != CatalogVisibility::List {
+        return false;
+    }
+    let mut identities = vec![model.id.as_str()];
+    if let Some(upstream_model) = model.upstream_model.as_deref() {
+        identities.push(upstream_model);
+    }
+    identities.extend(model.aliases.iter().map(String::as_str));
+    !identities.iter().any(|value| {
+        let normalized = value
+            .trim()
+            .strip_prefix("openai/")
+            .unwrap_or(value.trim())
+            .to_ascii_lowercase();
+        INTERNAL_MODEL_IDENTIFIERS.iter().any(|identifier| {
+            normalized == *identifier || normalized.starts_with(&format!("{identifier}/"))
+        })
+    })
+}
+
+fn catalog_visibility_from_item(object: &Map<String, Value>) -> CatalogVisibility {
+    if object.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return CatalogVisibility::Hide;
+    }
+    match object
+        .get("visibility")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("list") => CatalogVisibility::List,
+        Some("hide") => CatalogVisibility::Hide,
+        Some(_) => CatalogVisibility::Unknown,
+        None if object.get("hidden").and_then(Value::as_bool) == Some(false) => {
+            CatalogVisibility::List
+        }
+        None => CatalogVisibility::Unknown,
+    }
+}
+
+fn item_has_internal_identity(object: &Map<String, Value>) -> bool {
+    object
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "id" | "slug" | "model" | "name" | "upstream_model"
+            )
+        })
+        .filter_map(|(_, value)| value.as_str())
+        .map(str::trim)
+        .map(|value| value.strip_prefix("openai/").unwrap_or(value))
+        .map(str::to_ascii_lowercase)
+        .any(|value| {
+            INTERNAL_MODEL_IDENTIFIERS.iter().any(|identifier| {
+                value == *identifier || value.starts_with(&format!("{identifier}/"))
+            })
+        })
+}
+
 fn subscription_model_from_item(item: &Value) -> Option<OfficialSubscriptionModel> {
     let object = item.as_object()?;
-    if object
-        .get("hidden")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if item_has_internal_identity(object)
+        || catalog_visibility_from_item(object) != CatalogVisibility::List
     {
         return None;
     }
@@ -946,6 +1009,7 @@ fn subscription_models_to_metadata_models(
             locked: true,
             codex_enabled: true,
             gateway_exported: true,
+            visibility: CatalogVisibility::List,
             context_window: subscription_model
                 .context_window
                 .or_else(|| defaults.and_then(|model| model.context_window)),
@@ -1054,6 +1118,7 @@ fn write_official_subscription_seed(
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
     ensure_responses_lite_opt_in(&mut payload);
+    payload.insert("visibility".to_string(), json!(CatalogVisibility::List));
     payload.insert("slug".to_string(), json!(model.slug));
     payload
         .entry("display_name".to_string())
@@ -2011,6 +2076,14 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
     let original_enabled = base.enabled;
     let original_codex_enabled = base.codex_enabled;
     let original_gateway_exported = base.gateway_exported;
+    let original_visibility = base.visibility;
+    let visibility = match (original_visibility, override_model.visibility) {
+        (CatalogVisibility::Hide, _) | (_, CatalogVisibility::Hide) => CatalogVisibility::Hide,
+        (CatalogVisibility::Unknown, _) | (_, CatalogVisibility::Unknown) => {
+            CatalogVisibility::Unknown
+        }
+        _ => CatalogVisibility::List,
+    };
     let aliases = merge_model_aliases(base.aliases.clone(), override_model.aliases);
     *base = Model {
         id: override_model.id,
@@ -2024,6 +2097,7 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         locked: base.locked || override_model.locked,
         codex_enabled: override_model.codex_enabled && original_codex_enabled,
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
+        visibility,
         context_window: override_model.context_window.or(base.context_window),
         max_context_window: override_model.max_context_window.or(base.max_context_window),
         effective_source: override_model.effective_source.or(base.effective_source.take()),
@@ -2282,6 +2356,19 @@ fn priced_metadata(
 
 fn catalog_model_from_item(item: &Value) -> Option<Model> {
     let object = item.as_object()?;
+    // Generated catalogs predate the typed visibility field and also contain
+    // trusted third-party provider entries that never carried an upstream
+    // visibility flag.  Preserve that legacy list default at this boundary;
+    // raw app-server/upstream ingestion remains fail-closed through
+    // `subscription_model_from_item` and `catalog_visibility_from_item`.
+    let listable = if object.contains_key("visibility") || object.contains_key("hidden") {
+        catalog_visibility_from_item(object) == CatalogVisibility::List
+    } else {
+        true
+    };
+    if item_has_internal_identity(object) || !listable {
+        return None;
+    }
     let id = object
         .get("slug")
         .or_else(|| object.get("id"))
@@ -2353,6 +2440,7 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .get("gateway_exported")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        visibility: CatalogVisibility::List,
         pricing: None,
         metadata_provenance: None,
     })
@@ -2770,6 +2858,45 @@ for line in sys.stdin:
         assert_eq!(models[0].display_name.as_deref(), Some("5.4"));
         assert_eq!(models[0].upstream_model.as_deref(), Some("gpt-5.4"));
         assert!(models[0].pricing.is_some());
+    }
+
+    #[test]
+    fn subscription_models_apply_typed_visibility_and_internal_identity_policy() {
+        let subscription_models = subscription_models_from_payload(&json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false
+                },
+                {
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "visibility": "hide",
+                    "hidden": false
+                },
+                {
+                    "id": "codex-auto-review",
+                    "model": "gpt-5.6-terra",
+                    "slug": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false
+                },
+                {
+                    "id": "gpt-5.6-luna",
+                    "model": "gpt-5.6-luna",
+                    "visibility": "future",
+                    "hidden": false
+                }
+            ]
+        }))
+        .expect("subscription models");
+
+        let models = subscription_models_to_metadata_models(&subscription_models);
+
+        assert_eq!(model_ids(&models), ["gpt-5.6-terra"]);
+        assert_eq!(models[0].visibility, crate::CatalogVisibility::List);
     }
 
     #[test]

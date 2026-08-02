@@ -49,6 +49,37 @@ struct TrayToast {
     tone: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogVisibility {
+    List,
+    Hide,
+    Unknown,
+}
+
+impl Default for CatalogVisibility {
+    fn default() -> Self {
+        // Provider models and older persisted metadata were user-listable
+        // before visibility became explicit. Upstream/catalog parsers still
+        // assign Unknown when a record is missing or malformed.
+        Self::List
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogVisibility {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(match value.as_ref().and_then(serde_json::Value::as_str).map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("list") => Self::List,
+            Some("hide") => Self::Hide,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -65,6 +96,8 @@ pub struct Model {
     pub codex_enabled: bool,
     #[serde(default = "default_enabled")]
     pub gateway_exported: bool,
+    #[serde(default)]
+    pub visibility: CatalogVisibility,
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_window: Option<u32>,
@@ -99,6 +132,7 @@ impl Default for Model {
             locked: false,
             codex_enabled: true,
             gateway_exported: true,
+            visibility: CatalogVisibility::default(),
             context_window: None,
             max_context_window: None,
             effective_source: None,

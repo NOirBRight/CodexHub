@@ -15,11 +15,16 @@ from urllib.request import Request, urlopen
 
 from atomic_io import atomic_write_text
 from catalog import (
+    CatalogVisibility,
     CatalogPolicy,
     canonical_model_id,
+    catalog_visibility_diagnostics,
     display_name_for,
+    is_catalog_model_listable,
+    is_internal_model,
     load_catalog_models,
     load_policy,
+    model_visibility,
     should_include_external_provider_model,
     should_include_model,
 )
@@ -489,11 +494,21 @@ def load_official_seed_snapshot(
         payload_models = payload.get("models")
         if not isinstance(payload_models, list):
             payload_models = []
-        models = [
-            deepcopy(model)
-            for model in payload_models
-            if isinstance(model, dict) and str(model.get("slug", "")).startswith("gpt-")
-        ]
+        models = []
+        for raw_model in payload_models:
+            if not isinstance(raw_model, dict):
+                continue
+            model = deepcopy(raw_model)
+            if not is_catalog_model_listable(model, missing_is_list=True):
+                continue
+            slug = canonical_model_id(str(model.get("slug", "")))
+            if slug.startswith("openai/gpt-"):
+                slug = slug.removeprefix("openai/")
+            if not slug.startswith("gpt-"):
+                continue
+            model["slug"] = slug
+            model["visibility"] = CatalogVisibility.LIST.value
+            models.append(model)
         if not models:
             continue
         if candidate == runtime_path:
@@ -567,6 +582,8 @@ def _direct_official_model_index(
 ) -> dict[str, dict[str, Any]] | None:
     indexed: dict[str, dict[str, Any]] = {}
     for model in models:
+        if is_internal_model(model):
+            continue
         slug = _direct_official_model_identity(model)
         if slug is None or slug in indexed:
             return None
@@ -586,6 +603,8 @@ def _direct_official_cache_model_index(
 
     indexed: dict[str, dict[str, Any]] = {}
     for model in models:
+        if is_internal_model(model):
+            continue
         identities = _direct_official_model_identities(model)
         if identities is None:
             return None
@@ -1229,6 +1248,7 @@ def build_official_proxy_model(
     model["display_name"] = official_short_display_name(slug, model, policy)
     if source_model is None:
         apply_official_model_defaults(model, slug)
+    model["visibility"] = CatalogVisibility.LIST.value
     normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
     normalize_official_upgrade_for_codex(model)
@@ -1297,6 +1317,8 @@ def normalize_official_upgrade_for_codex(model: dict[str, Any]) -> None:
 def official_model_index(official_models: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for model in official_models:
+        if not is_catalog_model_listable(model, missing_is_list=True):
+            continue
         raw_slug = canonical_model_id(str(model.get("slug", "")))
         if not raw_slug:
             continue
@@ -1492,6 +1514,8 @@ def build_codex_catalog(
 ) -> dict[str, Any]:
     models: list[dict[str, Any]] = []
     seen_slugs: set[str] = set()
+    official_models = list(official_models)
+    visibility_diagnostics = catalog_visibility_diagnostics(official_models)
     official_by_slug = official_model_index(official_models)
     disabled_official_slugs = {official_model_disable_key(str(model_id)) for model_id in disabled_official_model_ids or []}
     official_source_slugs = list(official_by_slug.keys()) or list(policy.official_models)
@@ -1547,6 +1571,7 @@ def build_codex_catalog(
     return {
         "fetched_at": fetched_at or utc_now_iso(),
         "client_version": client_version,
+        "visibility_diagnostics": visibility_diagnostics,
         "models": models,
     }
 
@@ -1582,6 +1607,7 @@ def load_cached_state(path: Path = GENERATED_STATE_PATH) -> dict[str, Any]:
         "discovery_status": "cache_missing",
         "discovery_detail": "cached state is missing",
         "metadata_detail": "",
+        "visibility_diagnostics": {"hidden": 0, "unknown": 0, "internal": 0},
         "ollama_model_metadata": {},
         "discovered_ollama_models": [],
         "external_provider_models": [],
@@ -1743,6 +1769,9 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         "discovery_status": discovery_status,
         "discovery_detail": discovery_detail,
         "metadata_detail": metadata_detail,
+        "visibility_diagnostics": catalog.get(
+            "visibility_diagnostics", {"hidden": 0, "unknown": 0, "internal": 0}
+        ),
         "ollama_model_metadata": ollama_model_metadata,
         "discovered_ollama_models": discovered_slugs,
         "external_provider_models": [str(model["alias"]) for model in external_models],

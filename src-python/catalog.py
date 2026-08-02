@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 from pathlib import Path
 import re
 import tomllib
 from typing import Any
+
+
+class CatalogVisibility(str, Enum):
+    """The only visibility states accepted at a catalog boundary."""
+
+    LIST = "list"
+    HIDE = "hide"
+    UNKNOWN = "unknown"
+
+
+INTERNAL_MODEL_IDENTIFIERS = frozenset({"codex-auto-review"})
+MAX_VISIBILITY_DIAGNOSTIC_COUNT = 100
 
 
 @dataclass(frozen=True)
@@ -24,6 +37,95 @@ def canonical_model_id(model_id: str) -> str:
     if value.endswith(":cloud"):
         value = value[:-6]
     return value
+
+
+def catalog_visibility(value: Any) -> CatalogVisibility:
+    if isinstance(value, CatalogVisibility):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == CatalogVisibility.LIST.value:
+            return CatalogVisibility.LIST
+        if normalized == CatalogVisibility.HIDE.value:
+            return CatalogVisibility.HIDE
+    return CatalogVisibility.UNKNOWN
+
+
+def model_visibility(
+    model: Any,
+    *,
+    missing_is_list: bool = False,
+) -> CatalogVisibility:
+    """Resolve upstream visibility without trusting unknown values.
+
+    Older hand-authored catalog fixtures omitted visibility entirely.  Callers
+    that operate on those trusted legacy records can opt into the historical
+    list default; native/upstream ingestion remains fail-closed.
+    """
+
+    if not isinstance(model, dict):
+        return CatalogVisibility.UNKNOWN
+    if "visibility" in model:
+        return catalog_visibility(model.get("visibility"))
+    hidden = model.get("hidden")
+    if isinstance(hidden, bool):
+        return CatalogVisibility.HIDE if hidden else CatalogVisibility.LIST
+    return CatalogVisibility.LIST if missing_is_list else CatalogVisibility.UNKNOWN
+
+
+def model_identity_values(model: Any) -> tuple[str, ...]:
+    if not isinstance(model, dict):
+        return ()
+    values: list[str] = []
+    for key in ("id", "slug", "model", "name", "upstream_model"):
+        value = model.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = canonical_model_id(value).lower()
+        if normalized.startswith("openai/"):
+            normalized = normalized.removeprefix("openai/")
+        values.append(normalized)
+    return tuple(values)
+
+
+def is_internal_model(model: Any) -> bool:
+    return any(
+        value in INTERNAL_MODEL_IDENTIFIERS
+        or any(value.startswith(f"{identifier}/") for identifier in INTERNAL_MODEL_IDENTIFIERS)
+        for value in model_identity_values(model)
+    )
+
+
+def is_catalog_model_listable(
+    model: Any,
+    *,
+    missing_is_list: bool = False,
+) -> bool:
+    return (
+        not is_internal_model(model)
+        and model_visibility(model, missing_is_list=missing_is_list) is CatalogVisibility.LIST
+    )
+
+
+def catalog_visibility_diagnostics(models: Any) -> dict[str, int]:
+    """Return bounded aggregate visibility diagnostics without model identities."""
+
+    counts = {"hidden": 0, "unknown": 0, "internal": 0}
+    for model in models if isinstance(models, (list, tuple)) else ():
+        if is_internal_model(model):
+            key = "internal"
+        else:
+            visibility = model_visibility(model, missing_is_list=False)
+            key = (
+                "hidden"
+                if visibility is CatalogVisibility.HIDE
+                else "unknown"
+                if visibility is CatalogVisibility.UNKNOWN
+                else ""
+            )
+        if key:
+            counts[key] = min(MAX_VISIBILITY_DIAGNOSTIC_COUNT, counts[key] + 1)
+    return counts
 
 
 def deny_match_model_id(model_id: str) -> str:

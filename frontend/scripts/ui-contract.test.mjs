@@ -2092,8 +2092,8 @@ test("frontend official merge canonicalizes aliases with fresh metadata winning"
   const merge = providersSource.match(/function mergeOfficialModelSources[\s\S]*?function isOfficialModel/)?.[0] ?? "";
 
   assert.match(merge, /const knownOfficialIds = officialModelIdSet\(catalog, metadata\);/);
-  assert.match(merge, /for \(const model of catalog\.filter\(isOfficialModel\)\)/);
-  assert.match(merge, /for \(const model of metadata\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /for \(const model of catalog\.filter\(\(item\) => isOfficialModel\(item\) && isCatalogModelListable\(item\)\)\)/);
+  assert.match(merge, /for \(const model of metadata\.filter\(\(item\) => isOfficialModel\(item\) && isCatalogModelListable\(item\)\)\)/);
   assert.match(merge, /const canonicalId = normalizeOfficialModelId\(model\.id, knownOfficialIds\);/);
   assert.match(merge, /\.\.\.existing,[\s\S]*\.\.\.model,[\s\S]*id: canonicalId/);
   assert.match(
@@ -2151,6 +2151,7 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
     "mergeOfficialModelSources",
     "officialModelIdSet",
     "isOfficialModel",
+    "isCatalogModelListable",
     "filterCodexVisibleOfficialModels",
     "isOfficialGatewayFastVariant",
   ];
@@ -2174,8 +2175,8 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
   ];
   for (const item of cases) {
     const merged = mergeOfficialModelSources(
-      [{ id: "openai/gpt-5.5", enabled: item.catalog }],
-      [{ id: "gpt-5.5", enabled: item.metadata }],
+      [{ id: "openai/gpt-5.5", enabled: item.catalog, visibility: "list" }],
+      [{ id: "gpt-5.5", enabled: item.metadata, visibility: "list" }],
     );
     assert.equal(merged.length, 1, item.name);
     assert.equal(merged[0].enabled, item.expected, item.name);
@@ -2191,6 +2192,7 @@ test("published Official catalog context limits outrank stale metadata after ref
     "mergeOfficialModelSources",
     "officialModelIdSet",
     "isOfficialModel",
+    "isCatalogModelListable",
     "filterCodexVisibleOfficialModels",
     "isOfficialGatewayFastVariant",
   ];
@@ -2210,6 +2212,7 @@ test("published Official catalog context limits outrank stale metadata after ref
   const [model] = mergeOfficialModelSources(
     [{
       id: "openai/gpt-5.6-terra",
+      visibility: "list",
       context_window: 272000,
       max_context_window: 272000,
       effective_source: "fresh_direct_official_cache_authority",
@@ -2221,6 +2224,7 @@ test("published Official catalog context limits outrank stale metadata after ref
     }],
     [{
       id: "gpt-5.6-terra",
+      visibility: "list",
       context_window: 353400,
       max_context_window: 353400,
       effective_source: "pinned_metadata",
