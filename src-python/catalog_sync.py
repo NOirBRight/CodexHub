@@ -563,7 +563,11 @@ def _planner_override_is_valid(
         # A user override may opt into a different supported multi-agent
         # version, but it must not turn websockets, tool mode, or Responses
         # Lite on/off independently of the model's official contract.
-        if value != expected.get(key):
+        expected_value = expected.get(key)
+        if isinstance(expected_value, bool):
+            if type(value) is not bool or value != expected_value:
+                return False
+        elif value != expected_value:
             return False
     return True
 
@@ -798,8 +802,13 @@ def _managed_baseline_shape_is_valid(payload: Any) -> bool:
                 if field == "multi_agent_version":
                     if not isinstance(value, str) or value not in {"v1", "v2"}:
                         return False
-                elif value != expected.get(field):
-                    return False
+                else:
+                    expected_value = expected.get(field)
+                    if isinstance(expected_value, bool):
+                        if type(value) is not bool or value != expected_value:
+                            return False
+                    elif value != expected_value:
+                        return False
             metadata = model.get("codex_proxy_metadata")
             if isinstance(metadata, dict) and (
                 CATALOG_OWNER_METADATA_KEY in metadata

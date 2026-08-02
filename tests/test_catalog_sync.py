@@ -913,6 +913,14 @@ class CatalogSyncTests(unittest.TestCase):
                     {"multi_agent_version": "v2"},
                 )
             )
+            for field in ("prefer_websockets", "use_responses_lite"):
+                with self.subTest(field=field):
+                    self.assertFalse(
+                        catalog_sync._planner_override_is_valid(
+                            valid_identity,
+                            {field: 1},
+                        )
+                    )
             path.write_text("[]", encoding="utf-8")
             self.assertEqual(catalog_sync._load_catalog_override_state(path), {})
 
@@ -1334,6 +1342,26 @@ class CatalogSyncTests(unittest.TestCase):
             baseline = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
             baseline.update({"schema_version": 1, "managed_baseline": True})
             baseline["models"][0]["multi_agent_version"] = []
+            baseline_path = root / "baseline.json"
+            current_path = root / "catalog.json"
+            baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+            current_path.write_text(json.dumps({"models": baseline["models"]}), encoding="utf-8")
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline_path),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", root / "overrides.json"),
+            ):
+                collected, diagnostics = catalog_sync._collect_catalog_overrides()
+            self.assertEqual(collected, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_baseline"], 1)
+
+    def test_managed_baseline_rejects_numeric_boolean_planner_values(self):
+        official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+            baseline.update({"schema_version": 1, "managed_baseline": True})
+            baseline["models"][0]["prefer_websockets"] = 1
             baseline_path = root / "baseline.json"
             current_path = root / "catalog.json"
             baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
