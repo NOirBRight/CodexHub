@@ -142,6 +142,21 @@ def test_official_catalog_rejects_malformed_legacy_metadata_before_io():
     urlopen.assert_not_called()
 
 
+def test_official_catalog_rejects_malformed_supported_in_api_before_io():
+    row = _catalog_row("gpt-5.6-terra")
+    row["supported_in_api"] = 1
+
+    with patch("codex_proxy.existing_generated_catalog_path", return_value=Path("missing.json")), patch(
+        "codex_proxy.load_catalog_models", return_value=[row]
+    ), patch("codex_proxy.urlopen") as urlopen:
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("gpt-5.6-terra")
+
+    assert failure.value.classification == "catalog_inconsistency"
+    assert failure.value.reason == "malformed_supported_in_api"
+    urlopen.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "requested",
     [
@@ -317,6 +332,27 @@ def test_ollama_catalog_rejects_malformed_metadata_before_io():
 
     assert failure.value.classification == "catalog_inconsistency"
     assert failure.value.reason == "malformed_metadata"
+    urlopen.assert_not_called()
+
+
+def test_ollama_catalog_rejects_malformed_supported_in_api_before_io():
+    row = _catalog_row(
+        "ollama-cloud/glm-5.2",
+        provider="ollama-cloud",
+        upstream_model="glm-5.2",
+    )
+    row["supported_in_api"] = "true"
+
+    with (
+        patch("codex_proxy.generated_catalog_by_slug", return_value={"ollama-cloud/glm-5.2": row}),
+        patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None)),
+        patch("codex_proxy.urlopen") as urlopen,
+    ):
+        with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
+            codex_proxy.choose_upstream("ollama-cloud/glm-5.2")
+
+    assert failure.value.classification == "catalog_inconsistency"
+    assert failure.value.reason == "malformed_supported_in_api"
     urlopen.assert_not_called()
 
 

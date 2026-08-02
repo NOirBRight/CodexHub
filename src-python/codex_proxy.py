@@ -2631,6 +2631,13 @@ def _validate_published_catalog_model_for_provider(
             provider_id=provider_id,
             model_slug=model_slug,
         )
+    if "supported_in_api" in model and not isinstance(model["supported_in_api"], bool):
+        raise _catalog_failure(
+            "published catalog model supported_in_api is malformed",
+            reason="malformed_supported_in_api",
+            provider_id=provider_id,
+            model_slug=model_slug,
+        )
     if model.get("supported_in_api") is False:
         raise _identity_failure(
             f"model identity is not supported in the API: {model_slug}",
@@ -2781,6 +2788,13 @@ def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | N
         raise _catalog_failure(
             "published catalog model is not explicitly listable",
             reason="unsupported_visibility",
+            provider_id="openai",
+            model_slug=upstream_model,
+        )
+    if "supported_in_api" in model and not isinstance(model["supported_in_api"], bool):
+        raise _catalog_failure(
+            "official catalog model supported_in_api is malformed",
+            reason="malformed_supported_in_api",
             provider_id="openai",
             model_slug=upstream_model,
         )
