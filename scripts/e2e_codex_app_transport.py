@@ -7,9 +7,40 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import threading
 import time
+
+
+def resolve_cli_version(codex_command: Path) -> str:
+    """Read the version from the exact CLI binary used by app-server.
+
+    The app-server initialize payload is part of the evidence identity.  It
+    must not retain a historical fixture version when the operator upgrades
+    the App-managed CLI, otherwise the trace is falsely attributed to an old
+    client.  Allowing an explicit value keeps replay/fixture callers
+    deterministic while the live path binds itself to the executable.
+    """
+
+    completed = subprocess.run(
+        [str(codex_command), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    output = "\n".join((completed.stdout, completed.stderr)).strip()
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Codex CLI version probe failed with exit code {completed.returncode}"
+        )
+    match = re.search(r"\bcodex-cli\s+([^\s]+)", output, re.IGNORECASE)
+    if match is None:
+        raise RuntimeError("Codex CLI version probe returned no codex-cli version")
+    return match.group(1)
 
 
 def main() -> int:
@@ -17,12 +48,17 @@ def main() -> int:
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--cwd", type=Path, required=True)
+    parser.add_argument(
+        "--client-version",
+        help="Override the app-server clientInfo version (otherwise probe --codex --version).",
+    )
     parser.add_argument("--turns", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--session-jsonl", type=Path)
     parser.add_argument("--tool-calls", type=int, default=0)
     parser.add_argument("--pause-between-turns", type=float, default=0.0)
     args = parser.parse_args()
+    client_version = args.client_version or resolve_cli_version(args.codex.resolve())
 
     env = os.environ.copy()
     env["CODEX_HOME"] = str(args.home.resolve())
@@ -128,7 +164,7 @@ def main() -> int:
                 "clientInfo": {
                     "name": "codex_desktop",
                     "title": "Codex Desktop",
-                    "version": "0.144.0-alpha.4",
+                    "version": client_version,
                 },
                 "capabilities": {
                     "experimentalApi": True,
