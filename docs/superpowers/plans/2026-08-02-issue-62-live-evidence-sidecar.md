@@ -151,7 +151,7 @@ Expected: failure because the HTTP server is absent.
 
 - [x] **Step 3: Implement the minimal server and forwarding path**
 
-Build a `ThreadingHTTPServer` with daemon request threads, exact `Content-Length` request reads, application-body forwarding, response streaming in bounded chunks, deadline checks, fixed sanitized failure codes, and `shutdown()` that closes the listener and joins its serving thread. Do not store exception text.
+Build a `ThreadingHTTPServer` with tracked request/client/upstream lifecycles, exact `Content-Length` request reads, application-body forwarding, response streaming in bounded chunks, deadline checks, fixed sanitized failure codes, and `shutdown()` that closes the listener and active sockets before a bounded active-handler drain. Do not store exception text.
 
 - [x] **Step 4: Run the integration test and verify GREEN**
 
@@ -210,13 +210,14 @@ Run:
 
 ```powershell
 py -3.13 -m pytest -q tests/test_issue_62_live_evidence_sidecar.py tests/test_diagnostic_recorder.py tests/test_diagnostic_recorder_gateway.py tests/test_issue_62_runtime_trace.py tests/test_issue_62_runtime_audit.py tests/test_issue_62_runtime_inventory.py
+py -3.13 -m pytest -q --ignore=tests/test_real_client_e2e.py
 python scripts/build_issue_62_runtime_inventory.py --check-drift
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
 python scripts/report_quality_gates.py
 git diff --check
 ```
 
-Expected: focused tests pass; inventory drift reports a match; PowerShell reports `THREAD_TOOL_SURFACE_COMPLETE` without changing qualification; quality-gate output remains report-only; diff check is clean.
+Expected: focused tests pass and the strict Python suite excluding the out-of-scope real-client E2E contract completes without a sidecar regression. Any strict-suite failure must be reproduced at the exact `origin/dev` baseline and reported rather than counted as a pass. Inventory drift reports a match; PowerShell reports `THREAD_TOOL_SURFACE_COMPLETE` without changing qualification; quality-gate output remains report-only; diff check is clean.
 
 - [x] **Step 3: Confirm the qualification artifact is unchanged**
 
@@ -224,7 +225,7 @@ Run: `git diff origin/dev -- docs/evidence/issue-62/runtime-wire-inventory.json`
 
 Expected: no output.
 
-- [ ] **Step 4: Commit the implementation candidate**
+- [x] **Step 4: Commit the implementation candidate**
 
 ```powershell
 git add scripts/capture_issue_62_live_evidence.py tests/test_issue_62_live_evidence_sidecar.py docs/evidence/issue-62/README.md docs/superpowers/plans/2026-08-02-issue-62-live-evidence-sidecar.md

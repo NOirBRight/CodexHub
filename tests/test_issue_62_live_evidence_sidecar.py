@@ -46,8 +46,11 @@ class _FakeUpstreamHandler(BaseHTTPRequestHandler):
         chunk_size = self.server.response_chunk_size  # type: ignore[attr-defined]
         for offset in range(0, len(body), chunk_size):
             chunk = body[offset : offset + chunk_size]
-            self.wfile.write(chunk)
-            self.wfile.flush()
+            try:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+            except OSError:
+                return
             if self.server.chunk_delay:  # type: ignore[attr-defined]
                 time.sleep(self.server.chunk_delay)  # type: ignore[attr-defined]
 
@@ -162,6 +165,32 @@ def test_main_requires_explicit_enable(capsys: pytest.CaptureFixture[str]) -> No
 def test_config_rejects_non_loopback(host: str, base_config) -> None:
     with pytest.raises(sidecar.ConfigurationError, match="listen_not_loopback"):
         sidecar.validate_config(dataclasses.replace(base_config, listen_host=host))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:65536",
+        "http://127.0.0.1:not-a-port",
+    ],
+)
+def test_config_rejects_malformed_or_out_of_range_forward_port(url: str, base_config) -> None:
+    with pytest.raises(sidecar.ConfigurationError, match="forward_base_url_invalid"):
+        sidecar.validate_config(dataclasses.replace(base_config, forward_base_url=url))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("connect_timeout_seconds", float("nan"), "connect_timeout_invalid"),
+        ("read_timeout_seconds", float("inf"), "read_timeout_invalid"),
+        ("overall_timeout_seconds", float("-inf"), "overall_timeout_invalid"),
+    ],
+)
+def test_config_rejects_nonfinite_timeouts(field: str, value: float, code: str, base_config) -> None:
+    with pytest.raises(sidecar.ConfigurationError, match=code):
+        sidecar.validate_config(dataclasses.replace(base_config, **{field: value}))
 
 
 def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> None:
@@ -383,6 +412,20 @@ def test_sse_sequence_fails_closed_without_terminal_or_complete_frame() -> None:
     assert incomplete_frame["sequence_hmac_sha256"] is None
 
 
+def test_sse_sequence_fails_closed_when_any_frame_follows_terminal() -> None:
+    observed = _consume_sse(
+        [
+            b'data: {"type":"response.completed"}\n\n'
+            b'data: {"type":"response.output_text.delta","delta":"after"}\n\n'
+        ]
+    )
+
+    assert observed["complete"] is False
+    assert observed["sequence_sha256"] is None
+    assert observed["sequence_hmac_sha256"] is None
+    assert observed["terminal_classes"] == ["response.completed"]
+
+
 def test_two_hops_capture_matching_complete_request_response_and_sse(
     tmp_path: Path,
     hmac_key_file: Path,
@@ -521,6 +564,57 @@ def test_response_overflow_nulls_partial_response_digests(
     assert record["response"]["sha256"] is None  # type: ignore[index]
     assert record["response"]["hmac_sha256"] is None  # type: ignore[index]
     assert "private-output" not in json.dumps(record, sort_keys=True)
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+def _terminal_first_response(extra: bytes) -> bytes:
+    terminal = b'data: {"type":"response.completed"}\n\n'
+    padding_size = (64 * 1024) - len(terminal) - 3
+    assert padding_size > 0
+    return terminal + b":" + (b"x" * padding_size) + b"\n\n" + extra
+
+
+@pytest.mark.parametrize("failure_mode", ["overflow", "timeout"])
+def test_incomplete_response_invalidates_previously_complete_sse_digest(
+    failure_mode: str,
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = _terminal_first_response(b":after-terminal\n\n")
+    upstream_options = {"chunk_size": 64 * 1024}
+    config_options: dict[str, object] = {"max_response_bytes": 64 * 1024}
+    expected_failure = "response_overflow"
+    if failure_mode == "timeout":
+        upstream_options["chunk_delay"] = 0.2
+        config_options = {
+            "max_response_bytes": len(response_body) + 1024,
+            "read_timeout_seconds": 0.05,
+            "overall_timeout_seconds": 0.15,
+        }
+        expected_failure = "upstream_timeout"
+    with _fake_upstream(response_body, **upstream_options) as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            upstream_url,
+            **config_options,
+        )
+        with _running_sidecar(config) as server:
+            connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+            connection.request("POST", "/responses", body=b"{}")
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+
+    record = _read_only_record(config.output_dir)
+    assert record["outcome"] == "incomplete"
+    assert record["failure"] == expected_failure
+    assert record["response"]["complete"] is False  # type: ignore[index]
+    assert record["response"]["sha256"] is None  # type: ignore[index]
+    assert record["sse"]["complete"] is False  # type: ignore[index]
+    assert record["sse"]["sequence_sha256"] is None  # type: ignore[index]
+    assert record["sse"]["sequence_hmac_sha256"] is None  # type: ignore[index]
     assert not list(tmp_path.rglob("*.partial"))
 
 
@@ -733,4 +827,55 @@ def test_cli_explicit_enable_starts_and_cleans_up_on_interrupt(
         rebound.bind(("127.0.0.1", port))
     finally:
         rebound.close()
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_shutdown_closes_active_client_and_upstream_and_waits_bounded(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = b'data: {"type":"response.completed"}\n\n'
+    with _fake_upstream(response_body, response_delay=0.25) as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            upstream_url,
+            read_timeout_seconds=5.0,
+            overall_timeout_seconds=5.0,
+        )
+        server = sidecar.CaptureSidecarServer(config)
+        server.start()
+        client_done = threading.Event()
+
+        def request() -> None:
+            connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=6)
+            try:
+                connection.request("POST", "/responses", body=b"{}")
+                response = connection.getresponse()
+                response.read()
+            except OSError:
+                pass
+            finally:
+                connection.close()
+                client_done.set()
+
+        client_thread = threading.Thread(target=request, daemon=True)
+        client_thread.start()
+        deadline = time.monotonic() + 2
+        while upstream.observed_request is None and time.monotonic() < deadline:  # type: ignore[attr-defined]
+            time.sleep(0.01)
+        assert upstream.observed_request == b"{}"  # type: ignore[attr-defined]
+
+        started = time.monotonic()
+        drained = server.shutdown()
+        elapsed = time.monotonic() - started
+        client_thread.join(timeout=1)
+
+    assert drained is True
+    assert elapsed < 1.0
+    assert client_done.is_set()
+    record = _read_only_record(config.output_dir)
+    assert record["outcome"] == "incomplete"
+    assert record["failure"] in {"client_cancelled", "forwarding_failed", "upstream_timeout"}
     assert not list(tmp_path.rglob("*.partial"))

@@ -15,6 +15,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -143,6 +144,8 @@ class SseSequenceFingerprint:
         self._frame_count = 0
         self._frame_bytes = 0
         self._terminal_classes: set[str] = set()
+        self._terminal_seen = False
+        self._invalid_after_terminal = False
 
     def update(self, chunk: bytes) -> None:
         if not isinstance(chunk, bytes):
@@ -160,8 +163,13 @@ class SseSequenceFingerprint:
             self._hmac_sha256.update(encoded)
             self._frame_count += 1
             self._frame_bytes += len(frame)
+            if self._terminal_seen:
+                self._invalid_after_terminal = True
             terminal = _classify_sse_terminal(frame)
             if terminal is not None:
+                if self._terminal_seen:
+                    self._invalid_after_terminal = True
+                self._terminal_seen = True
                 self._terminal_classes.add(terminal)
 
     def _next_boundary(self) -> tuple[int, int] | None:
@@ -173,7 +181,13 @@ class SseSequenceFingerprint:
         return min(candidates) if candidates else None
 
     def complete(self) -> dict[str, Any]:
-        complete = not self._buffer and bool(self._terminal_classes)
+        complete = not self._buffer and self._terminal_seen and not self._invalid_after_terminal
+        return self._snapshot(complete=complete)
+
+    def incomplete(self) -> dict[str, Any]:
+        return self._snapshot(complete=False)
+
+    def _snapshot(self, *, complete: bool) -> dict[str, Any]:
         return {
             "complete": complete,
             "frame_count": self._frame_count,
@@ -230,6 +244,10 @@ def validate_config(config: SidecarConfig) -> bytes:
         raise ConfigurationError("listen_port_invalid")
 
     target = urlsplit(config.forward_base_url)
+    try:
+        target_port = target.port
+    except ValueError as error:
+        raise ConfigurationError("forward_base_url_invalid") from error
     if (
         target.scheme not in {"http", "https"}
         or not target.hostname
@@ -237,6 +255,7 @@ def validate_config(config: SidecarConfig) -> bytes:
         or target.password is not None
         or target.query
         or target.fragment
+        or (target_port is not None and not 1 <= target_port <= 65535)
     ):
         raise ConfigurationError("forward_base_url_invalid")
 
@@ -251,7 +270,12 @@ def validate_config(config: SidecarConfig) -> bytes:
         (config.read_timeout_seconds, "read_timeout_invalid"),
         (config.overall_timeout_seconds, "overall_timeout_invalid"),
     ):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
             raise ConfigurationError(code)
 
     try:
@@ -443,11 +467,31 @@ class _CaptureRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return None
 
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            owner = getattr(self.server, "capture_owner", None)
+            if owner is not None:
+                owner._finish_client(self.connection)
+
 
 class _CaptureThreadingHttpServer(ThreadingHTTPServer):
+    def process_request(self, request: Any, client_address: Any) -> None:
+        owner = getattr(self, "capture_owner", None)
+        if owner is not None:
+            owner._register_client(request)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            if owner is not None:
+                owner._finish_client(request)
+            raise
+
     def handle_error(self, request: Any, client_address: Any) -> None:
         owner = getattr(self, "capture_owner", None)
         if owner is not None:
+            owner._finish_client(request)
             owner._write_control_failure("client_cancelled")
 
 
@@ -465,6 +509,11 @@ class CaptureSidecarServer:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._thread_failure: str | None = None
+        self._active_condition = threading.Condition()
+        self._active_connections: dict[
+            socket.socket,
+            http.client.HTTPConnection | None,
+        ] = {}
 
     @property
     def listen_host(self) -> str:
@@ -517,7 +566,7 @@ class CaptureSidecarServer:
             self._thread_failure = "server_thread_failed"
             self._write_control_failure("server_thread_failed")
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
         server = self._server
         thread = self._thread
         self._server = None
@@ -525,9 +574,14 @@ class CaptureSidecarServer:
         if server is not None:
             if thread is not None and thread.is_alive():
                 server.shutdown()
+        self._close_active_connections()
+        if server is not None:
             server.server_close()
+        drain_timeout = min(self._config.overall_timeout_seconds, 5.0)
+        drained = self._wait_for_active_connections(drain_timeout)
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(1.0, self._config.overall_timeout_seconds))
+            thread.join(timeout=min(max(0.1, self._config.overall_timeout_seconds), 5.0))
+        return drained and (thread is None or not thread.is_alive())
 
     def wait(self) -> bool:
         thread = self._thread
@@ -546,6 +600,58 @@ class CaptureSidecarServer:
             )
         except Exception:
             return
+
+    def _register_client(self, connection: socket.socket) -> None:
+        with self._active_condition:
+            self._active_connections[connection] = None
+            self._active_condition.notify_all()
+
+    def _set_active_upstream(
+        self,
+        connection: socket.socket,
+        upstream: http.client.HTTPConnection | None,
+    ) -> None:
+        with self._active_condition:
+            if connection in self._active_connections:
+                self._active_connections[connection] = upstream
+
+    def _finish_client(self, connection: socket.socket) -> None:
+        with self._active_condition:
+            self._active_connections.pop(connection, None)
+            self._active_condition.notify_all()
+
+    def _close_active_connections(self) -> None:
+        with self._active_condition:
+            active = list(self._active_connections.items())
+        for connection, upstream in active:
+            if upstream is not None:
+                if upstream.sock is not None:
+                    try:
+                        upstream.sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+    def _wait_for_active_connections(self, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._active_condition:
+            while self._active_connections:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._active_condition.wait(timeout=remaining)
+            return True
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         capture_id = _capture_id()
@@ -595,6 +701,7 @@ class CaptureSidecarServer:
                 self._target.port,
                 timeout=self._config.connect_timeout_seconds,
             )
+            self._set_active_upstream(handler.connection, upstream)
             headers = {
                 name: value
                 for name, value in handler.headers.items()
@@ -661,6 +768,7 @@ class CaptureSidecarServer:
                     upstream.close()
                 except OSError:
                     pass
+                self._set_active_upstream(handler.connection, None)
             outcome = "complete" if failure is None and request_complete and response_complete else "incomplete"
             if outcome == "incomplete" and failure is None:
                 failure = "forwarding_failed"
@@ -679,7 +787,15 @@ class CaptureSidecarServer:
                     if response_fingerprint is not None
                     else None
                 ),
-                "sse": sse_fingerprint.complete() if sse_fingerprint is not None else None,
+                "sse": (
+                    (
+                        sse_fingerprint.complete()
+                        if response_complete
+                        else sse_fingerprint.incomplete()
+                    )
+                    if sse_fingerprint is not None
+                    else None
+                ),
             }
             try:
                 write_capture_record(self._config.output_dir, self._config.hop, record)
