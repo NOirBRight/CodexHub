@@ -679,11 +679,7 @@ struct ReasoningLevelEntry {
 fn subscription_models_from_app_server_payload(
     payload: &Value,
 ) -> Result<Vec<OfficialSubscriptionModel>, String> {
-    let models = subscription_models_from_payload(payload)?;
-    if models.is_empty() {
-        return Err("Codex subscription model list did not include visible GPT models".to_string());
-    }
-    Ok(models)
+    subscription_models_from_payload(payload)
 }
 
 fn subscription_models_from_payload(
@@ -2624,7 +2620,8 @@ mod tests {
     use super::{
         desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
-        list_models, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        list_models, load_json_file, merge_metadata_with_overrides, ollama_show_endpoint,
+        provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
         subscription_models_from_payload, subscription_models_to_metadata_models,
@@ -3068,6 +3065,35 @@ for line in sys.stdin:
         assert_eq!(cached_model["display_name"], "GPT Subscription Live");
         assert_eq!(cached_model["additional_speed_tiers"], json!(["fast"]));
         assert_eq!(cached_model["service_tiers"][0]["id"], "priority");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subscription_refresh_preserves_empty_visibility_snapshot_and_diagnostics() {
+        let root = temp_root("subscription-empty-visibility-refresh");
+        let paths = test_paths(&root);
+        let runner = StaticAppServerModelListRunner::ok(json!({
+            "data": [
+                {"id": "gpt-hidden", "visibility": "hide"},
+                {"id": "gpt-unknown", "visibility": "future"},
+                {
+                    "id": "codex-auto-review",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list"
+                }
+            ]
+        }));
+
+        let models = refresh_official_models_with_runner(&paths, &runner)
+            .expect("empty visibility snapshot should publish fail-closed");
+
+        assert!(models.is_empty());
+        let payload = load_json_file(&paths.official_subscription_cache_path())
+            .expect("empty official subscription cache");
+        assert_eq!(payload["models"].as_array().map(Vec::len), Some(0));
+        assert_eq!(payload["visibility_diagnostics"]["hidden"], 1);
+        assert_eq!(payload["visibility_diagnostics"]["unknown"], 1);
+        assert_eq!(payload["visibility_diagnostics"]["internal"], 1);
         let _ = fs::remove_dir_all(root);
     }
 
