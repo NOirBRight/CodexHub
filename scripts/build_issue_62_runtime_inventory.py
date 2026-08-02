@@ -14,14 +14,12 @@ Each item receives one of:
 - ``reversibly_adapted``  : observed with a documented reversible adaptation
 - ``local_consume``       : observed and consumed locally without upstream I/O
 - ``Unsupported``         : explicitly out of scope for the beta.1 core contract
-- ``Unqualified``        : observed but not qualified by accepted evidence
-- ``live_control_required`` : the bounded artifacts do not prove the item; a
-  separately authorized live control window must capture it before any
-  ``Supported`` claim
+- ``Unqualified``      : not qualified by accepted evidence; a separately
+  authorized live control window must capture it before any capability claim
 
 The generator reads the existing sanitized Issue #62 evidence artifacts and
-never fabricates a ``Supported`` disposition for a gate the artifacts mark
-``live_control_required``. It feeds #249 (capability gate) and #66 (Chat
+never fabricates a ``Supported`` disposition for a gate the artifacts leave
+unqualified. It feeds #249 (capability gate) and #66 (Chat
 conversion matrix).
 """
 
@@ -39,6 +37,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 ARTIFACT_KIND = "runtime_wire_inventory"
 DEFAULT_CLI_FLOOR = "0.145.0"
+SUPPORTED_CLI_FLOOR = DEFAULT_CLI_FLOOR
 DEFAULT_CANDIDATE_CLI_VERSION = None
 DEFAULT_CANDIDATE_SOURCE_COMMIT = None
 
@@ -48,7 +47,6 @@ ALLOWED_DISPOSITIONS = (
     "local_consume",
     "Unsupported",
     "Unqualified",
-    "live_control_required",
 )
 
 # Scopes that must stay live-control-required until a coordinated live window
@@ -80,7 +78,7 @@ ADVANCED_UNSUPPORTED_SCOPES = frozenset(
 )
 
 # Every core scope is required in the inventory, even when the current
-# evidence only justifies ``live_control_required``.  Keeping this set
+# evidence only justifies ``Unqualified``.  Keeping this set
 # separate from the disposition vocabulary prevents an incomplete fixture from
 # being mistaken for a completed beta gate.
 CORE_CONTRACT_SCOPES = frozenset(
@@ -108,6 +106,13 @@ KNOWN_SCOPES = (
     | LIVE_CONTROL_SCOPES
     | ADVANCED_UNSUPPORTED_SCOPES
     | {"choice_controls"}
+)
+
+# An unqualified core/live-control item blocks beta qualification.  Advanced
+# capabilities remain explicitly deferred and therefore do not block the
+# beta.1 core gate merely because they are unqualified.
+BLOCKING_UNQUALIFIED_SCOPES = frozenset(
+    CORE_CONTRACT_SCOPES | LIVE_CONTROL_SCOPES | {"choice_controls"}
 )
 
 # Evidence references are part of the contract, not free-form annotations.
@@ -188,6 +193,23 @@ def _version_key(value: str) -> tuple[int, int, int, int, str]:
 
 def _candidate_version_status(candidate: str, floor: str) -> str:
     return "eligible" if _version_key(candidate) >= _version_key(floor) else "legacy_below_floor"
+
+
+def _validate_supported_floor(value: str) -> str:
+    """Require the inventory to bind to the repository's supported CLI floor."""
+
+    if not isinstance(value, str):
+        raise ValueError(f"supported CLI floor must be a string: {value!r}")
+    try:
+        _version_key(value)
+    except ValueError as exc:
+        raise ValueError(f"supported CLI floor is malformed: {value!r}") from exc
+    if value != SUPPORTED_CLI_FLOOR:
+        raise ValueError(
+            "inventory CLI floor must bind to the supported CLI floor "
+            f"{SUPPORTED_CLI_FLOOR}, got {value!r}"
+        )
+    return value
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -350,7 +372,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_text_streaming",
-            "preserved" if streaming_captured else "live_control_required",
+            "preserved" if streaming_captured else "Unqualified",
             "codexhub-runtime-wire-fixture.json#response.streaming.captured",
             "streaming response text observed and preserved across the official Responses route",
         )
@@ -359,7 +381,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_text_non_streaming",
-            "preserved" if non_streaming_captured else "live_control_required",
+            "preserved" if non_streaming_captured else "Unqualified",
             "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
             "non-streaming response text is only qualified when a real captured fixture is present",
         )
@@ -370,7 +392,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_history_multiturn",
-            "preserved" if paired > 0 else "live_control_required",
+            "preserved" if paired > 0 else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls",
             "multi-turn history with paired call/output rows observed",
         )
@@ -380,7 +402,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_history_item_ids",
-            "preserved" if call_links else "live_control_required",
+            "preserved" if call_links else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "call_item_id and output_item_id aliases preserved per link",
         )
@@ -388,7 +410,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_history_call_ids",
-            "preserved" if call_links else "live_control_required",
+            "preserved" if call_links else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.required_call_ids",
             "call_id aliases preserved and reconciled with call links",
         )
@@ -398,7 +420,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_sse_streaming_events",
-            "reversibly_adapted" if sse_events else "live_control_required",
+            "reversibly_adapted" if sse_events else "Unqualified",
             "codexhub-runtime-wire-fixture.json#response.streaming.events",
             "observed SSE event kinds sanitized to redacted payloads with stable event sequence",
         )
@@ -409,7 +431,7 @@ def _classify_core_items(
             "core_sse_terminal_events",
             "preserved"
             if _gate_is_complete(full_wire_gate) and _has_terminal_event(wire)
-            else "live_control_required",
+            else "Unqualified",
             "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
             "terminal event classification requires independently captured full response-body evidence",
         )
@@ -419,7 +441,7 @@ def _classify_core_items(
             "core_sse_errors",
             "preserved"
             if _gate_is_complete(full_wire_gate) and _has_error_event(wire)
-            else "live_control_required",
+            else "Unqualified",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
             "error classification requires independently fingerprinted pre/post response bodies",
         )
@@ -432,7 +454,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_function_declaration",
-            "preserved" if codex_app_ns else "live_control_required",
+            "preserved" if codex_app_ns else "Unqualified",
             "codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces",
             "Direct and Deferred function declarations observed for the codex_app namespace",
         )
@@ -444,7 +466,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_function_call",
-            "preserved" if call_links_have_function else "live_control_required",
+            "preserved" if call_links_have_function else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "function_call items with call_id and arguments aliases observed",
         )
@@ -452,7 +474,7 @@ def _classify_core_items(
     items.append(
         _item(
             "core_function_result",
-            "preserved" if call_links_have_function else "live_control_required",
+            "preserved" if call_links_have_function else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "function_call_output items with call_id and output aliases observed",
         )
@@ -464,7 +486,7 @@ def _classify_core_items(
             if _gate_is_complete(full_wire_gate)
             and _gate_is_complete(identity_gate)
             and _gate_is_complete(wire_replay_gate)
-            else "live_control_required",
+            else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
         )
@@ -473,7 +495,7 @@ def _classify_core_items(
     items.append(
         _item(
             "identity_item_call_ids",
-            "preserved" if call_links else "live_control_required",
+            "preserved" if call_links else "Unqualified",
             "codexhub-runtime-wire-fixture.json#history.call_links",
             "item/call id aliases preserved across pre/post-Gateway replay",
         )
@@ -481,7 +503,7 @@ def _classify_core_items(
     items.append(
         _item(
             "identity_response_ids",
-            "preserved" if streaming_captured else "live_control_required",
+            "preserved" if streaming_captured else "Unqualified",
             "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
             "response_id aliases preserved across pre/post-Gateway replay",
         )
@@ -493,7 +515,7 @@ def _classify_core_items(
             "identity_request_ids",
             "preserved"
             if pre_request_id and post_request_id and pre_request_id == post_request_id
-            else "live_control_required",
+            else "Unqualified",
             "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
             "request_id aliases preserved and equal across pre/post-Gateway replay",
         )
@@ -522,7 +544,7 @@ def _classify_live_control_items(
     items.append(
         _item(
             "choice_controls",
-            "live_control_required",
+            "Unqualified",
             "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false",
             "choice controls are a contract sentinel in the wire fixture; the bounded audit observes tool_choice/parallel_tool_calls but full pre/post choice identity requires a live control",
         )
@@ -540,7 +562,7 @@ def _classify_live_control_items(
             "terminal_events",
             "preserved"
             if _gate_is_complete(full_wire_gate) and _has_terminal_event(wire)
-            else "live_control_required",
+            else "Unqualified",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
             "terminal event classification requires a real captured response body fingerprint",
         )
@@ -550,7 +572,7 @@ def _classify_live_control_items(
             "errors",
             "preserved"
             if _gate_is_complete(full_wire_gate) and _has_error_event(wire)
-            else "live_control_required",
+            else "Unqualified",
             "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
             "error classification requires independently captured pre/post response evidence",
         )
@@ -559,7 +581,7 @@ def _classify_live_control_items(
     items.append(
         _item(
             "hosted_only_declarations",
-            "preserved" if _gate_is_met(non_direct_gate) else "live_control_required",
+            "preserved" if _gate_is_met(non_direct_gate) else "Unqualified",
             "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
             "hosted-only and host-unavailable are tagged reconciliation sentinels; no runtime-observed host binding",
         )
@@ -574,7 +596,7 @@ def _classify_live_control_items(
             and unknown_non_stream_count > 0
             and _gate_is_complete(full_wire_gate)
             and non_streaming_captured
-            else "live_control_required",
+            else "Unqualified",
             "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
             "unknown tagged sentinels are preserved as opaque replay sentinels; live runtime dispositions require a real unknown item",
         )
@@ -583,7 +605,7 @@ def _classify_live_control_items(
     items.append(
         _item(
             "default_runtime_fields",
-            "preserved" if _gate_is_complete(full_wire_gate) else "live_control_required",
+            "preserved" if _gate_is_complete(full_wire_gate) else "Unqualified",
             "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
             "default runtime field classification requires an independently captured full request body",
         )
@@ -646,7 +668,12 @@ def _build_identity_control(
     items: list[dict[str, Any]], *, unknown_tagged_source_count: int
 ) -> dict[str, Any]:
     by_scope = {item.get("scope"): item for item in items}
-    core_allowed = {"preserved", "reversibly_adapted", "live_control_required"}
+    core_allowed = {
+        "preserved",
+        "reversibly_adapted",
+        "local_consume",
+        "Unqualified",
+    }
     unclassified = []
     for scope in sorted(CORE_CONTRACT_SCOPES):
         item = by_scope.get(scope)
@@ -674,18 +701,13 @@ def _build_qualification(
     audit: dict[str, Any],
     wire_fixture_sha256: str | None = None,
 ) -> dict[str, Any]:
-    live_control_scopes = sorted(
+    unqualified_scopes = sorted(
         item["scope"]
         for item in items
-        if item["disposition"] == "live_control_required"
+        if item["scope"] in BLOCKING_UNQUALIFIED_SCOPES
+        and item["disposition"] == "Unqualified"
     )
-    unqualified_core_scopes = sorted(
-        item["scope"]
-        for item in items
-        if item["scope"] in CORE_CONTRACT_SCOPES
-        and item["disposition"] in {"Unqualified", "Unsupported"}
-    )
-    blocking_scopes = sorted(set(live_control_scopes) | set(unqualified_core_scopes))
+    blocking_scopes = unqualified_scopes
     candidate_version_eligible = candidate_version_status == "eligible"
     evidence_gates = {
         "complete_model_visible_plan": trace.get("capture_coverage", {})
@@ -776,12 +798,25 @@ def _validate_candidate_binding(
     candidate_cli_version: str | None,
     candidate_source_commit: str | None,
 ) -> tuple[dict[str, Any], str]:
+    _validate_supported_floor(cli_version_floor)
     source = trace_data.get("source", {})
     planner_gates = trace_data.get("planner_gates", {})
     trace_cli_version = source.get("cli_version")
     trace_source_commit = planner_gates.get("source_commit")
     if not trace_cli_version or not trace_source_commit:
         raise ValueError("trace evidence is missing source.cli_version or planner_gates.source_commit")
+    if not isinstance(trace_cli_version, str):
+        raise ValueError("trace source.cli_version must be a string")
+    try:
+        _version_key(trace_cli_version)
+    except ValueError as exc:
+        raise ValueError("trace source.cli_version is malformed") from exc
+    if not isinstance(trace_source_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", trace_source_commit
+    ):
+        raise ValueError(
+            "trace planner_gates.source_commit must be a lowercase 40-character SHA-1"
+        )
 
     if candidate_cli_version is None:
         candidate_cli_version = trace_cli_version
@@ -790,6 +825,8 @@ def _validate_candidate_binding(
             "candidate CLI version does not match trace evidence: "
             f"requested={candidate_cli_version!r} observed={trace_cli_version!r}"
         )
+    if not isinstance(candidate_cli_version, str):
+        raise ValueError("candidate CLI version must be a string")
 
     if candidate_source_commit is None:
         candidate_source_commit = trace_source_commit
@@ -799,8 +836,16 @@ def _validate_candidate_binding(
             f"requested={candidate_source_commit!r} observed={trace_source_commit!r}"
         )
 
-    if not re.fullmatch(r"[0-9a-f]{40}", candidate_source_commit):
+    if not isinstance(candidate_source_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", candidate_source_commit
+    ):
         raise ValueError(f"candidate source commit is not a 40-character SHA-1: {candidate_source_commit!r}")
+    try:
+        _version_key(candidate_cli_version)
+    except ValueError as exc:
+        raise ValueError(
+            f"candidate CLI version is malformed: {candidate_cli_version!r}"
+        ) from exc
 
     trace_route = trace_data.get("gateway_route", {})
     wire_route = wire_data.get("route", {})
@@ -895,6 +940,7 @@ def build_inventory(
     candidate_cli_version: str | None = DEFAULT_CANDIDATE_CLI_VERSION,
     candidate_source_commit: str | None = DEFAULT_CANDIDATE_SOURCE_COMMIT,
 ) -> dict[str, Any]:
+    cli_version_floor = _validate_supported_floor(cli_version_floor)
     trace_data = _load_json(trace)
     wire_data = _load_json(wire_fixture)
     audit_data = _load_json(audit)
@@ -1058,10 +1104,10 @@ def reconcile_inventory(
                 f"mutation: {scope}: evidence_source {item.get('evidence_source')!r} "
                 f"does not match required {expected_evidence!r}"
             )
-        if scope in CORE_CONTRACT_SCOPES and disposition in {"Unsupported", "Unqualified"}:
+        if scope in CORE_CONTRACT_SCOPES and disposition == "Unsupported":
             mismatches.append(
                 f"mutation: {scope}: core disposition {disposition!r} cannot replace "
-                "preserved, reversibly_adapted, or live_control_required"
+                "preserved, reversibly_adapted, local_consume, or Unqualified"
             )
 
     required_scopes = (
@@ -1080,6 +1126,10 @@ def reconcile_inventory(
             mismatches.append(f"loss: candidate_identity.{field} is missing")
 
     qualification = inventory.get("qualification", {})
+    try:
+        _validate_supported_floor(str(inventory.get("cli_version_floor", "")))
+    except ValueError as exc:
+        mismatches.append(str(exc))
     candidate_status = qualification.get("candidate_version_status")
     if candidate_status not in {"eligible", "legacy_below_floor"}:
         mismatches.append("qualification.candidate_version_status is invalid")
@@ -1089,16 +1139,11 @@ def reconcile_inventory(
             "qualification.candidate_version_eligible does not match candidate version status"
         )
     actual_blocking_scopes = sorted(
-        set(
+        {
             item.get("scope")
             for item in items
-            if item.get("disposition") == "live_control_required"
-        )
-        | {
-            item.get("scope")
-            for item in items
-            if item.get("scope") in CORE_CONTRACT_SCOPES
-            and item.get("disposition") in {"Unqualified", "Unsupported"}
+            if item.get("scope") in BLOCKING_UNQUALIFIED_SCOPES
+            and item.get("disposition") == "Unqualified"
         }
     )
     if qualification.get("blocking_scopes") != actual_blocking_scopes:
@@ -1253,6 +1298,24 @@ def reconcile_inventory(
                         mismatches.append(
                             f"mutation: qualification.{field} does not match bound evidence"
                         )
+                try:
+                    generated_inventory = build_inventory(
+                        trace=bound_paths["trace"],
+                        wire_fixture=bound_paths["wire_fixture"],
+                        audit=bound_paths["audit"],
+                        cli_version_floor=str(inventory.get("cli_version_floor", "")),
+                        candidate_cli_version=candidate_identity.get("cli_version"),
+                        candidate_source_commit=candidate_identity.get("source_commit"),
+                    )
+                except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+                    mismatches.append(f"generated inventory check failed: {exc}")
+                else:
+                    if json.dumps(generated_inventory, sort_keys=True) != json.dumps(
+                        inventory, sort_keys=True
+                    ):
+                        mismatches.append(
+                            "generated inventory differs from committed artifact"
+                        )
 
     identity_control = inventory.get("identity_control", {})
     if identity_control.get("fail_closed") is not True:
@@ -1285,7 +1348,7 @@ def reconcile_inventory(
     )
     if not isinstance(unknown_tagged_source_count, int) or unknown_tagged_source_count <= 0:
         mismatches.append("identity_control.unknown_tagged_source_count is invalid")
-    if evidence_root is not None and not mismatches:
+    if evidence_root is not None:
         wire_entry = evidence_binding.get("wire_fixture", {})
         wire_path = evidence_root / str(wire_entry.get("file", ""))
         if wire_path.is_file():
@@ -1333,6 +1396,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="identity",
         choices=["identity", "mutation", "deletion", "loss"],
     )
+    parser.add_argument(
+        "--check-drift",
+        action="store_true",
+        help="validate that --out exactly matches freshly generated inventory without writing it",
+    )
     return parser
 
 
@@ -1356,6 +1424,20 @@ def main() -> int:
     report = reconcile_inventory(inventory, evidence_root=args.trace.parent)
     if not report["reconciled"]:
         raise SystemExit(f"identity reconciliation failed: {report['mismatches']}")
+
+    if args.check_drift:
+        if not args.out.is_file():
+            raise SystemExit(f"committed inventory artifact not found: {args.out}")
+        committed = _load_json(args.out)
+        if json.dumps(committed, sort_keys=True) != json.dumps(
+            inventory, sort_keys=True
+        ):
+            raise SystemExit(
+                "generated inventory differs from committed artifact: "
+                f"{args.out}"
+            )
+        print(f"generated inventory matches {args.out}")
+        return 0
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(

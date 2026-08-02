@@ -21,8 +21,7 @@
     "reversibly_adapted",
     "local_consume",
     "Unsupported",
-    "Unqualified",
-    "live_control_required"
+    "Unqualified"
   ],
   "evidence_binding": {
     "audit": {
@@ -67,7 +66,7 @@
       "scope": "core_text_streaming"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
       "notes": "non-streaming response text is only qualified when a real captured fixture is present",
       "scope": "core_text_non_streaming"
@@ -97,13 +96,13 @@
       "scope": "core_sse_streaming_events"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
       "notes": "terminal event classification requires independently captured full response-body evidence",
       "scope": "core_sse_terminal_events"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
       "notes": "error classification requires independently fingerprinted pre/post response bodies",
       "scope": "core_sse_errors"
@@ -127,7 +126,7 @@
       "scope": "core_function_result"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
       "notes": "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
       "scope": "core_function_replay"
@@ -151,37 +150,37 @@
       "scope": "identity_request_ids"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false",
       "notes": "choice controls are a contract sentinel in the wire fixture; the bounded audit observes tool_choice/parallel_tool_calls but full pre/post choice identity requires a live control",
       "scope": "choice_controls"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
       "notes": "terminal event classification requires a real captured response body fingerprint",
       "scope": "terminal_events"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
       "notes": "error classification requires independently captured pre/post response evidence",
       "scope": "errors"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
       "notes": "hosted-only and host-unavailable are tagged reconciliation sentinels; no runtime-observed host binding",
       "scope": "hosted_only_declarations"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
       "notes": "unknown tagged sentinels are preserved as opaque replay sentinels; live runtime dispositions require a real unknown item",
       "scope": "unknown_tagged_sentinels"
     },
     {
-      "disposition": "live_control_required",
+      "disposition": "Unqualified",
       "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
       "notes": "default runtime field classification requires an independently captured full request body",
       "scope": "default_runtime_fields"

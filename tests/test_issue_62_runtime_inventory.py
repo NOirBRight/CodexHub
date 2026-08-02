@@ -18,7 +18,6 @@ DISPOSITIONS = (
     "local_consume",
     "Unsupported",
     "Unqualified",
-    "live_control_required",
 )
 
 
@@ -85,6 +84,17 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
 
 
+def test_inventory_uses_only_final_capability_disposition_vocabulary() -> None:
+    module = load_inventory_module()
+    assert module.ALLOWED_DISPOSITIONS == DISPOSITIONS
+
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    assert "live_control_required" not in inventory["disposition_vocabulary"]
+    assert all(
+        item["disposition"] in DISPOSITIONS for item in inventory["items"]
+    )
+
+
 def test_inventory_covers_every_required_taxonomy_scope() -> None:
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
     scopes = {entry["scope"] for entry in inventory["items"]}
@@ -148,7 +158,7 @@ def test_core_items_have_preserved_or_reversibly_adapted_disposition() -> None:
     ):
         assert by_scope[scope]["disposition"] in preserved_or_adapted, scope
 
-    assert by_scope["core_function_replay"]["disposition"] == "live_control_required"
+    assert by_scope["core_function_replay"]["disposition"] == "Unqualified"
 
 
 def test_advanced_capabilities_are_not_supported_or_unqualified() -> None:
@@ -162,7 +172,7 @@ def test_advanced_capabilities_are_not_supported_or_unqualified() -> None:
         }, scope
 
 
-def test_live_control_gates_are_marked_live_control_required() -> None:
+def test_unqualified_items_remain_blocked_until_live_control() -> None:
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
     by_scope = {entry["scope"]: entry for entry in inventory["items"]}
 
@@ -178,7 +188,7 @@ def test_live_control_gates_are_marked_live_control_required() -> None:
         "default_runtime_fields",
     ):
         entry = by_scope[scope]
-        assert entry["disposition"] == "live_control_required", scope
+        assert entry["disposition"] == "Unqualified", scope
 
 
 def test_inventory_reports_zero_unclassified_core_items() -> None:
@@ -276,6 +286,42 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
         )
 
 
+def test_build_inventory_rejects_a_floor_other_than_supported_candidate_floor() -> None:
+    module = load_inventory_module()
+
+    with pytest.raises(ValueError, match="supported CLI floor"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+            cli_version_floor="0.144.0",
+            candidate_cli_version="0.144.0-alpha.4",
+            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+        )
+
+
+def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
+    module = load_inventory_module()
+
+    with pytest.raises(ValueError, match="candidate CLI version"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+            candidate_cli_version="not-a-version",
+            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+        )
+
+    with pytest.raises(ValueError, match="candidate source commit"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+            candidate_cli_version="0.144.0-alpha.4",
+            candidate_source_commit="A" * 40,
+        )
+
+
 def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
@@ -289,7 +335,7 @@ def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
         wire_fixture_sha256=module._sha256_file(WIRE_FIXTURE),
     )
     replay = next(item for item in items if item["scope"] == "core_function_replay")
-    assert replay["disposition"] == "live_control_required"
+    assert replay["disposition"] == "Unqualified"
 
 
 def test_captured_sse_status_does_not_satisfy_independent_sse_gate() -> None:
@@ -391,6 +437,18 @@ def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
     report = module.reconcile_inventory(tampered_identity_control)
     assert report["reconciled"] is False
     assert any("identity_control" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_generated_artifact_drift() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    drifted = json.loads(json.dumps(base))
+    drifted["items"][0]["notes"] = "hand-edited stale note"
+
+    report = module.reconcile_inventory(drifted, evidence_root=INVENTORY.parent)
+
+    assert report["reconciled"] is False
+    assert any("generated inventory" in mismatch for mismatch in report["mismatches"])
 
 
 def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() -> None:

@@ -23,6 +23,30 @@ $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
 $inventory = Get-Content -Raw -LiteralPath $InventoryPath | ConvertFrom-Json
 $mismatches = [System.Collections.Generic.List[string]]::new()
 
+# Rebuild the inventory from the bound evidence and compare it with the
+# committed artifact.  The PowerShell checks below remain an independent
+# reconciliation, while this call catches stale generated fields/notes that
+# a hand-maintained mirror could otherwise miss.
+$inventoryGenerator = Join-Path $PSScriptRoot 'build_issue_62_runtime_inventory.py'
+$python = Get-Command python -ErrorAction SilentlyContinue
+if ($null -eq $python) {
+    Add-Mismatch 'generated inventory drift check requires the python interpreter'
+} else {
+    try {
+        $generatorOutput = & $python.Source $inventoryGenerator `
+            --trace $TracePath `
+            --wire-fixture $WireFixturePath `
+            --audit $AuditPath `
+            --out $InventoryPath `
+            --check-drift 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Add-Mismatch "generated inventory drift check failed: $($generatorOutput -join ' ')"
+        }
+    } catch {
+        Add-Mismatch "generated inventory drift check failed: $($_.Exception.Message)"
+    }
+}
+
 function Add-Mismatch {
     param([string]$Message)
     $script:mismatches.Add($Message)
@@ -553,7 +577,7 @@ foreach ($entry in $inventoryItems) {
     if ($entry.scope -notin $knownInventoryScopes) {
         Add-Mismatch "inventory contains unknown scope: $($entry.scope)"
     }
-    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified')) {
         Add-Mismatch "inventory item $($entry.scope) has disallowed disposition $($entry.disposition)"
     }
     if (-not $entry.evidence_source) {
@@ -600,6 +624,12 @@ if (
     Add-Mismatch 'inventory artifact identity or CLI version floor is invalid'
 }
 $inventoryCandidate = $inventory.candidate_identity
+if ([string]$inventoryCandidate.source_commit -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate source commit is not a lowercase 40-character SHA-1'
+}
+if ($null -eq (Get-CliVersionKey -Value ([string]$inventoryCandidate.cli_version))) {
+    Add-Mismatch 'inventory candidate CLI version is malformed'
+}
 if (
     $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
     $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
@@ -676,7 +706,7 @@ $coreEvidence = @{
     identity_response_ids = 'codexhub-runtime-wire-fixture.json#response.streaming.response_id'
     identity_request_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.request_id'
 }
-$coreAllowedDispositions = @('preserved','reversibly_adapted','live_control_required')
+$coreAllowedDispositions = @('preserved','reversibly_adapted','local_consume','Unqualified')
 foreach ($scope in $coreEvidence.Keys) {
     $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
     if (-not $entry) { continue }
@@ -691,9 +721,12 @@ $qualification = $inventory.qualification
 if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
     Add-Mismatch 'inventory qualification candidate version status is invalid'
 }
+$blockingScopes = @(
+    $coreEvidence.Keys + $requiredLiveControlScopes + $requiredChoiceScope |
+        Sort-Object -Unique
+)
 $observedBlockingScopes = @($inventoryItems | Where-Object {
-    $_.disposition -eq 'live_control_required' -or
-    ($coreEvidence.ContainsKey($_.scope) -and $_.disposition -in @('Unqualified','Unsupported'))
+    $_.scope -in $blockingScopes -and $_.disposition -eq 'Unqualified'
 } | ForEach-Object { $_.scope } | Sort-Object -Unique)
 $reportedBlockingScopes = @($qualification.blocking_scopes | Sort-Object -Unique)
 if (($observedBlockingScopes -join '|') -ne ($reportedBlockingScopes -join '|')) {
@@ -772,15 +805,15 @@ foreach ($scope in $advancedScopes) {
     }
 }
 $expectedLiveDispositions = @{
-    core_text_non_streaming = if ($expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture) { 'preserved' } else { 'live_control_required' }
-    core_sse_terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'live_control_required' }
-    core_sse_errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'live_control_required' }
-    terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'live_control_required' }
-    errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'live_control_required' }
-    core_function_replay = if ($expectedEvidenceGates.wire_identity_replay -in $acceptedEvidenceGateStatuses.wire_identity_replay) { 'preserved' } else { 'live_control_required' }
-    hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met')) { 'preserved' } else { 'live_control_required' }
-    unknown_tagged_sentinels = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response -and $expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture -and $streamUnknown.Count -gt 0) { 'preserved' } else { 'live_control_required' }
-    default_runtime_fields = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response) { 'preserved' } else { 'live_control_required' }
+    core_text_non_streaming = if ($expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture) { 'preserved' } else { 'Unqualified' }
+    core_sse_terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'Unqualified' }
+    core_sse_errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'Unqualified' }
+    terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'Unqualified' }
+    errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'Unqualified' }
+    core_function_replay = if ($expectedEvidenceGates.wire_identity_replay -in $acceptedEvidenceGateStatuses.wire_identity_replay) { 'preserved' } else { 'Unqualified' }
+    hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met')) { 'preserved' } else { 'Unqualified' }
+    unknown_tagged_sentinels = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response -and $expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture -and $streamUnknown.Count -gt 0) { 'preserved' } else { 'Unqualified' }
+    default_runtime_fields = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response) { 'preserved' } else { 'Unqualified' }
 }
 foreach ($scope in $expectedLiveDispositions.Keys) {
     $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
@@ -828,7 +861,7 @@ foreach ($entry in $inventory.items) {
     if (-not $replayScopes.Add($entry.scope)) {
         $inventoryMismatches.Add("mutation: duplicate scope $($entry.scope)")
     }
-    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified','live_control_required')) {
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified')) {
         $inventoryMismatches.Add("mutation: $($entry.scope) disposition $($entry.disposition) not allowed")
         $observedUnclassified += 1
     }

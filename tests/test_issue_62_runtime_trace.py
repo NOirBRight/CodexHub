@@ -171,6 +171,39 @@ def test_inventory_identity_replay_passes() -> None:
     assert "Inventory replay case: identity" in result.stdout
 
 
+def test_inventory_check_rejects_generated_artifact_drift(tmp_path: Path) -> None:
+    inventory = json.loads(
+        (ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    inventory["items"][0]["notes"] = "hand-edited stale note"
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    inventory_path.write_text(
+        json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr
+
+
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
 def test_negative_inventory_replays_fail_visibly(case: str) -> None:
     result = run_inventory_replay(case)

@@ -155,9 +155,9 @@ marked `legacy_below_floor`; this evidence cannot be used as the beta.1
 candidate. The generator rejects an explicitly supplied CLI/source value that
 does not match the trace, binds route/provider/model fields across trace and
 wire fixtures (including pre/post models, catalog binding, and route profile),
-and records a canonical-LF SHA-256 manifest for all three input artifacts.
-It never fabricates a `Supported` disposition for a gate the artifacts mark
-`live_control_required`.
+and records a canonical-LF SHA-256 manifest for all three input artifacts.  It
+never fabricates a capability disposition for a gate the artifacts do not
+qualify.
 
 The qualification also has a separate `wire_identity_replay` gate. A full
 request/response fingerprint is not treated as replay proof by itself: a
@@ -176,25 +176,22 @@ the same wire fixture; full-body request/response equality alone is not enough.
 | `reversibly_adapted` | Observed with a documented reversible adaptation |
 | `local_consume` | Observed and consumed locally without upstream I/O |
 | `Unsupported` | Out of scope for the beta.1 core contract |
-| `Unqualified` | Observed but not qualified by accepted evidence |
-| `live_control_required` | The bounded artifacts do not prove the item; a separately authorized live control window must capture it before any `Supported` claim |
+| `Unqualified` | The bounded artifacts do not qualify the item; a separately authorized live control window must capture it before any capability claim |
 
 ### Taxonomy coverage
 
 Core items (`preserved`/`reversibly_adapted` where the bounded artifacts prove
 them): core text streaming, multi-turn history, item/call IDs, streaming SSE
 event kinds, standard function declaration/call/result, and identity
-(request/response/item/call IDs). Function replay remains
-`live_control_required`: the sanitized call-link fixture proves the shape of
-call/result pairs, while the tool-membership replay does not prove a complete
-real-wire function replay.
+(request/response/item/call IDs). Function replay remains `Unqualified`: the
+sanitized call-link fixture proves the shape of call/result pairs, while the
+tool-membership replay does not prove a complete real-wire function replay.
 
-Live-control items (`live_control_required` until a coordinated live window
-captures them): non-streaming text, choice controls (the wire fixture carries a
-contract sentinel; the bounded audit observes `tool_choice`/`parallel_tool_calls`
-but full pre/post choice identity requires a live control), terminal events,
-errors, hosted-only declarations, unknown tagged sentinels, and default runtime
-fields.
+Live-control items are `Unqualified` until a coordinated live window captures
+them: non-streaming text, choice controls (the wire fixture carries a contract
+sentinel; the bounded audit observes `tool_choice`/`parallel_tool_calls` but
+full pre/post choice identity requires a live control), terminal events, errors,
+hosted-only declarations, unknown tagged sentinels, and default runtime fields.
 
 Advanced capabilities (`Unsupported`/`Unqualified`): Code Mode, `tool_search`,
 Collaboration V2, and Chat conversion are explicitly deferred for beta.1 per
@@ -210,15 +207,17 @@ the PowerShell reconciliation (`scripts/check-codex-thread-tool-surface.ps1
 
 ```powershell
 python scripts/build_issue_62_runtime_inventory.py
+python scripts/build_issue_62_runtime_inventory.py --check-drift
 python scripts/build_issue_62_runtime_inventory.py --replay-case mutation
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1 -InventoryReplayCase mutation
 ```
 
-Regeneration is deterministic and covered by a test that compares the
-generated object to this committed JSON artifact. The PowerShell reconciliation
-also checks the input fingerprints, rejects duplicate scopes, and requires
-each core scope to point at its declared evidence path. A zero
+Regeneration is deterministic and the `--check-drift` mode compares a fresh
+generation to this committed JSON artifact without writing it. The PowerShell
+reconciliation invokes the same drift check, then independently checks the
+input fingerprints, rejects duplicate scopes, and requires each core scope to
+point at its declared evidence path. A zero
 `unclassified_core_items` count therefore describes vocabulary validity only;
 `qualification.ready_for_beta1` is the separate completion gate. That gate also
 consumes planner completeness, current-binding cold-start, full-wire
