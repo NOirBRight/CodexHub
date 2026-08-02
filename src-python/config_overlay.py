@@ -92,9 +92,45 @@ def strip_section(text: str, section_name: str) -> str:
     return "".join(result)
 
 
+def _toml_value_without_comment(raw: str) -> str:
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if quote == "'":
+            if char == "'":
+                if index + 1 < len(raw) and raw[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+        elif quote == '"':
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "#":
+            return raw[:index].rstrip()
+        index += 1
+    return raw.strip()
+
+
+def _decode_toml_string(raw: str) -> str:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        if raw[0] == "'":
+            return raw[1:-1].replace("''", "'")
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return raw[1:-1]
+    return raw
+
+
 def top_level_value(text: str, key: str) -> str | None:
     in_top_level = True
-    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*(?:#.*)?$")
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.*)$")
     for line in text.splitlines():
         if re.match(r"^\s*\[", line):
             in_top_level = False
@@ -103,10 +139,8 @@ def top_level_value(text: str, key: str) -> str | None:
         match = key_pattern.match(line)
         if not match:
             continue
-        raw = match.group(1).strip()
-        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
-            return raw[1:-1]
-        return raw
+        raw = _toml_value_without_comment(match.group(1))
+        return _decode_toml_string(raw)
     return None
 
 
@@ -992,7 +1026,11 @@ def apply_overlay(
         existing_catalog_value
         if existing_catalog_value is not None
         and not is_managed_catalog_path(existing_catalog_value, catalog_path)
-        else (catalog_config_value(config_path, catalog_path) if catalog_path is not None else None)
+        else (
+            catalog_config_value(config_path, catalog_path)
+            if catalog_path is not None
+            else existing_catalog_value
+        )
     )
     catalog_owned = catalog_value is not None and is_managed_catalog_path(catalog_value, catalog_path)
     cleaned = strip_top_level_keys(cleaned)
@@ -1004,6 +1042,15 @@ def apply_overlay(
     ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
+
+
+def _preserve_user_catalog_path(current: str, restored: str) -> str:
+    current_value = top_level_value(current, "model_catalog_json")
+    if not current_value or is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
+        return restored
+    if current_value == top_level_value(restored, "model_catalog_json"):
+        return restored
+    return set_top_level_values(restored, {"model_catalog_json": toml_literal(current_value)})
 
 
 def restore_overlay(
@@ -1025,6 +1072,7 @@ def restore_overlay(
             restored,
             context_guard_state_path,
         )
+        restored = _preserve_user_catalog_path(current, restored)
         restore_from_backup = True
         if is_active_takeover_backup(current, restored, backup_path):
             restored_owner = overlay_owner(restored)

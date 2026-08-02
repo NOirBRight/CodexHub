@@ -288,6 +288,51 @@ class ConfigOverlayTests(unittest.TestCase):
                 updated,
             )
 
+    def test_restore_overlay_keeps_catalog_path_edited_while_connected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            managed_catalog = tmp / "arbitrary-managed-location" / "catalog.json"
+            config_path.write_text('model = "volc/glm-5.2"\n', encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, managed_catalog, "http://127.0.0.1:9099")
+            edited = config_path.read_text(encoding="utf-8").replace(
+                f"model_catalog_json = '{managed_catalog.resolve()}'",
+                'model_catalog_json = "C:/user/catalogs/edited.json"',
+            )
+            config_path.write_text(edited, encoding="utf-8")
+
+            restore_overlay(config_path, backup_path)
+
+            restored = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_catalog_json = 'C:/user/catalogs/edited.json'", restored)
+
+    def test_apply_overlay_without_catalog_argument_does_not_drop_existing_catalog(self):
+        original = 'model = "volc/glm-5.2"\nmodel_catalog_json = "C:/user/catalogs/custom.json"\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, None, "http://127.0.0.1:9099")
+
+            self.assertIn("model_catalog_json = 'C:/user/catalogs/custom.json'", config_path.read_text(encoding="utf-8"))
+
+    def test_user_owned_catalog_path_with_hash_and_apostrophe_is_preserved(self):
+        original = "model = \"volc/glm-5.2\"\nmodel_catalog_json = \"C:/user/#catalog's/custom.json\"\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8")
+
+            apply_overlay(config_path, backup_path, None, "http://127.0.0.1:9099")
+
+            active = config_path.read_text(encoding="utf-8")
+            self.assertIn("model_catalog_json = 'C:/user/#catalog''s/custom.json'", active)
+
     def test_overlay_projects_safe_catalog_budget_across_restart_and_missing_catalog_fallback(self):
         original = "\n".join(
             [

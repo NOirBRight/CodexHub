@@ -770,8 +770,28 @@ class CatalogSyncTests(unittest.TestCase):
                     return catalog_sync.sync_catalog()
 
             run_sync()
+            # Remove the new sidecars to model a pre-Beta2 single-file
+            # installation.  The next sync must migrate only the supported
+            # same-model planner delta from the edited effective catalog.
+            baseline.unlink()
+            overrides.unlink()
             initial = json.loads(generated.read_text(encoding="utf-8"))
+            # Strip the Beta2 ownership marker so this is a true legacy
+            # single-file migration rather than a modern catalog round-trip.
+            initial_metadata = initial["models"][0]["codex_proxy_metadata"]
+            initial_metadata.pop(catalog_sync.CATALOG_OWNER_METADATA_KEY, None)
+            initial_metadata.pop(catalog_sync.CATALOG_OWNER_METADATA_VERSION_KEY, None)
+            initial_metadata.pop(catalog_sync.CATALOG_OWNER_IDENTITY_KEY, None)
             initial["models"][0]["multi_agent_version"] = "v2"
+            # Pre-Beta2 Ollama rows may not carry proxy identity metadata;
+            # they must not prevent the exact Official legacy migration.
+            initial["models"].append(
+                {
+                    "slug": "glm-5.2",
+                    "visibility": "list",
+                    "use_responses_lite": False,
+                }
+            )
             generated.write_text(json.dumps(initial), encoding="utf-8")
 
             state = run_sync()
@@ -792,6 +812,22 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(repeated["models"][0]["multi_agent_version"], "v2")
             self.assertEqual(len(repeated_overrides["overrides"]), 1)
 
+            # A hidden source row is not an ownership authority.  The next
+            # sync must fail closed instead of copying its v2 value onto the
+            # newly generated visible row.
+            hidden = json.loads(generated.read_text(encoding="utf-8"))
+            hidden["models"][0]["visibility"] = "hide"
+            generated.write_text(json.dumps(hidden), encoding="utf-8")
+            state = run_sync()
+            effective = json.loads(generated.read_text(encoding="utf-8"))
+            override_state = json.loads(overrides.read_text(encoding="utf-8"))
+            self.assertEqual(effective["models"][0]["multi_agent_version"], "v1")
+            self.assertEqual(override_state["overrides"], [])
+            self.assertEqual(
+                state["catalog_override_diagnostics"]["reasons"].get("invalid_row_identity"),
+                1,
+            )
+
     def test_catalog_override_does_not_copy_official_planner_metadata_to_external_model(self):
         external = {
             "alias": "volc/gpt-5.6-luna",
@@ -799,10 +835,39 @@ class CatalogSyncTests(unittest.TestCase):
             "upstream_name": "volcengine",
             "upstream_model": "gpt-5.6-luna",
         }
-        model = catalog_sync.build_external_provider_model(external, self.policy, None)
+        model = catalog_sync.build_external_provider_model(
+            external,
+            self.policy,
+            {
+                "prefer_websockets": True,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+                "use_responses_lite": True,
+            },
+        )
         self.assertNotIn("multi_agent_version", model)
         self.assertNotIn("tool_mode", model)
         self.assertNotIn("prefer_websockets", model)
+        self.assertIs(model["use_responses_lite"], False)
+
+        ollama = catalog_sync.build_ollama_model(
+            "glm-5.2",
+            self.policy,
+            {},
+            {
+                "prefer_websockets": True,
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+                "use_responses_lite": True,
+            },
+        )
+        self.assertNotIn("multi_agent_version", ollama)
+        self.assertNotIn("tool_mode", ollama)
+        self.assertNotIn("prefer_websockets", ollama)
+        self.assertIs(ollama["use_responses_lite"], False)
+        self.assertEqual(ollama["codex_proxy_metadata"]["provider"], "ollama-cloud")
+        self.assertEqual(ollama["codex_proxy_metadata"]["upstream_name"], "ollama_cloud")
+        self.assertEqual(ollama["codex_proxy_metadata"]["upstream_model"], "glm-5.2")
 
     def test_catalog_override_rejects_invalid_unknown_and_cross_provider_entries(self):
         valid_identity = ("openai", "official", "gpt-5.6-luna")
@@ -832,13 +897,118 @@ class CatalogSyncTests(unittest.TestCase):
                 json.dumps({"schema_version": 1, "overrides": list(cases.values())}),
                 encoding="utf-8",
             )
-            self.assertEqual(catalog_sync._load_catalog_override_state(path), {})
+            diagnostics = {}
+            self.assertEqual(catalog_sync._load_catalog_override_state(path, diagnostics), {})
+            self.assertEqual(diagnostics["reasons"]["invalid_override_fields"], 1)
             self.assertTrue(
                 catalog_sync._planner_override_is_valid(
                     valid_identity,
                     {"multi_agent_version": "v2"},
                 )
             )
+            path.write_text("[]", encoding="utf-8")
+            self.assertEqual(catalog_sync._load_catalog_override_state(path), {})
+
+            valid_entry = {
+                "provider": valid_identity[0],
+                "upstream_name": valid_identity[1],
+                "upstream_model": valid_identity[2],
+                "fields": {"multi_agent_version": "v2"},
+            }
+            diagnostics = {}
+            path.write_text(
+                json.dumps({"schema_version": True, "overrides": [valid_entry]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(catalog_sync._load_catalog_override_state(path, diagnostics), {})
+            self.assertEqual(diagnostics["reasons"]["invalid_sidecar"], 1)
+
+            diagnostics = {}
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "overrides": [
+                            valid_entry,
+                            {**valid_entry, "unexpected": "field"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(catalog_sync._load_catalog_override_state(path, diagnostics), {})
+            self.assertEqual(diagnostics["reasons"]["invalid_sidecar"], 1)
+
+            diagnostics = {}
+            path.write_text(
+                json.dumps({"schema_version": 1, "overrides": [valid_entry, valid_entry]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(catalog_sync._load_catalog_override_state(path, diagnostics), {})
+            self.assertEqual(diagnostics["reasons"]["invalid_sidecar"], 1)
+
+    def test_catalog_override_rejects_malformed_managed_baseline_without_legacy_migration(self):
+        identity = ("openai", "official", "gpt-5.6-luna")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = Path(tmpdir) / "baseline.json"
+            generated = Path(tmpdir) / "catalog.json"
+            baseline.write_text(json.dumps({"models": []}), encoding="utf-8")
+            generated.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-luna",
+                                "visibility": "list",
+                                "multi_agent_version": "v2",
+                                "codex_proxy_metadata": {
+                                    "provider": identity[0],
+                                    "upstream_name": identity[1],
+                                    "upstream_model": identity[2],
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", generated),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", Path(tmpdir) / "overrides.json"),
+            ):
+                overrides, diagnostics = catalog_sync._collect_catalog_overrides()
+            self.assertEqual(overrides, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_baseline"], 1)
+
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "managed_baseline": True,
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-luna",
+                                "visibility": "list",
+                                "codex_proxy_metadata": {
+                                    "provider": identity[0],
+                                    "upstream_name": identity[1],
+                                    "upstream_model": identity[2],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", generated),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", Path(tmpdir) / "overrides.json"),
+            ):
+                overrides, diagnostics = catalog_sync._collect_catalog_overrides()
+            self.assertEqual(overrides, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_baseline"], 1)
 
     def test_catalog_override_matches_exact_identity_not_slug(self):
         official_identity = ("openai", "official", "gpt-5.6-luna")
@@ -858,6 +1028,226 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertNotIn("multi_agent_version", external_model)
 
+    def test_catalog_override_rejects_legacy_official_identity_spoof(self):
+        identity = ("openai", "official", "gpt-5.6-luna")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current = root / "catalog.json"
+            current.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": identity[2],
+                                "visibility": "list",
+                                "multi_agent_version": "v2",
+                                "codex_proxy_metadata": {
+                                    "provider": identity[0],
+                                    "upstream_name": identity[1],
+                                    "upstream_model": identity[2],
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", root / "missing-baseline.json"),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", root / "overrides.json"),
+            ):
+                overrides, diagnostics = catalog_sync._collect_catalog_overrides()
+
+            self.assertEqual(overrides, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
+
+    def test_catalog_override_validates_managed_identity_digest(self):
+        official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
+        managed = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+        current = json.loads(json.dumps(managed))
+        current["models"][0]["multi_agent_version"] = "v2"
+        current["models"][0]["codex_proxy_metadata"][catalog_sync.CATALOG_OWNER_IDENTITY_KEY] = "0" * 64
+        baseline = json.loads(json.dumps(managed))
+        baseline.update({"schema_version": 1, "managed_baseline": True})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current_path = root / "catalog.json"
+            baseline_path = root / "baseline.json"
+            current_path.write_text(json.dumps(current), encoding="utf-8")
+            baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+            with (
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline_path),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", root / "overrides.json"),
+            ):
+                overrides, diagnostics = catalog_sync._collect_catalog_overrides()
+
+            self.assertEqual(overrides, {})
+            self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
+
+        target = json.loads(json.dumps(managed["models"][0]))
+        target["codex_proxy_metadata"][catalog_sync.CATALOG_OWNER_IDENTITY_KEY] = "0" * 64
+        catalog = {"models": [target]}
+        diagnostics = {"accepted": 0, "rejected": 0, "reasons": {}}
+        catalog_sync._apply_catalog_overrides(
+            catalog,
+            {("openai", "official", "gpt-5.6-luna"): {"multi_agent_version": "v2"}},
+            diagnostics,
+        )
+        self.assertNotEqual(target.get("multi_agent_version"), "v2")
+        self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
+
+    def test_catalog_override_purges_sidecar_when_current_identity_is_missing(self):
+        identity = ("openai", "official", "gpt-5.6-luna")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline = root / "baseline.json"
+            current = root / "catalog.json"
+            overrides = root / "overrides.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "managed_baseline": True,
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-luna",
+                                "visibility": "list",
+                                "prefer_websockets": True,
+                                "tool_mode": "code_mode_only",
+                                "multi_agent_version": "v1",
+                                "use_responses_lite": True,
+                                "codex_proxy_metadata": {
+                                    "provider": identity[0],
+                                    "upstream_name": identity[1],
+                                    "upstream_model": identity[2],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            overrides.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "overrides": [
+                            {
+                                "provider": identity[0],
+                                "upstream_name": identity[1],
+                                "upstream_model": identity[2],
+                                "fields": {"multi_agent_version": "v2"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # Same display slug, but a different provider identity.  The old
+            # Official sidecar entry must not cross over to this row.
+            current.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "volc/gpt-5.6-luna",
+                                "visibility": "list",
+                                "codex_proxy_metadata": {
+                                    "provider": "volc",
+                                    "upstream_name": "volcengine",
+                                    "upstream_model": "gpt-5.6-luna",
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides),
+            ):
+                collected, diagnostics = catalog_sync._collect_catalog_overrides()
+
+            self.assertEqual(collected, {})
+            self.assertEqual(diagnostics["reasons"]["missing_managed_model"], 1)
+
+    def test_catalog_override_reports_malformed_current_catalog_without_using_it_as_edit(self):
+        identity = ("openai", "official", "gpt-5.6-luna")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline = root / "baseline.json"
+            current = root / "catalog.json"
+            overrides = root / "overrides.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "managed_baseline": True,
+                        "models": [
+                            {
+                                "slug": "gpt-5.6-luna",
+                                "visibility": "list",
+                                "prefer_websockets": True,
+                                "tool_mode": "code_mode_only",
+                                "multi_agent_version": "v1",
+                                "use_responses_lite": True,
+                                "codex_proxy_metadata": {
+                                    "provider": identity[0],
+                                    "upstream_name": identity[1],
+                                    "upstream_model": identity[2],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            overrides.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "overrides": [
+                            {
+                                "provider": identity[0],
+                                "upstream_name": identity[1],
+                                "upstream_model": identity[2],
+                                "fields": {"multi_agent_version": "v2"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            current.write_text("{not json", encoding="utf-8")
+
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides),
+            ):
+                collected, diagnostics = catalog_sync._collect_catalog_overrides()
+
+            self.assertEqual(collected[identity], {"multi_agent_version": "v2"})
+            self.assertFalse(diagnostics["current_catalog_valid"])
+            self.assertEqual(diagnostics["reasons"]["invalid_catalog"], 1)
+
+            current.write_text(json.dumps({"models": [{}]}), encoding="utf-8")
+            with (
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline),
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides),
+            ):
+                collected, diagnostics = catalog_sync._collect_catalog_overrides()
+            self.assertEqual(collected[identity], {"multi_agent_version": "v2"})
+            self.assertFalse(diagnostics["current_catalog_valid"])
+            self.assertEqual(diagnostics["reasons"]["invalid_catalog"], 1)
+
     def test_catalog_override_is_removed_when_managed_baseline_catches_up(self):
         identity = ("openai", "official", "gpt-5.6-luna")
         current = {"multi_agent_version": "v2"}
@@ -872,6 +1262,67 @@ class CatalogSyncTests(unittest.TestCase):
             catalog_sync._delta_override_fields(identity, current, new_baseline),
             {},
         )
+
+    def test_catalog_override_survives_managed_baseline_refresh_publication(self):
+        official = [
+            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}
+        ]
+        identity = ("openai", "official", "gpt-5.6-luna")
+        managed_v1 = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+        current = json.loads(json.dumps(managed_v1))
+        current["models"][0]["multi_agent_version"] = "v2"
+        baseline_v1 = json.loads(json.dumps(managed_v1))
+        baseline_v1.update({"schema_version": 1, "managed_baseline": True})
+        sidecar_v2 = catalog_sync._write_catalog_override_state(
+            {identity: {"multi_agent_version": "v2"}}
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current_path = root / "catalog.json"
+            baseline_path = root / "baseline.json"
+            overrides_path = root / "overrides.json"
+            current_path.write_text(json.dumps(current), encoding="utf-8")
+            baseline_path.write_text(json.dumps(baseline_v1), encoding="utf-8")
+            overrides_path.write_text(json.dumps(sidecar_v2), encoding="utf-8")
+            with (
+                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline_path),
+                patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", overrides_path),
+            ):
+                collected, diagnostics = catalog_sync._collect_catalog_overrides()
+                self.assertEqual(collected[identity], {"multi_agent_version": "v2"})
+
+                pinned_v2 = json.loads(json.dumps(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA))
+                pinned_v2["gpt-5.6-luna"]["multi_agent_version"] = "v2"
+                with patch.object(catalog_sync, "PINNED_OFFICIAL_CATALOG_METADATA", pinned_v2):
+                    managed_v2 = catalog_sync.build_codex_catalog(
+                        official,
+                        [],
+                        self.policy,
+                        "0.146.0",
+                    )
+                    effective_v2 = catalog_sync._apply_catalog_overrides(
+                        json.loads(json.dumps(managed_v2)),
+                        collected,
+                        diagnostics,
+                    )
+
+                self.assertEqual(effective_v2["models"][0]["multi_agent_version"], "v2")
+                current_path.write_text(json.dumps(effective_v2), encoding="utf-8")
+                baseline_v2 = dict(managed_v2)
+                baseline_v2.update({"schema_version": 1, "managed_baseline": True})
+                baseline_path.write_text(json.dumps(baseline_v2), encoding="utf-8")
+                overrides_path.write_text(json.dumps(catalog_sync._write_catalog_override_state(collected)), encoding="utf-8")
+
+                collected_after, diagnostics_after = catalog_sync._collect_catalog_overrides()
+                self.assertEqual(collected_after, {})
+                effective_after = catalog_sync._apply_catalog_overrides(
+                    json.loads(json.dumps(managed_v2)),
+                    collected_after,
+                    diagnostics_after,
+                )
+                self.assertEqual(effective_after["models"][0]["multi_agent_version"], "v2")
 
     def test_pinned_official_catalog_metadata_rejects_an_incomplete_model_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:

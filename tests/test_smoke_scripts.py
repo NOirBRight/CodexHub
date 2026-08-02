@@ -807,6 +807,15 @@ def test_codex_mode_persists_bare_official_model_ids():
     assert 'model = "openai/gpt-5.5"' not in source
 
 
+def test_codex_mode_preserves_user_owned_catalog_paths():
+    source = (ROOT / "scripts" / "codex-mode.ps1").read_text(encoding="utf-8-sig")
+
+    assert "function Get-TopLevelConfigValue" in source
+    assert "function Test-CodexHubManagedCatalogPath" in source
+    assert "$preserveCatalog" in source
+    assert "model_catalog_json = $(Convert-ToTomlLiteral -Value $existingCatalogValue)" in source
+
+
 def test_active_gateway_diagnostics_default_to_bare_official_model_ids():
     launcher = (ROOT / "scripts" / "launch-codex-proxy-app.ps1").read_text(encoding="utf-8-sig")
     replay = (ROOT / "scripts" / "replay_official_transport.py").read_text(encoding="utf-8")

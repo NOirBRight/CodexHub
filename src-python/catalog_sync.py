@@ -4,6 +4,7 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -309,6 +310,21 @@ PINNED_OFFICIAL_MODEL_FIELD_SETS = {
 # unrelated stale metadata to survive a refresh.
 CATALOG_OVERRIDE_FIELDS = frozenset(PINNED_OFFICIAL_PLANNER_FIELD_SET)
 CATALOG_OVERRIDE_SCHEMA_VERSION = 1
+CATALOG_OWNER_METADATA_KEY = "catalog_owner"
+CATALOG_OWNER_METADATA_VERSION_KEY = "catalog_owner_version"
+CATALOG_OWNER_IDENTITY_KEY = "catalog_identity_digest"
+CATALOG_OWNER_METADATA_VALUE = "codexhub"
+CATALOG_OWNER_METADATA_VERSION = 1
+CATALOG_OVERRIDE_REJECTION_REASONS = frozenset(
+    {
+        "invalid_sidecar",
+        "invalid_catalog",
+        "invalid_baseline",
+        "invalid_row_identity",
+        "invalid_override_fields",
+        "missing_managed_model",
+    }
+)
 
 
 def load_pinned_official_catalog_metadata(
@@ -401,6 +417,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
     return (
         POLICY_PATH,
         OFFICIAL_SEED_PATH,
+        OFFICIAL_CATALOG_METADATA_PATH,
         RUNTIME_OFFICIAL_SEED_PATH,
         DIRECT_OFFICIAL_MODELS_CACHE_PATH,
         OLLAMA_FALLBACK_PATH,
@@ -410,6 +427,8 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         Path(__file__).resolve(),
         PROXY_DIR / "catalog.py",
         PROXY_DIR / "providers_config.py",
+        MANAGED_CATALOG_BASELINE_PATH,
+        CATALOG_OVERRIDES_PATH,
     )
 
 
@@ -509,6 +528,9 @@ def _planner_override_is_valid(
         return False
     if not fields or not set(fields).issubset(CATALOG_OVERRIDE_FIELDS):
         return False
+    supported_fields = set(PINNED_OFFICIAL_MODEL_FIELD_SETS.get(slug, ()))
+    if not set(fields).issubset(supported_fields):
+        return False
     for key, value in fields.items():
         if key == "multi_agent_version":
             # v1/v2 are the only native planner versions.  The selected model
@@ -526,6 +548,92 @@ def _planner_override_is_valid(
     return True
 
 
+def _record_override_rejection(
+    diagnostics: dict[str, Any] | None,
+    reason: str,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics["rejected"] = int(diagnostics.get("rejected", 0)) + 1
+    reasons = diagnostics.setdefault("reasons", {})
+    if not isinstance(reasons, dict):
+        reasons = {}
+        diagnostics["reasons"] = reasons
+    if reason not in CATALOG_OVERRIDE_REJECTION_REASONS:
+        reason = "invalid_sidecar"
+    reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+
+def _catalog_override_row_is_eligible(
+    identity: CatalogModelIdentity,
+    model: dict[str, Any],
+    baseline_model: dict[str, Any] | None = None,
+) -> bool:
+    """Require the edited row to be a visible, exact managed row.
+
+    Metadata alone is not an authority: a user-edited hidden row or a row
+    spoofed to look Official must not seed an override for the next catalog.
+    """
+
+    if not is_catalog_model_listable(model, missing_is_list=False):
+        return False
+    slug = model.get("slug")
+    if not isinstance(slug, str):
+        return False
+    normalized_slug = canonical_model_id(slug)
+    if normalized_slug.startswith("openai/gpt-"):
+        normalized_slug = normalized_slug.removeprefix("openai/")
+    if normalized_slug != identity[2]:
+        return False
+
+    metadata = model.get("codex_proxy_metadata")
+    if not isinstance(metadata, dict):
+        return False
+
+    # New catalogs carry an ownership marker in the generated row. When a
+    # managed baseline has one, require the current row to carry the same
+    # marker; changing only the visible slug/identity cannot turn a replaced
+    # third-party row into an Official authority.
+    baseline_metadata = (
+        baseline_model.get("codex_proxy_metadata")
+        if isinstance(baseline_model, dict)
+        else None
+    )
+    if (
+        isinstance(baseline_metadata, dict)
+        and CATALOG_OWNER_METADATA_KEY in baseline_metadata
+    ) or CATALOG_OWNER_METADATA_KEY in metadata:
+        return (
+            metadata.get(CATALOG_OWNER_METADATA_KEY) == CATALOG_OWNER_METADATA_VALUE
+            and metadata.get(CATALOG_OWNER_METADATA_VERSION_KEY)
+            == CATALOG_OWNER_METADATA_VERSION
+            and metadata.get(CATALOG_OWNER_IDENTITY_KEY)
+            == catalog_identity_digest(identity)
+        )
+
+    # Pre-Beta2 catalogs have no marker. Retain migration compatibility only
+    # for the recognizable generated Official row shape; a hand-authored
+    # metadata/slug spoof is not a legacy catalog record.
+    if not _official_identity(identity):
+        return True
+    required_legacy_keys = (
+        "description",
+        "shell_type",
+        "supported_in_api",
+        "supported_reasoning_levels",
+        "default_reasoning_level",
+        "input_modalities",
+    )
+    if any(key not in model for key in required_legacy_keys):
+        return False
+    return (
+        model.get("shell_type") == "shell_command"
+        and model.get("supported_in_api") is True
+        and isinstance(model.get("supported_reasoning_levels"), list)
+        and isinstance(model.get("input_modalities"), list)
+    )
+
+
 def _catalog_models(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -535,36 +643,169 @@ def _catalog_models(payload: Any) -> list[dict[str, Any]]:
     return [model for model in models if isinstance(model, dict)]
 
 
+def _catalog_payload_shape_is_valid(
+    payload: Any,
+    *,
+    require_identity: bool = False,
+) -> bool:
+    """Validate the minimum generated-catalog envelope before reconciliation."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return False
+    if not payload["models"]:
+        return False
+    for model in payload["models"]:
+        if not isinstance(model, dict):
+            return False
+        slug = model.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            return False
+        if "visibility" in model and not isinstance(model.get("visibility"), str):
+            return False
+        if "visibility" not in model and not isinstance(model.get("hidden"), bool):
+            return False
+        metadata = model.get("codex_proxy_metadata")
+        if "codex_proxy_metadata" in model and not isinstance(metadata, dict):
+            return False
+        if require_identity and (
+            not isinstance(metadata, dict) or catalog_model_identity(model) is None
+        ):
+            return False
+        if require_identity:
+            identity = catalog_model_identity(model)
+            if identity is not None and _official_identity(identity):
+                if identity[2] not in PINNED_OFFICIAL_MODEL_IDS:
+                    return False
+                if any(
+                    field not in model
+                    for field in PINNED_OFFICIAL_MODEL_FIELD_SETS.get(identity[2], ())
+                ):
+                    return False
+    return True
+
+
+def _managed_baseline_shape_is_valid(payload: Any) -> bool:
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("models"), list)
+        and not payload["models"]
+    ):
+        return True
+    if not _catalog_payload_shape_is_valid(payload, require_identity=True):
+        return False
+    for model in payload["models"]:
+        identity = catalog_model_identity(model)
+        if identity is None:
+            return False
+        if _official_identity(identity):
+            if identity[2] not in PINNED_OFFICIAL_MODEL_IDS:
+                return False
+            supported_fields = PINNED_OFFICIAL_MODEL_FIELD_SETS.get(identity[2], ())
+            if any(field not in model for field in supported_fields):
+                return False
+            expected = PINNED_OFFICIAL_CATALOG_METADATA.get(identity[2], {})
+            for field in supported_fields:
+                value = model.get(field)
+                if field == "multi_agent_version":
+                    if value not in {"v1", "v2"}:
+                        return False
+                elif value != expected.get(field):
+                    return False
+            metadata = model.get("codex_proxy_metadata")
+            if isinstance(metadata, dict) and CATALOG_OWNER_METADATA_KEY in metadata:
+                if (
+                    metadata.get(CATALOG_OWNER_METADATA_KEY) != CATALOG_OWNER_METADATA_VALUE
+                    or metadata.get(CATALOG_OWNER_METADATA_VERSION_KEY)
+                    != CATALOG_OWNER_METADATA_VERSION
+                    or metadata.get(CATALOG_OWNER_IDENTITY_KEY)
+                    != catalog_identity_digest(identity)
+                ):
+                    return False
+    return True
+
+
 def _index_catalog_models(payload: Any) -> dict[CatalogModelIdentity, dict[str, Any]]:
     indexed: dict[CatalogModelIdentity, dict[str, Any]] = {}
+    duplicates: set[CatalogModelIdentity] = set()
     for model in _catalog_models(payload):
         identity = catalog_model_identity(model)
-        if identity is not None and identity not in indexed:
-            indexed[identity] = model
+        if identity is None:
+            continue
+        if identity in indexed:
+            duplicates.add(identity)
+            continue
+        indexed[identity] = model
+    for identity in duplicates:
+        indexed.pop(identity, None)
     return indexed
 
 
-def _load_catalog_override_state(path: Path = CATALOG_OVERRIDES_PATH) -> dict[CatalogModelIdentity, dict[str, Any]]:
+def _duplicate_catalog_identities(payload: Any) -> set[CatalogModelIdentity]:
+    seen: set[CatalogModelIdentity] = set()
+    duplicates: set[CatalogModelIdentity] = set()
+    for model in _catalog_models(payload):
+        identity = catalog_model_identity(model)
+        if identity is None:
+            continue
+        if identity in seen:
+            duplicates.add(identity)
+        else:
+            seen.add(identity)
+    return duplicates
+
+
+def _load_catalog_override_state(
+    path: Path = CATALOG_OVERRIDES_PATH,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[CatalogModelIdentity, dict[str, Any]]:
     try:
         payload = load_json_file(path)
     except (OSError, UnicodeError, json.JSONDecodeError):
+        _record_override_rejection(diagnostics, "invalid_sidecar")
         return {}
-    if payload.get("schema_version") != CATALOG_OVERRIDE_SCHEMA_VERSION:
+    if not isinstance(payload, dict):
+        _record_override_rejection(diagnostics, "invalid_sidecar")
+        return {}
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != CATALOG_OVERRIDE_SCHEMA_VERSION
+    ):
+        _record_override_rejection(diagnostics, "invalid_sidecar")
+        return {}
+    if set(payload) != {"schema_version", "overrides"}:
+        _record_override_rejection(diagnostics, "invalid_sidecar")
         return {}
     raw_overrides = payload.get("overrides")
     if not isinstance(raw_overrides, list):
+        _record_override_rejection(diagnostics, "invalid_sidecar")
         return {}
     output: dict[CatalogModelIdentity, dict[str, Any]] = {}
     for entry in raw_overrides:
         if not isinstance(entry, dict):
-            continue
+            _record_override_rejection(diagnostics, "invalid_sidecar")
+            return {}
+        if set(entry) != {"provider", "upstream_name", "upstream_model", "fields"}:
+            _record_override_rejection(diagnostics, "invalid_sidecar")
+            return {}
         identity = _identity_from_payload(entry)
         fields = entry.get("fields")
         if identity is None or not isinstance(fields, dict):
-            continue
-        filtered = {key: value for key, value in fields.items() if key in CATALOG_OVERRIDE_FIELDS}
-        if _planner_override_is_valid(identity, filtered):
-            output[identity] = filtered
+            _record_override_rejection(diagnostics, "invalid_sidecar")
+            return {}
+        if not set(fields).issubset(CATALOG_OVERRIDE_FIELDS):
+            _record_override_rejection(diagnostics, "invalid_override_fields")
+            return {}
+        if _planner_override_is_valid(identity, fields):
+            if identity in output:
+                # A duplicate identity has no deterministic ownership
+                # semantics; reject the complete sidecar instead of making
+                # list order a hidden override selector.
+                _record_override_rejection(diagnostics, "invalid_sidecar")
+                return {}
+            output[identity] = {key: fields[key] for key in sorted(fields)}
+        else:
+            _record_override_rejection(diagnostics, "invalid_override_fields")
+            return {}
     return output
 
 
@@ -601,10 +842,10 @@ def _legacy_override_fields(
         return {}
     fields = {
         key: model[key]
-        for key in CATALOG_OVERRIDE_FIELDS
+        for key in sorted(CATALOG_OVERRIDE_FIELDS)
         if key in model and model.get(key) != baseline.get(key)
     }
-    return fields if _planner_override_is_valid(identity, fields) else {}
+    return fields
 
 
 def _delta_override_fields(
@@ -616,13 +857,13 @@ def _delta_override_fields(
         return _legacy_override_fields(identity, current)
     fields = {
         key: current[key]
-        for key in CATALOG_OVERRIDE_FIELDS
+        for key in sorted(CATALOG_OVERRIDE_FIELDS)
         if key in current and current.get(key) != baseline.get(key)
     }
-    return fields if _planner_override_is_valid(identity, fields) else {}
+    return fields
 
 
-def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, Any]], dict[str, int]]:
+def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, Any]], dict[str, Any]]:
     """Capture user edits before the effective catalog is replaced.
 
     A baseline sidecar is the ownership boundary for new installations.  If
@@ -631,23 +872,99 @@ def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, A
     are migrated.
     """
 
+    diagnostics: dict[str, Any] = {
+        "accepted": 0,
+        "rejected": 0,
+        "migrated": 0,
+        "reasons": {},
+        # A malformed effective catalog is not an ownership boundary.  Keep
+        # a valid persisted sidecar available for recovery, but never use the
+        # malformed file as evidence of a new user edit.
+        "current_catalog_valid": True,
+    }
+    current_path = existing_generated_catalog_path(GENERATED_CATALOG_PATH)
+    current_exists = current_path.exists()
+    diagnostics["current_catalog_valid"] = current_exists
     try:
-        current = load_json_file(existing_generated_catalog_path(GENERATED_CATALOG_PATH))
+        current = load_json_file(current_path)
     except (OSError, UnicodeError, json.JSONDecodeError):
         current = {}
-    try:
-        baseline = load_json_file(MANAGED_CATALOG_BASELINE_PATH)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        if current_exists:
+            diagnostics["current_catalog_valid"] = False
+            _record_override_rejection(diagnostics, "invalid_catalog")
+    if diagnostics["current_catalog_valid"] and not _catalog_payload_shape_is_valid(current):
+        current = {}
+        diagnostics["current_catalog_valid"] = False
+        _record_override_rejection(diagnostics, "invalid_catalog")
+
+    baseline_exists = MANAGED_CATALOG_BASELINE_PATH.exists()
+    if baseline_exists:
+        try:
+            baseline = load_json_file(MANAGED_CATALOG_BASELINE_PATH)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            _record_override_rejection(diagnostics, "invalid_baseline")
+            return {}, diagnostics
+        if not (
+            isinstance(baseline, dict)
+            and type(baseline.get("schema_version")) is int
+            and baseline.get("schema_version") == CATALOG_OVERRIDE_SCHEMA_VERSION
+            and baseline.get("managed_baseline") is True
+            and _managed_baseline_shape_is_valid(baseline)
+        ):
+            _record_override_rejection(diagnostics, "invalid_baseline")
+            return {}, diagnostics
+        if diagnostics["current_catalog_valid"] and not _catalog_payload_shape_is_valid(
+            current,
+            require_identity=True,
+        ):
+            current = {}
+            diagnostics["current_catalog_valid"] = False
+            _record_override_rejection(diagnostics, "invalid_catalog")
+    else:
         baseline = {}
+
+    baseline_duplicates = _duplicate_catalog_identities(baseline)
+    if baseline_duplicates:
+        _record_override_rejection(diagnostics, "invalid_baseline")
+        return {}, diagnostics
+
     baseline_models = _index_catalog_models(baseline)
-    overrides = _load_catalog_override_state(CATALOG_OVERRIDES_PATH)
-    diagnostics = {"accepted": 0, "rejected": 0, "migrated": 0}
-    for identity, model in _index_catalog_models(current).items():
+    # An override sidecar without its managed baseline has no ownership proof;
+    # ignore it and let the next effective catalog establish a fresh baseline.
+    overrides = (
+        _load_catalog_override_state(CATALOG_OVERRIDES_PATH, diagnostics)
+        if baseline_exists
+        else {}
+    )
+    if not diagnostics["current_catalog_valid"]:
+        # Do not infer a user edit from a missing/corrupt current file. Keep
+        # any already validated sidecar for the rebuilt managed catalog to
+        # consume, and let publication validate the target identity again.
+        return overrides, diagnostics
+    current_duplicates = _duplicate_catalog_identities(current)
+    for identity in current_duplicates:
+        overrides.pop(identity, None)
+        _record_override_rejection(diagnostics, "invalid_row_identity")
+    current_models = _index_catalog_models(current)
+    if diagnostics["current_catalog_valid"]:
+        # A sidecar entry is only valid while the exact managed identity is
+        # still present in the current catalog.  Otherwise a removed model,
+        # provider replacement, or cross-provider row could inherit the old
+        # planner fields on the next generated catalog.
+        for identity in set(overrides).difference(current_models):
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "missing_managed_model")
+    for identity, model in current_models.items():
         baseline_model = baseline_models.get(identity)
-        if baseline and baseline_model is None:
+        if not _catalog_override_row_is_eligible(identity, model, baseline_model):
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "invalid_row_identity")
+            continue
+        if baseline_exists and baseline_model is None:
             # A row unknown to the managed baseline is not an authority for
             # another row; it can be safely ignored during migration.
-            diagnostics["rejected"] += 1
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "invalid_row_identity")
             continue
         fields = _delta_override_fields(identity, model, baseline_model)
         if not fields:
@@ -659,27 +976,54 @@ def _collect_catalog_overrides() -> tuple[dict[CatalogModelIdentity, dict[str, A
         if _planner_override_is_valid(identity, fields):
             overrides[identity] = fields
             diagnostics["accepted"] += 1
-            if not baseline:
+            if not baseline_exists:
                 diagnostics["migrated"] += 1
         else:
             overrides.pop(identity, None)
-            diagnostics["rejected"] += 1
+            _record_override_rejection(diagnostics, "invalid_override_fields")
     return overrides, diagnostics
 
 
 def _apply_catalog_overrides(
     catalog: dict[str, Any],
     overrides: dict[CatalogModelIdentity, dict[str, Any]],
-    diagnostics: dict[str, int],
+    diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
     by_identity = _index_catalog_models(catalog)
-    for identity, fields in overrides.items():
+    for identity, fields in list(overrides.items()):
         model = by_identity.get(identity)
-        if model is None or not _planner_override_is_valid(identity, fields):
-            diagnostics["rejected"] = diagnostics.get("rejected", 0) + 1
+        if model is None:
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "missing_managed_model")
+            continue
+        if not _catalog_override_row_is_eligible(identity, model):
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "invalid_row_identity")
+            continue
+        if not _planner_override_is_valid(identity, fields):
+            overrides.pop(identity, None)
+            _record_override_rejection(diagnostics, "invalid_override_fields")
             continue
         model.update(deepcopy(fields))
     return catalog
+
+
+def _bounded_catalog_override_diagnostics(
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    result = {
+        key: min(max(int(diagnostics.get(key, 0)), 0), MAX_VISIBILITY_DIAGNOSTIC_COUNT)
+        for key in ("accepted", "rejected", "migrated")
+    }
+    raw_reasons = diagnostics.get("reasons")
+    reasons = {}
+    if isinstance(raw_reasons, dict):
+        for reason in sorted(CATALOG_OVERRIDE_REJECTION_REASONS):
+            value = raw_reasons.get(reason, 0)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                reasons[reason] = min(value, MAX_VISIBILITY_DIAGNOSTIC_COUNT)
+    result["reasons"] = reasons
+    return result
 
 
 @dataclass(frozen=True)
@@ -1446,6 +1790,21 @@ def normalize_official_responses_lite_opt_in(model: dict[str, Any]) -> None:
         model["use_responses_lite"] = False
 
 
+def catalog_identity_digest(identity: CatalogModelIdentity) -> str:
+    value = "\0".join(identity).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def stamp_catalog_owner_metadata(model: dict[str, Any]) -> None:
+    metadata = dict(model.get("codex_proxy_metadata", {}))
+    metadata[CATALOG_OWNER_METADATA_KEY] = CATALOG_OWNER_METADATA_VALUE
+    metadata[CATALOG_OWNER_METADATA_VERSION_KEY] = CATALOG_OWNER_METADATA_VERSION
+    identity = catalog_model_identity(model)
+    if identity is not None:
+        metadata[CATALOG_OWNER_IDENTITY_KEY] = catalog_identity_digest(identity)
+    model["codex_proxy_metadata"] = metadata
+
+
 def official_proxy_alias(slug: str) -> str:
     return f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/{slug}"
 
@@ -1585,6 +1944,7 @@ def build_official_proxy_model(
         }
     )
     model["codex_proxy_metadata"] = proxy_metadata
+    stamp_catalog_owner_metadata(model)
     return model
 
 
@@ -1648,12 +2008,33 @@ def build_ollama_model(
     else:
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
+    # Planner metadata is an Official-model contract.  A fallback catalog is
+    # shared input for third-party rows and must never be able to make one of
+    # those rows advertise an Official Code Mode/version.
+    for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
+        model.pop(key, None)
+    model["use_responses_lite"] = False
     model["slug"] = slug
     model["display_name"] = display_name_for(slug, policy)
     model.setdefault("description", DEFAULT_OLLAMA_MODEL["description"])
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
     apply_ollama_model_limits(model, slug, model_metadata or {})
+    inherited_metadata = model.get("codex_proxy_metadata")
+    safe_metadata = {
+        key: inherited_metadata[key]
+        for key in ("context_source", "max_output_source")
+        if isinstance(inherited_metadata, dict) and key in inherited_metadata
+    }
+    safe_metadata.update(
+        {
+            "provider": "ollama-cloud",
+            "upstream_name": "ollama_cloud",
+            "upstream_model": slug,
+        }
+    )
+    model["codex_proxy_metadata"] = safe_metadata
+    stamp_catalog_owner_metadata(model)
     return model
 
 
@@ -1719,6 +2100,13 @@ def build_external_provider_model(
         model = deepcopy(fallback_template)
     else:
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
+
+    # Never inherit Official planner fields from the fallback template.  The
+    # third-party catalog may retain the normal explicit false value for
+    # Responses Lite, but it cannot claim a native Official planner contract.
+    for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
+        model.pop(key, None)
+    model["use_responses_lite"] = False
 
     alias = str(external_model["alias"])
     display_prefix = str(external_model.get("display_prefix") or external_model.get("provider_alias") or "provider")
@@ -1790,6 +2178,7 @@ def build_external_provider_model(
             (str(external_model["provider_alias"]), str(external_model["upstream_model"]))
         ),
     )
+    stamp_catalog_owner_metadata(model)
     return model
 
 
@@ -2095,10 +2484,9 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
         "external_provider_models": [str(model["alias"]) for model in external_models],
         "visible_models": visible_slugs,
         "diff": diff,
-        "catalog_override_diagnostics": {
-            key: min(max(int(value), 0), MAX_VISIBILITY_DIAGNOSTIC_COUNT)
-            for key, value in override_diagnostics.items()
-        },
+        "catalog_override_diagnostics": _bounded_catalog_override_diagnostics(
+            override_diagnostics
+        ),
     }
 
     managed_baseline = dict(managed_catalog)
@@ -2137,6 +2525,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"visible_models={len(state['visible_models'])}")
     if state.get("cache_status"):
         print(f"cache_status={state['cache_status']}")
+    override_diagnostics = state.get("catalog_override_diagnostics", {})
+    print(f"catalog_override_accepted={override_diagnostics.get('accepted', 0)}")
+    print(f"catalog_override_rejected={override_diagnostics.get('rejected', 0)}")
+    print(f"catalog_override_migrated={override_diagnostics.get('migrated', 0)}")
+    reasons = override_diagnostics.get("reasons", {})
+    if isinstance(reasons, dict):
+        print(
+            "catalog_override_rejection_reasons="
+            + ",".join(f"{key}:{reasons[key]}" for key in sorted(reasons))
+        )
     print(f"added={','.join(diff['added'])}")
     print(f"removed={','.join(diff['removed'])}")
     return 0
