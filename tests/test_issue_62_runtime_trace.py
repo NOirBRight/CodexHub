@@ -207,6 +207,44 @@ def test_inventory_check_rejects_generated_artifact_drift(tmp_path: Path) -> Non
     assert "generated inventory drift check failed" in result.stderr
 
 
+def test_inventory_check_rejects_stale_response_identity_pointer(tmp_path: Path) -> None:
+    inventory = json.loads(
+        (ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for item in inventory["items"]:
+        if item["scope"] == "identity_response_ids":
+            item["evidence_source"] = (
+                "codexhub-runtime-wire-fixture.json#response.streaming.response_id"
+            )
+            break
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    inventory_path.write_text(
+        json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr
+
+
 def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) -> None:
     module_spec = importlib.util.spec_from_file_location(
         "issue_62_runtime_inventory", ROOT / "scripts/build_issue_62_runtime_inventory.py"

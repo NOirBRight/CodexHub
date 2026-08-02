@@ -337,6 +337,21 @@ def test_build_inventory_rejects_missing_capture_provenance(tmp_path: Path) -> N
         )
 
 
+def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
+    wire["post_gateway"]["response"]["streaming"]["response_id"] = "response_other"
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    wire_path.write_text(json.dumps(wire, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="identity_response_ids"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=wire_path,
+            audit=AUDIT,
+        )
+
+
 def test_function_replay_stays_live_without_bound_wire_replay_cases() -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
@@ -463,6 +478,34 @@ def test_inventory_reconcile_binds_every_scope_evidence_source() -> None:
     ]
     report = module.reconcile_inventory(mutated)
 
+    assert report["reconciled"] is False
+    assert any("expected fixture path/scope" in mismatch for mismatch in report["mismatches"])
+
+
+def test_identity_response_evidence_source_is_a_bound_pre_post_pair() -> None:
+    module = load_inventory_module()
+    base = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    identity = next(
+        item for item in base["items"] if item["scope"] == "identity_response_ids"
+    )
+
+    assert identity["evidence_source"] == module.IDENTITY_RESPONSE_EVIDENCE
+    assert module.reconcile_inventory(base, evidence_root=INVENTORY.parent) == {
+        "reconciled": True,
+        "mismatches": [],
+    }
+
+    stale_pointer = json.loads(json.dumps(base))
+    stale_pointer["items"] = [
+        {
+            **item,
+            "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+        }
+        if item["scope"] == "identity_response_ids"
+        else item
+        for item in stale_pointer["items"]
+    ]
+    report = module.reconcile_inventory(stale_pointer)
     assert report["reconciled"] is False
     assert any("expected fixture path/scope" in mismatch for mismatch in report["mismatches"])
 

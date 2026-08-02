@@ -226,6 +226,9 @@ alone cannot make an incomplete evidence set ready.
 
 The reconciler also binds every taxonomy item's `evidence_source` to the
 declared fixture path/scope (including advanced and live-control sentinels).
+The `identity_response_ids` source is an explicit pair, written as
+`pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id`;
+both pointers must exist and contain equal non-empty aliases.
 Core claims already proven by this bounded capture must remain `preserved` or
 `reversibly_adapted`; `local_consume` and `Unsupported` cannot downgrade those
 claims. Candidate source and Codex source commits must agree, and the trace,

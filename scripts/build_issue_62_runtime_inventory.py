@@ -118,6 +118,12 @@ BLOCKING_UNQUALIFIED_SCOPES = frozenset(
 # Evidence references are part of the contract, not free-form annotations.
 # This map lets reconciliation detect a stale or hand-edited inventory that
 # silently points a core claim at an unrelated tool-surface check.
+IDENTITY_RESPONSE_EVIDENCE = (
+    "codexhub-runtime-wire-fixture.json#"
+    "pre_gateway.response.streaming.response_id|"
+    "post_gateway.response.streaming.response_id"
+)
+
 CORE_SCOPE_EVIDENCE = {
     "core_text_streaming": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
     "core_text_non_streaming": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
@@ -132,7 +138,7 @@ CORE_SCOPE_EVIDENCE = {
     "core_function_result": "codexhub-runtime-wire-fixture.json#history.call_links",
     "core_function_replay": "codexhub-runtime-wire-fixture.json#history.call_links",
     "identity_item_call_ids": "codexhub-runtime-wire-fixture.json#history.call_links",
-    "identity_response_ids": "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+    "identity_response_ids": IDENTITY_RESPONSE_EVIDENCE,
     "identity_request_ids": "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
 }
 
@@ -180,6 +186,75 @@ CORE_REQUIRED_PRESERVED_SCOPES = frozenset(
 )
 
 CORE_FINAL_DISPOSITIONS = frozenset({"preserved", "reversibly_adapted", "Unqualified"})
+
+# JSON paths behind the core evidence references.  Most scopes point at one
+# value; the response identity claim deliberately points at a pre/post pair
+# and additionally requires those two aliases to agree.
+CORE_EVIDENCE_POINTERS = {
+    "core_text_streaming": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "streaming", "captured"),),
+    ),
+    "core_text_non_streaming": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "non_streaming", "captured"),),
+    ),
+    "core_history_multiturn": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "captured_source_counts", "paired_calls"),),
+    ),
+    "core_history_item_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_history_call_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "required_call_ids"),),
+    ),
+    "core_sse_streaming_events": (
+        "codexhub-runtime-wire-fixture.json",
+        (("response", "streaming", "events"),),
+    ),
+    "core_sse_terminal_events": (
+        "read-only-gate-audit.json",
+        (("gateway_identity_route", "observed_sse_event_type_counts"),),
+    ),
+    "core_sse_errors": (
+        "read-only-gate-audit.json",
+        (("gate_classification", "full_pre_post_request_response"),),
+    ),
+    "core_function_declaration": (
+        "codexhub-runtime-wire-fixture.json",
+        (("pre_gateway", "tool_surface", "namespaces"),),
+    ),
+    "core_function_call": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_function_result": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "core_function_replay": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "identity_item_call_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("history", "call_links"),),
+    ),
+    "identity_response_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (
+            ("pre_gateway", "response", "streaming", "response_id"),
+            ("post_gateway", "response", "streaming", "response_id"),
+        ),
+    ),
+    "identity_request_ids": (
+        "codexhub-runtime-wire-fixture.json",
+        (("pre_gateway", "request_id"),),
+    ),
+}
 
 REQUIRED_CANDIDATE_FIELDS = (
     "cli_version",
@@ -328,6 +403,47 @@ def _evidence_source_allowed(scope: str, evidence_source: Any) -> bool:
     if isinstance(expected, frozenset):
         return evidence_source in expected
     return evidence_source == expected
+
+
+def _resolve_fixture_pointer(document: Any, path: tuple[str, ...]) -> Any:
+    current = document
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            raise KeyError(".".join(path))
+        current = current[segment]
+    return current
+
+
+def _validate_core_evidence_pointers(
+    *, wire: dict[str, Any], audit: dict[str, Any]
+) -> None:
+    """Require every core evidence reference to resolve in its bound fixture."""
+
+    documents = {
+        "codexhub-runtime-wire-fixture.json": wire,
+        "read-only-gate-audit.json": audit,
+    }
+    for scope, (filename, pointers) in CORE_EVIDENCE_POINTERS.items():
+        document = documents[filename]
+        values: list[Any] = []
+        for pointer in pointers:
+            try:
+                value = _resolve_fixture_pointer(document, pointer)
+            except KeyError as exc:
+                raise ValueError(
+                    f"evidence pointer for {scope} is missing: {filename}#{exc.args[0]}"
+                ) from exc
+            values.append(value)
+        if scope == "identity_response_ids":
+            if (
+                len(values) != 2
+                or not all(isinstance(value, str) and value for value in values)
+                or values[0] != values[1]
+            ):
+                raise ValueError(
+                    "identity_response_ids evidence pointer must bind equal, non-empty "
+                    "pre_gateway and post_gateway response_id values"
+                )
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -621,8 +737,18 @@ def _classify_core_items(
     items.append(
         _item(
             "identity_response_ids",
-            "preserved" if streaming_captured else "Unqualified",
-            "codexhub-runtime-wire-fixture.json#response.streaming.response_id",
+            "preserved"
+            if streaming_captured
+            and wire.get("pre_gateway", {})
+            .get("response", {})
+            .get("streaming", {})
+            .get("response_id")
+            == wire.get("post_gateway", {})
+            .get("response", {})
+            .get("streaming", {})
+            .get("response_id")
+            else "Unqualified",
+            IDENTITY_RESPONSE_EVIDENCE,
             "response_id aliases preserved across pre/post-Gateway replay",
         )
     )
@@ -1075,6 +1201,7 @@ def build_inventory(
         or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
     ):
         raise ValueError("Issue #62 evidence schema identity is invalid")
+    _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
 
     items: list[dict[str, Any]] = []
     items.extend(
@@ -1406,6 +1533,11 @@ def reconcile_inventory(
                 or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
             ):
                 mismatches.append("mutation: bound evidence schema identity is invalid")
+                return {"reconciled": False, "mismatches": mismatches}
+            try:
+                _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
+            except ValueError as exc:
+                mismatches.append(f"mutation: bound evidence pointer validation failed: {exc}")
                 return {"reconciled": False, "mismatches": mismatches}
             try:
                 expected_identity, expected_status_from_evidence = _validate_candidate_binding(

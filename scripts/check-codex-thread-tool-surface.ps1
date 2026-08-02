@@ -734,7 +734,7 @@ $coreEvidence = @{
     core_function_result = 'codexhub-runtime-wire-fixture.json#history.call_links'
     core_function_replay = 'codexhub-runtime-wire-fixture.json#history.call_links'
     identity_item_call_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
-    identity_response_ids = 'codexhub-runtime-wire-fixture.json#response.streaming.response_id'
+    identity_response_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id'
     identity_request_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.request_id'
 }
 $expectedEvidenceSources = @{
@@ -802,6 +802,15 @@ foreach ($scope in $allRequiredScopes) {
     if ($entry.evidence_source -notin $expectedSources) {
         Add-Mismatch "inventory scope $scope has evidence_source $($entry.evidence_source), expected fixture path/scope $($expectedSources -join ', ')"
     }
+}
+$preResponseId = [string]$wire.pre_gateway.response.streaming.response_id
+$postResponseId = [string]$wire.post_gateway.response.streaming.response_id
+if (
+    [string]::IsNullOrWhiteSpace($preResponseId) -or
+    [string]::IsNullOrWhiteSpace($postResponseId) -or
+    $preResponseId -ne $postResponseId
+) {
+    Add-Mismatch 'wire identity_response_ids evidence pointer is missing or pre/post aliases differ'
 }
 $qualification = $inventory.qualification
 if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
