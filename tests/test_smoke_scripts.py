@@ -67,6 +67,79 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["tracked_child_exit_before_natural_timeout"] is True
     assert summary["cleanup_within_budget"] is True
     assert summary["cleanup_elapsed_milliseconds"] <= summary["cleanup_budget_milliseconds"]
+    assert summary["tracked_root_identity_captured"] is True
+    assert summary["tracked_root_identity_verified"] is True
+    assert summary["tracked_child_identity_captured"] is True
+    assert summary["tracked_child_identity_verified"] is True
+    assert summary["tracked_child_pid_reused"] is False
+    assert summary["cleanup_status"] == "primary"
+    assert summary["primary_tree_stop"]["attempted"] is True
+    assert summary["fallback_cleanup"]["used"] is False
+
+
+def test_issue_268_lifecycle_contract_captures_exact_identity_and_typed_cleanup():
+    source = (ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    # The lifecycle contract must retain the original Process handle and its
+    # start identity before teardown.  Re-opening a PID after tree termination
+    # is not an acceptable identity check because that PID may have been reused.
+    assert "Get-TrackedProcessIdentity" in source
+    assert "childProcess = [System.Diagnostics.Process]::GetProcessById" in source
+    assert "childProcessIdentity" in source
+    assert "StartTime" in source
+
+    # Primary tree-stop, degraded fallback, and the shared deadline are
+    # separate typed evidence rather than a boolean that can be cleared later.
+    assert "primary_tree_stop" in source
+    assert "fallback_cleanup" in source
+    assert "cleanup_status" in source
+    assert "LifecycleReplayCleanupTimeoutMilliseconds" in source
+    assert "LifecycleReplayExitProbeMilliseconds" not in source
+
+
+def test_issue_268_survivor_negative_control_stays_red_and_is_typed(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the lifecycle replay")
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-LifecycleSurvivorNegativeControl",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "lifecycle_survivor_negative_control"
+    assert summary["passed"] is False
+    assert summary["cleanup_status"] in {"degraded", "failed"}
+    assert summary["fallback_cleanup"]["used"] is True
+    assert summary["tracked_child_exit_before_natural_timeout"] is False
+    assert any(
+        code in summary["failures"]
+        for code in (
+            "lifecycle_tracked_child_survived_primary_tree_stop",
+            "lifecycle_cleanup_degraded",
+            "lifecycle_tracked_child_remained",
+        )
+    )
 
 
 def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(tmp_path):
