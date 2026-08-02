@@ -137,4 +137,96 @@ The remaining gates require a separately authorized live control: complete
 registered contributor/defer-loading capture, a clean current-binding cold
 start, independently fingerprinted full caller/upstream/downstream requests
 and responses, a real non-streaming request, and observed non-Direct states.
-No such control was run for this audit.
+
+## Versioned runtime/wire inventory
+
+`runtime-wire-inventory.json` is the versioned inventory artifact that feeds
+#249 (the beta.1 capability gate) and #66 (the Chat conversion matrix). It
+records one per-scope disposition for every taxonomy item the Codex CLI
+exposes over the core Responses contract and the explicitly-deferred advanced
+capabilities.
+
+The artifact is bound to CLI floor `0.145.0` and to the candidate identity
+derived from the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
+source commit `9e552e9d15ba52bed7077d5357f3e18e330f8f38`, official Responses
+route). Because the captured CLI is below the floor, the generated
+`qualification.ready_for_beta1` is `false` and the candidate is explicitly
+marked `legacy_below_floor`; this evidence cannot be used as the beta.1
+candidate. The generator rejects an explicitly supplied CLI/source value that
+does not match the trace, binds route/provider/model fields across trace and
+wire fixtures (including pre/post models, catalog binding, and route profile),
+and records a canonical-LF SHA-256 manifest for all three input artifacts.  It
+never fabricates a capability disposition for a gate the artifacts do not
+qualify.
+
+The qualification also has a separate `wire_identity_replay` gate. A full
+request/response fingerprint is not treated as replay proof by itself: a
+future capture must record fail-closed identity, mutation, deletion, and loss
+cases as complete/met, with each case observed and bound to the current wire
+fixture SHA-256 plus an output digest. The current sanitized evidence has no
+such wire replay record, so this gate remains `not_captured`. Likewise,
+`sse_identity` requires an independent pre/post stream-sequence digest bound to
+the same wire fixture; full-body request/response equality alone is not enough.
+
+### Disposition vocabulary
+
+| Disposition | Meaning |
+| --- | --- |
+| `preserved` | Observed and carried through unchanged |
+| `reversibly_adapted` | Observed with a documented reversible adaptation |
+| `local_consume` | Observed and consumed locally without upstream I/O |
+| `Unsupported` | Out of scope for the beta.1 core contract |
+| `Unqualified` | The bounded artifacts do not qualify the item; a separately authorized live control window must capture it before any capability claim |
+
+### Taxonomy coverage
+
+Core items (`preserved`/`reversibly_adapted` where the bounded artifacts prove
+them): core text streaming, multi-turn history, item/call IDs, streaming SSE
+event kinds, standard function declaration/call/result, and identity
+(request/response/item/call IDs). Function replay remains `Unqualified`: the
+sanitized call-link fixture proves the shape of call/result pairs, while the
+tool-membership replay does not prove a complete real-wire function replay.
+
+Live-control items are `Unqualified` until a coordinated live window captures
+them: non-streaming text, choice controls (the wire fixture carries a contract
+sentinel; the bounded audit observes `tool_choice`/`parallel_tool_calls` but
+full pre/post choice identity requires a live control), terminal events, errors,
+hosted-only declarations, unknown tagged sentinels, and default runtime fields.
+
+Advanced capabilities (`Unsupported`/`Unqualified`): Code Mode, `tool_search`,
+Collaboration V2, and Chat conversion are explicitly deferred for beta.1 per
+#248/#258 and are not advertised.
+
+### Identity control
+
+The inventory reports `unclassified_core_items: 0` and fails closed on
+mutation, deletion, and loss. Replay cases run through both the Python
+generator (`scripts/build_issue_62_runtime_inventory.py --replay-case`) and
+the PowerShell reconciliation (`scripts/check-codex-thread-tool-surface.ps1
+-InventoryReplayCase`):
+
+```powershell
+python scripts/build_issue_62_runtime_inventory.py
+python scripts/build_issue_62_runtime_inventory.py --check-drift
+python scripts/build_issue_62_runtime_inventory.py --replay-case mutation
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1 -InventoryReplayCase mutation
+```
+
+Regeneration is deterministic and the `--check-drift` mode compares a fresh
+generation to this committed JSON artifact without writing it. The PowerShell
+reconciliation invokes the same drift check, then independently checks the
+input fingerprints, rejects duplicate scopes, and requires each core scope to
+point at its declared evidence path. A zero
+`unclassified_core_items` count therefore describes vocabulary validity only;
+`qualification.ready_for_beta1` is the separate completion gate. That gate also
+consumes planner completeness, current-binding cold-start, full-wire
+fingerprinting, non-streaming, and identity-replay statuses; item dispositions
+alone cannot make an incomplete evidence set ready.
+
+`identity_control.unknown_tagged_source_count` is recomputed from the bound wire
+fixture during reconciliation; changing the count without changing the source
+evidence fails closed.
+
+The live-control-required gates remain open until the separately authorized
+live control window documented above captures real evidence for each one.
