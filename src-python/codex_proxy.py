@@ -2793,7 +2793,14 @@ def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | N
         )
 
     metadata = model.get("codex_proxy_metadata")
-    if not isinstance(metadata, dict):
+    if "codex_proxy_metadata" in model and not isinstance(metadata, Mapping):
+        raise _catalog_failure(
+            "official catalog model metadata is malformed",
+            reason="malformed_metadata",
+            provider_id="openai",
+            model_slug=upstream_model,
+        )
+    if not isinstance(metadata, Mapping):
         # The bundled policy is an authoritative identity for the legacy
         # gpt-5.5 route.  All newly discovered Official rows must carry the
         # generated metadata binding.
