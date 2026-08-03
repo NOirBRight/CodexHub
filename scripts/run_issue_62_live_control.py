@@ -33,6 +33,8 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,6 +67,14 @@ ALLOWED_ERROR_CODES = frozenset(
         "live_control_plan_missing",
         "live_control_plan_invalid",
         "candidate_binding_mismatch",
+        "plan_path_invalid",
+        "plan_path_outside_isolation",
+        "plan_path_linked",
+        "environment_invalid",
+        "cli_executable_binding_mismatch",
+        "helper_executable_binding_mismatch",
+        "planner_plan_incomplete",
+        "planner_disposition_invalid",
         "candidate_sha_binding_mismatch",
         "cli_package_binding_mismatch",
         "catalog_binding_mismatch",
@@ -73,6 +83,8 @@ ALLOWED_ERROR_CODES = frozenset(
         "sidecar_capture_missing",
         "sidecar_capture_incomplete",
         "identity_replay_incomplete",
+        "identity_replay_artifact_missing",
+        "identity_replay_artifact_invalid",
         "manifest_reconcile_failed",
     }
 )
@@ -94,6 +106,7 @@ LIVE_PLAN_FIELDS = frozenset(
     {
         "schema",
         "verification_scope",
+        "isolation_root",
         "candidate_identity",
         "binding",
         "catalog_model_entry_id",
@@ -101,7 +114,30 @@ LIVE_PLAN_FIELDS = frozenset(
         "sidecars",
         "controls",
         "replays",
+        "environment",
+        "planner",
     }
+)
+LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
+LIVE_ENV_KEYS = frozenset(
+    {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
+)
+SENSITIVE_ENV_KEYS = frozenset(
+    {
+        "CODEX_HOME",
+        "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
+        "CODEX_AUTH",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+    }
+)
+PLANNER_FIELDS = frozenset(
+    {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
 )
 
 
@@ -329,12 +365,16 @@ class BoundedPhaseRunner:
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         process_factory: Callable[..., subprocess.Popen[bytes]] | None = None,
+        environment: Mapping[str, str] | None = None,
+        working_directory: Path | None = None,
     ) -> None:
         _ensure_fresh_run_root(run_root)
         self.run_root = run_root
         self.identity = identity
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._process_factory = process_factory or subprocess.Popen
+        self._environment = _safe_environment(environment or {})
+        self._working_directory = str(working_directory) if working_directory is not None else None
         self.journal = SanitizedPhaseJournal(run_root, identity)
         self._active_process: subprocess.Popen[bytes] | None = None
         self._active_lock = threading.Lock()
@@ -386,6 +426,8 @@ class BoundedPhaseRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=self._environment,
+                cwd=self._working_directory,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
                 shell=False,
@@ -511,6 +553,8 @@ class BoundedPhaseRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=self._environment,
+                cwd=self._working_directory,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
                 shell=False,
@@ -692,9 +736,141 @@ def _validate_plan_argv(value: Any, code: str = "live_control_plan_invalid") -> 
 
 
 def _validate_plan_path(value: Any) -> str:
+    """Validate a relative plan path before it is joined to an isolated root."""
+
     if not isinstance(value, str) or not value or "\x00" in value:
-        _live_plan_fail("live_control_plan_invalid")
+        _live_plan_fail("plan_path_invalid")
+    candidate = Path(value)
+    # ``Path.is_absolute`` covers native Windows/POSIX roots; the explicit
+    # drive/UNC checks cover paths written for the other platform.
+    if candidate.is_absolute() or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", value):
+        _live_plan_fail("plan_path_invalid")
+    if any(part in {"..", "."} for part in candidate.parts):
+        _live_plan_fail("plan_path_invalid")
     return value
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            return True
+        attributes = getattr(os.stat(path), "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    except OSError:
+        return False
+
+
+def _resolve_isolated_path(
+    value: Any,
+    *,
+    isolated_root: Path,
+    must_exist: bool = False,
+    allow_missing_parents: bool = False,
+) -> str:
+    relative = _validate_plan_path(value)
+    try:
+        root = isolated_root.resolve(strict=True)
+    except OSError:
+        _live_plan_fail("plan_path_outside_isolation")
+    if _is_reparse(root):
+        _live_plan_fail("plan_path_linked")
+    target = root / relative
+    try:
+        resolved = target.resolve(strict=must_exist)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        _live_plan_fail("plan_path_outside_isolation")
+    current = root
+    parts = Path(relative).parts
+    for index, part in enumerate(parts):
+        current = current / part
+        exists = current.exists()
+        if not exists:
+            if (index != len(parts) - 1 and not allow_missing_parents) or must_exist:
+                _live_plan_fail("plan_path_outside_isolation")
+            continue
+        if _is_reparse(current):
+            _live_plan_fail("plan_path_linked")
+        try:
+            mode = os.lstat(current).st_mode
+            if current.is_file() and getattr(os.stat(current), "st_nlink", 1) > 1:
+                _live_plan_fail("plan_path_linked")
+            if stat.S_ISREG(mode) and index != len(parts) - 1:
+                _live_plan_fail("plan_path_outside_isolation")
+        except OSError:
+            _live_plan_fail("plan_path_outside_isolation")
+    return str(resolved)
+
+
+def _validate_environment(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        _live_plan_fail("environment_invalid")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or key in SENSITIVE_ENV_KEYS
+            or key not in LIVE_ENV_KEYS
+            or not isinstance(item, str)
+            or "\x00" in item
+            or len(item) > 4096
+        ):
+            _live_plan_fail("environment_invalid")
+        normalized[key] = item
+    return normalized
+
+
+def _safe_environment(overrides: Mapping[str, str]) -> dict[str, str]:
+    """Build a minimal child environment without host credentials/home state."""
+
+    result: dict[str, str] = {}
+    for key in LIVE_ENV_KEYS:
+        if key in SENSITIVE_ENV_KEYS:
+            continue
+        value = os.environ.get(key)
+        if value:
+            result[key] = value
+    for key, value in overrides.items():
+        result[key] = value
+    for key in SENSITIVE_ENV_KEYS:
+        result.pop(key, None)
+    return result
+
+
+def _validate_executable_spec(
+    value: Any,
+    *,
+    isolated_root: Path | None,
+    error_code: str,
+    extra_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    expected = frozenset({"argv", "executable_file", "executable_sha256"}) | extra_fields
+    if not isinstance(value, Mapping) or frozenset(value) != expected:
+        _live_plan_fail(error_code)
+    argv = _validate_plan_argv(value.get("argv"))
+    executable_file = _validate_plan_path(value.get("executable_file"))
+    digest = value.get("executable_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+        _live_plan_fail(error_code)
+    if argv[0] != executable_file:
+        _live_plan_fail(error_code)
+    if isolated_root is not None:
+        resolved = _resolve_isolated_path(
+            executable_file, isolated_root=isolated_root, must_exist=True
+        )
+        if _file_sha256(resolved) != digest.lower():
+            _live_plan_fail(error_code)
+    return {
+        "argv": argv,
+        "executable_file": executable_file,
+        "executable_sha256": digest.lower(),
+        **{
+            key: value[key]
+            for key in extra_fields
+            if key in value
+        },
+    }
 
 
 def _file_sha256(path: str) -> str:
@@ -712,14 +888,25 @@ def _file_sha256(path: str) -> str:
 
 
 def _validate_live_binding(
-    identity: CandidateIdentity, binding: Mapping[str, Any]
+    identity: CandidateIdentity,
+    binding: Mapping[str, Any],
+    *,
+    isolated_root: Path | None,
 ) -> dict[str, str]:
     expected_fields = frozenset(
         {"candidate_sha_file", "cli_package_file", "catalog_file", "route_file"}
     )
     if frozenset(binding) != expected_fields:
         _live_plan_fail("candidate_binding_mismatch")
-    paths = {key: _validate_plan_path(binding[key]) for key in expected_fields}
+    if isolated_root is None:
+        paths = {key: _validate_plan_path(binding[key]) for key in expected_fields}
+    else:
+        paths = {
+            key: _resolve_isolated_path(
+                binding[key], isolated_root=isolated_root, must_exist=True
+            )
+            for key in expected_fields
+        }
     try:
         candidate_text = Path(paths["candidate_sha_file"]).read_text(encoding="ascii").strip()
     except (OSError, UnicodeError):
@@ -737,16 +924,27 @@ def _validate_live_binding(
     return paths
 
 
-def _validate_sidecar_spec(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or frozenset(value) != frozenset({"argv", "output_dir"}):
-        _live_plan_fail("live_control_plan_invalid")
-    return {
-        "argv": _validate_plan_argv(value.get("argv")),
-        "output_dir": _validate_plan_path(value.get("output_dir")),
-    }
+def _validate_sidecar_spec(value: Any, *, isolated_root: Path | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or frozenset(value) != frozenset(
+        {"argv", "executable_file", "executable_sha256", "output_dir"}
+    ):
+        _live_plan_fail("helper_executable_binding_mismatch")
+    executable = _validate_executable_spec(
+        {key: value[key] for key in ("argv", "executable_file", "executable_sha256")},
+        isolated_root=isolated_root,
+        error_code="helper_executable_binding_mismatch",
+    )
+    output_dir = _validate_plan_path(value.get("output_dir"))
+    if isolated_root is not None:
+        output_dir = _resolve_isolated_path(
+            output_dir, isolated_root=isolated_root, allow_missing_parents=True
+        )
+    return {**executable, "output_dir": output_dir}
 
 
-def _validate_sidecars(value: Any) -> dict[str, list[dict[str, Any]]]:
+def _validate_sidecars(
+    value: Any, *, isolated_root: Path | None, run_root: Path | None
+) -> dict[str, list[dict[str, Any]]]:
     if not isinstance(value, Mapping) or frozenset(value) != frozenset({"pre", "post"}):
         _live_plan_fail("live_control_plan_invalid")
     result: dict[str, list[dict[str, Any]]] = {}
@@ -756,17 +954,34 @@ def _validate_sidecars(value: Any) -> dict[str, list[dict[str, Any]]]:
         specs = raw if isinstance(raw, list) else [raw]
         if not specs or len(specs) > len(CONTROL_NAMES):
             _live_plan_fail("live_control_plan_invalid")
-        normalized = [_validate_sidecar_spec(item) for item in specs]
+        normalized = [
+            _validate_sidecar_spec(item, isolated_root=isolated_root) for item in specs
+        ]
         for spec in normalized:
-            directory = str(Path(spec["output_dir"]).resolve())
-            if directory in output_dirs:
+            directory_path = Path(spec["output_dir"])
+            if run_root is not None:
+                try:
+                    directory_path.resolve().relative_to(run_root.resolve())
+                except ValueError:
+                    _live_plan_fail("plan_path_outside_isolation")
+            directory = str(directory_path.resolve())
+            if directory in output_dirs or any(
+                Path(directory).is_relative_to(Path(existing))
+                or Path(existing).is_relative_to(Path(directory))
+                for existing in output_dirs
+            ):
                 _live_plan_fail("live_control_plan_invalid")
             output_dirs.add(directory)
         result[hop] = normalized
     return result
 
 
-def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, Any]:
+def load_live_control_plan(
+    source: Path | str | Mapping[str, Any],
+    *,
+    isolated_root: Path | None = None,
+    run_root: Path | None = None,
+) -> dict[str, Any]:
     """Load and independently bind an explicitly authorized live plan.
 
     This function performs no subprocess or network work.  It is deliberately
@@ -788,6 +1003,13 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
         _live_plan_fail("live_control_plan_invalid")
     if payload.get("schema") != LIVE_PLAN_SCHEMA or payload.get("verification_scope") != LIVE_SCOPE:
         _live_plan_fail("live_control_plan_invalid")
+    if payload.get("isolation_root") != ".":
+        _live_plan_fail("plan_path_invalid")
+    if isolated_root is not None:
+        try:
+            isolated_root = isolated_root.resolve(strict=True)
+        except OSError:
+            _live_plan_fail("plan_path_outside_isolation")
 
     raw_identity = payload.get("candidate_identity")
     if not isinstance(raw_identity, Mapping):
@@ -812,7 +1034,9 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
     binding = payload.get("binding")
     if not isinstance(binding, Mapping):
         _live_plan_fail("candidate_binding_mismatch")
-    normalized_binding = _validate_live_binding(identity, binding)
+    normalized_binding = _validate_live_binding(
+        identity, binding, isolated_root=isolated_root
+    )
 
     model = payload.get("catalog_model_entry_id")
     if (
@@ -823,16 +1047,39 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
         _live_plan_fail("catalog_binding_mismatch")
 
     cli = payload.get("cli")
-    if not isinstance(cli, Mapping) or frozenset(cli) != frozenset({"argv"}):
-        _live_plan_fail("live_control_plan_invalid")
-    normalized_cli = {"argv": _validate_plan_argv(cli.get("argv"))}
-    normalized_sidecars = _validate_sidecars(payload.get("sidecars"))
+    if not isinstance(cli, Mapping) or frozenset(cli) != frozenset(
+        {"argv", "executable_file", "executable_sha256", "cli_version"}
+    ):
+        _live_plan_fail("cli_executable_binding_mismatch")
+    if cli.get("cli_version") != identity.cli_version:
+        _live_plan_fail("cli_executable_binding_mismatch")
+    normalized_cli = _validate_executable_spec(
+        cli,
+        isolated_root=isolated_root,
+        error_code="cli_executable_binding_mismatch",
+        extra_fields=frozenset({"cli_version"}),
+    )
+    normalized_cli["cli_version"] = cli["cli_version"]
+    normalized_sidecars = _validate_sidecars(
+        payload.get("sidecars"), isolated_root=isolated_root, run_root=run_root
+    )
+    normalized_environment = _validate_environment(payload.get("environment"))
+    planner = payload.get("planner")
+    if not isinstance(planner, Mapping) or frozenset(planner) != PLANNER_FIELDS:
+        _live_plan_fail("planner_plan_incomplete")
+    if planner.get("model_visible_plan") != "complete":
+        _live_plan_fail("planner_plan_incomplete")
+    if planner.get("hosted_only_disposition") not in LIVE_DISPOSITIONS or planner.get(
+        "unknown_tag_disposition"
+    ) not in LIVE_DISPOSITIONS:
+        _live_plan_fail("planner_disposition_invalid")
 
     controls = payload.get("controls")
     if not isinstance(controls, list) or len(controls) != len(CONTROL_NAMES):
         _live_plan_fail("control_labels_incomplete")
     normalized_controls: list[dict[str, Any]] = []
     names: list[str] = []
+    record_paths: dict[str, set[str]] = {"pre": set(), "post": set()}
     allowed_control_fields = frozenset({"name", "args", "capture", "pre_record", "post_record"})
     for item in controls:
         if not isinstance(item, Mapping) or not frozenset(item).issubset(allowed_control_fields):
@@ -853,7 +1100,16 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
             _live_plan_fail("live_control_plan_invalid")
         for field in ("pre_record", "post_record"):
             if field in item:
-                normalized[field] = _validate_plan_path(item[field])
+                if isolated_root is None:
+                    normalized[field] = _validate_plan_path(item[field])
+                else:
+                    normalized[field] = _resolve_isolated_path(
+                        item[field], isolated_root=isolated_root, allow_missing_parents=True
+                    )
+                normalized_path = str(Path(normalized[field]).resolve())
+                if normalized_path in record_paths[field.removesuffix("_record")]:
+                    _live_plan_fail("sidecar_capture_incomplete")
+                record_paths[field.removesuffix("_record")].add(normalized_path)
         normalized_controls.append(normalized)
     if set(names) != CONTROL_NAME_SET or len(set(names)) != len(names):
         _live_plan_fail("control_labels_incomplete")
@@ -865,13 +1121,39 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
     normalized_replays: dict[str, dict[str, Any]] = {}
     for name in replay_names:
         spec = replays.get(name)
-        if not isinstance(spec, Mapping) or frozenset(spec) != frozenset({"argv"}):
+        if not isinstance(spec, Mapping) or frozenset(spec) != frozenset(
+            {
+                "argv",
+                "executable_file",
+                "executable_sha256",
+                "artifact_file",
+                "case",
+            }
+        ) or spec.get("case") != name:
             _live_plan_fail("identity_replay_incomplete")
-        normalized_replays[name] = {"argv": _validate_plan_argv(spec.get("argv"))}
+        replay = _validate_executable_spec(
+            spec,
+            isolated_root=isolated_root,
+            error_code="helper_executable_binding_mismatch",
+            extra_fields=frozenset({"artifact_file", "case"}),
+        )
+        artifact_file = _validate_plan_path(replay.get("artifact_file"))
+        if isolated_root is not None:
+            artifact_file = _resolve_isolated_path(
+                artifact_file, isolated_root=isolated_root, allow_missing_parents=True
+            )
+            if run_root is not None:
+                try:
+                    Path(artifact_file).resolve().relative_to(run_root.resolve())
+                except ValueError:
+                    _live_plan_fail("plan_path_outside_isolation")
+        replay["artifact_file"] = artifact_file
+        normalized_replays[name] = replay
 
     return {
         "schema": LIVE_PLAN_SCHEMA,
         "verification_scope": LIVE_SCOPE,
+        "isolation_root": ".",
         "candidate_identity": identity.as_dict(),
         "binding": normalized_binding,
         "catalog_model_entry_id": model,
@@ -879,6 +1161,8 @@ def load_live_control_plan(source: Path | str | Mapping[str, Any]) -> dict[str, 
         "sidecars": normalized_sidecars,
         "controls": normalized_controls,
         "replays": normalized_replays,
+        "environment": normalized_environment,
+        "planner": dict(planner),
     }
 
 
@@ -919,6 +1203,20 @@ def _record_path_for_control(
     specs: Sequence[Mapping[str, Any]],
     index: int,
 ) -> Path:
+    def capture_files(root: Path) -> list[Path]:
+        try:
+            if root.is_symlink() or not root.is_dir():
+                raise OSError
+            entries = list(root.iterdir())
+        except OSError:
+            raise LiveControlValidationError("sidecar_capture_missing")
+        if any(
+            entry.is_symlink() or entry.is_dir() or entry.suffix.lower() != ".json"
+            for entry in entries
+        ):
+            raise LiveControlValidationError("sidecar_capture_incomplete")
+        return sorted(entry for entry in entries if entry.is_file())
+
     explicit = control.get(f"{hop}_record")
     if explicit is not None:
         path = Path(str(explicit))
@@ -928,17 +1226,19 @@ def _record_path_for_control(
                 path.resolve().relative_to(root.resolve())
             except ValueError:
                 continue
+            if path.resolve() not in {candidate.resolve() for candidate in capture_files(root)}:
+                raise LiveControlValidationError("sidecar_capture_missing")
             return path
         raise LiveControlValidationError("sidecar_capture_missing")
     if len(specs) == len(CONTROL_NAMES):
         root = Path(str(specs[index]["output_dir"]))
-        candidates = sorted(path for path in root.glob("*.json") if path.is_file())
+        candidates = capture_files(root)
         if len(candidates) == 1:
             return candidates[0]
         raise LiveControlValidationError("sidecar_capture_missing")
     if len(specs) == 1:
         root = Path(str(specs[0]["output_dir"]))
-        candidates = sorted(path for path in root.glob("*.json") if path.is_file())
+        candidates = capture_files(root)
         if len(candidates) == len(CONTROL_NAMES):
             return candidates[index]
     raise LiveControlValidationError("sidecar_capture_missing")
@@ -1003,12 +1303,115 @@ def _manifest_candidate(plan: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
+    executable = _resolve_isolated_path(
+        spec["executable_file"], isolated_root=isolated_root, must_exist=True
+    )
+    argv = list(spec["argv"])
+    argv[0] = executable
+    return argv
+
+
+def _remove_capture_dirs(
+    sidecars: Mapping[str, Sequence[Mapping[str, Any]]], *, run_root: Path
+) -> bool:
+    failures = 0
+    root = run_root.resolve()
+    for specs in sidecars.values():
+        for spec in specs:
+            target = Path(str(spec["output_dir"])).resolve()
+            try:
+                target.relative_to(root)
+                if target == root:
+                    raise OSError
+                if target.is_symlink():
+                    target.unlink()
+                elif target.exists():
+                    shutil.rmtree(target)
+            except (OSError, ValueError):
+                failures += 1
+    return failures == 0
+
+
+def _remove_replay_artifacts(
+    replays: Mapping[str, Mapping[str, Any]], *, run_root: Path
+) -> bool:
+    failures = 0
+    root = run_root.resolve()
+    for replay in replays.values():
+        target = Path(str(replay["artifact_file"])).resolve()
+        try:
+            target.relative_to(root)
+            if target.is_symlink():
+                target.unlink()
+            elif target.exists():
+                target.unlink()
+        except (OSError, ValueError):
+            failures += 1
+    return failures == 0
+
+
+def _ensure_replay_artifacts_fresh(
+    replays: Mapping[str, Mapping[str, Any]], *, run_root: Path
+) -> None:
+    """Reject a reused replay output before any child process starts."""
+
+    root = run_root.resolve()
+    seen: set[Path] = set()
+    for replay in replays.values():
+        target = Path(str(replay["artifact_file"])).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+        if target in seen or target.exists() or target.is_symlink():
+            raise LiveControlValidationError("stale_artifact")
+        seen.add(target)
+
+
+def _validate_replay_artifact(
+    path: Path,
+    *,
+    case: str,
+    candidate_sha: str,
+    manifest_sha: str,
+) -> str:
+    # Diagnostic kept path-free; only existence is observed.
+    # (The caller redacts all path values from journal artifacts.)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError
+        artifact_sha = _file_sha256(str(path))
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is None:
+            raise OSError
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise LiveControlValidationError("identity_replay_artifact_missing")
+    expected_fields = frozenset(
+        {"schema", "case", "candidate_sha", "capture_manifest_sha256", "wire_replay", "outcome"}
+    )
+    if not isinstance(value, Mapping) or frozenset(value) != expected_fields:
+        raise LiveControlValidationError("identity_replay_artifact_invalid")
+    if (
+        value.get("schema") != "codexhub.issue62.identity-replay.v1"
+        or value.get("case") != case
+        or value.get("candidate_sha") != candidate_sha
+        or value.get("capture_manifest_sha256") != manifest_sha
+        or value.get("wire_replay") is not True
+        or value.get("outcome") != ("accepted" if case == "identity" else "rejected")
+    ):
+        raise LiveControlValidationError("identity_replay_artifact_invalid")
+    return artifact_sha
+
+
 def run_live_control(
     plan: Path | str | Mapping[str, Any],
     *,
     run_root: Path,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     manifest_out: Path | None = None,
+    isolated_root: Path | None = None,
+    cancellation_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Execute an explicitly supplied live plan through bounded children.
 
@@ -1017,33 +1420,100 @@ def run_live_control(
     review is still required before any Issue #62 claim can be made.
     """
 
-    loaded = load_live_control_plan(plan)
+    try:
+        isolation = (isolated_root or Path(run_root).parent).resolve(strict=True)
+        if isinstance(plan, (str, Path)):
+            plan_path = Path(plan).resolve(strict=True)
+            plan_path.relative_to(isolation)
+        run_path = Path(run_root)
+        if not run_path.is_absolute():
+            run_path = isolation / run_path
+        run_path = run_path.resolve(strict=False)
+        run_path.relative_to(isolation)
+        if run_path == isolation or _is_reparse(run_path):
+            raise LiveControlValidationError("plan_path_outside_isolation")
+    except (OSError, ValueError):
+        raise LiveControlValidationError("plan_path_outside_isolation")
+    loaded = load_live_control_plan(
+        plan, isolated_root=isolation, run_root=run_path
+    )
     identity = CandidateIdentity(**loaded["candidate_identity"])
-    runner = BoundedPhaseRunner(run_root, identity, timeout_seconds=timeout_seconds)
+    output_manifest: Path | None = None
+    if manifest_out is not None:
+        output_manifest = Path(manifest_out)
+        if not output_manifest.is_absolute():
+            output_manifest = isolation / output_manifest
+        output_manifest = output_manifest.resolve(strict=False)
+        try:
+            output_manifest.relative_to(isolation)
+        except ValueError:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+        try:
+            output_manifest.relative_to(run_path)
+        except ValueError:
+            pass
+        else:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+    runner = BoundedPhaseRunner(
+        run_path,
+        identity,
+        timeout_seconds=timeout_seconds,
+        environment=loaded["environment"],
+        working_directory=isolation,
+    )
     handles: list[BackgroundProcess] = []
     result_status = "completed"
     result_code = "ok"
     manifest: dict[str, Any] | None = None
     manifest_reconciled = False
     replay_results: dict[str, str] = {}
+    cleanup_actions: tuple[CleanupAction, ...] = (
+        lambda: _remove_capture_dirs(loaded["sidecars"], run_root=run_path),
+        lambda: _remove_replay_artifacts(loaded["replays"], run_root=run_path),
+    )
+
+    def is_cancelled() -> bool:
+        return cancellation_event is not None and cancellation_event.is_set()
+
     try:
         runner.mark_phase("binding_validated")
-        _prepare_capture_dirs(loaded["sidecars"])
-        for hop in ("pre", "post"):
-            for index, spec in enumerate(loaded["sidecars"][hop]):
-                try:
-                    handles.append(runner.start_background(f"{hop}_sidecar_{index}", spec["argv"]))
-                except HarnessFailure as error:
-                    result_status, result_code = "failed", error.code
+        _ensure_replay_artifacts_fresh(loaded["replays"], run_root=run_path)
+        if is_cancelled():
+            result_status, result_code = "cancelled", "cancelled"
+        else:
+            _prepare_capture_dirs(loaded["sidecars"])
+            for hop in ("pre", "post"):
+                for index, spec in enumerate(loaded["sidecars"][hop]):
+                    try:
+                        handles.append(
+                            runner.start_background(
+                                f"{hop}_sidecar_{index}",
+                                _runtime_argv(spec, isolated_root=isolation),
+                            )
+                        )
+                    except HarnessFailure as error:
+                        result_status, result_code = "failed", error.code
+                        break
+                if result_status != "completed":
                     break
-            if result_status != "completed":
-                break
+
+        if result_status == "completed" and any(
+            handle.process.poll() is not None for handle in handles
+        ):
+            result_status, result_code = "failed", "sidecar_capture_incomplete"
 
         if result_status == "completed":
             for control in loaded["controls"]:
+                if is_cancelled():
+                    result_status, result_code = "cancelled", "cancelled"
+                    break
                 result = runner.run_subprocess(
                     f"control_{control['name']}",
-                    [*loaded["cli"]["argv"], *control["args"]],
+                    [
+                        *_runtime_argv(loaded["cli"], isolated_root=isolation),
+                        *control["args"],
+                    ],
+                    cancellation_event=cancellation_event,
                 )
                 if result.status != "completed":
                     result_status, result_code = result.status, result.status_code
@@ -1071,8 +1541,8 @@ def run_live_control(
                     result_status, result_code = "failed", "manifest_reconcile_failed"
                 else:
                     manifest_reconciled = True
-                    if manifest_out is not None:
-                        _write_sanitized_json(manifest_out, manifest)
+                    if output_manifest is not None:
+                        _write_sanitized_json(output_manifest, manifest)
             except LiveControlValidationError as error:
                 result_status, result_code = "failed", error.code
             except Exception as error:
@@ -1089,19 +1559,35 @@ def run_live_control(
                     break
             if result_status == "completed":
                 for case in ("identity", "mutation", "deletion", "loss"):
+                    if is_cancelled():
+                        result_status, result_code = "cancelled", "cancelled"
+                        break
                     replay_result = runner.run_subprocess(
-                        f"replay_{case}", loaded["replays"][case]["argv"]
+                        f"replay_{case}",
+                        _runtime_argv(loaded["replays"][case], isolated_root=isolation),
+                        cancellation_event=cancellation_event,
                     )
                     if replay_result.status != "completed":
                         result_status, result_code = "failed", "identity_replay_incomplete"
                         break
+                    replay = loaded["replays"][case]
+                    artifact_sha = _validate_replay_artifact(
+                        Path(replay["artifact_file"]),
+                        case=case,
+                        candidate_sha=identity.candidate_sha,
+                        manifest_sha=str(manifest["capture_manifest_sha256"]),
+                    )
+                    replay_results[case] = f"artifact_bound:{artifact_sha}"
     except LiveControlValidationError as error:
         result_status, result_code = "failed", error.code
     except HarnessFailure as error:
         result_status, result_code = "failed", error.code
+    except Exception:
+        # Keep unexpected manifest/replay errors fail-closed and path-free.
+        result_status, result_code = "failed", "phase_exception"
     finally:
         try:
-            receipt = runner.cleanup()
+            receipt = runner.cleanup(actions=cleanup_actions)
         except HarnessFailure:
             receipt = {
                 "cleanup_attempted": True,
@@ -1122,6 +1608,7 @@ def run_live_control(
         "manifest_reconciled": manifest_reconciled,
         "replay": replay_results,
         "reason": "independent_review_required",
+        "planner": loaded["planner"],
     }
     if manifest is not None:
         output["capture_manifest_sha256"] = manifest.get("capture_manifest_sha256")
@@ -1142,6 +1629,7 @@ def _fixture_identity(args: argparse.Namespace) -> CandidateIdentity:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, required=True)
+    parser.add_argument("--isolated-root", type=Path, help="Fresh-root parent for relative plan paths")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--fixture", choices=("success", "timeout", "nonzero", "cancelled", "cleanup-failure")
@@ -1183,6 +1671,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_root=args.run_root,
                 timeout_seconds=args.timeout_seconds,
                 manifest_out=args.manifest_out,
+                isolated_root=args.isolated_root,
             )
         except LiveControlValidationError as error:
             result = {

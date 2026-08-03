@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+import shutil
 import sys
 
 import pytest
@@ -28,24 +29,46 @@ def _sha(value: str) -> str:
 
 
 def _binding_files(tmp_path: Path) -> dict[str, str]:
+    (tmp_path / "inputs").mkdir()
     files = {
-        "candidate_sha_file": tmp_path / "candidate-sha",
-        "cli_package_file": tmp_path / "cli-package.tgz",
-        "catalog_file": tmp_path / "catalog.json",
-        "route_file": tmp_path / "route.json",
+        "candidate_sha_file": tmp_path / "inputs" / "candidate-sha",
+        "cli_package_file": tmp_path / "inputs" / "cli-package.tgz",
+        "catalog_file": tmp_path / "inputs" / "catalog.json",
+        "route_file": tmp_path / "inputs" / "route.json",
     }
     files["candidate_sha_file"].write_text("a" * 40 + "\n", encoding="ascii")
     files["cli_package_file"].write_bytes(b"package")
     files["catalog_file"].write_bytes(b"catalog")
     files["route_file"].write_bytes(b"route")
-    return {key: str(value) for key, value in files.items()}
+    return {key: str(value.relative_to(tmp_path)) for key, value in files.items()}
 
 
 def _plan(tmp_path: Path) -> dict[str, object]:
     binding = _binding_files(tmp_path)
+    (tmp_path / "helpers").mkdir()
+    (tmp_path / "run").mkdir()
+    python_copy = tmp_path / "tools" / "python.exe"
+    python_copy.parent.mkdir()
+    shutil.copy2(sys.executable, python_copy)
+    (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (tmp_path / "helpers" / "replay.py").write_text(
+        "import json, pathlib, sys\n"
+        "case, candidate, manifest, output = sys.argv[1:5]\n"
+        "path = pathlib.Path(output)\n"
+        "path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "path.write_text(json.dumps({'schema':'codexhub.issue62.identity-replay.v1', 'case':case, 'candidate_sha':candidate, 'capture_manifest_sha256':manifest, 'wire_replay':True, 'outcome':'accepted' if case == 'identity' else 'rejected'}, sort_keys=True, separators=(',', ':')) + '\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    executable_digest = hashlib.sha256(python_copy.read_bytes()).hexdigest()
+    executable_file = str(python_copy.relative_to(tmp_path))
+    executable = {
+        "executable_file": executable_file,
+        "executable_sha256": executable_digest,
+    }
     return {
         "schema": "codexhub.issue62.live-control-plan.v1",
         "verification_scope": "authorized_live_control",
+        "isolation_root": ".",
         "candidate_identity": {
             "candidate_sha": "a" * 40,
             "cli_version": "0.146.0",
@@ -55,20 +78,29 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         },
         "binding": binding,
         "catalog_model_entry_id": "gpt-5.6-sol",
-        "cli": {"argv": [sys.executable, "-c", "pass"]},
+        "environment": {"PATH": str(Path(sys.executable).parent)},
+        "planner": {
+            "model_visible_plan": "complete",
+            "hosted_only_disposition": "Unqualified",
+            "unknown_tag_disposition": "Unqualified",
+        },
+        "cli": {"argv": [executable_file, "helpers/cli.py"], **executable, "cli_version": "0.146.0"},
         "sidecars": {
-            "pre": {"argv": [sys.executable, "-c", "pass"], "output_dir": str(tmp_path / "pre")},
-            "post": {"argv": [sys.executable, "-c", "pass"], "output_dir": str(tmp_path / "post")},
+            "pre": {"argv": [executable_file, "helpers/cli.py"], "output_dir": "run/pre", **executable},
+            "post": {"argv": [executable_file, "helpers/cli.py"], "output_dir": "run/post", **executable},
         },
         "controls": [
             {"name": name, "args": [], "capture": {}}
             for name in CONTROL_NAMES
         ],
         "replays": {
-            "identity": {"argv": [sys.executable, "-c", "pass"]},
-            "mutation": {"argv": [sys.executable, "-c", "pass"]},
-            "deletion": {"argv": [sys.executable, "-c", "pass"]},
-            "loss": {"argv": [sys.executable, "-c", "pass"]},
+            case: {
+                "argv": [executable_file, "helpers/replay.py", case, "a" * 40, "0" * 64, f"run/replay-{case}.json"],
+                **executable,
+                "artifact_file": f"run/replay-{case}.json",
+                "case": case,
+            }
+            for case in ("identity", "mutation", "deletion", "loss")
         },
     }
 
@@ -87,19 +119,19 @@ def test_cli_live_mode_reports_missing_plan_without_starting_children(tmp_path: 
 
 def test_live_plan_binds_candidate_and_route_catalog_files(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    loaded = load_live_control_plan(plan)
+    loaded = load_live_control_plan(plan, isolated_root=tmp_path)
     assert loaded["candidate_identity"]["candidate_sha"] == "a" * 40
 
-    (tmp_path / "route.json").write_bytes(b"changed")
+    (tmp_path / "inputs" / "route.json").write_bytes(b"changed")
     with pytest.raises(LiveControlValidationError, match="route_binding_mismatch"):
-        load_live_control_plan(plan)
+        load_live_control_plan(plan, isolated_root=tmp_path)
 
 
 def test_live_plan_requires_exactly_eight_control_labels(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     plan["controls"] = list(plan["controls"])[1:]
     with pytest.raises(LiveControlValidationError, match="control_labels_incomplete"):
-        load_live_control_plan(plan)
+        load_live_control_plan(plan, isolated_root=tmp_path)
 
 
 def test_live_execution_requires_complete_pre_and_post_sidecar_records(tmp_path: Path) -> None:
@@ -119,8 +151,8 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
     source = importlib.import_module("test_issue_62_control_manifest")
     plan = _plan(tmp_path)
     controls = source._controls()
-    pre_dir = Path(plan["sidecars"]["pre"]["output_dir"])
-    post_dir = Path(plan["sidecars"]["post"]["output_dir"])
+    pre_dir = tmp_path / "inputs" / "pre-records"
+    post_dir = tmp_path / "inputs" / "post-records"
     pre_dir.mkdir()
     post_dir.mkdir()
     payloads: dict[str, Path] = {}
@@ -140,10 +172,10 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
             "name": control["name"],
             "args": [],
             "capture": semantic,
-            "pre_record": str(pre_dir / f"pre-c{index}.json"),
-            "post_record": str(post_dir / f"post-c{index}.json"),
+            "pre_record": f"run/pre-{index}/pre-c{index}.json",
+            "post_record": f"run/post-{index}/post-c{index}.json",
         }
-    sidecar_script = tmp_path / "write-sidecar.py"
+    sidecar_script = tmp_path / "helpers" / "sidecar.py"
     sidecar_script.write_text(
         "import pathlib, shutil, sys, time\n"
         "out = pathlib.Path(sys.argv[1]); src = pathlib.Path(sys.argv[2])\n"
@@ -159,27 +191,44 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
         plan["sidecars"][hop] = [
             {
                 "argv": [
-                    sys.executable,
-                    str(sidecar_script),
-                    str(Path(specs["output_dir"]).parent / f"{hop}-{index}"),
-                    str(source_paths[index]),
+                    plan["cli"]["executable_file"],
+                    "helpers/sidecar.py",
+                    f"run/{hop}-{index}",
+                    str(source_paths[index].relative_to(tmp_path)),
                     f"{hop}-c{index}.json",
                 ],
-                "output_dir": str(Path(specs["output_dir"]).parent / f"{hop}-{index}"),
+                "output_dir": f"run/{hop}-{index}",
+                "executable_file": plan["cli"]["executable_file"],
+                "executable_sha256": plan["cli"]["executable_sha256"],
             }
             for index in range(8)
         ]
         for index in range(8):
-            plan["controls"][index][f"{hop}_record"] = str(
-                Path(plan["sidecars"][hop][index]["output_dir"]) / f"{hop}-c{index}.json"
+            plan["controls"][index][f"{hop}_record"] = (
+                f"run/{hop}-{index}/{hop}-c{index}.json"
             )
     # Re-run plan validation after replacing the sidecar specs.
     result = run_live_control(plan, run_root=tmp_path / "run", timeout_seconds=30)
-    assert result["completed"] is True
+    assert result["completed"] is False
     assert result["ready_for_issue62"] is False
-    assert result["replay"] == {
-        "identity": "pass",
-        "mutation": "pass",
-        "deletion": "pass",
-        "loss": "pass",
-    }
+    assert result["status_code"] == "identity_replay_artifact_invalid"
+    assert result["cleanup_completed"] is True
+    assert result["manifest_reconciled"] is True
+    assert not (tmp_path / "run" / "pre-0").exists()
+    assert not (tmp_path / "run" / "post-0").exists()
+    assert not (tmp_path / "run" / "replay-identity.json").exists()
+
+
+def test_live_plan_rejects_host_credentials_and_duplicate_capture_paths(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan["environment"] = {"OPENAI_API_KEY": "must-not-pass"}
+    with pytest.raises(LiveControlValidationError, match="environment_invalid"):
+        load_live_control_plan(plan, isolated_root=tmp_path)
+
+    duplicate_root = tmp_path / "duplicate"
+    duplicate_root.mkdir()
+    plan = _plan(duplicate_root)
+    plan["controls"][1]["pre_record"] = "run/shared.json"
+    plan["controls"][0]["pre_record"] = "run/shared.json"
+    with pytest.raises(LiveControlValidationError, match="sidecar_capture_incomplete"):
+        load_live_control_plan(plan, isolated_root=duplicate_root)
