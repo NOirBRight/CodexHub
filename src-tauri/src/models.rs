@@ -18,7 +18,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
-const CODEX_APP_SERVER_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
@@ -412,17 +411,11 @@ fn read_codex_app_server_model_list() -> Result<Value, String> {
     let codex = find_codex_executable()?;
     let mut command = Command::new(&codex);
     command.args(["app-server", "--stdio"]);
-    let cache_path = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
-    read_codex_app_server_model_list_with_command(
-        command,
-        &cache_path,
-        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
-    )
+    read_codex_app_server_model_list_with_command(command, CODEX_APP_SERVER_MODEL_LIST_TIMEOUT)
 }
 
 fn read_codex_app_server_model_list_with_command(
     mut command: Command,
-    cache_path: &Path,
     timeout: Duration,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
@@ -435,11 +428,14 @@ fn read_codex_app_server_model_list_with_command(
         .spawn()
         .map_err(|error| format!("failed to start codex app-server for model list: {error}"))?;
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "failed to open codex app-server stdin".to_string())?;
-    write_app_server_json_line(
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            kill_child(&mut child);
+            return Err("failed to open codex app-server stdin".to_string());
+        }
+    };
+    if let Err(error) = write_app_server_json_line(
         &mut stdin,
         &json!({
             "id": 1,
@@ -457,24 +453,41 @@ fn read_codex_app_server_model_list_with_command(
                 }
             }
         }),
-    )?;
-    write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))?;
-    write_app_server_json_line(
+    ) {
+        kill_child(&mut child);
+        return Err(error);
+    }
+    if let Err(error) =
+        write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))
+    {
+        kill_child(&mut child);
+        return Err(error);
+    }
+    if let Err(error) = write_app_server_json_line(
         &mut stdin,
         &json!({
             "id": 2,
             "method": "model/list",
             "params": {}
         }),
-    )?;
-    stdin
-        .flush()
-        .map_err(|error| format!("failed to flush codex app-server model list request: {error}"))?;
+    ) {
+        kill_child(&mut child);
+        return Err(error);
+    }
+    if let Err(error) = stdin.flush() {
+        kill_child(&mut child);
+        return Err(format!(
+            "failed to flush codex app-server model list request: {error}"
+        ));
+    }
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to open codex app-server stdout".to_string())?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            kill_child(&mut child);
+            return Err("failed to open codex app-server stdout".to_string());
+        }
+    };
     let message = read_codex_app_server_value_response(
         &mut child,
         stdout,
@@ -500,41 +513,8 @@ fn read_codex_app_server_model_list_with_command(
             return Err(error);
         }
     };
-    if !wait_for_native_model_cache_publication(cache_path, deadline) {
-        kill_child(&mut child);
-        return Err(
-            "codex app-server model list did not publish a readable native models cache before the refresh deadline"
-                .to_string(),
-        );
-    }
     kill_child(&mut child);
     Ok(result)
-}
-
-fn wait_for_native_model_cache_publication(cache_path: &Path, deadline: Instant) -> bool {
-    let mut previous = None;
-    loop {
-        let current = readable_native_model_cache(cache_path);
-        if current.is_some() && current == previous {
-            return true;
-        }
-        previous = current;
-
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        thread::sleep(
-            CODEX_APP_SERVER_CACHE_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
-        );
-    }
-}
-
-fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
-    let bytes = fs::read(cache_path).ok()?;
-    let payload: Value = serde_json::from_slice(&bytes).ok()?;
-    payload.get("models")?.as_array()?;
-    Some(bytes)
 }
 
 fn read_codex_app_server_value_response(
@@ -2686,7 +2666,21 @@ mod tests {
             .expect("flush app-server test-process liveness record");
 
         if mode.as_deref() == Ok("respond") {
-            println!("\n{}", json!({"id": 2, "result": {"data": []}}));
+            println!(
+                "\n{}",
+                json!({
+                    "id": 2,
+                    "result": {
+                        "data": [{
+                            "id": "gpt-5.6-terra",
+                            "model": "gpt-5.6-terra",
+                            "visibility": "list",
+                            "hidden": false,
+                            "context_window": 272000
+                        }]
+                    }
+                })
+            );
             std::io::stdout()
                 .flush()
                 .expect("flush app-server model-list test response");
@@ -2774,7 +2768,7 @@ mod tests {
     }
 
     #[test]
-    fn app_server_model_list_waits_for_delayed_atomic_native_cache_publication() {
+    fn app_server_model_list_does_not_wait_for_delayed_atomic_native_cache_publication() {
         let root = temp_root("app-server-delayed-cache");
         let script = root.join("fake-codex-app-server.py");
         let cache_path = root.join("codex-home").join("models_cache.json");
@@ -2791,8 +2785,8 @@ for line in sys.stdin:
     message = json.loads(line)
     if message.get("id") != 2:
         continue
-    print(json.dumps({"id": 2, "result": {"data": []}}), flush=True)
-    time.sleep(0.15)
+    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False, "context_window": 272000}]}}), flush=True)
+    time.sleep(2)
     cache_path = Path(os.environ["FAKE_MODELS_CACHE"])
     temporary_path = cache_path.with_suffix(".tmp")
     temporary_path.write_text(
@@ -2811,21 +2805,31 @@ for line in sys.stdin:
 
         let result = super::read_codex_app_server_model_list_with_command(
             command,
-            &cache_path,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .expect("model list response");
 
-        assert_eq!(result, json!({"data": []}));
+        assert_eq!(
+            result,
+            json!({
+                "data": [{
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false,
+                    "context_window": 272000
+                }]
+            })
+        );
         assert!(
-            cache_path.is_file(),
-            "the app-server must remain alive until its atomic native cache publication is visible"
+            !cache_path.is_file(),
+            "the app-server response must not wait for optional native cache publication"
         );
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn app_server_model_list_fails_closed_when_native_cache_is_never_published() {
+    fn app_server_model_list_accepts_valid_response_without_native_cache_publication() {
         let root = temp_root("app-server-missing-cache");
         let cache_path = root.join("codex-home").join("models_cache.json");
         let helper_liveness_path = root.join("helper-liveness.lock");
@@ -2833,21 +2837,29 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        let error = super::read_codex_app_server_model_list_with_command(
+        let result = super::read_codex_app_server_model_list_with_command(
             command,
-            &cache_path,
             Duration::from_millis(500),
         )
-        .expect_err("missing native cache publication must fail closed");
+        .expect("valid model/list response must not require native cache publication");
 
         assert_eq!(
-            error,
-            "codex app-server model list did not publish a readable native models cache before the refresh deadline"
+            result,
+            json!({
+                "data": [{
+                    "id": "gpt-5.6-terra",
+                    "model": "gpt-5.6-terra",
+                    "visibility": "list",
+                    "hidden": false,
+                    "context_window": 272000
+                }]
+            })
         );
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "missing cache handling must remain bounded"
+            "model/list handling must remain bounded without native cache publication"
         );
+        assert!(!cache_path.is_file());
         assert_app_server_test_process_stopped(&helper_liveness_path);
         let _ = fs::remove_dir_all(root);
     }
@@ -2863,7 +2875,6 @@ for line in sys.stdin:
 
         let error = super::read_codex_app_server_model_list_with_command(
             command,
-            &cache_path,
             Duration::from_secs(1),
         )
         .expect_err("silent app-server must hit the response timeout");
@@ -3080,7 +3091,8 @@ for line in sys.stdin:
                     "id": "codex-auto-review",
                     "model": "gpt-5.6-terra",
                     "visibility": "list"
-                }
+                },
+                {"id": 42, "visibility": "list"}
             ]
         }));
 
@@ -3094,6 +3106,23 @@ for line in sys.stdin:
         assert_eq!(payload["visibility_diagnostics"]["hidden"], 1);
         assert_eq!(payload["visibility_diagnostics"]["unknown"], 1);
         assert_eq!(payload["visibility_diagnostics"]["internal"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subscription_refresh_rejects_malformed_model_list_without_publishing() {
+        let root = temp_root("subscription-malformed-refresh");
+        let paths = test_paths(&root);
+        let runner = StaticAppServerModelListRunner::ok(json!({
+            "data": {"not": "an array"}
+        }));
+
+        let error = refresh_official_models_with_runner(&paths, &runner)
+            .expect_err("malformed model/list response must fail closed");
+
+        assert!(error.contains("Codex subscription model list unavailable"));
+        assert!(!paths.official_subscription_cache_path().exists());
+        assert!(!paths.metadata_cache_path().exists());
         let _ = fs::remove_dir_all(root);
     }
 
