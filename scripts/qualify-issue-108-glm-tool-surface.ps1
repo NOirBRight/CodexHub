@@ -2191,7 +2191,9 @@ def _is_successful_apply_patch_output(value):
 def _is_exact_apply_patch_history_pair(call, result):
     return (
         isinstance(call, dict)
-        and set(call) == {"type", "status", "call_id", "name", "input"}
+        # CLI 0.146 includes an item id on both sides of the pair.  Match the
+        # stable semantic contract and tolerate additive metadata fields.
+        and {"type", "status", "call_id", "name", "input"}.issubset(call)
         and call.get("type") == "custom_tool_call"
         and call.get("status") == "completed"
         and call.get("name") == "apply_patch"
@@ -2200,7 +2202,7 @@ def _is_exact_apply_patch_history_pair(call, result):
         and isinstance(call.get("input"), str)
         and bool(call["input"].strip())
         and isinstance(result, dict)
-        and set(result) == {"type", "call_id", "output"}
+        and {"type", "call_id", "output"}.issubset(result)
         and result.get("type") == "custom_tool_call_output"
         and result.get("call_id") == call["call_id"]
     )

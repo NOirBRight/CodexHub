@@ -809,6 +809,8 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "'-a', 'never'" not in source
     assert "response.get(\"output\")" in source
     assert "def _sse_output_items(payload):" in source
+    assert '{"type", "status", "call_id", "name", "input"}.issubset(call)' in source
+    assert '{"type", "call_id", "output"}.issubset(result)' in source
     assert "External qualification scratch directory must be outside the repository workspace" in source
     assert "Readiness preflight: use the accepted GLM route" in source
     assert "ReadinessTimeoutSeconds" in source
