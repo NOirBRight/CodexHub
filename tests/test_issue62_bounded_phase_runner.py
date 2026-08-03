@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -71,7 +72,21 @@ def test_direct_runner_drops_sensitive_and_host_path_overrides(tmp_path: Path) -
         working_directory=tmp_path,
     )
 
-    assert "HOME" not in runner._environment
+    isolated_home_keys = (
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "CODEX_HOME",
+        "XDG_CONFIG_HOME",
+    )
+    isolated_home_paths = {
+        key: Path(runner._environment[key]).resolve()
+        for key in isolated_home_keys
+    }
+    assert len(set(isolated_home_paths.values())) == len(isolated_home_keys)
+    assert all(path.is_relative_to(tmp_path.resolve()) for path in isolated_home_paths.values())
+    assert all("host" not in str(path).lower() for path in isolated_home_paths.values())
     assert "OPENAI_API_KEY" not in runner._environment
     assert "PATH" not in runner._environment
     assert "PYTHONPATH" not in runner._environment
@@ -112,6 +127,100 @@ class _BlockingFakeProcess(_FakeProcess):
         if self.return_code is None:
             raise subprocess.TimeoutExpired("fixture", timeout or 0)
         return self.return_code
+
+
+class _ExitedParentWithDescendant(_FakeProcess):
+    """A root whose PID is exited while its tree still needs teardown."""
+
+    def __init__(self) -> None:
+        super().__init__(return_code=0)
+        self.tree_stop_attempted = False
+
+
+def test_exited_root_still_attempts_tree_stop_and_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _ExitedParentWithDescendant()
+    calls: list[tuple[object, dict[str, object]]] = []
+    readback: list[int] = []
+    monkeypatch.setattr("run_issue_62_live_control.os.name", "nt")
+    monkeypatch.setattr(
+        "run_issue_62_live_control.subprocess.run",
+        lambda *args, **kwargs: (
+            calls.append((args[0], kwargs)) or type("Result", (), {"returncode": 0})()
+        ),
+    )
+    monkeypatch.setattr(
+        "run_issue_62_live_control._process_tree_pids",
+        lambda root_pid: {int(root_pid), 54321},
+    )
+    monkeypatch.setattr(
+        "run_issue_62_live_control._process_tree_is_gone",
+        lambda tracked_process, tracked_pids: readback.append(int(tracked_process.pid)) or True,
+    )
+
+    assert _terminate_process(process) is True
+    assert calls[0][0] == ["taskkill", "/PID", "54321", "/F"]
+    assert readback == [12345]
+
+
+def test_tree_readback_failure_cannot_report_cleanup_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _ExitedParentWithDescendant()
+    monkeypatch.setattr("run_issue_62_live_control.os.name", "nt")
+    monkeypatch.setattr(
+        "run_issue_62_live_control.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0})(),
+    )
+    monkeypatch.setattr(
+        "run_issue_62_live_control._process_tree_is_gone",
+        lambda tracked_process, tracked_pids: False,
+    )
+
+    assert _terminate_process(process) is False
+
+
+def test_exited_parent_with_live_descendant_is_cleaned_before_success(
+    tmp_path: Path,
+) -> None:
+    survivor_marker = tmp_path / "survivor-marker"
+    pid_file = tmp_path / "descendant.pid"
+    grandchild_code = (
+        "import pathlib, time; "
+        "time.sleep(1.5); "
+        f"pathlib.Path({str(survivor_marker)!r}).write_text('survived', encoding='ascii')"
+    )
+    parent_code = (
+        "import pathlib, subprocess, sys; "
+        "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "close_fds=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')"
+    )
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        [sys.executable, "-c", parent_code, str(pid_file), grandchild_code],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.exists()
+        process.wait(timeout=5)
+
+        assert _terminate_process(process) is True
+        time.sleep(2)
+        assert not survivor_marker.exists()
+    finally:
+        if process.poll() is None:
+            _terminate_process(process)
 
 
 def test_timeout_is_terminal_and_cleanup_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -135,8 +135,17 @@ SENSITIVE_ENV_KEYS = frozenset(
         "HOMEPATH",
         "APPDATA",
         "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
     }
 )
+CASE_ENVIRONMENT_PATHS = {
+    "HOME": "home",
+    "USERPROFILE": "userprofile",
+    "APPDATA": "appdata",
+    "LOCALAPPDATA": "localappdata",
+    "CODEX_HOME": "codex-home",
+    "XDG_CONFIG_HOME": "xdg-config",
+}
 PLANNER_FIELDS = frozenset(
     {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
 )
@@ -247,6 +256,7 @@ class BackgroundProcess:
 
     phase: str
     process: subprocess.Popen[bytes]
+    tracked_pids: frozenset[int] = frozenset()
 
 
 def _validate_timeout(timeout_seconds: float) -> float:
@@ -321,40 +331,237 @@ def _write_sanitized_json(target: Path, payload: dict[str, object]) -> None:
         raise HarnessFailure("journal_write_failed") from error
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
+def _posix_process_tree_pids(root_pid: int) -> set[int] | None:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+    parents: dict[int, int] = {}
+    process_groups: dict[int, int] = {}
     try:
-        if process.poll() is not None:
-            # A completed parent can still have a descendant.  Treat that
-            # state as unknown rather than claiming the process tree is gone.
-            return False
-        if os.name == "nt":
-            # ``terminate`` only signals the direct child on Windows.  The
-            # Gateway/CLI can spawn grandchildren, so use taskkill's tree mode
-            # and suppress all command output.
-            kill_result = subprocess.run(
-                ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=5,
-            )
-            if kill_result.returncode != 0:
-                raise OSError("taskkill failed")
-        else:
-            os.killpg(int(process.pid), signal.SIGTERM)
-        process.wait(timeout=5)
-        return True
-    except Exception:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_text = (entry / "stat").read_text(encoding="ascii")
+                closing_paren = stat_text.rfind(")")
+                fields = stat_text[closing_paren + 2 :].split()
+                pid = int(entry.name)
+                parents[pid] = int(fields[1])
+                process_groups[pid] = int(fields[2])
+            except (OSError, UnicodeError, ValueError, IndexError):
+                continue
+    except OSError:
+        return None
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    # A session leader can exit while its descendants remain in the same
+    # process group.  Keep those descendants in the readback set even when
+    # the kernel has reparented them to init.
+    result.update(pid for pid, group in process_groups.items() if group == root_pid)
+    return result
+
+
+def _windows_process_parent_map() -> dict[int, int] | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if snapshot == invalid_handle:
+            return None
         try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(int(process.pid), signal.SIGKILL)
-            process.wait(timeout=5)
-            return True
-        except Exception:
+            entry = ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+            first = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            if not first:
+                return None
+            result: dict[int, int] = {}
+            while True:
+                result[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return result
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return None
+
+
+def _process_tree_pids(root_pid: int) -> set[int] | None:
+    """Return the root and currently observable descendants, if available."""
+
+    if os.name == "nt":
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return None
+    else:
+        return _posix_process_tree_pids(root_pid)
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    return result
+
+
+def _process_tree_is_gone(
+    process: subprocess.Popen[bytes], tracked_pids: set[int]
+) -> bool:
+    """Read back both the root and descendants before reporting success."""
+
+    try:
+        if process.poll() is None:
             return False
+    except Exception:
+        return False
+
+    current = _process_tree_pids(int(process.pid))
+    if current is None:
+        # An unavailable readback is not proof of cleanup.
+        return False
+    if current - {int(process.pid)}:
+        return False
+    if os.name == "nt":
+        # Parent IDs can be lost when Windows reparents a descendant after the
+        # root exits.  Check every PID observed before teardown as well.
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return False
+        if any(pid in parents for pid in tracked_pids if pid != int(process.pid)):
+            return False
+        return int(process.pid) not in parents
+
+    # ``/proc`` retains the process group even after the session leader exits;
+    # use the kernel's group existence check as a second readback path.
+    try:
+        os.killpg(int(process.pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _taskkill(pid: int, *, tree: bool) -> None:
+    command = ["taskkill", "/PID", str(int(pid))]
+    if tree:
+        command.append("/T")
+    command.append("/F")
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=5,
+    )
+    # Test doubles may intentionally return no CompletedProcess.  A real
+    # subprocess result with a non-zero code remains a hard stop failure.
+    if result is not None and getattr(result, "returncode", 0) != 0:
+        raise OSError("taskkill failed")
+
+
+def _terminate_process(
+    process: subprocess.Popen[bytes], *, tracked_pids: set[int] | None = None
+) -> bool:
+    """Stop a process tree and return true only after a positive readback."""
+
+    try:
+        root_pid = int(process.pid)
+    except Exception:
+        return False
+    known_pids = set(tracked_pids or ())
+    known_pids.add(root_pid)
+    initial_tree = _process_tree_pids(root_pid)
+    if initial_tree is not None:
+        known_pids.update(initial_tree)
+
+    try:
+        parent_alive = process.poll() is None
+    except Exception:
+        parent_alive = False
+
+    try:
+        if os.name == "nt":
+            if parent_alive:
+                # ``taskkill /T`` is the primary Windows tree primitive while
+                # the root is still open.
+                _taskkill(root_pid, tree=True)
+            else:
+                # A dead root cannot be passed to ``taskkill /T`` reliably.
+                # Kill the descendants observed in the readback snapshot by
+                # exact PID, then verify that no tree member remains.
+                for pid in sorted(known_pids - {root_pid}, reverse=True):
+                    _taskkill(pid, tree=False)
+        else:
+            # All runner children are session leaders, so the process group
+            # remains addressable even if the root has already exited.
+            os.killpg(root_pid, signal.SIGTERM)
+        process.wait(timeout=5)
+        if _process_tree_is_gone(process, known_pids):
+            return True
+    except Exception:
+        pass
+
+    # Escalate once, but keep the same tracked PID set and require the same
+    # readback.  A successful parent kill alone is never sufficient.
+    try:
+        if os.name == "nt":
+            current_tree = _process_tree_pids(root_pid)
+            descendants = (current_tree or set()) | known_pids
+            for pid in sorted(descendants - {root_pid}, reverse=True):
+                _taskkill(pid, tree=False)
+            if process.poll() is None:
+                process.kill()
+        else:
+            os.killpg(root_pid, signal.SIGKILL)
+        process.wait(timeout=5)
+    except Exception:
+        pass
+    return _process_tree_is_gone(process, known_pids)
 
 
 class BoundedPhaseRunner:
@@ -380,14 +587,17 @@ class BoundedPhaseRunner:
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._process_factory = process_factory or subprocess.Popen
         self._working_directory = str(working_directory) if working_directory is not None else None
+        self._case_environment_root = run_root / "case-env"
         self._environment = _safe_environment(
             environment or {},
             working_directory=Path(working_directory)
             if working_directory is not None
             else None,
+            case_root=self._case_environment_root,
         )
         self.journal = SanitizedPhaseJournal(run_root, identity)
         self._active_process: subprocess.Popen[bytes] | None = None
+        self._active_process_pids: frozenset[int] = frozenset()
         self._active_lock = threading.Lock()
         self._background_processes: dict[str, BackgroundProcess] = {}
         self._background_lock = threading.Lock()
@@ -401,15 +611,36 @@ class BoundedPhaseRunner:
             raise HarnessFailure("phase_exception")
         return phase
 
-    def _set_active(self, process: subprocess.Popen[bytes] | None) -> None:
+    def _set_active(
+        self,
+        process: subprocess.Popen[bytes] | None,
+        tracked_pids: frozenset[int] = frozenset(),
+    ) -> None:
         with self._active_lock:
             self._active_process = process
+            self._active_process_pids = tracked_pids if process is not None else frozenset()
 
     @staticmethod
     def _validate_argv(argv: Sequence[str]) -> bool:
         return bool(argv) and all(
             isinstance(item, str) and bool(item) and "\x00" not in item for item in argv
         )
+
+    def _prepare_case_environment(self) -> None:
+        try:
+            if self._case_environment_root.is_symlink() or (
+                self._case_environment_root.exists()
+                and not self._case_environment_root.is_dir()
+            ):
+                raise OSError
+            self._case_environment_root.mkdir(parents=True, exist_ok=True)
+            for directory in CASE_ENVIRONMENT_PATHS.values():
+                target = self._case_environment_root / directory
+                if target.is_symlink() or (target.exists() and not target.is_dir()):
+                    raise OSError
+                target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise HarnessFailure("process_start_failed") from error
 
     def start_background(self, phase: str, argv: Sequence[str]) -> BackgroundProcess:
         """Start one bounded sidecar process without retaining its output."""
@@ -425,6 +656,7 @@ class BoundedPhaseRunner:
                 status_code="process_start_failed",
             )
             raise HarnessFailure("process_start_failed")
+        self._prepare_case_environment()
         creationflags = 0
         start_new_session = False
         if os.name == "nt":
@@ -451,12 +683,13 @@ class BoundedPhaseRunner:
                 status_code="process_start_failed",
             )
             raise HarnessFailure("process_start_failed") from error
-        handle = BackgroundProcess(phase_name, process)
+        tracked_pids = frozenset(_process_tree_pids(int(process.pid)) or {int(process.pid)})
+        handle = BackgroundProcess(phase_name, process, tracked_pids)
         with self._background_lock:
             if phase_name in self._background_processes:
                 # A duplicate phase would make cleanup ambiguous.  Terminate
                 # the just-started process before failing closed.
-                _terminate_process(process)
+                _terminate_process(process, tracked_pids=set(tracked_pids))
                 raise HarnessFailure("phase_exception")
             self._background_processes[phase_name] = handle
         return handle
@@ -469,7 +702,9 @@ class BoundedPhaseRunner:
         if current is None:
             return True
         started = time.monotonic()
-        terminated = _terminate_process(current.process)
+        terminated = _terminate_process(
+            current.process, tracked_pids=set(current.tracked_pids)
+        )
         self._children_terminated = self._children_terminated and terminated
         code = status_code if terminated else "termination_failed"
         self.journal.append(
@@ -552,6 +787,10 @@ class BoundedPhaseRunner:
             return finish(CommandResult("cancelled", "cancelled", terminated=True))
         if not self._validate_argv(argv):
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
+        try:
+            self._prepare_case_environment()
+        except HarnessFailure:
+            return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
         creationflags = 0
         start_new_session = False
@@ -575,7 +814,8 @@ class BoundedPhaseRunner:
         except Exception:
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
-        self._set_active(process)
+        tracked_pids = frozenset(_process_tree_pids(int(process.pid)) or {int(process.pid)})
+        self._set_active(process, tracked_pids)
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -629,9 +869,10 @@ class BoundedPhaseRunner:
         self._cancel_requested = True
         with self._active_lock:
             process = self._active_process
+            tracked_pids = self._active_process_pids
         if process is None:
             return True
-        terminated = _terminate_process(process)
+        terminated = _terminate_process(process, tracked_pids=set(tracked_pids))
         self._children_terminated = self._children_terminated and terminated
         return terminated
 
@@ -659,6 +900,8 @@ class BoundedPhaseRunner:
                     failures += 1
             except Exception:
                 failures += 1
+        if not _remove_directory(self._case_environment_root):
+            failures += 1
         extra = _count_extra_artifacts(self.run_root)
         if extra:
             failures += 1
@@ -873,9 +1116,12 @@ def _validate_environment(
 
 
 def _safe_environment(
-    overrides: Mapping[str, str], *, working_directory: Path | None = None
+    overrides: Mapping[str, str],
+    *,
+    working_directory: Path | None = None,
+    case_root: Path | None = None,
 ) -> dict[str, str]:
-    """Build a minimal child environment without host credentials/home state."""
+    """Build a minimal child environment with case-local home state."""
 
     result: dict[str, str] = {}
     for key in ("SystemRoot", "ComSpec"):
@@ -894,6 +1140,10 @@ def _safe_environment(
     # live-plan validator.
     for key in SENSITIVE_ENV_KEYS:
         result.pop(key, None)
+    if case_root is not None:
+        root = case_root.resolve(strict=False)
+        for key, directory in CASE_ENVIRONMENT_PATHS.items():
+            result[key] = str(root / directory)
     return result
 
 
