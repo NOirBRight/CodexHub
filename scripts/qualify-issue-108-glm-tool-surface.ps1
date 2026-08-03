@@ -2598,9 +2598,9 @@ $windowsSandboxConfiguration
     $cliArguments = @(
         # Codex CLI 0.146 removed the legacy `-a/--ask-for-approval` option.
         # Keep this qualification non-interactive by supplying the current
-        # config override before the `exec` subcommand.  Passing the value as
-        # TOML preserves the string form expected by strict-config.
-        '-c', 'approval_policy="never"',
+        # config override before the `exec` subcommand.  The unquoted value
+        # also survives the cmd.exe shim used by npm's codex.cmd launcher.
+        '-c', 'approval_policy=never',
         'exec', '--strict-config', '--ephemeral', '--json',
         '--sandbox', $cliSandbox,
         '-C', $testWorkspace,

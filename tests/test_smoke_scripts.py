@@ -805,7 +805,7 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert 'sandbox = "elevated"' in source
     assert 'sandbox = "unelevated"' not in source
     assert "'--sandbox', $cliSandbox" in source
-    assert "'-c', 'approval_policy=\"never\"'" in source
+    assert "'-c', 'approval_policy=never'" in source
     assert "'-a', 'never'" not in source
     assert "response.get(\"output\")" in source
     assert "def _sse_output_items(payload):" in source
