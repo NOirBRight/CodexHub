@@ -27,7 +27,7 @@
 - Create: `tests/test_issue_62_live_evidence_sidecar.py`
 
 **Interfaces:**
-- Produces: `SidecarConfig`, `validate_config(config)`, `write_capture_record(output_dir, hop, record)`, and `main(argv=None) -> int`.
+- Produces: `SidecarConfig`, `validate_config(config)`, `write_capture_record(output_dir, hop, record, capture_key=..., correlation_token=...)`, and `main(argv=None) -> int`.
 - Consumes: only Python standard-library modules and a pre-existing HMAC key file.
 
 - [x] **Step 1: Write failing activation and artifact tests**
@@ -43,7 +43,13 @@ def test_config_rejects_non_loopback(host, base_config):
         sidecar.validate_config(dataclasses.replace(base_config, listen_host=host))
 
 def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path):
-    record_path = sidecar.write_capture_record(tmp_path, "pre", SAFE_RECORD)
+    record_path = sidecar.write_capture_record(
+        tmp_path,
+        "pre",
+        SAFE_RECORD,
+        capture_key=KEY,
+        correlation_token=CORRELATION_TOKEN,
+    )
     assert json.loads(record_path.read_text(encoding="utf-8"))["schema"] == (
         "codexhub.issue62.live-evidence-lane.v1"
     )
