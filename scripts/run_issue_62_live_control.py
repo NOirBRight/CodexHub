@@ -135,8 +135,17 @@ SENSITIVE_ENV_KEYS = frozenset(
         "HOMEPATH",
         "APPDATA",
         "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
     }
 )
+CASE_ENVIRONMENT_PATHS = {
+    "HOME": "home",
+    "USERPROFILE": "userprofile",
+    "APPDATA": "appdata",
+    "LOCALAPPDATA": "localappdata",
+    "CODEX_HOME": "codex-home",
+    "XDG_CONFIG_HOME": "xdg-config",
+}
 PLANNER_FIELDS = frozenset(
     {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
 )
@@ -247,6 +256,7 @@ class BackgroundProcess:
 
     phase: str
     process: subprocess.Popen[bytes]
+    tracked_pids: frozenset[int] = frozenset()
 
 
 def _validate_timeout(timeout_seconds: float) -> float:
@@ -321,40 +331,563 @@ def _write_sanitized_json(target: Path, payload: dict[str, object]) -> None:
         raise HarnessFailure("journal_write_failed") from error
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
+def _posix_process_tree_pids(root_pid: int) -> set[int] | None:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+    parents: dict[int, int] = {}
+    process_groups: dict[int, int] = {}
     try:
-        if process.poll() is not None:
-            # A completed parent can still have a descendant.  Treat that
-            # state as unknown rather than claiming the process tree is gone.
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_text = (entry / "stat").read_text(encoding="ascii")
+                closing_paren = stat_text.rfind(")")
+                fields = stat_text[closing_paren + 2 :].split()
+                pid = int(entry.name)
+                parents[pid] = int(fields[1])
+                process_groups[pid] = int(fields[2])
+            except (OSError, UnicodeError, ValueError, IndexError):
+                continue
+    except OSError:
+        return None
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    # A session leader can exit while its descendants remain in the same
+    # process group.  Keep those descendants in the readback set even when
+    # the kernel has reparented them to init.
+    result.update(pid for pid, group in process_groups.items() if group == root_pid)
+    return result
+
+
+def _windows_process_parent_map() -> dict[int, int] | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if snapshot == invalid_handle:
+            return None
+        try:
+            entry = ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+            first = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            if not first:
+                return None
+            result: dict[int, int] = {}
+            while True:
+                result[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return result
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return None
+
+
+def _close_windows_handle(handle: object | None) -> None:
+    if handle is None or os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def _create_windows_job() -> object | None:
+    """Create a kill-on-close job so descendants survive root exit tracking."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+        info = ExtendedLimitInformation()
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            handle,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            _close_windows_handle(handle)
+            return None
+        return handle
+    except Exception:
+        return None
+
+
+def _resume_windows_process_threads(pid: int) -> bool:
+    """Resume a process launched with CREATE_SUSPENDED."""
+
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ThreadEntry32),
+        ]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ThreadEntry32),
+        ]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
             return False
-        if os.name == "nt":
-            # ``terminate`` only signals the direct child on Windows.  The
-            # Gateway/CLI can spawn grandchildren, so use taskkill's tree mode
-            # and suppress all command output.
-            kill_result = subprocess.run(
-                ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=5,
-            )
-            if kill_result.returncode != 0:
-                raise OSError("taskkill failed")
-        else:
-            os.killpg(int(process.pid), signal.SIGTERM)
-        process.wait(timeout=5)
+        resumed = False
+        try:
+            entry = ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(ThreadEntry32)
+            if not kernel32.Thread32First(snapshot, ctypes.byref(entry)):
+                return False
+            while True:
+                if int(entry.th32OwnerProcessID) == pid:
+                    thread = kernel32.OpenThread(
+                        0x0002 | 0x0040,  # THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION
+                        False,
+                        entry.th32ThreadID,
+                    )
+                    if thread:
+                        try:
+                            previous = kernel32.ResumeThread(thread)
+                            if previous != 0xFFFFFFFF:
+                                while previous > 1:
+                                    previous = kernel32.ResumeThread(thread)
+                                resumed = True
+                        finally:
+                            _close_windows_handle(thread)
+                if not kernel32.Thread32Next(snapshot, ctypes.byref(entry)):
+                    break
+            return resumed
+        finally:
+            _close_windows_handle(snapshot)
+    except Exception:
+        return False
+
+
+def _attach_windows_job(process: subprocess.Popen[bytes], job: object) -> bool:
+    """Assign and resume a suspended real Popen child."""
+
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_handle = getattr(process, "_handle")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
+            _resume_windows_process_threads(int(process.pid))
+            _close_windows_handle(job)
+            return False
+        if not _resume_windows_process_threads(int(process.pid)):
+            kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.TerminateJobObject.restype = wintypes.BOOL
+            kernel32.TerminateJobObject(job, 1)
+            _close_windows_handle(job)
+            raise OSError("process resume failed")
+        setattr(process, "_issue62_job_handle", job)
+        setattr(process, "_issue62_tree_readback_authoritative", True)
         return True
     except Exception:
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(int(process.pid), signal.SIGKILL)
-            process.wait(timeout=5)
-            return True
-        except Exception:
+        _close_windows_handle(job)
+        raise
+
+
+def _terminate_windows_job(job: object) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        return bool(kernel32.TerminateJobObject(job, 1))
+    except Exception:
+        return False
+
+
+def _windows_job_active_processes(job: object) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class AccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        info = AccountingInformation()
+        returned = wintypes.DWORD()
+        if not kernel32.QueryInformationJobObject(
+            job,
+            1,  # JobObjectBasicAccountingInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            ctypes.byref(returned),
+        ):
+            return None
+        return int(info.ActiveProcesses)
+    except Exception:
+        return None
+
+
+def _process_tree_pids(root_pid: int) -> set[int] | None:
+    """Return the root and currently observable descendants, if available."""
+
+    if os.name == "nt":
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return None
+    else:
+        return _posix_process_tree_pids(root_pid)
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    return result
+
+
+def _stabilize_process_tree(
+    process: subprocess.Popen[bytes], *, timeout_seconds: float = 0.25
+) -> frozenset[int]:
+    """Observe descendants briefly so cleanup still has their PIDs if the root exits."""
+
+    root_pid = int(process.pid)
+    observed = {root_pid}
+    if not hasattr(process, "_handle"):
+        return frozenset(observed)
+    deadline = time.perf_counter() + timeout_seconds
+    while True:
+        tree = _process_tree_pids(root_pid)
+        if tree:
+            observed.update(tree)
+        if len(observed) > 1 or process.poll() is not None or time.perf_counter() >= deadline:
+            return frozenset(observed)
+        time.sleep(0.01)
+
+
+def _process_tree_is_gone(
+    process: subprocess.Popen[bytes], tracked_pids: set[int]
+) -> bool:
+    """Read back both the root and descendants before reporting success."""
+
+    try:
+        if process.poll() is None:
             return False
+    except Exception:
+        return False
+
+    job = getattr(process, "_issue62_job_handle", None)
+    if job is not None:
+        active = _windows_job_active_processes(job)
+        return active == 0
+    if os.name == "nt" and getattr(
+        process, "_issue62_tree_readback_authoritative", True
+    ) is False:
+        return False
+
+    current = _process_tree_pids(int(process.pid))
+    if current is None:
+        # An unavailable readback is not proof of cleanup.
+        return False
+    if current - {int(process.pid)}:
+        return False
+    if os.name == "nt":
+        # Parent IDs can be lost when Windows reparents a descendant after the
+        # root exits.  Check every PID observed before teardown as well.
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return False
+        if any(pid in parents for pid in tracked_pids if pid != int(process.pid)):
+            return False
+        return int(process.pid) not in parents
+
+    # ``/proc`` retains the process group even after the session leader exits;
+    # use the kernel's group existence check as a second readback path.
+    try:
+        os.killpg(int(process.pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _taskkill(pid: int, *, tree: bool) -> None:
+    command = ["taskkill", "/PID", str(int(pid))]
+    if tree:
+        command.append("/T")
+    command.append("/F")
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=5,
+    )
+    # Test doubles may intentionally return no CompletedProcess.  A real
+    # subprocess result with a non-zero code remains a hard stop failure.
+    if result is not None and getattr(result, "returncode", 0) != 0:
+        raise OSError("taskkill failed")
+
+
+def _terminate_process(
+    process: subprocess.Popen[bytes], *, tracked_pids: set[int] | None = None
+) -> bool:
+    """Stop a process tree and return true only after a positive readback."""
+
+    try:
+        root_pid = int(process.pid)
+    except Exception:
+        return False
+    known_pids = set(tracked_pids or ())
+    known_pids.add(root_pid)
+    initial_tree = _process_tree_pids(root_pid)
+    if initial_tree is not None:
+        known_pids.update(initial_tree)
+    job = getattr(process, "_issue62_job_handle", None)
+
+    try:
+        parent_alive = process.poll() is None
+    except Exception:
+        parent_alive = False
+
+    try:
+        if os.name == "nt":
+            if job is not None:
+                if not _terminate_windows_job(job):
+                    raise OSError("job termination failed")
+            elif parent_alive:
+                # ``taskkill /T`` is the primary Windows tree primitive while
+                # the root is still open.
+                _taskkill(root_pid, tree=True)
+            else:
+                # A dead root cannot be passed to ``taskkill /T`` reliably.
+                # Kill the descendants observed in the readback snapshot by
+                # exact PID, then verify that no tree member remains.
+                for pid in sorted(known_pids - {root_pid}, reverse=True):
+                    _taskkill(pid, tree=False)
+        else:
+            # All runner children are session leaders, so the process group
+            # remains addressable even if the root has already exited.
+            os.killpg(root_pid, signal.SIGTERM)
+        process.wait(timeout=5)
+        if _process_tree_is_gone(process, known_pids):
+            if job is not None:
+                _close_windows_handle(job)
+                setattr(process, "_issue62_job_handle", None)
+            return True
+    except Exception:
+        pass
+
+    # Escalate once, but keep the same tracked PID set and require the same
+    # readback.  A successful parent kill alone is never sufficient.
+    try:
+        if os.name == "nt":
+            if job is not None:
+                _terminate_windows_job(job)
+            else:
+                current_tree = _process_tree_pids(root_pid)
+                descendants = (current_tree or set()) | known_pids
+                for pid in sorted(descendants - {root_pid}, reverse=True):
+                    _taskkill(pid, tree=False)
+                if process.poll() is None:
+                    process.kill()
+        else:
+            os.killpg(root_pid, signal.SIGKILL)
+        process.wait(timeout=5)
+    except Exception:
+        pass
+    result = _process_tree_is_gone(process, known_pids)
+    if job is not None:
+        _close_windows_handle(job)
+        setattr(process, "_issue62_job_handle", None)
+    return result
+
+
+def _windows_launch_options(
+    process_factory: Callable[..., subprocess.Popen[bytes]],
+) -> tuple[int, bool, object | None]:
+    if os.name != "nt":
+        return 0, True, None
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    job: object | None = None
+    # Test doubles and injected factories are not suspended.  Only use the
+    # job launch handshake with the stdlib Popen implementation.
+    if getattr(process_factory, "__module__", None) == "subprocess":
+        job = _create_windows_job()
+        if job is not None:
+            creationflags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+    return creationflags, False, job
+
+
+def _finish_windows_launch(
+    process: subprocess.Popen[bytes], job: object | None
+) -> None:
+    if os.name != "nt":
+        return
+    if job is None:
+        # Test doubles do not expose a native process handle.  A real launch
+        # without a Job Object has no authoritative descendant readback and
+        # must fail closed instead of treating the wrapper PID as the tree.
+        if hasattr(process, "_handle"):
+            setattr(process, "_issue62_tree_readback_authoritative", False)
+        return
+    if not _attach_windows_job(process, job):
+        # Assignment can be unavailable under a constrained Windows token;
+        # retain the process and use the bounded taskkill/readback fallback.
+        setattr(process, "_issue62_tree_readback_authoritative", False)
+        return
 
 
 class BoundedPhaseRunner:
@@ -380,15 +913,21 @@ class BoundedPhaseRunner:
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._process_factory = process_factory or subprocess.Popen
         self._working_directory = str(working_directory) if working_directory is not None else None
+        self._case_environment_root = run_root / "case-env"
         self._environment = _safe_environment(
             environment or {},
             working_directory=Path(working_directory)
             if working_directory is not None
             else None,
+            case_root=self._case_environment_root,
         )
         self.journal = SanitizedPhaseJournal(run_root, identity)
         self._active_process: subprocess.Popen[bytes] | None = None
+        self._active_process_pids: frozenset[int] = frozenset()
         self._active_lock = threading.Lock()
+        self._foreground_processes: list[
+            tuple[subprocess.Popen[bytes], frozenset[int]]
+        ] = []
         self._background_processes: dict[str, BackgroundProcess] = {}
         self._background_lock = threading.Lock()
         self._cancel_requested = False
@@ -401,15 +940,36 @@ class BoundedPhaseRunner:
             raise HarnessFailure("phase_exception")
         return phase
 
-    def _set_active(self, process: subprocess.Popen[bytes] | None) -> None:
+    def _set_active(
+        self,
+        process: subprocess.Popen[bytes] | None,
+        tracked_pids: frozenset[int] = frozenset(),
+    ) -> None:
         with self._active_lock:
             self._active_process = process
+            self._active_process_pids = tracked_pids if process is not None else frozenset()
 
     @staticmethod
     def _validate_argv(argv: Sequence[str]) -> bool:
         return bool(argv) and all(
             isinstance(item, str) and bool(item) and "\x00" not in item for item in argv
         )
+
+    def _prepare_case_environment(self) -> None:
+        try:
+            if _is_reparse(self._case_environment_root) or (
+                self._case_environment_root.exists()
+                and not self._case_environment_root.is_dir()
+            ):
+                raise OSError
+            self._case_environment_root.mkdir(parents=True, exist_ok=True)
+            for directory in CASE_ENVIRONMENT_PATHS.values():
+                target = self._case_environment_root / directory
+                if _is_reparse(target) or (target.exists() and not target.is_dir()):
+                    raise OSError
+                target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise HarnessFailure("process_start_failed") from error
 
     def start_background(self, phase: str, argv: Sequence[str]) -> BackgroundProcess:
         """Start one bounded sidecar process without retaining its output."""
@@ -425,12 +985,10 @@ class BoundedPhaseRunner:
                 status_code="process_start_failed",
             )
             raise HarnessFailure("process_start_failed")
-        creationflags = 0
-        start_new_session = False
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        else:
-            start_new_session = True
+        self._prepare_case_environment()
+        creationflags, start_new_session, job = _windows_launch_options(
+            self._process_factory
+        )
         try:
             process = self._process_factory(
                 list(argv),
@@ -445,18 +1003,33 @@ class BoundedPhaseRunner:
                 shell=False,
             )
         except Exception as error:
+            _close_windows_handle(job)
             self.journal.append(
                 marker=f"{phase_name}_completed",
                 status="failed",
                 status_code="process_start_failed",
             )
             raise HarnessFailure("process_start_failed") from error
-        handle = BackgroundProcess(phase_name, process)
+        try:
+            _finish_windows_launch(process, job)
+        except Exception as error:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            self.journal.append(
+                marker=f"{phase_name}_completed",
+                status="failed",
+                status_code="process_start_failed",
+            )
+            raise HarnessFailure("process_start_failed") from error
+        tracked_pids = _stabilize_process_tree(process)
+        handle = BackgroundProcess(phase_name, process, tracked_pids)
         with self._background_lock:
             if phase_name in self._background_processes:
                 # A duplicate phase would make cleanup ambiguous.  Terminate
                 # the just-started process before failing closed.
-                _terminate_process(process)
+                _terminate_process(process, tracked_pids=set(tracked_pids))
                 raise HarnessFailure("phase_exception")
             self._background_processes[phase_name] = handle
         return handle
@@ -469,7 +1042,9 @@ class BoundedPhaseRunner:
         if current is None:
             return True
         started = time.monotonic()
-        terminated = _terminate_process(current.process)
+        terminated = _terminate_process(
+            current.process, tracked_pids=set(current.tracked_pids)
+        )
         self._children_terminated = self._children_terminated and terminated
         code = status_code if terminated else "termination_failed"
         self.journal.append(
@@ -487,6 +1062,24 @@ class BoundedPhaseRunner:
         failures = 0
         for handle in handles:
             if not self.stop_background(handle):
+                failures += 1
+        return failures
+
+    def _stop_foreground_processes(self) -> int:
+        """Recheck every completed foreground tree during final cleanup."""
+
+        with self._active_lock:
+            active = self._active_process
+        failures = 0
+        for process, tracked_pids in self._foreground_processes:
+            if process is active:
+                # ``cleanup`` called ``cancel`` first; its result already
+                # contributes to the failure count when the active process
+                # could not be stopped.
+                continue
+            terminated = _terminate_process(process, tracked_pids=set(tracked_pids))
+            self._children_terminated = self._children_terminated and terminated
+            if not terminated:
                 failures += 1
         return failures
 
@@ -552,13 +1145,14 @@ class BoundedPhaseRunner:
             return finish(CommandResult("cancelled", "cancelled", terminated=True))
         if not self._validate_argv(argv):
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
+        try:
+            self._prepare_case_environment()
+        except HarnessFailure:
+            return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
-        creationflags = 0
-        start_new_session = False
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        else:
-            start_new_session = True
+        creationflags, start_new_session, job = _windows_launch_options(
+            self._process_factory
+        )
         try:
             process = self._process_factory(
                 list(argv),
@@ -573,9 +1167,20 @@ class BoundedPhaseRunner:
                 shell=False,
             )
         except Exception:
+            _close_windows_handle(job)
+            return finish(CommandResult("failed", "process_start_failed", terminated=True))
+        try:
+            _finish_windows_launch(process, job)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
-        self._set_active(process)
+        tracked_pids = _stabilize_process_tree(process)
+        self._foreground_processes.append((process, tracked_pids))
+        self._set_active(process, tracked_pids)
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -629,9 +1234,10 @@ class BoundedPhaseRunner:
         self._cancel_requested = True
         with self._active_lock:
             process = self._active_process
+            tracked_pids = self._active_process_pids
         if process is None:
             return True
-        terminated = _terminate_process(process)
+        terminated = _terminate_process(process, tracked_pids=set(tracked_pids))
         self._children_terminated = self._children_terminated and terminated
         return terminated
 
@@ -652,6 +1258,7 @@ class BoundedPhaseRunner:
         self.journal.append(marker="cleanup_started", status="started", status_code="phase_started")
         if not self.cancel():
             failures += 1
+        failures += self._stop_foreground_processes()
         failures += self._stop_background_processes()
         for action in reversed(tuple(actions)):
             try:
@@ -659,6 +1266,8 @@ class BoundedPhaseRunner:
                     failures += 1
             except Exception:
                 failures += 1
+        if not _remove_directory(self._case_environment_root):
+            failures += 1
         extra = _count_extra_artifacts(self.run_root)
         if extra:
             failures += 1
@@ -873,9 +1482,12 @@ def _validate_environment(
 
 
 def _safe_environment(
-    overrides: Mapping[str, str], *, working_directory: Path | None = None
+    overrides: Mapping[str, str],
+    *,
+    working_directory: Path | None = None,
+    case_root: Path | None = None,
 ) -> dict[str, str]:
-    """Build a minimal child environment without host credentials/home state."""
+    """Build a minimal child environment with case-local home state."""
 
     result: dict[str, str] = {}
     for key in ("SystemRoot", "ComSpec"):
@@ -894,6 +1506,10 @@ def _safe_environment(
     # live-plan validator.
     for key in SENSITIVE_ENV_KEYS:
         result.pop(key, None)
+    if case_root is not None:
+        root = case_root.resolve(strict=False)
+        for key, directory in CASE_ENVIRONMENT_PATHS.items():
+            result[key] = str(root / directory)
     return result
 
 
