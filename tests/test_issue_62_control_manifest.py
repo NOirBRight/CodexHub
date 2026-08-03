@@ -494,6 +494,16 @@ def test_manifest_binds_route_digest_and_planner_dispositions() -> None:
     assert manifest.reconcile_manifest(built) == {"reconciled": True, "mismatches": []}
 
 
+def test_manifest_accepts_canonical_lowercase_preserved_disposition() -> None:
+    planner = _planner()
+    planner["hosted_only_disposition"] = "preserved"
+    planner["unknown_tag_disposition"] = "local_consume"
+
+    built = manifest.build_manifest(_controls(), candidate_identity=_candidate(), planner=planner)
+
+    assert built["planner"] == planner
+
+
 def test_manifest_reconciliation_rejects_route_or_planner_provenance_drift() -> None:
     built = manifest.build_manifest(
         _controls(),
@@ -511,7 +521,7 @@ def test_manifest_reconciliation_rejects_route_or_planner_provenance_drift() -> 
     assert "control_route_digest_mismatch" in report["mismatches"]
 
     planner_forgery = copy.deepcopy(built)
-    planner_forgery["planner"]["unknown_tag_disposition"] = "Preserved"
+    planner_forgery["planner"]["unknown_tag_disposition"] = "not_captured"
     planner_forgery["capture_manifest_sha256"] = manifest._canonical_digest(
         manifest._manifest_core(planner_forgery)
     )
