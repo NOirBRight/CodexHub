@@ -243,6 +243,25 @@ evidence fails closed.
 The live-control-required gates remain open until the separately authorized
 live control window documented above captures real evidence for each one.
 
+### Sanitized control manifest
+
+`scripts/build_issue_62_control_manifest.py` joins sanitized pre/post sidecar
+records with the eight live-control labels.  The manifest stores only
+allow-listed shapes, byte/SSE SHA-256/HMAC fingerprints, aggregate reference
+counts, and candidate provenance; it never stores request/response bodies,
+URLs, headers, credentials, prompts, tool arguments, or wire identifiers.
+`synthetic_fixture_only` is always ineligible for Issue #62.  Reconciliation
+validates the canonical manifest schema and fails closed on mutation,
+deletion, loss, missing fingerprints, or route/catalog mismatch.
+
+For Codex CLI `0.146.0`, the package metadata does not include `gitHead`.
+Evidence may use `cli_source_commit: null` with
+`cli_source_commit_status: not_published_by_registry`; a fabricated SHA is
+not acceptable.  If the npm provenance attestation has been independently
+verified, its exact SLSA resolved-dependency commit may instead be recorded
+with status `published` (for `0.146.0`, the attested release commit is
+`e363b08c9175ac1cbe5893615dd2cb9ddf95043b2`).
+
 ## Isolated live-evidence sidecar lane
 
 `scripts/capture_issue_62_live_evidence.py` is a standalone, standard-library
