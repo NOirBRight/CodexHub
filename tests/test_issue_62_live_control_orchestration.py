@@ -58,7 +58,9 @@ def _plan(tmp_path: Path) -> dict[str, object]:
     (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
     (tmp_path / "helpers" / "sidecar-empty.py").write_text(
         "import time\n"
-        "time.sleep(30)\n",
+        # Keep the fixture alive longer than the full Hosted startup window;
+        # the harness still bounds and terminates it during cleanup.
+        "time.sleep(300)\n",
         encoding="utf-8",
     )
     (tmp_path / "helpers" / "replay.py").write_text(
@@ -212,9 +214,9 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
     sidecar_script = tmp_path / "helpers" / "sidecar.py"
     sidecar_script.write_text(
         "import pathlib, shutil, sys, time\n"
-        "out = pathlib.Path(sys.argv[1]); src = pathlib.Path(sys.argv[2])\n"
-        "shutil.copyfile(src, out / pathlib.Path(sys.argv[3]).name)\n"
-        "time.sleep(30)\n",
+            "out = pathlib.Path(sys.argv[1]); src = pathlib.Path(sys.argv[2])\n"
+            "shutil.copyfile(src, out / pathlib.Path(sys.argv[3]).name)\n"
+            "time.sleep(300)\n",
         encoding="utf-8",
     )
     for hop in ("pre", "post"):
