@@ -103,7 +103,6 @@ ITEM_TYPES = frozenset(
 )
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-_SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 _SHA1_OR_HEX64 = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SEMVER = re.compile(r"0\.(?:\d+)\.(?:\d+)(?:-[0-9A-Za-z.-]+)?\Z")
 
@@ -751,7 +750,7 @@ def _validate_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ManifestValidationError("candidate_cli_source_commit_status_invalid")
     source_commit = result["cli_source_commit"]
     if source_status == "published":
-        _require_hex(source_commit, _SHA1, "candidate_cli_source_commit_invalid")
+        _require_hex(source_commit, _SHA1_OR_HEX64, "candidate_cli_source_commit_invalid")
     elif source_commit is not None:
         raise ManifestValidationError("candidate_cli_source_commit_unexpected")
     _require_hex(result["cli_package_sha256"], _HEX64, "candidate_cli_package_sha_invalid")
@@ -767,11 +766,16 @@ def _validate_planner(value: Any, *, verification_scope: str) -> dict[str, str]:
         raise ManifestValidationError("planner_invalid")
     _require_exact_fields(value, PLANNER_FIELDS, "planner_fields_invalid")
     model_visible_plan = value.get("model_visible_plan")
-    if model_visible_plan not in PLANNER_PLAN_STATES:
+    if not isinstance(model_visible_plan, str) or model_visible_plan not in PLANNER_PLAN_STATES:
         raise ManifestValidationError("planner_model_visible_plan_invalid")
     hosted_only = value.get("hosted_only_disposition")
     unknown_tag = value.get("unknown_tag_disposition")
-    if hosted_only not in PLANNER_DISPOSITIONS or unknown_tag not in PLANNER_DISPOSITIONS:
+    if (
+        not isinstance(hosted_only, str)
+        or not isinstance(unknown_tag, str)
+        or hosted_only not in PLANNER_DISPOSITIONS
+        or unknown_tag not in PLANNER_DISPOSITIONS
+    ):
         raise ManifestValidationError("planner_disposition_invalid")
     if verification_scope == SYNTHETIC_SCOPE and (
         model_visible_plan == "complete"
