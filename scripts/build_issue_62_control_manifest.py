@@ -115,7 +115,6 @@ PLANNER_DISPOSITIONS = frozenset(
         "preserved",
         "reversibly_adapted",
         "local_consume",
-        "Preserved",
         "Unsupported",
         "Unqualified",
     }
@@ -786,7 +785,11 @@ def _validate_planner(value: Any, *, verification_scope: str) -> dict[str, str]:
         or unknown_tag not in PLANNER_DISPOSITIONS
     ):
         raise ManifestValidationError("planner_disposition_invalid")
-    if verification_scope == SYNTHETIC_SCOPE and model_visible_plan == "complete":
+    if verification_scope == SYNTHETIC_SCOPE and (
+        model_visible_plan == "complete"
+        or hosted_only != "Unqualified"
+        or unknown_tag != "Unqualified"
+    ):
         raise ManifestValidationError("planner_synthetic_evidence_invalid")
     return {
         "model_visible_plan": model_visible_plan,
@@ -909,17 +912,8 @@ def build_manifest(
     if len(route_provenance) != 1:
         raise ManifestValidationError("control_route_provenance_inconsistent")
     if not isinstance(candidate_identity, Mapping) or "route_digest" not in candidate_identity:
-        # The bounded live runner on this exact base does not yet forward its
-        # already-validated plan digest into this builder.  Keep that narrow,
-        # non-qualifying compatibility path while requiring explicit route
-        # provenance for synthetic/CLI builds and any planner-bound manifest.
-        if verification_scope != LIVE_SCOPE or planner is not None or not isinstance(candidate_identity, Mapping):
-            raise ManifestValidationError("candidate_route_digest_required")
-        candidate_input = dict(candidate_identity)
-        candidate_input["route_digest"] = next(iter(route_digests))
-    else:
-        candidate_input = candidate_identity
-    candidate = _validate_candidate(candidate_input)
+        raise ManifestValidationError("candidate_route_digest_required")
+    candidate = _validate_candidate(candidate_identity)
     route_models = {control["route_identity"]["model"] for control in controls}
     if route_models != {candidate["catalog_model_entry_id"]}:
         raise ManifestValidationError("control_route_model_set_invalid")
