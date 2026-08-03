@@ -22,7 +22,7 @@ _SENSITIVE_VALUE = re.compile(
 _LOCAL_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\users\\|/users/|/home/)")
 _RAW_CONTENT = re.compile(r"(?i)(?:automated qualification|\*\*\* begin patch|\*\*\* update file:)")
 DIRECT_TOOL_SURFACE_BUDGET = 64
-_ACCEPTED_DEFERRED_PAYLOAD_SHA256 = "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
+_ACCEPTED_DEFERRED_PAYLOAD_SHA256 = "sha256:0a69a2512db23c06561be489e636440cd76f5350c45c20d9af4b5c5106135da5"
 _ACCEPTED_QUALIFICATION_REQUEST_COUNT = 4
 _REQUIRED_CORE_TOOL_NAMES = frozenset({"shell_command", "apply_patch"})
 _EXPECTED_DEFERRED_CANONICAL_TOOL_SHAPE = [
@@ -42,9 +42,17 @@ _EXPECTED_DEFERRED_CANONICAL_TOOL_SHAPE = [
         "keys": ["description", "name", "parameters", "strict", "type"],
     },
     {
-        "type": "custom",
+        "type": "function",
         "name": "apply_patch",
-        "keys": ["description", "format", "name", "type"],
+        "keys": ["description", "name", "parameters", "strict", "type"],
+        "strict": True,
+        "parameter_keys": ["additionalProperties", "properties", "required", "type"],
+        "property_names": ["patch"],
+        "patch_schema_keys": ["minLength", "type"],
+        "patch_type": "string",
+        "patch_min_length": 1,
+        "required": ["patch"],
+        "additional_properties": False,
     },
     {
         "type": "function",

@@ -2191,7 +2191,9 @@ def _is_successful_apply_patch_output(value):
 def _is_exact_apply_patch_history_pair(call, result):
     return (
         isinstance(call, dict)
-        and set(call) == {"type", "status", "call_id", "name", "input"}
+        # CLI 0.146 includes an item id on both sides of the pair.  Match the
+        # stable semantic contract and tolerate additive metadata fields.
+        and {"type", "status", "call_id", "name", "input"}.issubset(call)
         and call.get("type") == "custom_tool_call"
         and call.get("status") == "completed"
         and call.get("name") == "apply_patch"
@@ -2200,7 +2202,7 @@ def _is_exact_apply_patch_history_pair(call, result):
         and isinstance(call.get("input"), str)
         and bool(call["input"].strip())
         and isinstance(result, dict)
-        and set(result) == {"type", "call_id", "output"}
+        and {"type", "call_id", "output"}.issubset(result)
         and result.get("type") == "custom_tool_call_output"
         and result.get("call_id") == call["call_id"]
     )
@@ -2251,6 +2253,29 @@ def _note_apply_patch_failure(payload):
             return
 
 
+def _sse_output_items(payload):
+    """Yield tool items from both legacy and current Responses SSE shapes.
+
+    Codex CLI 0.146 may wrap a streamed item under ``response.output`` while
+    older clients expose it directly as ``item``.  The qualification harness
+    only needs the tool name, so normalize those envelopes without retaining
+    any request or response content.
+    """
+    if not isinstance(payload, dict):
+        return
+    item = payload.get("item")
+    if isinstance(item, dict):
+        yield item
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return
+    output = response.get("output")
+    if isinstance(output, list):
+        for candidate in output:
+            if isinstance(candidate, dict):
+                yield candidate
+
+
 def _record_post_success_tool_choice(line):
     global _post_success_tool_choice_recorded
     if not _post_success_apply_patch_pending or _post_success_tool_choice_recorded:
@@ -2261,21 +2286,22 @@ def _record_post_success_tool_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if not isinstance(item, dict) or item.get("type") not in {"function_call", "custom_tool_call"}:
+    for item in _sse_output_items(payload):
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        _post_success_tool_choice_recorded = True
+        _append_capture_record(
+            {
+                "stage": "post_success_tool_choice",
+                "choice": name,
+                "expected_choice": _expected_post_success_tool_choice,
+                "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
+            }
+        )
         return
-    name = item.get("name")
-    if not isinstance(name, str) or not name:
-        return
-    _post_success_tool_choice_recorded = True
-    _append_capture_record(
-        {
-            "stage": "post_success_tool_choice",
-            "choice": name,
-            "expected_choice": _expected_post_success_tool_choice,
-            "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
-        }
-    )
 
 
 def _record_tool_search_choice(line):
@@ -2285,13 +2311,10 @@ def _record_tool_search_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if (
-        isinstance(item, dict)
-        and item.get("type") in {"function_call", "custom_tool_call"}
-        and item.get("name") == "tool_search"
-    ):
-        _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+    for item in _sse_output_items(payload):
+        if item.get("type") in {"function_call", "custom_tool_call"} and item.get("name") == "tool_search":
+            _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+            return
 
 
 def _patch_structure(arguments):
@@ -2573,7 +2596,11 @@ $windowsSandboxConfiguration
     Wait-GatewayHealth -BaseUrl $gatewayBaseUrl -StartupSeconds $GatewayStartupSeconds
 
     $cliArguments = @(
-        '-a', 'never',
+        # Codex CLI 0.146 removed the legacy `-a/--ask-for-approval` option.
+        # Keep this qualification non-interactive by supplying the current
+        # config override before the `exec` subcommand.  The unquoted value
+        # also survives the cmd.exe shim used by npm's codex.cmd launcher.
+        '-c', 'approval_policy=never',
         'exec', '--strict-config', '--ephemeral', '--json',
         '--sandbox', $cliSandbox,
         '-C', $testWorkspace,
