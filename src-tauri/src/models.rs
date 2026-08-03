@@ -2978,11 +2978,17 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
+        // A Windows test binary can take more than 500 ms to start under a
+        // loaded workspace. Keep this helper-only response budget bounded
+        // well below the production 20 s native-cache grace: if the code
+        // regresses into waiting for cache publication despite complete
+        // context metadata, the 5 s cache grace below outlasts the 4 s
+        // elapsed bound and keeps that wait observable.
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(2),
             &cache_path,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
         )
         .expect("valid model/list response must not require native cache publication");
 
@@ -3000,7 +3006,7 @@ for line in sys.stdin:
             })
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(4),
             "model/list handling must remain bounded without native cache publication"
         );
         assert!(!cache_path.is_file());
