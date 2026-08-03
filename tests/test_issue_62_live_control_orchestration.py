@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -47,32 +48,76 @@ def _plan(tmp_path: Path) -> dict[str, object]:
     binding = _binding_files(tmp_path)
     (tmp_path / "helpers").mkdir()
     (tmp_path / "run").mkdir()
-    python_copy = tmp_path / "tools" / "python.exe"
-    python_copy.parent.mkdir()
-    shutil.copy2(sys.executable, python_copy)
-    # A copied Windows interpreter needs its private runtime DLLs beside the
-    # executable.  Keep them under the isolated root and expose only that
-    # case-local directory through PATH; never rely on the host PATH.
-    for runtime_dll in Path(sys.executable).parent.glob("*.dll"):
-        shutil.copy2(runtime_dll, python_copy.parent / runtime_dll.name)
-    (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
-    (tmp_path / "helpers" / "sidecar-empty.py").write_text(
-        "import time\n"
-        # Keep the fixture alive longer than the full Hosted startup window;
-        # the harness still bounds and terminates it during cleanup.
-        "time.sleep(300)\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "helpers" / "replay.py").write_text(
-        "import json, pathlib, sys\n"
-        "case, candidate, manifest, output = sys.argv[1:5]\n"
-        "path = pathlib.Path(output)\n"
-        "path.parent.mkdir(parents=True, exist_ok=True)\n"
-        "path.write_text(json.dumps({'schema':'codexhub.issue62.identity-replay.v1', 'case':case, 'candidate_sha':candidate, 'capture_manifest_sha256':manifest, 'wire_replay':True, 'outcome':'accepted' if case == 'identity' else 'rejected'}, sort_keys=True, separators=(',', ':')) + '\\n', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    executable_digest = hashlib.sha256(python_copy.read_bytes()).hexdigest()
-    executable_file = str(python_copy.relative_to(tmp_path))
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    if os.name == "nt":
+        # A copied setup-python interpreter is not reliably launchable on a
+        # fresh Hosted image (its loader can reject the relocated DLL set).
+        # Use the system command host as the bound executable instead; all
+        # scripts and the timeout helper remain copied under this root.
+        executable_path = tools_dir / "cmd.exe"
+        shutil.copy2(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe", executable_path)
+        shutil.copy2(Path(os.environ["SystemRoot"]) / "System32" / "PING.EXE", tools_dir / "PING.EXE")
+        (tmp_path / "helpers" / "cli.cmd").write_text(
+            "@echo off\nexit /b 0\n", encoding="ascii"
+        )
+        (tmp_path / "helpers" / "sidecar-empty.cmd").write_text(
+            "@echo off\nping 127.0.0.1 -n 300 >nul\n", encoding="ascii"
+        )
+        (tmp_path / "helpers" / "replay.cmd").write_text(
+            "@echo off\n"
+            "set \"case=%~1\"\n"
+            "set \"candidate=%~2\"\n"
+            "set \"manifest=%~3\"\n"
+            "set \"output=%~4\"\n"
+            "if /I \"%case%\"==\"identity\" (set \"outcome=accepted\") else (set \"outcome=rejected\")\n"
+            ">\"%output%\" echo {\"schema\":\"codexhub.issue62.identity-replay.v1\",\"case\":\"%case%\",\"candidate_sha\":\"%candidate%\",\"capture_manifest_sha256\":\"%manifest%\",\"wire_replay\":true,\"outcome\":\"%outcome%\"}\n",
+            encoding="ascii",
+        )
+        executable_file = str(executable_path.relative_to(tmp_path))
+        environment = {
+            "PATH": str(tools_dir),
+            "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        }
+        cli_argv = [executable_file, "/d", "/c", "helpers\\cli.cmd"]
+        sidecar_argv = [executable_file, "/d", "/c", "helpers\\sidecar-empty.cmd"]
+        replay_argv = lambda case: [
+            executable_file,
+            "/d",
+            "/c",
+            "helpers\\replay.cmd",
+            case,
+            "a" * 40,
+            "0" * 64,
+            f"run/replay-{case}.json",
+        ]
+        helper_names = {"cli": "cli.cmd", "sidecar": "sidecar-empty.cmd", "replay": "replay.cmd"}
+    else:
+        executable_path = tools_dir / "python"
+        shutil.copy2(sys.executable, executable_path)
+        (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+        (tmp_path / "helpers" / "sidecar-empty.py").write_text(
+            "import time\n"
+            "time.sleep(300)\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "helpers" / "replay.py").write_text(
+            "import json, pathlib, sys\n"
+            "case, candidate, manifest, output = sys.argv[1:5]\n"
+            "path = pathlib.Path(output)\n"
+            "path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "path.write_text(json.dumps({'schema':'codexhub.issue62.identity-replay.v1', 'case':case, 'candidate_sha':candidate, 'capture_manifest_sha256':manifest, 'wire_replay':True, 'outcome':'accepted' if case == 'identity' else 'rejected'}, sort_keys=True, separators=(',', ':')) + '\\n', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        executable_file = str(executable_path.relative_to(tmp_path))
+        environment = {}
+        cli_argv = [executable_file, "helpers/cli.py"]
+        sidecar_argv = [executable_file, "helpers/sidecar-empty.py"]
+        replay_argv = lambda case: [
+            executable_file, "helpers/replay.py", case, "a" * 40, "0" * 64, f"run/replay-{case}.json"
+        ]
+        helper_names = {"cli": "cli.py", "sidecar": "sidecar-empty.py", "replay": "replay.py"}
+    executable_digest = hashlib.sha256(executable_path.read_bytes()).hexdigest()
     executable = {
         "executable_file": executable_file,
         "executable_sha256": executable_digest,
@@ -93,33 +138,33 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         },
         "binding": binding,
         "catalog_model_entry_id": "gpt-5.6-sol",
-        "environment": {"PATH": str(python_copy.parent)},
+        "environment": environment,
         "planner": {
             "model_visible_plan": "complete",
             "hosted_only_disposition": "Unqualified",
             "unknown_tag_disposition": "Unqualified",
         },
         "cli": {
-            "argv": [executable_file, "helpers/cli.py"],
+            "argv": cli_argv,
             **executable,
-            "argv_file_digests": {"helpers/cli.py": file_digest("cli.py")},
+            "argv_file_digests": {f"helpers/{helper_names['cli']}": file_digest(helper_names["cli"])},
             "cli_version": "0.146.0",
         },
         "sidecars": {
             "pre": {
-                "argv": [executable_file, "helpers/sidecar-empty.py"],
+                "argv": sidecar_argv,
                 "output_dir": "run/pre",
                 **executable,
                 "argv_file_digests": {
-                    "helpers/sidecar-empty.py": file_digest("sidecar-empty.py")
+                    f"helpers/{helper_names['sidecar']}": file_digest(helper_names["sidecar"])
                 },
             },
             "post": {
-                "argv": [executable_file, "helpers/sidecar-empty.py"],
+                "argv": sidecar_argv,
                 "output_dir": "run/post",
                 **executable,
                 "argv_file_digests": {
-                    "helpers/sidecar-empty.py": file_digest("sidecar-empty.py")
+                    f"helpers/{helper_names['sidecar']}": file_digest(helper_names["sidecar"])
                 },
             },
         },
@@ -129,9 +174,9 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         ],
         "replays": {
             case: {
-                "argv": [executable_file, "helpers/replay.py", case, "a" * 40, "0" * 64, f"run/replay-{case}.json"],
+                "argv": replay_argv(case),
                 **executable,
-                "argv_file_digests": {"helpers/replay.py": file_digest("replay.py")},
+                "argv_file_digests": {f"helpers/{helper_names['replay']}": file_digest(helper_names["replay"])},
                 "artifact_file": f"run/replay-{case}.json",
                 "case": case,
             }
@@ -211,14 +256,27 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
             "pre_record": f"run/pre-{index}/pre-c{index}.json",
             "post_record": f"run/post-{index}/post-c{index}.json",
         }
-    sidecar_script = tmp_path / "helpers" / "sidecar.py"
-    sidecar_script.write_text(
-        "import pathlib, shutil, sys, time\n"
+    if os.name == "nt":
+        sidecar_name = "sidecar.cmd"
+        sidecar_script = tmp_path / "helpers" / sidecar_name
+        sidecar_script.write_text(
+            "@echo off\n"
+            "copy /y \"%~2\" \"%~1\\%~3\" >nul\n"
+            "ping 127.0.0.1 -n 300 >nul\n",
+            encoding="ascii",
+        )
+        sidecar_prefix = [plan["cli"]["executable_file"], "/d", "/c", "helpers\\sidecar.cmd"]
+    else:
+        sidecar_name = "sidecar.py"
+        sidecar_script = tmp_path / "helpers" / sidecar_name
+        sidecar_script.write_text(
+            "import pathlib, shutil, sys, time\n"
             "out = pathlib.Path(sys.argv[1]); src = pathlib.Path(sys.argv[2])\n"
             "shutil.copyfile(src, out / pathlib.Path(sys.argv[3]).name)\n"
             "time.sleep(300)\n",
-        encoding="utf-8",
-    )
+            encoding="utf-8",
+        )
+        sidecar_prefix = [plan["cli"]["executable_file"], "helpers/sidecar.py"]
     for hop in ("pre", "post"):
         specs = plan["sidecars"][hop]
         source_paths = [payloads[f"{hop}-{index}"] for index in range(8)]
@@ -227,8 +285,7 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
         plan["sidecars"][hop] = [
             {
                 "argv": [
-                    plan["cli"]["executable_file"],
-                    "helpers/sidecar.py",
+                    *sidecar_prefix,
                     f"run/{hop}-{index}",
                     str(source_paths[index].relative_to(tmp_path)),
                     f"{hop}-c{index}.json",
@@ -237,9 +294,7 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
                 "executable_file": plan["cli"]["executable_file"],
                 "executable_sha256": plan["cli"]["executable_sha256"],
                 "argv_file_digests": {
-                    "helpers/sidecar.py": hashlib.sha256(
-                        sidecar_script.read_bytes()
-                    ).hexdigest()
+                    f"helpers/{sidecar_name}": hashlib.sha256(sidecar_script.read_bytes()).hexdigest()
                 },
             }
             for index in range(8)
