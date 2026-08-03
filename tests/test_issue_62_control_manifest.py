@@ -333,6 +333,30 @@ def test_manifest_rejects_pre_post_digest_mismatch() -> None:
         manifest.build_manifest(controls, candidate_identity=_candidate())
 
 
+def test_manifest_rejects_incomplete_body_and_sse_fingerprints() -> None:
+    controls = _controls()
+    for side in (controls[0]["pre"], controls[0]["post"]):  # type: ignore[index]
+        side["request"]["complete"] = False  # type: ignore[index]
+        side["request"]["sha256"] = None  # type: ignore[index]
+        side["request"]["hmac_sha256"] = None  # type: ignore[index]
+    with pytest.raises(manifest.ManifestValidationError, match="control_request_fingerprint_incomplete"):
+        manifest.build_manifest(controls, candidate_identity=_candidate())
+
+    controls = _controls()
+    for side in (controls[0]["pre"], controls[0]["post"]):  # type: ignore[index]
+        side["sse"]["complete"] = False  # type: ignore[index]
+        side["sse"]["sequence_sha256"] = None  # type: ignore[index]
+        side["sse"]["sequence_hmac_sha256"] = None  # type: ignore[index]
+    with pytest.raises(manifest.ManifestValidationError, match="control_sse_fingerprint_incomplete"):
+        manifest.build_manifest(controls, candidate_identity=_candidate())
+
+
+def test_sidecar_accepts_done_as_a_sanitized_sse_terminal_class() -> None:
+    record = _sidecar("done-terminal", "pre", streaming=True, status=200, terminal="done")
+    sanitized = manifest.sanitize_sidecar_record(record, expected_hop="pre")
+    assert sanitized["sse"]["terminal_classes"] == ["done"]  # type: ignore[index]
+
+
 def test_candidate_source_provenance_never_accepts_placeholder_hash() -> None:
     unavailable = _candidate()
     unavailable["cli_source_commit"] = "a" * 40
@@ -397,3 +421,25 @@ def test_manifest_cli_emits_sanitized_fixture_and_replay_report(tmp_path: Path) 
     serialized = output_path.read_text(encoding="utf-8")
     for forbidden in ("must-not-be-retained", "capture_id", "call_id", "item_id", "prompt"):
         assert forbidden not in serialized
+
+
+def test_manifest_reconcile_rejects_top_level_drift_and_qualification_loss() -> None:
+    built = manifest.build_manifest(_controls(), candidate_identity=_candidate())
+
+    with_extra = copy.deepcopy(built)
+    with_extra["prompt"] = "must-not-be-retained"
+    report = manifest.reconcile_manifest(with_extra)
+    assert report["reconciled"] is False
+    assert "manifest_fields_invalid" in report["mismatches"]
+
+    without_qualification = copy.deepcopy(built)
+    without_qualification.pop("qualification")
+    report = manifest.reconcile_manifest(without_qualification)
+    assert report["reconciled"] is False
+    assert any("manifest_fields_invalid" in mismatch for mismatch in report["mismatches"])
+
+    synthetic_ready = copy.deepcopy(built)
+    synthetic_ready["qualification"]["ready_for_issue62"] = True
+    report = manifest.reconcile_manifest(synthetic_ready)
+    assert report["reconciled"] is False
+    assert "synthetic_scope_cannot_qualify" in report["mismatches"]

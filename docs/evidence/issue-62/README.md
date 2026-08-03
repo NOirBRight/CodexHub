@@ -254,12 +254,13 @@ URLs, headers, credentials, prompts, tool arguments, or wire identifiers.
 validates the canonical manifest schema and fails closed on mutation,
 deletion, loss, missing fingerprints, or route/catalog mismatch.
 
-For Codex CLI `0.146.0`, npm publishes the package SHA/integrity but does not
-publish a source commit.  Evidence must therefore use
-`cli_source_commit: null` with
+For Codex CLI `0.146.0`, the package metadata does not include `gitHead`.
+Evidence may use `cli_source_commit: null` with
 `cli_source_commit_status: not_published_by_registry`; a fabricated SHA is
-not acceptable.  If a future registry artifact publishes a real commit, set
-the status to `published` and provide its exact 40-hex commit.
+not acceptable.  If the npm provenance attestation has been independently
+verified, its exact SLSA resolved-dependency commit may instead be recorded
+with status `published` (for `0.146.0`, the attested release commit is
+`e363b08c9175ac1cbe5893615dd2cb9ddf95043b2`).
 
 ## Isolated live-evidence sidecar lane
 

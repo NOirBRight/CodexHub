@@ -34,6 +34,17 @@ SCHEMA = "codexhub.issue62.control-manifest.v1"
 SYNTHETIC_SCOPE = "synthetic_fixture_only"
 LIVE_SCOPE = "authorized_live_control"
 VERIFICATION_SCOPES = frozenset({SYNTHETIC_SCOPE, LIVE_SCOPE})
+MANIFEST_FIELDS = frozenset(
+    {
+        "schema",
+        "verification_scope",
+        "candidate_identity",
+        "controls",
+        "identity_control",
+        "capture_manifest_sha256",
+        "qualification",
+    }
+)
 
 # These are deliberately semantic labels, not arbitrary response/event text.
 CONTROL_NAMES = (
@@ -49,6 +60,9 @@ CONTROL_NAMES = (
 CONTROL_NAME_SET = frozenset(CONTROL_NAMES)
 TERMINAL_CLASSES = frozenset(
     {"response.completed", "response.failed", "error", "json_response"}
+)
+SSE_TERMINAL_CLASSES = frozenset(
+    {"response.completed", "response.failed", "error", "done"}
 )
 CONTENT_TYPE_CLASSES = frozenset({"event-stream", "json"})
 TOOL_CHOICES = frozenset({"auto", "none", "required", "function", None})
@@ -180,7 +194,7 @@ def _sse_summary(value: Any, code: str) -> dict[str, Any] | None:
     terminal_classes = value.get("terminal_classes")
     if (
         not isinstance(terminal_classes, list)
-        or any(item not in TERMINAL_CLASSES - {"json_response"} for item in terminal_classes)
+        or any(item not in SSE_TERMINAL_CLASSES for item in terminal_classes)
         or terminal_classes != sorted(set(terminal_classes))
     ):
         raise ManifestValidationError(code)
@@ -470,10 +484,35 @@ def _require_complete_fingerprints(pre: Mapping[str, Any], post: Mapping[str, An
     that as invalid instead of allowing ``None == None`` to appear equal.
     """
 
-    if pre.get("request") is None or post.get("request") is None:
-        raise ManifestValidationError("control_request_fingerprint_missing")
-    if pre.get("response") is None or post.get("response") is None:
-        raise ManifestValidationError("control_response_fingerprint_missing")
+    for side, label in ((pre, "request"), (post, "request")):
+        fingerprint = side.get(label)
+        if fingerprint is None:
+            raise ManifestValidationError("control_request_fingerprint_missing")
+        if not isinstance(fingerprint, Mapping) or fingerprint.get("complete") is not True:
+            raise ManifestValidationError("control_request_fingerprint_incomplete")
+        if not fingerprint.get("sha256") or not fingerprint.get("hmac_sha256"):
+            raise ManifestValidationError("control_request_fingerprint_missing_digest")
+    for side, label in ((pre, "response"), (post, "response")):
+        fingerprint = side.get(label)
+        if fingerprint is None:
+            raise ManifestValidationError("control_response_fingerprint_missing")
+        if not isinstance(fingerprint, Mapping) or fingerprint.get("complete") is not True:
+            raise ManifestValidationError("control_response_fingerprint_incomplete")
+        if not fingerprint.get("sha256") or not fingerprint.get("hmac_sha256"):
+            raise ManifestValidationError("control_response_fingerprint_missing_digest")
+
+
+def _require_complete_sse_fingerprints(pre: Mapping[str, Any], post: Mapping[str, Any]) -> None:
+    """Require complete ordered SSE fingerprints for streaming controls."""
+
+    for side in (pre, post):
+        fingerprint = side.get("sse")
+        if fingerprint is None:
+            raise ManifestValidationError("control_sse_fingerprint_missing")
+        if not isinstance(fingerprint, Mapping) or fingerprint.get("complete") is not True:
+            raise ManifestValidationError("control_sse_fingerprint_incomplete")
+        if not fingerprint.get("sequence_sha256") or not fingerprint.get("sequence_hmac_sha256"):
+            raise ManifestValidationError("control_sse_fingerprint_missing_digest")
 
 
 def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
@@ -506,6 +545,7 @@ def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
     if pre["content_type_class"] == "event-stream":
         if pre["sse"] is None or post["sse"] is None or not _pair_equal(pre, post, "sse"):
             raise ManifestValidationError("control_sse_fingerprint_mismatch")
+        _require_complete_sse_fingerprints(pre, post)
     elif pre["sse"] is not None or post["sse"] is not None:
         raise ManifestValidationError("control_json_sse_mismatch")
     request_shape = _sanitize_request_shape(control.get("request_shape"))
@@ -583,6 +623,7 @@ def _validate_canonical_control(control: Mapping[str, Any]) -> dict[str, Any]:
     if pre["content_type_class"] == "event-stream":
         if pre["sse"] is None or post["sse"] is None or not _pair_equal(pre, post, "sse"):
             raise ManifestValidationError("control_sse_fingerprint_mismatch")
+        _require_complete_sse_fingerprints(pre, post)
     elif pre["sse"] is not None or post["sse"] is not None:
         raise ManifestValidationError("control_json_sse_mismatch")
 
@@ -677,6 +718,35 @@ def _manifest_core(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_identity": manifest.get("candidate_identity"),
         "controls": manifest.get("controls"),
         "identity_control": manifest.get("identity_control"),
+        "qualification": manifest.get("qualification"),
+    }
+
+
+def _validate_qualification(value: Any) -> dict[str, Any]:
+    expected = frozenset(
+        {
+            "candidate_identity_complete",
+            "all_required_controls_complete",
+            "identity_replay",
+            "ready_for_issue62",
+            "reason",
+        }
+    )
+    if not isinstance(value, Mapping):
+        raise ManifestValidationError("qualification_invalid")
+    _require_exact_fields(value, expected, "qualification_fields_invalid")
+    for key in ("candidate_identity_complete", "all_required_controls_complete", "ready_for_issue62"):
+        _require_bool(value.get(key), "qualification_boolean_invalid")
+    if value.get("identity_replay") not in {"not_captured", "captured"}:
+        raise ManifestValidationError("qualification_identity_replay_invalid")
+    if not isinstance(value.get("reason"), str) or not value.get("reason"):
+        raise ManifestValidationError("qualification_reason_invalid")
+    return {
+        "candidate_identity_complete": value["candidate_identity_complete"],
+        "all_required_controls_complete": value["all_required_controls_complete"],
+        "identity_replay": value["identity_replay"],
+        "ready_for_issue62": value["ready_for_issue62"],
+        "reason": value["reason"],
     }
 
 
@@ -720,15 +790,7 @@ def build_manifest(
         "replay_cases": ["identity", "mutation", "deletion", "loss"],
         "wire_pairing": "control_label_ordinal_without_wire_identifier",
     }
-    core = {
-        "schema": SCHEMA,
-        "verification_scope": verification_scope,
-        "candidate_identity": candidate,
-        "controls": sorted(controls, key=lambda item: item["name"]),
-        "identity_control": identity_control,
-    }
-    core["capture_manifest_sha256"] = _canonical_digest(core)
-    core["qualification"] = {
+    qualification = {
         "candidate_identity_complete": True,
         "all_required_controls_complete": not missing,
         "identity_replay": "not_captured",
@@ -739,6 +801,15 @@ def build_manifest(
             else "wire replay and final inventory reconciliation required"
         ),
     }
+    core = {
+        "schema": SCHEMA,
+        "verification_scope": verification_scope,
+        "candidate_identity": candidate,
+        "controls": sorted(controls, key=lambda item: item["name"]),
+        "identity_control": identity_control,
+        "qualification": qualification,
+    }
+    core["capture_manifest_sha256"] = _canonical_digest(core)
     return core
 
 
@@ -763,7 +834,14 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Reconcile a generated or replayed manifest without reading source bodies."""
 
     mismatches: list[str] = []
-    if not isinstance(manifest, Mapping) or manifest.get("schema") != SCHEMA:
+    if not isinstance(manifest, Mapping):
+        return {"reconciled": False, "mismatches": ["schema_invalid"]}
+    try:
+        _require_exact_fields(manifest, MANIFEST_FIELDS, "manifest_fields_invalid")
+    except ManifestValidationError as exc:
+        mismatches.append(str(exc))
+    if manifest.get("schema") != SCHEMA:
+        mismatches.append("schema_invalid")
         return {"reconciled": False, "mismatches": ["schema_invalid"]}
     try:
         candidate = _validate_candidate(manifest.get("candidate_identity"))
@@ -806,10 +884,17 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             mismatches.append("identity_control_replay_cases")
     if manifest.get("verification_scope") not in VERIFICATION_SCOPES:
         mismatches.append("verification_scope_invalid")
-    if manifest.get("verification_scope") == SYNTHETIC_SCOPE:
-        qualification = manifest.get("qualification")
-        if isinstance(qualification, Mapping) and qualification.get("ready_for_issue62") is True:
+    try:
+        qualification = _validate_qualification(manifest.get("qualification"))
+    except ManifestValidationError as exc:
+        mismatches.append(f"qualification:{exc}")
+        qualification = {}
+    if qualification.get("ready_for_issue62") is True:
+        mismatches.append("manifest_qualification_not_performed")
+        if manifest.get("verification_scope") == SYNTHETIC_SCOPE:
             mismatches.append("synthetic_scope_cannot_qualify")
+    if qualification.get("identity_replay") != "not_captured":
+        mismatches.append("live_provenance_not_captured")
     expected_digest = manifest.get("capture_manifest_sha256")
     if not isinstance(expected_digest, str) or _HEX64.fullmatch(expected_digest) is None:
         mismatches.append("capture_manifest_sha256_invalid")
