@@ -91,7 +91,7 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         },
         "binding": binding,
         "catalog_model_entry_id": "gpt-5.6-sol",
-        "environment": {"PATH": "tools"},
+        "environment": {"PATH": str(python_copy.parent)},
         "planner": {
             "model_visible_plan": "complete",
             "hosted_only_disposition": "Unqualified",
