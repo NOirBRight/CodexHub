@@ -33,6 +33,8 @@ param(
     [string]$PiPath = 'pi.exe',
     [string]$OmpPath = 'omp.exe',
 
+    [switch]$CliOnly,
+
     [int]$TimeoutSeconds = 180,
 
     [int]$ManualEvidenceTimeoutSeconds = 900,
@@ -205,6 +207,13 @@ $script:MinimumVersions = [ordered]@{
     pi = '0.80.6'
     omp = '17.0.3'
 }
+$script:CliOnly = [bool]$CliOnly
+$script:VerificationScope = if ($script:CliOnly) { 'cli_only' } else { 'gui_and_cli' }
+$script:VersionKeys = if ($script:CliOnly) {
+    @('codex_cli', 'opencode', 'pi', 'omp')
+} else {
+    @($script:MinimumVersions.Keys)
+}
 $script:ObservedVersions = [ordered]@{}
 $script:MaximumCapturedCharacters = 65536
 $script:MaximumClientEventCharacters = 1048576
@@ -323,7 +332,7 @@ function Write-JsonFile {
 
 function Get-ReportedClientVersions {
     $reported = [ordered]@{}
-    foreach ($name in $script:MinimumVersions.Keys) {
+    foreach ($name in $script:VersionKeys) {
         $reported[$name] = if ($script:ObservedVersions.Contains($name)) {
             [string]$script:ObservedVersions[$name]
         }
@@ -338,6 +347,7 @@ function Get-FailureSummaryValue {
     param([string]$FailureClassification, [string[]]$Artifacts = @())
     return [ordered]@{
         schema = 'codexhub.real-client-e2e-summary.v2'
+        verification_scope = $script:VerificationScope
         candidate_sha = if ($CandidateSha -match '^[0-9a-fA-F]{40}$') { $CandidateSha.ToLowerInvariant() } else { $null }
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-fA-F]{40}$') { $ManagedClientConfigSha.ToLowerInvariant() } else { $null }
         outcome = 'failed'
@@ -448,6 +458,7 @@ function Invoke-RunnerSupervisor {
         OpenCodePath = $OpenCodePath
         PiPath = $PiPath
         OmpPath = $OmpPath
+        CliOnly = [bool]$CliOnly
         TimeoutSeconds = $TimeoutSeconds
         ManualEvidenceTimeoutSeconds = $ManualEvidenceTimeoutSeconds
         OverallTimeoutSeconds = $OverallTimeoutSeconds
@@ -485,6 +496,7 @@ function Invoke-RunnerSupervisor {
   -ThirdPartyModel 'internal' `
   -OutputDirectory '.' `
   -HostEnvironmentManifest '.' `
+  -CliOnly:$false `
   -TimeoutSeconds 1 `
   -ManualEvidenceTimeoutSeconds 1 `
   -OverallTimeoutSeconds 1 `
@@ -2889,7 +2901,7 @@ try {
         'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
-        'PiPath', 'OmpPath', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
+        'PiPath', 'OmpPath', 'CliOnly', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
         'OverallTimeoutSeconds'
     ) -Failure 'preflight_supervisor_arguments_invalid'
     $CandidateSha = [string]$forwardedArguments.CandidateSha
@@ -2907,12 +2919,21 @@ try {
     $OpenCodePath = [string]$forwardedArguments.OpenCodePath
     $PiPath = [string]$forwardedArguments.PiPath
     $OmpPath = [string]$forwardedArguments.OmpPath
+    $CliOnly = [bool]$forwardedArguments.CliOnly
     $TimeoutSeconds = [int]$forwardedArguments.TimeoutSeconds
     $ManualEvidenceTimeoutSeconds = [int]$forwardedArguments.ManualEvidenceTimeoutSeconds
     $OverallTimeoutSeconds = [int]$forwardedArguments.OverallTimeoutSeconds
 }
 catch {
     throw 'preflight_supervisor_arguments_invalid'
+}
+
+$script:CliOnly = [bool]$CliOnly
+$script:VerificationScope = if ($script:CliOnly) { 'cli_only' } else { 'gui_and_cli' }
+$script:VersionKeys = if ($script:CliOnly) {
+    @('codex_cli', 'opencode', 'pi', 'omp')
+} else {
+    @($script:MinimumVersions.Keys)
 }
 
 $CandidateSha = $CandidateSha.ToLowerInvariant()
@@ -3042,7 +3063,8 @@ if ([string]$hostEnvironment.schema -cne 'codexhub.real-client-host-environment.
 $profile = Read-JsonObject -Path $accountPath -Failure 'preflight_account_profile_invalid'
 Assert-ExactJsonProperties -Value $profile -Names @('schema', 'dedicated_account', 'codex_login_ready', 'gui_ready', 'host_session_reused') -Failure 'preflight_account_profile_invalid'
 if ([string]$profile.schema -cne 'codexhub.real-client-account.v1' -or
-    [bool]$profile.dedicated_account -ne $true -or [bool]$profile.codex_login_ready -ne $true -or [bool]$profile.gui_ready -ne $true -or
+    [bool]$profile.dedicated_account -ne $true -or [bool]$profile.codex_login_ready -ne $true -or
+    (-not $CliOnly -and [bool]$profile.gui_ready -ne $true) -or
     [bool]$profile.host_session_reused -ne $false) {
     throw 'preflight_account_not_ready'
 }
@@ -3077,12 +3099,14 @@ if (Test-Path -LiteralPath $summaryPath) {
 }
 
 $executables = @{
-    desktop = Resolve-CommandPath -Path $CodexDesktopPath -Name 'desktop'
     'codex-cli' = Resolve-CommandPath -Path $CodexCliPath -Name 'codex_cli'
-    zcode = Resolve-CommandPath -Path $ZCodePath -Name 'zcode'
     opencode = Resolve-CommandPath -Path $OpenCodePath -Name 'opencode'
     pi = Resolve-CommandPath -Path $PiPath -Name 'pi'
     omp = Resolve-CommandPath -Path $OmpPath -Name 'omp'
+}
+if (-not $CliOnly) {
+    $executables.desktop = Resolve-CommandPath -Path $CodexDesktopPath -Name 'desktop'
+    $executables.zcode = Resolve-CommandPath -Path $ZCodePath -Name 'zcode'
 }
 if ($script:WindowsInstallMetadata) {
     $nonFixtureExecutables = @($executables.Values | Where-Object {
@@ -3096,30 +3120,45 @@ if ($script:WindowsInstallMetadata) {
 }
 $actualVersions = [ordered]@{}
 Set-RunnerPhase -Phase 'client_materialization'
-foreach ($versionTarget in @(
-    [pscustomobject]@{ client = 'desktop'; key = 'desktop' },
+$versionTargets = @(
     [pscustomobject]@{ client = 'codex-cli'; key = 'codex_cli' },
-    [pscustomobject]@{ client = 'zcode'; key = 'zcode' },
     [pscustomobject]@{ client = 'opencode'; key = 'opencode' },
     [pscustomobject]@{ client = 'pi'; key = 'pi' },
     [pscustomobject]@{ client = 'omp'; key = 'omp' }
-)) {
+)
+if (-not $CliOnly) {
+    $versionTargets = @(
+        [pscustomobject]@{ client = 'desktop'; key = 'desktop' },
+        $versionTargets[0],
+        [pscustomobject]@{ client = 'zcode'; key = 'zcode' },
+        $versionTargets[1],
+        $versionTargets[2],
+        $versionTargets[3]
+    )
+}
+foreach ($versionTarget in $versionTargets) {
     $actualVersions[$versionTarget.key] = Get-NativeClientVersion -Client $versionTarget.client -Executable $executables[$versionTarget.client] -Minimum $script:MinimumVersions[$versionTarget.key] -ProbeRoot (Join-Path $workRoot "version-$($versionTarget.client)")
     $script:ObservedVersions[$versionTarget.key] = $actualVersions[$versionTarget.key]
 }
-$desktopLaunchExecutable = Copy-DesktopApplicationPayload `
-    -Executable $executables.desktop `
-    -WorkRoot $workRoot `
-    -IsolationRoot $isolationRoot
+if (-not $CliOnly) {
+    $desktopLaunchExecutable = Copy-DesktopApplicationPayload `
+        -Executable $executables.desktop `
+        -WorkRoot $workRoot `
+        -IsolationRoot $isolationRoot
+}
 [void](New-Item -ItemType Directory -Path $artifactRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $artifactRoot 'cases'))
 
-$manualCases = @(
-    [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
-    [pscustomobject]@{ case_id = 'desktop-ollama-cloud'; client = 'desktop'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
-    [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
-    [pscustomobject]@{ case_id = 'zcode-ollama-cloud'; client = 'zcode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
-)
+$manualCases = if ($CliOnly) {
+    @()
+} else {
+    @(
+        [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'desktop-ollama-cloud'; client = 'desktop'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+        [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'zcode-ollama-cloud'; client = 'zcode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
+    )
+}
 $automatedCases = @(
     [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses' },
     [pscustomobject]@{ case_id = 'codex-cli-ollama-cloud'; client = 'codex-cli'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
@@ -3132,9 +3171,11 @@ $automatedCases = @(
 )
 
 $runBinding = New-RunBinding
-Write-ManualEvidenceTemplate -Path $manualTemplatePath -ManualCases $manualCases -RunBinding $runBinding
-if (Test-Path -LiteralPath $manualEvidencePath) {
-    throw 'manual_evidence_preexisting'
+if (-not $CliOnly) {
+    Write-ManualEvidenceTemplate -Path $manualTemplatePath -ManualCases $manualCases -RunBinding $runBinding
+    if (Test-Path -LiteralPath $manualEvidencePath) {
+        throw 'manual_evidence_preexisting'
+    }
 }
 $trackedProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 $nativeGuiProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
@@ -3219,7 +3260,9 @@ try {
         }
         $caseConfigurations[$case.case_id] = $configuration
     }
-    [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
+    if (-not $CliOnly) {
+        [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
+    }
     $candidateStartupStopwatch.Stop()
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $remainingStartupMilliseconds = $candidateStartupBudgetMilliseconds - [int]$candidateStartupStopwatch.ElapsedMilliseconds
@@ -3240,7 +3283,9 @@ try {
     Wait-CandidateGatewayReady -CandidateProcess $candidateProcess -TimeoutMilliseconds $remainingStartupMilliseconds -ElapsedBeforeWaitMilliseconds $elapsedBeforeWaitMilliseconds
     $candidateStartupStopwatch.Stop()
 
-    Set-RunnerPhase -Phase 'manual_evidence'
+    $manualResults = @()
+    if (-not $CliOnly) {
+        Set-RunnerPhase -Phase 'manual_evidence'
     foreach ($guiCase in $manualCases) {
         $guiClient = $guiCase.client
         $guiRoot = Join-Path $workRoot ("gui-" + $guiClient)
@@ -3315,6 +3360,7 @@ try {
         Start-Sleep -Milliseconds 100
     }
     $manualResults = @(Get-ManualResults -EvidencePath $manualEvidencePath -ManualCases $manualCases -ArtifactRoot $artifactRoot -RunBinding $runBinding)
+    }
 
     Set-RunnerPhase -Phase 'automated_cases'
     $automatedById = @{}
@@ -3325,25 +3371,35 @@ try {
     foreach ($result in $manualResults) {
         $manualById[$result.case_id] = $result
     }
-    $caseOrder = @(
-        'desktop-luna', 'desktop-ollama-cloud',
-        'codex-cli-luna', 'codex-cli-ollama-cloud',
-        'opencode-luna', 'opencode-ollama-cloud',
-        'zcode-luna', 'zcode-ollama-cloud',
-        'pi-luna', 'pi-ollama-cloud',
-        'omp-luna', 'omp-ollama-cloud'
-    )
+    $caseOrder = if ($CliOnly) {
+        @(
+            'codex-cli-luna', 'codex-cli-ollama-cloud',
+            'opencode-luna', 'opencode-ollama-cloud',
+            'pi-luna', 'pi-ollama-cloud',
+            'omp-luna', 'omp-ollama-cloud'
+        )
+    } else {
+        @(
+            'desktop-luna', 'desktop-ollama-cloud',
+            'codex-cli-luna', 'codex-cli-ollama-cloud',
+            'opencode-luna', 'opencode-ollama-cloud',
+            'zcode-luna', 'zcode-ollama-cloud',
+            'pi-luna', 'pi-ollama-cloud',
+            'omp-luna', 'omp-ollama-cloud'
+        )
+    }
     $caseResults = @($caseOrder | ForEach-Object {
         if ($manualById.ContainsKey($_)) { $manualById[$_] } else { $automatedById[$_] }
     })
     $passedCount = @($caseResults | Where-Object { $_.outcome -ceq 'passed' }).Count
     $summary = [ordered]@{
         schema = 'codexhub.real-client-e2e-summary.v2'
+        verification_scope = $script:VerificationScope
         candidate_sha = $CandidateSha
         managed_client_config_sha = $ManagedClientConfigSha
         run_binding_sha256 = $runBinding
-        outcome = if ($passedCount -eq 12) { 'passed' } else { 'failed' }
-        failure_classification = if ($passedCount -eq 12) { 'none' } else { 'case_failure' }
+        outcome = if ($passedCount -eq $caseResults.Count -and $caseResults.Count -gt 0) { 'passed' } else { 'failed' }
+        failure_classification = if ($passedCount -eq $caseResults.Count -and $caseResults.Count -gt 0) { 'none' } else { 'case_failure' }
         hashes = [ordered]@{
             debug_build = Get-Sha256 -Path $DebugBuild
             managed_client_config_build = Get-Sha256 -Path $ManagedClientConfigBuild
@@ -3351,18 +3407,18 @@ try {
         pinned_versions = $actualVersions
         canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', $LunaModel, $ThirdPartyModel)
         counts = [ordered]@{
-            case_count = 12
+            case_count = $caseResults.Count
             passed_count = $passedCount
-            failed_count = 12 - $passedCount
-            manual_case_count = 4
-            automated_case_count = 8
+            failed_count = $caseResults.Count - $passedCount
+            manual_case_count = $manualResults.Count
+            automated_case_count = $automatedCases.Count
         }
         cases = $caseResults
         artifacts = @($caseResults | ForEach-Object { $_.artifact })
     }
     Set-RunnerPhase -Phase 'summary'
     Write-JsonFile -Path $summaryPath -Value $summary
-    if ($passedCount -ne 12) {
+    if ($passedCount -ne $caseResults.Count -or $caseResults.Count -eq 0) {
         exit 1
     }
 }
@@ -3389,6 +3445,7 @@ catch {
     }
     $failureSummary = [ordered]@{
         schema = 'codexhub.real-client-e2e-summary.v2'
+        verification_scope = $script:VerificationScope
         candidate_sha = if ($CandidateSha -match '^[0-9a-f]{40}$') { $CandidateSha } else { $null }
         managed_client_config_sha = if ($ManagedClientConfigSha -match '^[0-9a-f]{40}$') { $ManagedClientConfigSha } else { $null }
         outcome = 'failed'

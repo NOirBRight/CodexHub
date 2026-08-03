@@ -29,6 +29,7 @@ MINIMUM_VERSIONS = {
 }
 SUMMARY_KEYS = {
     "schema",
+    "verification_scope",
     "candidate_sha",
     "managed_client_config_sha",
     "run_binding_sha256",
@@ -399,6 +400,7 @@ def _run(
     manual_timeout_seconds: int = 10,
     overall_timeout_seconds: int = 180,
     authoritative_paths_with_spaces: bool = False,
+    cli_only: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -418,6 +420,11 @@ def _run(
     }
     for name, fixture_name in (client_fakes or {}).items():
         executable_arguments[name] = FIXTURES / fixture_name
+    if cli_only:
+        # CLI-only mode must not even resolve the GUI clients. Keep these
+        # paths absent so a regression back to GUI preflight fails the test.
+        executable_arguments["CodexDesktopPath"] = tmp_path / "missing-codex-desktop.exe"
+        executable_arguments["ZCodePath"] = tmp_path / "missing-zcode.exe"
     if authoritative_paths_with_spaces:
         candidate_root = tmp_path / "Program Files" / "CodexHub Candidate"
         candidate_root.mkdir(parents=True)
@@ -510,6 +517,8 @@ def _run(
     for name, executable in executable_arguments.items():
         command.extend((f"-{name}", str(executable)))
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
+    if cli_only:
+        command.append("-CliOnly")
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
     command.extend(("-OverallTimeoutSeconds", str(overall_timeout_seconds)))
     finalizer = None
@@ -1005,7 +1014,10 @@ def test_materializer_build_sidecar_must_match_explicit_current_candidate_sha(tm
 
 def _assert_exact_summary_schema(summary: dict) -> None:
     assert set(summary) == (SUMMARY_KEYS if summary["cases"] else FAILURE_SUMMARY_KEYS)
-    assert set(summary["pinned_versions"]) == set(MINIMUM_VERSIONS)
+    expected_versions = set(MINIMUM_VERSIONS)
+    if summary.get("verification_scope") == "cli_only":
+        expected_versions -= {"desktop", "zcode"}
+    assert set(summary["pinned_versions"]) == expected_versions
     assert set(summary["counts"]) == COUNT_KEYS
     if summary["cases"]:
         assert set(summary["hashes"]) == {
@@ -1040,6 +1052,53 @@ def test_operator_workflow_uses_authoritative_machine_bound_local_host():
     assert "VM snapshot" not in documentation
 
 
+def test_cli_only_matrix_skips_gui_requirements_and_marks_scope(tmp_path):
+    def disable_gui_readiness(_output, isolation, _debug):
+        profile_path = isolation / "account" / "profile.json"
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["gui_ready"] = False
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    result = _run(
+        tmp_path,
+        cli_only=True,
+        mutate=disable_gui_readiness,
+        finalize_manual=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = tmp_path / "output"
+    summary = json.loads((output / "summary.json").read_text(encoding="utf-8-sig"))
+    _assert_exact_summary_schema(summary)
+    assert summary["verification_scope"] == "cli_only"
+    assert set(summary["pinned_versions"]) == {
+        "codex_cli",
+        "opencode",
+        "pi",
+        "omp",
+    }
+    assert summary["counts"] == {
+        "case_count": 8,
+        "passed_count": 8,
+        "failed_count": 0,
+        "manual_case_count": 0,
+        "automated_case_count": 8,
+    }
+    assert [case["case_id"] for case in summary["cases"]] == [
+        "codex-cli-luna",
+        "codex-cli-ollama-cloud",
+        "opencode-luna",
+        "opencode-ollama-cloud",
+        "pi-luna",
+        "pi-ollama-cloud",
+        "omp-luna",
+        "omp-ollama-cloud",
+    ]
+    assert not (output / "manual-evidence.template.json").exists()
+    assert not (output / "manual-evidence.json").exists()
+    assert not list((output / "isolated" / "work").glob("gui-*.launched"))
+
+
 def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summary(
     tmp_path,
 ):
@@ -1051,6 +1110,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
     _assert_exact_summary_schema(summary)
     assert summary["schema"] == "codexhub.real-client-e2e-summary.v2"
+    assert summary["verification_scope"] == "gui_and_cli"
     assert summary["candidate_sha"] == CANDIDATE_SHA
     assert summary["pinned_versions"] == MINIMUM_VERSIONS
     assert summary["counts"] == {
