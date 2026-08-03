@@ -592,7 +592,15 @@ fn model_list_contains_context_metadata(result: &Value) -> bool {
         .collect();
     !visible_models.is_empty()
         && visible_models.iter().all(|item| {
-            numeric_limit(item, &["context_window", "max_context_window"], "context")
+            numeric_limit(item, &["context_window", "max_context_window"], "context").is_some()
+                && numeric_limit(
+                    item,
+                    &[
+                        "effective_context_window_percent",
+                        "effectiveContextWindowPercent",
+                    ],
+                    "context",
+                )
                 .is_some()
         })
 }
@@ -2796,6 +2804,10 @@ mod tests {
                 ("model".to_string(), json!("gpt-5.6-terra")),
                 ("visibility".to_string(), json!("list")),
                 ("hidden".to_string(), json!(false)),
+                (
+                    "effective_context_window_percent".to_string(),
+                    json!(95),
+                ),
             ]);
             if let Some(context) = context {
                 model.insert("context_window".to_string(), json!(context));
@@ -2913,7 +2925,7 @@ for line in sys.stdin:
     message = json.loads(line)
     if message.get("id") != 2:
         continue
-    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False, "context_window": 272000}]}}), flush=True)
+    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False, "context_window": 272000, "effective_context_window_percent": 95}]}}), flush=True)
     time.sleep(2)
     cache_path = Path(os.environ["FAKE_MODELS_CACHE"])
     temporary_path = cache_path.with_suffix(".tmp")
@@ -2945,7 +2957,8 @@ for line in sys.stdin:
                     "model": "gpt-5.6-terra",
                     "visibility": "list",
                     "hidden": false,
-                    "context_window": 272000
+                    "context_window": 272000,
+                    "effective_context_window_percent": 95
                 }]
             })
         );
@@ -2981,7 +2994,8 @@ for line in sys.stdin:
                     "model": "gpt-5.6-terra",
                     "visibility": "list",
                     "hidden": false,
-                    "context_window": 272000
+                    "context_window": 272000,
+                    "effective_context_window_percent": 95
                 }]
             })
         );
@@ -3026,7 +3040,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn app_server_model_list_waits_for_cache_only_when_context_metadata_is_absent() {
+    fn app_server_model_list_waits_for_cache_when_context_metadata_is_partial() {
         let root = temp_root("app-server-context-cache-grace");
         let script = root.join("fake-codex-app-server.py");
         let cache_path = root.join("codex-home").join("models_cache.json");
@@ -3060,7 +3074,7 @@ for line in sys.stdin:
     message = json.loads(line)
     if message.get("id") != 2:
         continue
-    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False}]}}), flush=True)
+    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False, "context_window": 272000}]}}), flush=True)
     time.sleep(0.15)
     cache_path = Path(os.environ["FAKE_MODELS_CACHE"])
     temporary_path = cache_path.with_suffix(".tmp")
@@ -3096,7 +3110,7 @@ for line in sys.stdin:
             &cache_path,
             Duration::from_secs(1),
         )
-        .expect("missing response context should use the bounded native-cache grace");
+        .expect("partial response context should use the bounded native-cache grace");
 
         assert_eq!(result["data"][0]["model"], "gpt-5.6-terra");
         let cache: Value =
