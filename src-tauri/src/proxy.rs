@@ -5372,6 +5372,8 @@ time.sleep(10)
             let old_status =
                 start_with_controlled_inspector(&old_paths, &old_inspector, &listener_inspector)?;
             ensure(old_status.proxy_running, "old bundle should start")?;
+            let old_pid = read_pid(&old_paths)?
+                .ok_or_else(|| "old bundle should own the proxy PID".to_string())?;
 
             replace_managed_proxy_from_previous_bundle_with_controls(
                 &new_paths,
@@ -5380,6 +5382,11 @@ time.sleep(10)
                 &listener_inspector,
             )?;
             previous_bundle_replaced = true;
+            // The debug Gateway closes its health endpoint before its recorder
+            // drains and the Python process exits.  Keep the bundle-upgrade
+            // fixture from racing the next reconciliation through that
+            // transient health-unavailable/PID-still-live window.
+            wait_for_missing_process(old_pid);
             let new_status =
                 start_with_controlled_inspector(&new_paths, &new_inspector, &listener_inspector)?;
             ensure(new_status.proxy_running, "new bundle should start")?;
