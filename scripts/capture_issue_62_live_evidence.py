@@ -35,6 +35,7 @@ _OUTCOMES = frozenset({"complete", "incomplete"})
 _FAILURES = frozenset(
     {
         "client_cancelled",
+        "correlation_binding_invalid",
         "downstream_cancelled",
         "forwarding_failed",
         "invalid_content_length",
@@ -80,6 +81,9 @@ _SSE_FIELDS = frozenset(
 )
 _CAPTURE_ID = re.compile(r"c[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_CORRELATION_TOKEN = re.compile(r"[0-9a-f]{32}\Z")
+_CORRELATION_BINDING = re.compile(r"([0-9a-f]{32})\.([0-9a-f]{64})\Z")
+_CORRELATION_HEADER = "X-CodexHub-Issue62-Capture"
 
 
 class ConfigurationError(ValueError):
@@ -391,10 +395,76 @@ def validate_capture_record(record: Mapping[str, Any], hop: str) -> None:
             raise ArtifactValidationError("record_completion_invalid")
 
 
-def write_capture_record(output_dir: Path, hop: str, record: Mapping[str, Any]) -> Path:
-    """Atomically publish one sanitized record and always remove its partial."""
+def _capture_id_for_token(key: bytes, correlation_token: str) -> str:
+    if not isinstance(key, bytes) or not 32 <= len(key) <= 4096:
+        raise ValueError("capture_key_invalid")
+    if (
+        not isinstance(correlation_token, str)
+        or _CORRELATION_TOKEN.fullmatch(correlation_token) is None
+    ):
+        raise ValueError("correlation_token_invalid")
+    digest = hmac.new(
+        key,
+        b"issue62-capture\0" + correlation_token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return "c" + digest[:32]
+
+
+def _new_correlation_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _correlation_binding(key: bytes, correlation_token: str) -> str:
+    if (
+        not isinstance(correlation_token, str)
+        or _CORRELATION_TOKEN.fullmatch(correlation_token) is None
+    ):
+        raise ValueError("correlation_token_invalid")
+    signature = hmac.new(
+        key,
+        b"issue62-correlation\0" + correlation_token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{correlation_token}.{signature}"
+
+
+def _correlation_token_from_header(key: bytes, value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = _CORRELATION_BINDING.fullmatch(value)
+    if match is None:
+        return None
+    correlation_token, signature = match.groups()
+    expected = hmac.new(
+        key,
+        b"issue62-correlation\0" + correlation_token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    return correlation_token
+
+
+def write_capture_record(
+    output_dir: Path,
+    hop: str,
+    record: Mapping[str, Any],
+    *,
+    capture_key: bytes | None = None,
+    correlation_token: str | None = None,
+) -> Path:
+    """Atomically publish one live-bound sanitized record and remove its partial."""
 
     validate_capture_record(record, hop)
+    if capture_key is None or correlation_token is None:
+        raise ArtifactValidationError("capture_binding_missing")
+    try:
+        expected_capture_id = _capture_id_for_token(capture_key, correlation_token)
+    except (TypeError, ValueError):
+        raise ArtifactValidationError("capture_binding_invalid") from None
+    if not hmac.compare_digest(str(record["capture_id"]), expected_capture_id):
+        raise ArtifactValidationError("capture_binding_invalid")
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     capture_id = str(record["capture_id"])
@@ -429,10 +499,6 @@ _HOP_BY_HOP_HEADERS = frozenset(
         "upgrade",
     }
 )
-
-
-def _capture_id() -> str:
-    return "c" + uuid.uuid4().hex
 
 
 def _content_type_class(value: str | None) -> str:
@@ -603,11 +669,18 @@ class CaptureSidecarServer:
         return self._thread_failure is None
 
     def _write_control_failure(self, failure: str) -> None:
+        correlation_token = _new_correlation_token()
         try:
             write_capture_record(
                 self._config.output_dir,
                 self._config.hop,
-                _empty_record(self._config.hop, _capture_id(), failure),
+                _empty_record(
+                    self._config.hop,
+                    _capture_id_for_token(self._key, correlation_token),
+                    failure,
+                ),
+                capture_key=self._key,
+                correlation_token=correlation_token,
             )
         except Exception:
             return
@@ -665,7 +738,8 @@ class CaptureSidecarServer:
             return True
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
-        capture_id = _capture_id()
+        correlation_token = _new_correlation_token()
+        capture_id = _capture_id_for_token(self._key, correlation_token)
         started_at = time.monotonic()
         request_fingerprint = BodyFingerprint(self._key, b"request-body")
         response_fingerprint: BodyFingerprint | None = None
@@ -677,6 +751,17 @@ class CaptureSidecarServer:
         request_complete = False
         response_complete = False
         try:
+            if self._config.hop == "post":
+                bound_token = _correlation_token_from_header(
+                    self._key,
+                    handler.headers.get(_CORRELATION_HEADER),
+                )
+                if bound_token is None:
+                    failure = "correlation_binding_invalid"
+                    self._send_bounded_error(handler, 400)
+                    return
+                correlation_token = bound_token
+                capture_id = _capture_id_for_token(self._key, correlation_token)
             raw_length = handler.headers.get("Content-Length")
             try:
                 content_length = int(raw_length) if raw_length is not None else -1
@@ -716,8 +801,11 @@ class CaptureSidecarServer:
             headers = {
                 name: value
                 for name, value in handler.headers.items()
-                if name.lower() not in _HOP_BY_HOP_HEADERS | {"host", "content-length"}
+                if name.lower()
+                not in _HOP_BY_HOP_HEADERS | {"host", "content-length", _CORRELATION_HEADER.lower()}
             }
+            if self._config.hop == "pre":
+                headers[_CORRELATION_HEADER] = _correlation_binding(self._key, correlation_token)
             target_path = _join_target_path(self._target.path, handler.path)
             upstream.request("POST", target_path, body=request_body, headers=headers)
             if upstream.sock is not None:
@@ -810,7 +898,13 @@ class CaptureSidecarServer:
                 ),
             }
             try:
-                write_capture_record(self._config.output_dir, self._config.hop, record)
+                write_capture_record(
+                    self._config.output_dir,
+                    self._config.hop,
+                    record,
+                    capture_key=self._key,
+                    correlation_token=correlation_token,
+                )
             except Exception:
                 return
 
