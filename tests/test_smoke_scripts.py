@@ -933,7 +933,7 @@ def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
     assert "len(stdout) > _VERSION_PROBE_OUTPUT_LIMIT" in source
     assert "len(stderr) > _VERSION_PROBE_OUTPUT_LIMIT" in source
     assert "re.fullmatch(r\"codex-cli\\s+" in source
-    assert "_CODEX_CLI_VERSION_FLOOR = (0, 144, 5)" in source
+    assert "_CODEX_CLI_VERSION_FLOOR = (0, 145, 0)" in source
     assert "--client-version" not in source
     assert '"app-server"' in source
     assert '"thread/start"' in source
