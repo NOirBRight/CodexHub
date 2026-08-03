@@ -927,6 +927,12 @@ def test_embedded_python_runtime_bundles_zstandard_for_app_request_bodies():
 def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
     source = (ROOT / "scripts" / "e2e_codex_app_transport.py").read_text(encoding="utf-8")
 
+    assert "--version" in source
+    assert "_VERSION_PROBE_TIMEOUT_SECONDS = 10" in source
+    assert "_VERSION_PROBE_OUTPUT_LIMIT = 64 * 1024" in source
+    assert "re.fullmatch(r\"codex-cli\\s+" in source
+    assert "_CODEX_CLI_VERSION_FLOOR = (0, 144, 5)" in source
+    assert "--client-version" not in source
     assert '"app-server"' in source
     assert '"thread/start"' in source
     assert '"turn/start"' in source

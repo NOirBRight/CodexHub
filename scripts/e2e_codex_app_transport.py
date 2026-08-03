@@ -13,34 +13,48 @@ import threading
 import time
 
 
+_CODEX_CLI_VERSION_FLOOR = (0, 144, 5)
+_VERSION_PROBE_TIMEOUT_SECONDS = 10
+_VERSION_PROBE_OUTPUT_LIMIT = 64 * 1024
+
+
 def resolve_cli_version(codex_command: Path) -> str:
     """Read the version from the exact CLI binary used by app-server.
 
     The app-server initialize payload is part of the evidence identity.  It
     must not retain a historical fixture version when the operator upgrades
-    the App-managed CLI, otherwise the trace is falsely attributed to an old
-    client.  Allowing an explicit value keeps replay/fixture callers
-    deterministic while the live path binds itself to the executable.
+    the CLI, otherwise the trace is falsely attributed to an old client.
     """
 
-    completed = subprocess.run(
+    process = subprocess.Popen(
         [str(codex_command), "--version"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
-    output = "\n".join((completed.stdout, completed.stderr)).strip()
-    if completed.returncode != 0:
+    try:
+        stdout, stderr = process.communicate(timeout=_VERSION_PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("Codex CLI version probe timed out") from error
+    output = b"\n".join((stdout[:_VERSION_PROBE_OUTPUT_LIMIT], stderr[:_VERSION_PROBE_OUTPUT_LIMIT])).decode(
+        "utf-8", errors="replace"
+    ).strip()
+    if process.returncode != 0:
         raise RuntimeError(
-            f"Codex CLI version probe failed with exit code {completed.returncode}"
+            f"Codex CLI version probe failed with exit code {process.returncode}"
         )
-    match = re.search(r"\bcodex-cli\s+([^\s]+)", output, re.IGNORECASE)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise RuntimeError("Codex CLI version probe returned ambiguous output")
+    match = re.fullmatch(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)", lines[0], re.IGNORECASE)
     if match is None:
-        raise RuntimeError("Codex CLI version probe returned no codex-cli version")
-    return match.group(1)
+        raise RuntimeError("Codex CLI version probe returned no stable three-part version")
+    version = tuple(int(part) for part in match.groups())
+    if version < _CODEX_CLI_VERSION_FLOOR:
+        raise RuntimeError("Codex CLI version is below the supported floor")
+    return ".".join(str(part) for part in version)
 
 
 def main() -> int:
@@ -48,17 +62,13 @@ def main() -> int:
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--cwd", type=Path, required=True)
-    parser.add_argument(
-        "--client-version",
-        help="Override the app-server clientInfo version (otherwise probe --codex --version).",
-    )
     parser.add_argument("--turns", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--session-jsonl", type=Path)
     parser.add_argument("--tool-calls", type=int, default=0)
     parser.add_argument("--pause-between-turns", type=float, default=0.0)
     args = parser.parse_args()
-    client_version = args.client_version or resolve_cli_version(args.codex.resolve())
+    client_version = resolve_cli_version(args.codex.resolve())
 
     env = os.environ.copy()
     env["CODEX_HOME"] = str(args.home.resolve())
