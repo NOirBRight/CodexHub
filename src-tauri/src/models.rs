@@ -18,6 +18,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
+// Codex CLI 0.146 may answer model/list before it atomically publishes the
+// native context cache.  A response that already carries context is a safe
+// direct snapshot and returns immediately; a context-less response needs this
+// bounded grace before the catalog can resolve a safe Official budget.
+const CODEX_APP_SERVER_NATIVE_CACHE_GRACE: Duration = Duration::from_secs(20);
 const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
@@ -411,13 +416,48 @@ fn read_codex_app_server_model_list() -> Result<Value, String> {
     let codex = find_codex_executable()?;
     let mut command = Command::new(&codex);
     command.args(["app-server", "--stdio"]);
-    read_codex_app_server_model_list_with_command(command, CODEX_APP_SERVER_MODEL_LIST_TIMEOUT)
+    let cache_path = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
+    read_codex_app_server_model_list_with_cache_path(
+        command,
+        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
+        &cache_path,
+        CODEX_APP_SERVER_NATIVE_CACHE_GRACE,
+    )
 }
 
+#[cfg(test)]
 fn read_codex_app_server_model_list_with_command(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
 ) -> Result<Value, String> {
+    read_codex_app_server_model_list_with_cache_grace(command, timeout, None, Duration::ZERO)
+}
+
+fn read_codex_app_server_model_list_with_cache_path(
+    command: Command,
+    timeout: Duration,
+    cache_path: &Path,
+    cache_grace: Duration,
+) -> Result<Value, String> {
+    read_codex_app_server_model_list_with_cache_grace(
+        command,
+        timeout,
+        Some(cache_path),
+        cache_grace,
+    )
+}
+
+fn read_codex_app_server_model_list_with_cache_grace(
+    mut command: Command,
+    timeout: Duration,
+    cache_path: Option<&Path>,
+    cache_grace: Duration,
+) -> Result<Value, String> {
+    // Capture the cache before starting app-server.  A context-less
+    // model/list response may only use a cache atomically published by this
+    // request; accepting an unchanged file could mistake an older snapshot
+    // for the current Official context evidence.
+    let initial_cache = cache_path.and_then(readable_native_model_cache);
     let deadline = Instant::now() + timeout;
     command
         .stdin(Stdio::piped())
@@ -513,8 +553,85 @@ fn read_codex_app_server_model_list_with_command(
             return Err(error);
         }
     };
+    if let Some(cache_path) = cache_path {
+        if !model_list_contains_context_metadata(&result)
+            && !wait_for_native_model_cache_publication(
+                cache_path,
+                cache_grace,
+                initial_cache.as_deref(),
+            )
+        {
+            kill_child(&mut child);
+            return Err(
+                "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
+                    .to_string(),
+            );
+        }
+    }
     kill_child(&mut child);
     Ok(result)
+}
+
+fn model_list_contains_context_metadata(result: &Value) -> bool {
+    let Some(items) = result
+        .get("data")
+        .or_else(|| result.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array())
+    else {
+        return false;
+    };
+    let visible_models: Vec<&Value> = items
+        .iter()
+        .filter(|item| {
+            item.as_object().is_some_and(|object| {
+                !item_has_internal_identity(object)
+                    && catalog_visibility_from_item(object) == CatalogVisibility::List
+            })
+        })
+        .collect();
+    !visible_models.is_empty()
+        && visible_models.iter().all(|item| {
+            numeric_limit(item, &["context_window", "max_context_window"], "context")
+                .is_some()
+        })
+}
+
+fn wait_for_native_model_cache_publication(
+    cache_path: &Path,
+    grace: Duration,
+    initial_cache: Option<&[u8]>,
+) -> bool {
+    let deadline = Instant::now() + grace;
+    let mut previous = None;
+    loop {
+        let current = readable_native_model_cache(cache_path);
+        let changed = match (current.as_deref(), initial_cache) {
+            (Some(current), Some(initial)) => current != initial,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if changed && current == previous {
+            return true;
+        }
+        previous = current;
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
+    }
+}
+
+fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(cache_path).ok()?;
+    let payload: Value = serde_json::from_slice(&bytes).ok()?;
+    payload.get("models")?.as_array()?;
+    // Detailed freshness, identity, and comp_hash authority remains in
+    // catalog_sync.py.  This seam only proves that a stable JSON cache was
+    // atomically published; the caller separately requires it to differ from
+    // the pre-request snapshot when context metadata was absent.
+    Some(bytes)
 }
 
 fn read_codex_app_server_value_response(
@@ -2633,7 +2750,10 @@ mod tests {
     #[ignore = "launched as a subprocess by app-server model-list tests"]
     fn app_server_model_list_test_process_helper() {
         let mode = std::env::var(APP_SERVER_TEST_PROCESS_ENV);
-        if !matches!(mode.as_deref(), Ok("respond" | "silent")) {
+        if !matches!(
+            mode.as_deref(),
+            Ok("respond" | "respond-without-context" | "silent")
+        ) {
             return;
         }
         let liveness_path = PathBuf::from(
@@ -2665,19 +2785,27 @@ mod tests {
             .flush()
             .expect("flush app-server test-process liveness record");
 
-        if mode.as_deref() == Ok("respond") {
+        if matches!(mode.as_deref(), Ok("respond" | "respond-without-context")) {
+            let context = if mode.as_deref() == Ok("respond") {
+                Some(272000)
+            } else {
+                None
+            };
+            let mut model = serde_json::Map::from_iter([
+                ("id".to_string(), json!("gpt-5.6-terra")),
+                ("model".to_string(), json!("gpt-5.6-terra")),
+                ("visibility".to_string(), json!("list")),
+                ("hidden".to_string(), json!(false)),
+            ]);
+            if let Some(context) = context {
+                model.insert("context_window".to_string(), json!(context));
+            }
             println!(
                 "\n{}",
                 json!({
                     "id": 2,
                     "result": {
-                        "data": [{
-                            "id": "gpt-5.6-terra",
-                            "model": "gpt-5.6-terra",
-                            "visibility": "list",
-                            "hidden": false,
-                            "context_window": 272000
-                        }]
+                        "data": [Value::Object(model)]
                     }
                 })
             );
@@ -2837,8 +2965,10 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        let result = super::read_codex_app_server_model_list_with_command(
+        let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
+            Duration::from_millis(500),
+            &cache_path,
             Duration::from_millis(500),
         )
         .expect("valid model/list response must not require native cache publication");
@@ -2860,6 +2990,161 @@ for line in sys.stdin:
             "model/list handling must remain bounded without native cache publication"
         );
         assert!(!cache_path.is_file());
+        assert_app_server_test_process_stopped(&helper_liveness_path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_fails_closed_when_context_and_native_cache_are_missing() {
+        let root = temp_root("app-server-missing-context-and-cache");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        let helper_liveness_path = root.join("helper-liveness.lock");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let mut command = responding_app_server_test_process_command(&helper_liveness_path);
+        command.env(APP_SERVER_TEST_PROCESS_ENV, "respond-without-context");
+        let started = Instant::now();
+
+        let error = super::read_codex_app_server_model_list_with_cache_path(
+            command,
+            Duration::from_millis(500),
+            &cache_path,
+            Duration::from_millis(100),
+        )
+        .expect_err("context-less model/list must fail closed without native cache evidence");
+
+        assert_eq!(
+            error,
+            "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "missing context handling must remain bounded"
+        );
+        assert!(!cache_path.is_file());
+        assert_app_server_test_process_stopped(&helper_liveness_path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_waits_for_cache_only_when_context_metadata_is_absent() {
+        let root = temp_root("app-server-context-cache-grace");
+        let script = root.join("fake-codex-app-server.py");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            json!({
+                "fetched_at": "2026-08-03T13:00:00Z",
+                "etag": "stale",
+                "client_version": "0.146.0",
+                "models": [{
+                    "slug": "gpt-5.6-terra",
+                    "context_window": 128000,
+                    "max_context_window": 128000,
+                    "effective_context_window_percent": 95,
+                    "comp_hash": "stale"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &script,
+            r#"import json
+import os
+from pathlib import Path
+import sys
+import time
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") != 2:
+        continue
+    print(json.dumps({"id": 2, "result": {"data": [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "visibility": "list", "hidden": False}]}}), flush=True)
+    time.sleep(0.15)
+    cache_path = Path(os.environ["FAKE_MODELS_CACHE"])
+    temporary_path = cache_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps({
+            "fetched_at": "2026-08-03T13:01:00Z",
+            "etag": "fresh",
+            "client_version": "0.146.0",
+            "models": [{
+                "slug": "gpt-5.6-terra",
+                "context_window": 272000,
+                "max_context_window": 272000,
+                "effective_context_window_percent": 95,
+                "comp_hash": "fresh"
+            }]
+        }),
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, cache_path)
+    time.sleep(2)
+"#,
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(super::find_python());
+        command
+            .arg(&script)
+            .env("FAKE_MODELS_CACHE", &cache_path);
+        let started = Instant::now();
+
+        let result = super::read_codex_app_server_model_list_with_cache_path(
+            command,
+            Duration::from_secs(2),
+            &cache_path,
+            Duration::from_secs(1),
+        )
+        .expect("missing response context should use the bounded native-cache grace");
+
+        assert_eq!(result["data"][0]["model"], "gpt-5.6-terra");
+        let cache: Value =
+            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache["models"][0]["context_window"], 272000);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_server_model_list_rejects_unchanged_native_cache_without_context() {
+        let root = temp_root("app-server-unchanged-cache");
+        let cache_path = root.join("codex-home").join("models_cache.json");
+        let helper_liveness_path = root.join("helper-liveness.lock");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            json!({
+                "fetched_at": "2026-08-03T13:00:00Z",
+                "etag": "unchanged",
+                "client_version": "0.146.0",
+                "models": [{
+                    "slug": "gpt-5.6-terra",
+                    "context_window": 272000,
+                    "max_context_window": 272000,
+                    "effective_context_window_percent": 95,
+                    "comp_hash": "unchanged"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut command = responding_app_server_test_process_command(&helper_liveness_path);
+        command.env(APP_SERVER_TEST_PROCESS_ENV, "respond-without-context");
+
+        let error = super::read_codex_app_server_model_list_with_cache_path(
+            command,
+            Duration::from_millis(500),
+            &cache_path,
+            Duration::from_millis(100),
+        )
+        .expect_err("unchanged native cache must not satisfy a context-less refresh");
+
+        assert_eq!(
+            error,
+            "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
+        );
         assert_app_server_test_process_stopped(&helper_liveness_path);
         let _ = fs::remove_dir_all(root);
     }
