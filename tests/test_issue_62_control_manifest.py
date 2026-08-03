@@ -499,7 +499,12 @@ def test_manifest_accepts_canonical_lowercase_preserved_disposition() -> None:
     planner["hosted_only_disposition"] = "preserved"
     planner["unknown_tag_disposition"] = "local_consume"
 
-    built = manifest.build_manifest(_controls(), candidate_identity=_candidate(), planner=planner)
+    built = manifest.build_manifest(
+        _controls(),
+        candidate_identity=_candidate(),
+        verification_scope=manifest.LIVE_SCOPE,
+        planner=planner,
+    )
 
     assert built["planner"] == planner
 
