@@ -249,6 +249,12 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
             for key, value in control.items()
             if key not in {"name", "pre", "post"}
         }
+        # The live plan binds route provenance to the candidate's route
+        # file.  Reuse that digest for the synthetic control fixture so
+        # the test exercises replay failure rather than an intentional
+        # route-provenance mismatch.
+        semantic["route_identity"] = dict(semantic["route_identity"])
+        semantic["route_identity"]["route_digest"] = plan["candidate_identity"]["route_digest"]
         plan["controls"][index] = {
             "name": control["name"],
             "args": [],

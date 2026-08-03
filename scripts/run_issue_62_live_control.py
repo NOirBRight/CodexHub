@@ -2025,6 +2025,7 @@ def _manifest_candidate(plan: Mapping[str, Any]) -> dict[str, Any]:
         "cli_package_sha256": identity["cli_package_sha256"],
         "catalog_snapshot_sha256": identity["catalog_digest"],
         "catalog_model_entry_id": plan["catalog_model_entry_id"],
+        "route_digest": identity["route_digest"],
     }
 
 
@@ -2320,6 +2321,7 @@ def run_live_control(
                     controls,
                     candidate_identity=_manifest_candidate(loaded),
                     verification_scope=LIVE_SCOPE,
+                    planner=loaded["planner"],
                 )
                 report = reconcile_manifest(manifest)
                 if not report["reconciled"]:

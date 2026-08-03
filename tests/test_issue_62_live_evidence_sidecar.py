@@ -40,11 +40,6 @@ def test_capture_id_is_deterministically_bound_to_correlation_token() -> None:
     assert _capture_id() != _capture_id("2" * 32)
 
 
-def test_capture_id_is_deterministically_bound_to_correlation_token() -> None:
-    assert _capture_id() == _capture_id(CORRELATION_TOKEN)
-    assert _capture_id() != _capture_id("2" * 32)
-
-
 class _FakeUpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
