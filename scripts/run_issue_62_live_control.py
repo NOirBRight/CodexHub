@@ -122,6 +122,7 @@ LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
 LIVE_ENV_KEYS = frozenset(
     {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
 )
+LOCAL_ENV_PATH_KEYS = frozenset({"PATH", "TEMP", "TMP", "PYTHONPATH"})
 SENSITIVE_ENV_KEYS = frozenset(
     {
         "CODEX_HOME",
@@ -378,8 +379,13 @@ class BoundedPhaseRunner:
         self.identity = identity
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._process_factory = process_factory or subprocess.Popen
-        self._environment = _safe_environment(environment or {})
         self._working_directory = str(working_directory) if working_directory is not None else None
+        self._environment = _safe_environment(
+            environment or {},
+            working_directory=Path(working_directory)
+            if working_directory is not None
+            else None,
+        )
         self.journal = SanitizedPhaseJournal(run_root, identity)
         self._active_process: subprocess.Popen[bytes] | None = None
         self._active_lock = threading.Lock()
@@ -817,7 +823,33 @@ def _resolve_isolated_path(
     return str(resolved)
 
 
-def _validate_environment(value: Any) -> dict[str, str]:
+def _environment_value_is_local(
+    key: str, value: str, *, working_directory: Path | None = None
+) -> bool:
+    """Reject host path injection in child environment overrides."""
+
+    if key not in LOCAL_ENV_PATH_KEYS:
+        return True
+    root = working_directory.resolve(strict=False) if working_directory is not None else None
+    for entry in value.split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry)
+        if candidate.is_absolute() or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", entry):
+            if root is None:
+                return False
+            try:
+                candidate.resolve(strict=False).relative_to(root)
+            except (OSError, ValueError, RuntimeError):
+                return False
+        elif ".." in candidate.parts:
+            return False
+    return True
+
+
+def _validate_environment(
+    value: Any, *, isolated_root: Path | None = None
+) -> dict[str, str]:
     if not isinstance(value, Mapping):
         _live_plan_fail("environment_invalid")
     normalized: dict[str, str] = {}
@@ -829,13 +861,18 @@ def _validate_environment(value: Any) -> dict[str, str]:
             or not isinstance(item, str)
             or "\x00" in item
             or len(item) > 4096
+            or not _environment_value_is_local(
+                key, item, working_directory=isolated_root
+            )
         ):
             _live_plan_fail("environment_invalid")
         normalized[key] = item
     return normalized
 
 
-def _safe_environment(overrides: Mapping[str, str]) -> dict[str, str]:
+def _safe_environment(
+    overrides: Mapping[str, str], *, working_directory: Path | None = None
+) -> dict[str, str]:
     """Build a minimal child environment without host credentials/home state."""
 
     result: dict[str, str] = {}
@@ -844,13 +881,17 @@ def _safe_environment(overrides: Mapping[str, str]) -> dict[str, str]:
         if value:
             result[key] = value
     for key, value in overrides.items():
+        if not _environment_value_is_local(
+            key, value, working_directory=working_directory
+        ):
+            continue
         result[key] = value
-    # Only host-derived sensitive values are excluded.  Explicit, validated
-    # plan overrides (for example a case-local PATH/TEMP) are retained so the
-    # isolated executable can resolve its own runtime dependencies.
+    # Never copy sensitive values from arbitrary direct callers.  The public
+    # runner constructor is also used by fixture tests, so this function must
+    # enforce the credential/home boundary itself rather than relying on the
+    # live-plan validator.
     for key in SENSITIVE_ENV_KEYS:
-        if key not in overrides:
-            result.pop(key, None)
+        result.pop(key, None)
     return result
 
 
@@ -1123,7 +1164,9 @@ def load_live_control_plan(
     normalized_sidecars = _validate_sidecars(
         payload.get("sidecars"), isolated_root=isolated_root, run_root=run_root
     )
-    normalized_environment = _validate_environment(payload.get("environment"))
+    normalized_environment = _validate_environment(
+        payload.get("environment"), isolated_root=isolated_root
+    )
     planner = payload.get("planner")
     if not isinstance(planner, Mapping) or frozenset(planner) != PLANNER_FIELDS:
         _live_plan_fail("planner_plan_incomplete")

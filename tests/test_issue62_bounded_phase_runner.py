@@ -58,6 +58,26 @@ def test_success_writes_only_sanitized_phase_status_and_cleanup_receipt(tmp_path
     assert all("argv" not in record and "command" not in record for record in markers)
 
 
+def test_direct_runner_drops_sensitive_and_host_path_overrides(tmp_path: Path) -> None:
+    runner = BoundedPhaseRunner(
+        tmp_path,
+        IDENTITY,
+        environment={
+            "HOME": "C:/host/home",
+            "OPENAI_API_KEY": "must-not-pass",
+            "PATH": "C:/host/bin",
+            "PYTHONPATH": "../host-modules",
+        },
+        working_directory=tmp_path,
+    )
+
+    assert "HOME" not in runner._environment
+    assert "OPENAI_API_KEY" not in runner._environment
+    assert "PATH" not in runner._environment
+    assert "PYTHONPATH" not in runner._environment
+    assert runner.cleanup()["cleanup_completed"] is True
+
+
 class _FakeProcess:
     def __init__(self, return_code: int | None = None) -> None:
         self.return_code = return_code
