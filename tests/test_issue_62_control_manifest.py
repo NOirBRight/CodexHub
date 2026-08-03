@@ -423,6 +423,8 @@ def test_manifest_cli_emits_sanitized_fixture_and_replay_report(tmp_path: Path) 
         "b" * 64,
         "--catalog-snapshot-sha256",
         "c" * 64,
+        "--route-digest",
+        "d" * 64,
     ]
     assert manifest.main(args) == 0
     written = json.loads(output_path.read_text(encoding="utf-8"))
@@ -530,6 +532,22 @@ def test_manifest_requires_route_digest_in_canonical_provenance() -> None:
 
     assert report["reconciled"] is False
     assert any("candidate_identity_fields_invalid" in mismatch for mismatch in report["mismatches"])
+
+
+def test_manifest_requires_explicit_candidate_route_digest() -> None:
+    candidate = _candidate()
+    candidate.pop("route_digest")
+
+    with pytest.raises(manifest.ManifestValidationError, match="candidate_route_digest_required"):
+        manifest.build_manifest(_controls(), candidate_identity=candidate, planner=_planner())
+
+
+def test_manifest_rejects_explicit_candidate_route_digest_mismatch() -> None:
+    candidate = _candidate()
+    candidate["route_digest"] = "e" * 64
+
+    with pytest.raises(manifest.ManifestValidationError, match="control_route_digest_mismatch"):
+        manifest.build_manifest(_controls(), candidate_identity=candidate, planner=_planner())
 
 
 @pytest.mark.parametrize(
