@@ -51,6 +51,11 @@ def _plan(tmp_path: Path) -> dict[str, object]:
     python_copy.parent.mkdir()
     shutil.copy2(sys.executable, python_copy)
     (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (tmp_path / "helpers" / "sidecar-empty.py").write_text(
+        "import time\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
     (tmp_path / "helpers" / "replay.py").write_text(
         "import json, pathlib, sys\n"
         "case, candidate, manifest, output = sys.argv[1:5]\n"
@@ -65,6 +70,9 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         "executable_file": executable_file,
         "executable_sha256": executable_digest,
     }
+    file_digest = lambda name: hashlib.sha256(
+        (tmp_path / "helpers" / name).read_bytes()
+    ).hexdigest()
     return {
         "schema": "codexhub.issue62.live-control-plan.v1",
         "verification_scope": "authorized_live_control",
@@ -78,16 +86,35 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         },
         "binding": binding,
         "catalog_model_entry_id": "gpt-5.6-sol",
-        "environment": {"PATH": str(Path(sys.executable).parent)},
+        "environment": {},
         "planner": {
             "model_visible_plan": "complete",
             "hosted_only_disposition": "Unqualified",
             "unknown_tag_disposition": "Unqualified",
         },
-        "cli": {"argv": [executable_file, "helpers/cli.py"], **executable, "cli_version": "0.146.0"},
+        "cli": {
+            "argv": [executable_file, "helpers/cli.py"],
+            **executable,
+            "argv_file_digests": {"helpers/cli.py": file_digest("cli.py")},
+            "cli_version": "0.146.0",
+        },
         "sidecars": {
-            "pre": {"argv": [executable_file, "helpers/cli.py"], "output_dir": "run/pre", **executable},
-            "post": {"argv": [executable_file, "helpers/cli.py"], "output_dir": "run/post", **executable},
+            "pre": {
+                "argv": [executable_file, "helpers/sidecar-empty.py"],
+                "output_dir": "run/pre",
+                **executable,
+                "argv_file_digests": {
+                    "helpers/sidecar-empty.py": file_digest("sidecar-empty.py")
+                },
+            },
+            "post": {
+                "argv": [executable_file, "helpers/sidecar-empty.py"],
+                "output_dir": "run/post",
+                **executable,
+                "argv_file_digests": {
+                    "helpers/sidecar-empty.py": file_digest("sidecar-empty.py")
+                },
+            },
         },
         "controls": [
             {"name": name, "args": [], "capture": {}}
@@ -97,6 +124,7 @@ def _plan(tmp_path: Path) -> dict[str, object]:
             case: {
                 "argv": [executable_file, "helpers/replay.py", case, "a" * 40, "0" * 64, f"run/replay-{case}.json"],
                 **executable,
+                "argv_file_digests": {"helpers/replay.py": file_digest("replay.py")},
                 "artifact_file": f"run/replay-{case}.json",
                 "case": case,
             }
@@ -139,6 +167,7 @@ def test_live_execution_requires_complete_pre_and_post_sidecar_records(tmp_path:
         _plan(tmp_path),
         run_root=tmp_path / "run",
         timeout_seconds=30,
+        isolated_root=tmp_path,
     )
     assert result["ready_for_issue62"] is False
     assert result["status_code"] == "sidecar_capture_missing"
@@ -200,6 +229,11 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
                 "output_dir": f"run/{hop}-{index}",
                 "executable_file": plan["cli"]["executable_file"],
                 "executable_sha256": plan["cli"]["executable_sha256"],
+                "argv_file_digests": {
+                    "helpers/sidecar.py": hashlib.sha256(
+                        sidecar_script.read_bytes()
+                    ).hexdigest()
+                },
             }
             for index in range(8)
         ]
@@ -208,7 +242,12 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
                 f"run/{hop}-{index}/{hop}-c{index}.json"
             )
     # Re-run plan validation after replacing the sidecar specs.
-    result = run_live_control(plan, run_root=tmp_path / "run", timeout_seconds=30)
+    result = run_live_control(
+        plan,
+        run_root=tmp_path / "run",
+        timeout_seconds=30,
+        isolated_root=tmp_path,
+    )
     assert result["completed"] is False
     assert result["ready_for_issue62"] is False
     assert result["status_code"] == "identity_replay_artifact_invalid"

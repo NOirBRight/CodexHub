@@ -119,11 +119,12 @@ LIVE_PLAN_FIELDS = frozenset(
     }
 )
 LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
-LIVE_ENV_KEYS = frozenset(
-    {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
-)
+LIVE_ENV_KEYS = frozenset({"SystemRoot", "ComSpec"})
 SENSITIVE_ENV_KEYS = frozenset(
     {
+        "PATH",
+        "PATHEXT",
+        "PYTHONPATH",
         "CODEX_HOME",
         "OPENAI_API_KEY",
         "OLLAMA_API_KEY",
@@ -282,6 +283,7 @@ def _count_extra_artifacts(run_root: Path) -> int:
                 entry.name in ALLOWED_ARTIFACT_NAMES
                 and entry.is_file()
                 and not entry.is_symlink()
+                and os.stat(entry).st_nlink == 1
             ):
                 continue
             extras += 1
@@ -322,12 +324,14 @@ def _write_sanitized_json(target: Path, payload: dict[str, object]) -> None:
 def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
     try:
         if process.poll() is not None:
-            return True
+            # A completed parent can still have a descendant.  Treat that
+            # state as unknown rather than claiming the process tree is gone.
+            return False
         if os.name == "nt":
             # ``terminate`` only signals the direct child on Windows.  The
             # Gateway/CLI can spawn grandchildren, so use taskkill's tree mode
             # and suppress all command output.
-            subprocess.run(
+            kill_result = subprocess.run(
                 ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -335,6 +339,8 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
                 check=False,
                 timeout=5,
             )
+            if kill_result.returncode != 0:
+                raise OSError("taskkill failed")
         else:
             os.killpg(int(process.pid), signal.SIGTERM)
         process.wait(timeout=5)
@@ -428,6 +434,7 @@ class BoundedPhaseRunner:
                 stderr=subprocess.DEVNULL,
                 env=self._environment,
                 cwd=self._working_directory,
+                close_fds=True,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
                 shell=False,
@@ -555,6 +562,7 @@ class BoundedPhaseRunner:
                 stderr=subprocess.DEVNULL,
                 env=self._environment,
                 cwd=self._working_directory,
+                close_fds=True,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
                 shell=False,
@@ -727,7 +735,13 @@ def _live_plan_fail(code: str) -> NoReturn:
 
 def _validate_plan_argv(value: Any, code: str = "live_control_plan_invalid") -> list[str]:
     if not isinstance(value, list) or not value or any(
-        not isinstance(item, str) or not item or "\x00" in item for item in value
+        not isinstance(item, str)
+        or not item
+        or "\x00" in item
+        or Path(item).is_absolute()
+        or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", item) is not None
+        or ".." in Path(item).parts
+        for item in value
     ):
         _live_plan_fail(code)
     # Return a fresh list so callers cannot mutate the source object while a
@@ -752,10 +766,11 @@ def _validate_plan_path(value: Any) -> str:
 
 def _is_reparse(path: Path) -> bool:
     try:
-        mode = os.lstat(path).st_mode
+        stat_result = os.lstat(path)
+        mode = stat_result.st_mode
         if stat.S_ISLNK(mode):
             return True
-        attributes = getattr(os.stat(path), "st_file_attributes", 0)
+        attributes = getattr(stat_result, "st_file_attributes", 0)
         return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
     except OSError:
         return False
@@ -825,9 +840,7 @@ def _safe_environment(overrides: Mapping[str, str]) -> dict[str, str]:
     """Build a minimal child environment without host credentials/home state."""
 
     result: dict[str, str] = {}
-    for key in LIVE_ENV_KEYS:
-        if key in SENSITIVE_ENV_KEYS:
-            continue
+    for key in ("SystemRoot", "ComSpec"):
         value = os.environ.get(key)
         if value:
             result[key] = value
@@ -845,7 +858,9 @@ def _validate_executable_spec(
     error_code: str,
     extra_fields: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    expected = frozenset({"argv", "executable_file", "executable_sha256"}) | extra_fields
+    expected = frozenset(
+        {"argv", "executable_file", "executable_sha256", "argv_file_digests"}
+    ) | extra_fields
     if not isinstance(value, Mapping) or frozenset(value) != expected:
         _live_plan_fail(error_code)
     argv = _validate_plan_argv(value.get("argv"))
@@ -855,6 +870,22 @@ def _validate_executable_spec(
         _live_plan_fail(error_code)
     if argv[0] != executable_file:
         _live_plan_fail(error_code)
+    raw_files = value.get("argv_file_digests")
+    if not isinstance(raw_files, Mapping):
+        _live_plan_fail(error_code)
+    file_digests: dict[str, str] = {}
+    for path, file_digest in raw_files.items():
+        if not isinstance(path, str) or not isinstance(file_digest, str):
+            _live_plan_fail(error_code)
+        if re.fullmatch(r"[0-9a-fA-F]{64}", file_digest) is None:
+            _live_plan_fail(error_code)
+        if isolated_root is not None:
+            resolved_file = _resolve_isolated_path(
+                path, isolated_root=isolated_root, must_exist=True
+            )
+            if _file_sha256(resolved_file) != file_digest.lower():
+                _live_plan_fail(error_code)
+        file_digests[path] = file_digest.lower()
     if isolated_root is not None:
         resolved = _resolve_isolated_path(
             executable_file, isolated_root=isolated_root, must_exist=True
@@ -865,6 +896,7 @@ def _validate_executable_spec(
         "argv": argv,
         "executable_file": executable_file,
         "executable_sha256": digest.lower(),
+        "argv_file_digests": file_digests,
         **{
             key: value[key]
             for key in extra_fields
@@ -876,7 +908,7 @@ def _validate_executable_spec(
 def _file_sha256(path: str) -> str:
     try:
         target = Path(path)
-        if target.is_symlink() or not target.is_file():
+        if target.is_symlink() or not target.is_file() or os.stat(target).st_nlink != 1:
             raise OSError
         digest = hashlib.sha256()
         with target.open("rb") as handle:
@@ -926,11 +958,25 @@ def _validate_live_binding(
 
 def _validate_sidecar_spec(value: Any, *, isolated_root: Path | None) -> dict[str, Any]:
     if not isinstance(value, Mapping) or frozenset(value) != frozenset(
-        {"argv", "executable_file", "executable_sha256", "output_dir"}
+        {
+            "argv",
+            "executable_file",
+            "executable_sha256",
+            "argv_file_digests",
+            "output_dir",
+        }
     ):
         _live_plan_fail("helper_executable_binding_mismatch")
     executable = _validate_executable_spec(
-        {key: value[key] for key in ("argv", "executable_file", "executable_sha256")},
+        {
+            key: value[key]
+            for key in (
+                "argv",
+                "executable_file",
+                "executable_sha256",
+                "argv_file_digests",
+            )
+        },
         isolated_root=isolated_root,
         error_code="helper_executable_binding_mismatch",
     )
@@ -991,7 +1037,12 @@ def load_live_control_plan(
 
     if isinstance(source, (str, Path)):
         source_path = Path(source)
-        if not source_path.exists() or not source_path.is_file():
+        if (
+            source_path.is_symlink()
+            or not source_path.exists()
+            or not source_path.is_file()
+            or os.stat(source_path).st_nlink != 1
+        ):
             _live_plan_fail("live_control_plan_missing")
         try:
             payload = json.loads(source_path.read_text(encoding="utf-8"))
@@ -1048,7 +1099,13 @@ def load_live_control_plan(
 
     cli = payload.get("cli")
     if not isinstance(cli, Mapping) or frozenset(cli) != frozenset(
-        {"argv", "executable_file", "executable_sha256", "cli_version"}
+        {
+            "argv",
+            "executable_file",
+            "executable_sha256",
+            "argv_file_digests",
+            "cli_version",
+        }
     ):
         _live_plan_fail("cli_executable_binding_mismatch")
     if cli.get("cli_version") != identity.cli_version:
@@ -1126,6 +1183,7 @@ def load_live_control_plan(
                 "argv",
                 "executable_file",
                 "executable_sha256",
+                "argv_file_digests",
                 "artifact_file",
                 "case",
             }
@@ -1210,8 +1268,11 @@ def _record_path_for_control(
             entries = list(root.iterdir())
         except OSError:
             raise LiveControlValidationError("sidecar_capture_missing")
-        if any(
-            entry.is_symlink() or entry.is_dir() or entry.suffix.lower() != ".json"
+        if len(entries) > len(CONTROL_NAMES) or any(
+            entry.is_symlink()
+            or entry.is_dir()
+            or entry.suffix.lower() != ".json"
+            or os.stat(entry).st_nlink != 1
             for entry in entries
         ):
             raise LiveControlValidationError("sidecar_capture_incomplete")
@@ -1246,7 +1307,7 @@ def _record_path_for_control(
 
 def _read_sidecar_record(path: Path, *, hop: str) -> dict[str, Any]:
     try:
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file() or os.stat(path).st_nlink != 1:
             raise OSError
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -1307,6 +1368,10 @@ def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
     executable = _resolve_isolated_path(
         spec["executable_file"], isolated_root=isolated_root, must_exist=True
     )
+    for path, expected in spec.get("argv_file_digests", {}).items():
+        resolved = _resolve_isolated_path(path, isolated_root=isolated_root, must_exist=True)
+        if _file_sha256(resolved) != expected:
+            raise LiveControlValidationError("helper_executable_binding_mismatch")
     argv = list(spec["argv"])
     argv[0] = executable
     return argv
@@ -1327,7 +1392,8 @@ def _remove_capture_dirs(
                 if target.is_symlink():
                     target.unlink()
                 elif target.exists():
-                    shutil.rmtree(target)
+                    if not _remove_directory(target):
+                        raise OSError
             except (OSError, ValueError):
                 failures += 1
     return failures == 0
@@ -1349,6 +1415,22 @@ def _remove_replay_artifacts(
         except (OSError, ValueError):
             failures += 1
     return failures == 0
+
+
+def _remove_directory(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            if not path.is_dir():
+                return False
+            for index, _nested in enumerate(path.rglob("*"), start=1):
+                if index >= MAX_NESTED_ARTIFACT_SCAN:
+                    return False
+            shutil.rmtree(path)
+        return not path.exists()
+    except OSError:
+        return False
 
 
 def _ensure_replay_artifacts_fresh(
@@ -1421,46 +1503,80 @@ def run_live_control(
     """
 
     try:
-        isolation = (isolated_root or Path(run_root).parent).resolve(strict=True)
+        if isolated_root is None:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+        raw_isolation = Path(isolated_root)
+        if _is_reparse(raw_isolation):
+            raise LiveControlValidationError("plan_path_linked")
+        isolation = raw_isolation.resolve(strict=True)
         if isinstance(plan, (str, Path)):
-            plan_path = Path(plan).resolve(strict=True)
+            raw_plan_path = Path(plan)
+            if (
+                raw_plan_path.is_symlink()
+                or not raw_plan_path.is_file()
+                or os.stat(raw_plan_path).st_nlink != 1
+            ):
+                raise LiveControlValidationError("plan_path_linked")
+            plan_path = raw_plan_path.resolve(strict=True)
             plan_path.relative_to(isolation)
         run_path = Path(run_root)
         if not run_path.is_absolute():
             run_path = isolation / run_path
+        if _is_reparse(run_path):
+            raise LiveControlValidationError("plan_path_linked")
         run_path = run_path.resolve(strict=False)
         run_path.relative_to(isolation)
         if run_path == isolation or _is_reparse(run_path):
             raise LiveControlValidationError("plan_path_outside_isolation")
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         raise LiveControlValidationError("plan_path_outside_isolation")
-    loaded = load_live_control_plan(
-        plan, isolated_root=isolation, run_root=run_path
-    )
-    identity = CandidateIdentity(**loaded["candidate_identity"])
+    try:
+        loaded = load_live_control_plan(
+            plan, isolated_root=isolation, run_root=run_path
+        )
+        identity = CandidateIdentity(**loaded["candidate_identity"])
+    except LiveControlValidationError:
+        raise
+    except (OSError, ValueError, RuntimeError):
+        raise LiveControlValidationError("live_control_plan_invalid")
     output_manifest: Path | None = None
     if manifest_out is not None:
-        output_manifest = Path(manifest_out)
-        if not output_manifest.is_absolute():
-            output_manifest = isolation / output_manifest
-        output_manifest = output_manifest.resolve(strict=False)
         try:
+            output_manifest = Path(manifest_out)
+            if not output_manifest.is_absolute():
+                output_manifest = isolation / output_manifest
+            if output_manifest.is_symlink():
+                raise LiveControlValidationError("plan_path_linked")
+            output_manifest = output_manifest.resolve(strict=False)
             output_manifest.relative_to(isolation)
-        except ValueError:
+            try:
+                output_manifest.relative_to(run_path)
+            except ValueError:
+                pass
+            else:
+                raise LiveControlValidationError("plan_path_outside_isolation")
+            if output_manifest.exists():
+                raise LiveControlValidationError("stale_artifact")
+        except LiveControlValidationError:
+            raise
+        except (OSError, ValueError, RuntimeError):
             raise LiveControlValidationError("plan_path_outside_isolation")
-        try:
-            output_manifest.relative_to(run_path)
-        except ValueError:
-            pass
-        else:
-            raise LiveControlValidationError("plan_path_outside_isolation")
-    runner = BoundedPhaseRunner(
-        run_path,
-        identity,
-        timeout_seconds=timeout_seconds,
-        environment=loaded["environment"],
-        working_directory=isolation,
-    )
+    case_temp = run_path / "temp"
+    child_environment = dict(loaded["environment"])
+    child_environment["TEMP"] = str(case_temp)
+    child_environment["TMP"] = str(case_temp)
+    try:
+        runner = BoundedPhaseRunner(
+            run_path,
+            identity,
+            timeout_seconds=timeout_seconds,
+            environment=child_environment,
+            working_directory=isolation,
+        )
+    except HarnessFailure:
+        raise
+    except (OSError, ValueError, RuntimeError):
+        raise LiveControlValidationError("live_control_plan_invalid")
     handles: list[BackgroundProcess] = []
     result_status = "completed"
     result_code = "ok"
@@ -1470,6 +1586,7 @@ def run_live_control(
     cleanup_actions: tuple[CleanupAction, ...] = (
         lambda: _remove_capture_dirs(loaded["sidecars"], run_root=run_path),
         lambda: _remove_replay_artifacts(loaded["replays"], run_root=run_path),
+        lambda: _remove_directory(case_temp),
     )
 
     def is_cancelled() -> bool:
@@ -1481,6 +1598,11 @@ def run_live_control(
         if is_cancelled():
             result_status, result_code = "cancelled", "cancelled"
         else:
+            try:
+                case_temp.mkdir(parents=False, exist_ok=False)
+            except OSError:
+                result_status, result_code = "failed", "stale_artifact"
+        if result_status == "completed":
             _prepare_capture_dirs(loaded["sidecars"])
             for hop in ("pre", "post"):
                 for index, spec in enumerate(loaded["sidecars"][hop]):
@@ -1501,7 +1623,6 @@ def run_live_control(
             handle.process.poll() is not None for handle in handles
         ):
             result_status, result_code = "failed", "sidecar_capture_incomplete"
-
         if result_status == "completed":
             for control in loaded["controls"]:
                 if is_cancelled():
@@ -1690,6 +1811,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status_code": error.code,
                 "cleanup_completed": False,
                 "reason": error.code,
+            }
+        except Exception:
+            result = {
+                "completed": False,
+                "ready_for_issue62": False,
+                "status": "failed",
+                "status_code": "phase_exception",
+                "cleanup_completed": False,
+                "reason": "phase_exception",
             }
         print(json.dumps(result, sort_keys=True))
         return 0 if result.get("completed") is True and result.get("cleanup_completed") is True else 2
