@@ -38,6 +38,8 @@ def resolve_cli_version(codex_command: Path) -> str:
         process.kill()
         process.communicate()
         raise RuntimeError("Codex CLI version probe timed out") from error
+    if len(stdout) > _VERSION_PROBE_OUTPUT_LIMIT or len(stderr) > _VERSION_PROBE_OUTPUT_LIMIT:
+        raise RuntimeError("Codex CLI version probe exceeded its output limit")
     output = b"\n".join((stdout[:_VERSION_PROBE_OUTPUT_LIMIT], stderr[:_VERSION_PROBE_OUTPUT_LIMIT])).decode(
         "utf-8", errors="replace"
     ).strip()
