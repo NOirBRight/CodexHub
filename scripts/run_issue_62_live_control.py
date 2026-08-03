@@ -1,10 +1,12 @@
 """Run the bounded, sanitized orchestration envelope for Issue #62.
 
 This module deliberately separates orchestration from the real upstream
-controls.  The default command-line mode is ``--fixture`` and therefore cannot
-qualify Issue #62.  A future live runner can reuse :class:`BoundedPhaseRunner`
-with real command/phase callbacks after the exact candidate and route have been
-reviewed.
+controls.  The default command-line mode remains ``--fixture`` and therefore
+cannot qualify Issue #62.  An explicitly enabled ``--enable-live-control``
+mode accepts a sanitized, operator-supplied plan, binds its candidate/catalog/
+route files, runs real CLI and sidecar commands through
+:class:`BoundedPhaseRunner`, and still leaves qualification closed for
+independent review.
 
 The harness has three non-negotiable properties:
 
@@ -25,17 +27,20 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from typing import Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Mapping, NoReturn, Sequence
 
 
 SCHEMA_VERSION = "codexhub.issue62.live-control.v1"
@@ -56,8 +61,102 @@ ALLOWED_ERROR_CODES = frozenset(
         "process_start_failed",
         "stale_artifact",
         "termination_failed",
+        # Live-plan validation codes are intentionally fixed and safe to
+        # expose in the operator result.  They never include paths, command
+        # arguments, or exception text.
+        "live_control_plan_missing",
+        "live_control_plan_invalid",
+        "candidate_binding_mismatch",
+        "plan_path_invalid",
+        "plan_path_outside_isolation",
+        "plan_path_linked",
+        "environment_invalid",
+        "cli_executable_binding_mismatch",
+        "helper_executable_binding_mismatch",
+        "planner_plan_incomplete",
+        "planner_disposition_invalid",
+        "candidate_sha_binding_mismatch",
+        "cli_package_binding_mismatch",
+        "catalog_binding_mismatch",
+        "route_binding_mismatch",
+        "control_labels_incomplete",
+        "sidecar_capture_missing",
+        "sidecar_capture_incomplete",
+        "identity_replay_incomplete",
+        "identity_replay_artifact_missing",
+        "identity_replay_artifact_invalid",
+        "manifest_reconcile_failed",
     }
 )
+
+LIVE_PLAN_SCHEMA = "codexhub.issue62.live-control-plan.v1"
+LIVE_SCOPE = "authorized_live_control"
+CONTROL_NAMES = (
+    "streaming_text",
+    "streaming_function_history",
+    "non_streaming_text",
+    "choice_auto",
+    "choice_none",
+    "terminal_success",
+    "terminal_error",
+    "error_json",
+)
+CONTROL_NAME_SET = frozenset(CONTROL_NAMES)
+LIVE_PLAN_FIELDS = frozenset(
+    {
+        "schema",
+        "verification_scope",
+        "isolation_root",
+        "candidate_identity",
+        "binding",
+        "catalog_model_entry_id",
+        "cli",
+        "sidecars",
+        "controls",
+        "replays",
+        "environment",
+        "planner",
+    }
+)
+LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
+LIVE_ENV_KEYS = frozenset(
+    {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
+)
+LOCAL_ENV_PATH_KEYS = frozenset({"PATH", "TEMP", "TMP", "PYTHONPATH"})
+SENSITIVE_ENV_KEYS = frozenset(
+    {
+        "CODEX_HOME",
+        "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
+        "CODEX_AUTH",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+    }
+)
+CASE_ENVIRONMENT_PATHS = {
+    "HOME": "home",
+    "USERPROFILE": "userprofile",
+    "APPDATA": "appdata",
+    "LOCALAPPDATA": "localappdata",
+    "CODEX_HOME": "codex-home",
+    "XDG_CONFIG_HOME": "xdg-config",
+}
+PLANNER_FIELDS = frozenset(
+    {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
+)
+
+
+class LiveControlValidationError(ValueError):
+    """A deterministic, path-free live-control plan validation failure."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in ALLOWED_ERROR_CODES else "live_control_plan_invalid"
+        super().__init__(self.code)
 
 
 class HarnessFailure(RuntimeError):
@@ -151,6 +250,15 @@ class CommandResult:
     terminated: bool = True
 
 
+@dataclass(frozen=True)
+class BackgroundProcess:
+    """A bounded child kept alive while a control command executes."""
+
+    phase: str
+    process: subprocess.Popen[bytes]
+    tracked_pids: frozenset[int] = frozenset()
+
+
 def _validate_timeout(timeout_seconds: float) -> float:
     if not MIN_TIMEOUT_SECONDS <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
         raise ValueError("timeout must be between 30 and 60 seconds")
@@ -185,6 +293,7 @@ def _count_extra_artifacts(run_root: Path) -> int:
                 entry.name in ALLOWED_ARTIFACT_NAMES
                 and entry.is_file()
                 and not entry.is_symlink()
+                and os.stat(entry).st_nlink == 1
             ):
                 continue
             extras += 1
@@ -222,36 +331,563 @@ def _write_sanitized_json(target: Path, payload: dict[str, object]) -> None:
         raise HarnessFailure("journal_write_failed") from error
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
+def _posix_process_tree_pids(root_pid: int) -> set[int] | None:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+    parents: dict[int, int] = {}
+    process_groups: dict[int, int] = {}
     try:
-        if process.poll() is not None:
-            return True
-        if os.name == "nt":
-            # ``terminate`` only signals the direct child on Windows.  The
-            # Gateway/CLI can spawn grandchildren, so use taskkill's tree mode
-            # and suppress all command output.
-            subprocess.run(
-                ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=5,
-            )
-        else:
-            os.killpg(int(process.pid), signal.SIGTERM)
-        process.wait(timeout=5)
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_text = (entry / "stat").read_text(encoding="ascii")
+                closing_paren = stat_text.rfind(")")
+                fields = stat_text[closing_paren + 2 :].split()
+                pid = int(entry.name)
+                parents[pid] = int(fields[1])
+                process_groups[pid] = int(fields[2])
+            except (OSError, UnicodeError, ValueError, IndexError):
+                continue
+    except OSError:
+        return None
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    # A session leader can exit while its descendants remain in the same
+    # process group.  Keep those descendants in the readback set even when
+    # the kernel has reparented them to init.
+    result.update(pid for pid, group in process_groups.items() if group == root_pid)
+    return result
+
+
+def _windows_process_parent_map() -> dict[int, int] | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if snapshot == invalid_handle:
+            return None
+        try:
+            entry = ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+            first = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            if not first:
+                return None
+            result: dict[int, int] = {}
+            while True:
+                result[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return result
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return None
+
+
+def _close_windows_handle(handle: object | None) -> None:
+    if handle is None or os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def _create_windows_job() -> object | None:
+    """Create a kill-on-close job so descendants survive root exit tracking."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+        info = ExtendedLimitInformation()
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            handle,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            _close_windows_handle(handle)
+            return None
+        return handle
+    except Exception:
+        return None
+
+
+def _resume_windows_process_threads(pid: int) -> bool:
+    """Resume a process launched with CREATE_SUSPENDED."""
+
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ThreadEntry32),
+        ]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ThreadEntry32),
+        ]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            return False
+        resumed = False
+        try:
+            entry = ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(ThreadEntry32)
+            if not kernel32.Thread32First(snapshot, ctypes.byref(entry)):
+                return False
+            while True:
+                if int(entry.th32OwnerProcessID) == pid:
+                    thread = kernel32.OpenThread(
+                        0x0002 | 0x0040,  # THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION
+                        False,
+                        entry.th32ThreadID,
+                    )
+                    if thread:
+                        try:
+                            previous = kernel32.ResumeThread(thread)
+                            if previous != 0xFFFFFFFF:
+                                while previous > 1:
+                                    previous = kernel32.ResumeThread(thread)
+                                resumed = True
+                        finally:
+                            _close_windows_handle(thread)
+                if not kernel32.Thread32Next(snapshot, ctypes.byref(entry)):
+                    break
+            return resumed
+        finally:
+            _close_windows_handle(snapshot)
+    except Exception:
+        return False
+
+
+def _attach_windows_job(process: subprocess.Popen[bytes], job: object) -> bool:
+    """Assign and resume a suspended real Popen child."""
+
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_handle = getattr(process, "_handle")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
+            _resume_windows_process_threads(int(process.pid))
+            _close_windows_handle(job)
+            return False
+        if not _resume_windows_process_threads(int(process.pid)):
+            kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.TerminateJobObject.restype = wintypes.BOOL
+            kernel32.TerminateJobObject(job, 1)
+            _close_windows_handle(job)
+            raise OSError("process resume failed")
+        setattr(process, "_issue62_job_handle", job)
+        setattr(process, "_issue62_tree_readback_authoritative", True)
         return True
     except Exception:
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(int(process.pid), signal.SIGKILL)
-            process.wait(timeout=5)
-            return True
-        except Exception:
+        _close_windows_handle(job)
+        raise
+
+
+def _terminate_windows_job(job: object) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        return bool(kernel32.TerminateJobObject(job, 1))
+    except Exception:
+        return False
+
+
+def _windows_job_active_processes(job: object) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class AccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        info = AccountingInformation()
+        returned = wintypes.DWORD()
+        if not kernel32.QueryInformationJobObject(
+            job,
+            1,  # JobObjectBasicAccountingInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            ctypes.byref(returned),
+        ):
+            return None
+        return int(info.ActiveProcesses)
+    except Exception:
+        return None
+
+
+def _process_tree_pids(root_pid: int) -> set[int] | None:
+    """Return the root and currently observable descendants, if available."""
+
+    if os.name == "nt":
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return None
+    else:
+        return _posix_process_tree_pids(root_pid)
+
+    result = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in result:
+                result.add(pid)
+                pending.append(pid)
+    return result
+
+
+def _stabilize_process_tree(
+    process: subprocess.Popen[bytes], *, timeout_seconds: float = 0.25
+) -> frozenset[int]:
+    """Observe descendants briefly so cleanup still has their PIDs if the root exits."""
+
+    root_pid = int(process.pid)
+    observed = {root_pid}
+    if not hasattr(process, "_handle"):
+        return frozenset(observed)
+    deadline = time.perf_counter() + timeout_seconds
+    while True:
+        tree = _process_tree_pids(root_pid)
+        if tree:
+            observed.update(tree)
+        if len(observed) > 1 or process.poll() is not None or time.perf_counter() >= deadline:
+            return frozenset(observed)
+        time.sleep(0.01)
+
+
+def _process_tree_is_gone(
+    process: subprocess.Popen[bytes], tracked_pids: set[int]
+) -> bool:
+    """Read back both the root and descendants before reporting success."""
+
+    try:
+        if process.poll() is None:
             return False
+    except Exception:
+        return False
+
+    job = getattr(process, "_issue62_job_handle", None)
+    if job is not None:
+        active = _windows_job_active_processes(job)
+        return active == 0
+    if os.name == "nt" and getattr(
+        process, "_issue62_tree_readback_authoritative", True
+    ) is False:
+        return False
+
+    current = _process_tree_pids(int(process.pid))
+    if current is None:
+        # An unavailable readback is not proof of cleanup.
+        return False
+    if current - {int(process.pid)}:
+        return False
+    if os.name == "nt":
+        # Parent IDs can be lost when Windows reparents a descendant after the
+        # root exits.  Check every PID observed before teardown as well.
+        parents = _windows_process_parent_map()
+        if parents is None:
+            return False
+        if any(pid in parents for pid in tracked_pids if pid != int(process.pid)):
+            return False
+        return int(process.pid) not in parents
+
+    # ``/proc`` retains the process group even after the session leader exits;
+    # use the kernel's group existence check as a second readback path.
+    try:
+        os.killpg(int(process.pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _taskkill(pid: int, *, tree: bool) -> None:
+    command = ["taskkill", "/PID", str(int(pid))]
+    if tree:
+        command.append("/T")
+    command.append("/F")
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=5,
+    )
+    # Test doubles may intentionally return no CompletedProcess.  A real
+    # subprocess result with a non-zero code remains a hard stop failure.
+    if result is not None and getattr(result, "returncode", 0) != 0:
+        raise OSError("taskkill failed")
+
+
+def _terminate_process(
+    process: subprocess.Popen[bytes], *, tracked_pids: set[int] | None = None
+) -> bool:
+    """Stop a process tree and return true only after a positive readback."""
+
+    try:
+        root_pid = int(process.pid)
+    except Exception:
+        return False
+    known_pids = set(tracked_pids or ())
+    known_pids.add(root_pid)
+    initial_tree = _process_tree_pids(root_pid)
+    if initial_tree is not None:
+        known_pids.update(initial_tree)
+    job = getattr(process, "_issue62_job_handle", None)
+
+    try:
+        parent_alive = process.poll() is None
+    except Exception:
+        parent_alive = False
+
+    try:
+        if os.name == "nt":
+            if job is not None:
+                if not _terminate_windows_job(job):
+                    raise OSError("job termination failed")
+            elif parent_alive:
+                # ``taskkill /T`` is the primary Windows tree primitive while
+                # the root is still open.
+                _taskkill(root_pid, tree=True)
+            else:
+                # A dead root cannot be passed to ``taskkill /T`` reliably.
+                # Kill the descendants observed in the readback snapshot by
+                # exact PID, then verify that no tree member remains.
+                for pid in sorted(known_pids - {root_pid}, reverse=True):
+                    _taskkill(pid, tree=False)
+        else:
+            # All runner children are session leaders, so the process group
+            # remains addressable even if the root has already exited.
+            os.killpg(root_pid, signal.SIGTERM)
+        process.wait(timeout=5)
+        if _process_tree_is_gone(process, known_pids):
+            if job is not None:
+                _close_windows_handle(job)
+                setattr(process, "_issue62_job_handle", None)
+            return True
+    except Exception:
+        pass
+
+    # Escalate once, but keep the same tracked PID set and require the same
+    # readback.  A successful parent kill alone is never sufficient.
+    try:
+        if os.name == "nt":
+            if job is not None:
+                _terminate_windows_job(job)
+            else:
+                current_tree = _process_tree_pids(root_pid)
+                descendants = (current_tree or set()) | known_pids
+                for pid in sorted(descendants - {root_pid}, reverse=True):
+                    _taskkill(pid, tree=False)
+                if process.poll() is None:
+                    process.kill()
+        else:
+            os.killpg(root_pid, signal.SIGKILL)
+        process.wait(timeout=5)
+    except Exception:
+        pass
+    result = _process_tree_is_gone(process, known_pids)
+    if job is not None:
+        _close_windows_handle(job)
+        setattr(process, "_issue62_job_handle", None)
+    return result
+
+
+def _windows_launch_options(
+    process_factory: Callable[..., subprocess.Popen[bytes]],
+) -> tuple[int, bool, object | None]:
+    if os.name != "nt":
+        return 0, True, None
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    job: object | None = None
+    # Test doubles and injected factories are not suspended.  Only use the
+    # job launch handshake with the stdlib Popen implementation.
+    if getattr(process_factory, "__module__", None) == "subprocess":
+        job = _create_windows_job()
+        if job is not None:
+            creationflags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+    return creationflags, False, job
+
+
+def _finish_windows_launch(
+    process: subprocess.Popen[bytes], job: object | None
+) -> None:
+    if os.name != "nt":
+        return
+    if job is None:
+        # Test doubles do not expose a native process handle.  A real launch
+        # without a Job Object has no authoritative descendant readback and
+        # must fail closed instead of treating the wrapper PID as the tree.
+        if hasattr(process, "_handle"):
+            setattr(process, "_issue62_tree_readback_authoritative", False)
+        return
+    if not _attach_windows_job(process, job):
+        # Assignment can be unavailable under a constrained Windows token;
+        # retain the process and use the bounded taskkill/readback fallback.
+        setattr(process, "_issue62_tree_readback_authoritative", False)
+        return
 
 
 class BoundedPhaseRunner:
@@ -268,15 +904,32 @@ class BoundedPhaseRunner:
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         process_factory: Callable[..., subprocess.Popen[bytes]] | None = None,
+        environment: Mapping[str, str] | None = None,
+        working_directory: Path | None = None,
     ) -> None:
         _ensure_fresh_run_root(run_root)
         self.run_root = run_root
         self.identity = identity
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._process_factory = process_factory or subprocess.Popen
+        self._working_directory = str(working_directory) if working_directory is not None else None
+        self._case_environment_root = run_root / "case-env"
+        self._environment = _safe_environment(
+            environment or {},
+            working_directory=Path(working_directory)
+            if working_directory is not None
+            else None,
+            case_root=self._case_environment_root,
+        )
         self.journal = SanitizedPhaseJournal(run_root, identity)
         self._active_process: subprocess.Popen[bytes] | None = None
+        self._active_process_pids: frozenset[int] = frozenset()
         self._active_lock = threading.Lock()
+        self._foreground_processes: list[
+            tuple[subprocess.Popen[bytes], frozenset[int]]
+        ] = []
+        self._background_processes: dict[str, BackgroundProcess] = {}
+        self._background_lock = threading.Lock()
         self._cancel_requested = False
         self._cleanup_called = False
         self._children_terminated = True
@@ -287,9 +940,148 @@ class BoundedPhaseRunner:
             raise HarnessFailure("phase_exception")
         return phase
 
-    def _set_active(self, process: subprocess.Popen[bytes] | None) -> None:
+    def _set_active(
+        self,
+        process: subprocess.Popen[bytes] | None,
+        tracked_pids: frozenset[int] = frozenset(),
+    ) -> None:
         with self._active_lock:
             self._active_process = process
+            self._active_process_pids = tracked_pids if process is not None else frozenset()
+
+    @staticmethod
+    def _validate_argv(argv: Sequence[str]) -> bool:
+        return bool(argv) and all(
+            isinstance(item, str) and bool(item) and "\x00" not in item for item in argv
+        )
+
+    def _prepare_case_environment(self) -> None:
+        try:
+            if _is_reparse(self._case_environment_root) or (
+                self._case_environment_root.exists()
+                and not self._case_environment_root.is_dir()
+            ):
+                raise OSError
+            self._case_environment_root.mkdir(parents=True, exist_ok=True)
+            for directory in CASE_ENVIRONMENT_PATHS.values():
+                target = self._case_environment_root / directory
+                if _is_reparse(target) or (target.exists() and not target.is_dir()):
+                    raise OSError
+                target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise HarnessFailure("process_start_failed") from error
+
+    def start_background(self, phase: str, argv: Sequence[str]) -> BackgroundProcess:
+        """Start one bounded sidecar process without retaining its output."""
+
+        phase_name = self._phase_name(phase)
+        self.journal.append(
+            marker=f"{phase_name}_started", status="started", status_code="phase_started"
+        )
+        if not self._validate_argv(argv):
+            self.journal.append(
+                marker=f"{phase_name}_completed",
+                status="failed",
+                status_code="process_start_failed",
+            )
+            raise HarnessFailure("process_start_failed")
+        self._prepare_case_environment()
+        creationflags, start_new_session, job = _windows_launch_options(
+            self._process_factory
+        )
+        try:
+            process = self._process_factory(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=self._environment,
+                cwd=self._working_directory,
+                close_fds=True,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
+                shell=False,
+            )
+        except Exception as error:
+            _close_windows_handle(job)
+            self.journal.append(
+                marker=f"{phase_name}_completed",
+                status="failed",
+                status_code="process_start_failed",
+            )
+            raise HarnessFailure("process_start_failed") from error
+        try:
+            _finish_windows_launch(process, job)
+        except Exception as error:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            self.journal.append(
+                marker=f"{phase_name}_completed",
+                status="failed",
+                status_code="process_start_failed",
+            )
+            raise HarnessFailure("process_start_failed") from error
+        tracked_pids = _stabilize_process_tree(process)
+        handle = BackgroundProcess(phase_name, process, tracked_pids)
+        with self._background_lock:
+            if phase_name in self._background_processes:
+                # A duplicate phase would make cleanup ambiguous.  Terminate
+                # the just-started process before failing closed.
+                _terminate_process(process, tracked_pids=set(tracked_pids))
+                raise HarnessFailure("phase_exception")
+            self._background_processes[phase_name] = handle
+        return handle
+
+    def stop_background(self, handle: BackgroundProcess, *, status_code: str = "cancelled") -> bool:
+        """Stop one background child and emit its terminal journal marker."""
+
+        with self._background_lock:
+            current = self._background_processes.pop(handle.phase, None)
+        if current is None:
+            return True
+        started = time.monotonic()
+        terminated = _terminate_process(
+            current.process, tracked_pids=set(current.tracked_pids)
+        )
+        self._children_terminated = self._children_terminated and terminated
+        code = status_code if terminated else "termination_failed"
+        self.journal.append(
+            marker=f"{current.phase}_completed",
+            status="completed" if terminated else "failed",
+            status_code=code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            exit_code=(int(current.process.poll()) if current.process.poll() is not None else None),
+        )
+        return terminated
+
+    def _stop_background_processes(self) -> int:
+        with self._background_lock:
+            handles = list(self._background_processes.values())
+        failures = 0
+        for handle in handles:
+            if not self.stop_background(handle):
+                failures += 1
+        return failures
+
+    def _stop_foreground_processes(self) -> int:
+        """Recheck every completed foreground tree during final cleanup."""
+
+        with self._active_lock:
+            active = self._active_process
+        failures = 0
+        for process, tracked_pids in self._foreground_processes:
+            if process is active:
+                # ``cleanup`` called ``cancel`` first; its result already
+                # contributes to the failure count when the active process
+                # could not be stopped.
+                continue
+            terminated = _terminate_process(process, tracked_pids=set(tracked_pids))
+            self._children_terminated = self._children_terminated and terminated
+            if not terminated:
+                failures += 1
+        return failures
 
     def mark_phase(
         self,
@@ -351,29 +1143,44 @@ class BoundedPhaseRunner:
             return finish(CommandResult("cancelled", "cancelled", terminated=True))
         if self._cancel_requested:
             return finish(CommandResult("cancelled", "cancelled", terminated=True))
-        if not argv or any(not isinstance(item, str) or not item for item in argv):
+        if not self._validate_argv(argv):
+            return finish(CommandResult("failed", "process_start_failed", terminated=True))
+        try:
+            self._prepare_case_environment()
+        except HarnessFailure:
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
-        creationflags = 0
-        start_new_session = False
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        else:
-            start_new_session = True
+        creationflags, start_new_session, job = _windows_launch_options(
+            self._process_factory
+        )
         try:
             process = self._process_factory(
                 list(argv),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=self._environment,
+                cwd=self._working_directory,
+                close_fds=True,
                 creationflags=creationflags,
                 start_new_session=start_new_session,
                 shell=False,
             )
         except Exception:
+            _close_windows_handle(job)
+            return finish(CommandResult("failed", "process_start_failed", terminated=True))
+        try:
+            _finish_windows_launch(process, job)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
             return finish(CommandResult("failed", "process_start_failed", terminated=True))
 
-        self._set_active(process)
+        tracked_pids = _stabilize_process_tree(process)
+        self._foreground_processes.append((process, tracked_pids))
+        self._set_active(process, tracked_pids)
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -427,9 +1234,10 @@ class BoundedPhaseRunner:
         self._cancel_requested = True
         with self._active_lock:
             process = self._active_process
+            tracked_pids = self._active_process_pids
         if process is None:
             return True
-        terminated = _terminate_process(process)
+        terminated = _terminate_process(process, tracked_pids=set(tracked_pids))
         self._children_terminated = self._children_terminated and terminated
         return terminated
 
@@ -450,12 +1258,16 @@ class BoundedPhaseRunner:
         self.journal.append(marker="cleanup_started", status="started", status_code="phase_started")
         if not self.cancel():
             failures += 1
+        failures += self._stop_foreground_processes()
+        failures += self._stop_background_processes()
         for action in reversed(tuple(actions)):
             try:
                 if action() is False:
                     failures += 1
             except Exception:
                 failures += 1
+        if not _remove_directory(self._case_environment_root):
+            failures += 1
         extra = _count_extra_artifacts(self.run_root)
         if extra:
             failures += 1
@@ -531,6 +1343,1063 @@ class SanitizedPhaseJournal:
         self.records.append(record)
 
 
+def _live_plan_fail(code: str) -> NoReturn:
+    raise LiveControlValidationError(code)
+
+
+def _validate_plan_argv(value: Any, code: str = "live_control_plan_invalid") -> list[str]:
+    if not isinstance(value, list) or not value or any(
+        not isinstance(item, str)
+        or not item
+        or "\x00" in item
+        or Path(item).is_absolute()
+        or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", item) is not None
+        or ".." in Path(item).parts
+        for item in value
+    ):
+        _live_plan_fail(code)
+    # Return a fresh list so callers cannot mutate the source object while a
+    # plan is executing.
+    return list(value)
+
+
+def _validate_plan_path(value: Any) -> str:
+    """Validate a relative plan path before it is joined to an isolated root."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        _live_plan_fail("plan_path_invalid")
+    candidate = Path(value)
+    # ``Path.is_absolute`` covers native Windows/POSIX roots; the explicit
+    # drive/UNC checks cover paths written for the other platform.
+    if candidate.is_absolute() or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", value):
+        _live_plan_fail("plan_path_invalid")
+    if any(part in {"..", "."} for part in candidate.parts):
+        _live_plan_fail("plan_path_invalid")
+    return value
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        stat_result = os.lstat(path)
+        mode = stat_result.st_mode
+        if stat.S_ISLNK(mode):
+            return True
+        attributes = getattr(stat_result, "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    except OSError:
+        return False
+
+
+def _resolve_isolated_path(
+    value: Any,
+    *,
+    isolated_root: Path,
+    must_exist: bool = False,
+    allow_missing_parents: bool = False,
+) -> str:
+    relative = _validate_plan_path(value)
+    try:
+        root = isolated_root.resolve(strict=True)
+    except OSError:
+        _live_plan_fail("plan_path_outside_isolation")
+    if _is_reparse(root):
+        _live_plan_fail("plan_path_linked")
+    target = root / relative
+    try:
+        resolved = target.resolve(strict=must_exist)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        _live_plan_fail("plan_path_outside_isolation")
+    current = root
+    parts = Path(relative).parts
+    for index, part in enumerate(parts):
+        current = current / part
+        exists = current.exists()
+        if not exists:
+            if (index != len(parts) - 1 and not allow_missing_parents) or must_exist:
+                _live_plan_fail("plan_path_outside_isolation")
+            continue
+        if _is_reparse(current):
+            _live_plan_fail("plan_path_linked")
+        try:
+            mode = os.lstat(current).st_mode
+            if current.is_file() and getattr(os.stat(current), "st_nlink", 1) > 1:
+                _live_plan_fail("plan_path_linked")
+            if stat.S_ISREG(mode) and index != len(parts) - 1:
+                _live_plan_fail("plan_path_outside_isolation")
+        except OSError:
+            _live_plan_fail("plan_path_outside_isolation")
+    return str(resolved)
+
+
+def _environment_value_is_local(
+    key: str, value: str, *, working_directory: Path | None = None
+) -> bool:
+    """Reject host path injection in child environment overrides."""
+
+    if key not in LOCAL_ENV_PATH_KEYS:
+        return True
+    if working_directory is None:
+        return False
+    root = working_directory.resolve(strict=False) if working_directory is not None else None
+    for entry in value.split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry)
+        if candidate.is_absolute() or re.match(r"^(?:[A-Za-z]:|[\\/]{2})", entry):
+            if root is None:
+                return False
+            try:
+                candidate.resolve(strict=False).relative_to(root)
+            except (OSError, ValueError, RuntimeError):
+                return False
+        elif ".." in candidate.parts:
+            return False
+    return True
+
+
+def _validate_environment(
+    value: Any, *, isolated_root: Path | None = None
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        _live_plan_fail("environment_invalid")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or key in SENSITIVE_ENV_KEYS
+            or key not in LIVE_ENV_KEYS
+            or not isinstance(item, str)
+            or "\x00" in item
+            or len(item) > 4096
+            or not _environment_value_is_local(
+                key, item, working_directory=isolated_root
+            )
+        ):
+            _live_plan_fail("environment_invalid")
+        normalized[key] = item
+    return normalized
+
+
+def _safe_environment(
+    overrides: Mapping[str, str],
+    *,
+    working_directory: Path | None = None,
+    case_root: Path | None = None,
+) -> dict[str, str]:
+    """Build a minimal child environment with case-local home state."""
+
+    result: dict[str, str] = {}
+    for key in ("SystemRoot", "ComSpec"):
+        value = os.environ.get(key)
+        if value:
+            result[key] = value
+    for key, value in overrides.items():
+        if not _environment_value_is_local(
+            key, value, working_directory=working_directory
+        ):
+            continue
+        result[key] = value
+    # Never copy sensitive values from arbitrary direct callers.  The public
+    # runner constructor is also used by fixture tests, so this function must
+    # enforce the credential/home boundary itself rather than relying on the
+    # live-plan validator.
+    for key in SENSITIVE_ENV_KEYS:
+        result.pop(key, None)
+    if case_root is not None:
+        root = case_root.resolve(strict=False)
+        for key, directory in CASE_ENVIRONMENT_PATHS.items():
+            result[key] = str(root / directory)
+    return result
+
+
+def _validate_executable_spec(
+    value: Any,
+    *,
+    isolated_root: Path | None,
+    error_code: str,
+    extra_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    expected = frozenset(
+        {"argv", "executable_file", "executable_sha256", "argv_file_digests"}
+    ) | extra_fields
+    if not isinstance(value, Mapping) or frozenset(value) != expected:
+        _live_plan_fail(error_code)
+    argv = _validate_plan_argv(value.get("argv"))
+    executable_file = _validate_plan_path(value.get("executable_file"))
+    digest = value.get("executable_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+        _live_plan_fail(error_code)
+    if argv[0] != executable_file:
+        _live_plan_fail(error_code)
+    raw_files = value.get("argv_file_digests")
+    if not isinstance(raw_files, Mapping):
+        _live_plan_fail(error_code)
+    file_digests: dict[str, str] = {}
+    for path, file_digest in raw_files.items():
+        if not isinstance(path, str) or not isinstance(file_digest, str):
+            _live_plan_fail(error_code)
+        if re.fullmatch(r"[0-9a-fA-F]{64}", file_digest) is None:
+            _live_plan_fail(error_code)
+        if isolated_root is not None:
+            resolved_file = _resolve_isolated_path(
+                path, isolated_root=isolated_root, must_exist=True
+            )
+            if _file_sha256(resolved_file) != file_digest.lower():
+                _live_plan_fail(error_code)
+        file_digests[path] = file_digest.lower()
+    if isolated_root is not None:
+        resolved = _resolve_isolated_path(
+            executable_file, isolated_root=isolated_root, must_exist=True
+        )
+        if _file_sha256(resolved) != digest.lower():
+            _live_plan_fail(error_code)
+    return {
+        "argv": argv,
+        "executable_file": executable_file,
+        "executable_sha256": digest.lower(),
+        "argv_file_digests": file_digests,
+        **{
+            key: value[key]
+            for key in extra_fields
+            if key in value
+        },
+    }
+
+
+def _file_sha256(path: str) -> str:
+    try:
+        target = Path(path)
+        if target.is_symlink() or not target.is_file() or os.stat(target).st_nlink != 1:
+            raise OSError
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def _validate_live_binding(
+    identity: CandidateIdentity,
+    binding: Mapping[str, Any],
+    *,
+    isolated_root: Path | None,
+) -> dict[str, str]:
+    expected_fields = frozenset(
+        {"candidate_sha_file", "cli_package_file", "catalog_file", "route_file"}
+    )
+    if frozenset(binding) != expected_fields:
+        _live_plan_fail("candidate_binding_mismatch")
+    if isolated_root is None:
+        paths = {key: _validate_plan_path(binding[key]) for key in expected_fields}
+    else:
+        paths = {
+            key: _resolve_isolated_path(
+                binding[key], isolated_root=isolated_root, must_exist=True
+            )
+            for key in expected_fields
+        }
+    try:
+        candidate_text = Path(paths["candidate_sha_file"]).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        _live_plan_fail("candidate_sha_binding_mismatch")
+    if candidate_text.lower() != identity.candidate_sha:
+        _live_plan_fail("candidate_sha_binding_mismatch")
+    checks = (
+        ("cli_package_file", identity.cli_package_sha256, "cli_package_binding_mismatch"),
+        ("catalog_file", identity.catalog_digest, "catalog_binding_mismatch"),
+        ("route_file", identity.route_digest, "route_binding_mismatch"),
+    )
+    for field, expected, code in checks:
+        if _file_sha256(paths[field]) != expected:
+            _live_plan_fail(code)
+    return paths
+
+
+def _validate_sidecar_spec(value: Any, *, isolated_root: Path | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or frozenset(value) != frozenset(
+        {
+            "argv",
+            "executable_file",
+            "executable_sha256",
+            "argv_file_digests",
+            "output_dir",
+        }
+    ):
+        _live_plan_fail("helper_executable_binding_mismatch")
+    executable = _validate_executable_spec(
+        {
+            key: value[key]
+            for key in (
+                "argv",
+                "executable_file",
+                "executable_sha256",
+                "argv_file_digests",
+            )
+        },
+        isolated_root=isolated_root,
+        error_code="helper_executable_binding_mismatch",
+    )
+    output_dir = _validate_plan_path(value.get("output_dir"))
+    if isolated_root is not None:
+        output_dir = _resolve_isolated_path(
+            output_dir, isolated_root=isolated_root, allow_missing_parents=True
+        )
+    return {**executable, "output_dir": output_dir}
+
+
+def _validate_sidecars(
+    value: Any, *, isolated_root: Path | None, run_root: Path | None
+) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(value, Mapping) or frozenset(value) != frozenset({"pre", "post"}):
+        _live_plan_fail("live_control_plan_invalid")
+    result: dict[str, list[dict[str, Any]]] = {}
+    output_dirs: set[str] = set()
+    for hop in ("pre", "post"):
+        raw = value.get(hop)
+        specs = raw if isinstance(raw, list) else [raw]
+        if not specs or len(specs) > len(CONTROL_NAMES):
+            _live_plan_fail("live_control_plan_invalid")
+        normalized = [
+            _validate_sidecar_spec(item, isolated_root=isolated_root) for item in specs
+        ]
+        for spec in normalized:
+            directory_path = Path(spec["output_dir"])
+            if run_root is not None:
+                try:
+                    directory_path.resolve().relative_to(run_root.resolve())
+                except ValueError:
+                    _live_plan_fail("plan_path_outside_isolation")
+            directory = str(directory_path.resolve())
+            if directory in output_dirs or any(
+                Path(directory).is_relative_to(Path(existing))
+                or Path(existing).is_relative_to(Path(directory))
+                for existing in output_dirs
+            ):
+                _live_plan_fail("live_control_plan_invalid")
+            output_dirs.add(directory)
+        result[hop] = normalized
+    return result
+
+
+def load_live_control_plan(
+    source: Path | str | Mapping[str, Any],
+    *,
+    isolated_root: Path | None = None,
+    run_root: Path | None = None,
+) -> dict[str, Any]:
+    """Load and independently bind an explicitly authorized live plan.
+
+    This function performs no subprocess or network work.  It is deliberately
+    strict: a plan must carry all candidate/catalog/route digest bindings and
+    exactly the eight semantic control labels before the live runner can start.
+    """
+
+    if isinstance(source, (str, Path)):
+        source_path = Path(source)
+        if (
+            source_path.is_symlink()
+            or not source_path.exists()
+            or not source_path.is_file()
+            or os.stat(source_path).st_nlink != 1
+        ):
+            _live_plan_fail("live_control_plan_missing")
+        try:
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            _live_plan_fail("live_control_plan_invalid")
+    else:
+        payload = source
+    if not isinstance(payload, Mapping) or frozenset(payload) != LIVE_PLAN_FIELDS:
+        _live_plan_fail("live_control_plan_invalid")
+    if payload.get("schema") != LIVE_PLAN_SCHEMA or payload.get("verification_scope") != LIVE_SCOPE:
+        _live_plan_fail("live_control_plan_invalid")
+    if payload.get("isolation_root") != ".":
+        _live_plan_fail("plan_path_invalid")
+    if isolated_root is not None:
+        try:
+            isolated_root = isolated_root.resolve(strict=True)
+        except OSError:
+            _live_plan_fail("plan_path_outside_isolation")
+
+    raw_identity = payload.get("candidate_identity")
+    if not isinstance(raw_identity, Mapping):
+        _live_plan_fail("candidate_binding_mismatch")
+    identity_fields = frozenset(
+        {"candidate_sha", "cli_version", "cli_package_sha256", "catalog_digest", "route_digest"}
+    )
+    if frozenset(raw_identity) not in (identity_fields, identity_fields | {"cli_source_commit"}):
+        _live_plan_fail("candidate_binding_mismatch")
+    try:
+        identity = CandidateIdentity(
+            candidate_sha=raw_identity["candidate_sha"],
+            cli_version=raw_identity["cli_version"],
+            cli_package_sha256=raw_identity["cli_package_sha256"],
+            catalog_digest=raw_identity["catalog_digest"],
+            route_digest=raw_identity["route_digest"],
+            cli_source_commit=raw_identity.get("cli_source_commit"),
+        )
+    except (KeyError, TypeError, ValueError):
+        _live_plan_fail("candidate_binding_mismatch")
+
+    binding = payload.get("binding")
+    if not isinstance(binding, Mapping):
+        _live_plan_fail("candidate_binding_mismatch")
+    normalized_binding = _validate_live_binding(
+        identity, binding, isolated_root=isolated_root
+    )
+
+    model = payload.get("catalog_model_entry_id")
+    if (
+        not isinstance(model, str)
+        or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", model) is None
+        or model != "gpt-5.6-sol"
+    ):
+        _live_plan_fail("catalog_binding_mismatch")
+
+    cli = payload.get("cli")
+    if not isinstance(cli, Mapping) or frozenset(cli) != frozenset(
+        {
+            "argv",
+            "executable_file",
+            "executable_sha256",
+            "argv_file_digests",
+            "cli_version",
+        }
+    ):
+        _live_plan_fail("cli_executable_binding_mismatch")
+    if cli.get("cli_version") != identity.cli_version:
+        _live_plan_fail("cli_executable_binding_mismatch")
+    normalized_cli = _validate_executable_spec(
+        cli,
+        isolated_root=isolated_root,
+        error_code="cli_executable_binding_mismatch",
+        extra_fields=frozenset({"cli_version"}),
+    )
+    normalized_cli["cli_version"] = cli["cli_version"]
+    normalized_sidecars = _validate_sidecars(
+        payload.get("sidecars"), isolated_root=isolated_root, run_root=run_root
+    )
+    normalized_environment = _validate_environment(
+        payload.get("environment"), isolated_root=isolated_root
+    )
+    planner = payload.get("planner")
+    if not isinstance(planner, Mapping) or frozenset(planner) != PLANNER_FIELDS:
+        _live_plan_fail("planner_plan_incomplete")
+    if planner.get("model_visible_plan") != "complete":
+        _live_plan_fail("planner_plan_incomplete")
+    if planner.get("hosted_only_disposition") not in LIVE_DISPOSITIONS or planner.get(
+        "unknown_tag_disposition"
+    ) not in LIVE_DISPOSITIONS:
+        _live_plan_fail("planner_disposition_invalid")
+
+    controls = payload.get("controls")
+    if not isinstance(controls, list) or len(controls) != len(CONTROL_NAMES):
+        _live_plan_fail("control_labels_incomplete")
+    normalized_controls: list[dict[str, Any]] = []
+    names: list[str] = []
+    record_paths: dict[str, set[str]] = {"pre": set(), "post": set()}
+    allowed_control_fields = frozenset({"name", "args", "capture", "pre_record", "post_record"})
+    for item in controls:
+        if not isinstance(item, Mapping) or not frozenset(item).issubset(allowed_control_fields):
+            _live_plan_fail("live_control_plan_invalid")
+        name = item.get("name")
+        if not isinstance(name, str) or name not in CONTROL_NAME_SET:
+            _live_plan_fail("control_labels_incomplete")
+        names.append(name)
+        raw_args = item.get("args", [])
+        normalized: dict[str, Any] = {
+            "name": name,
+            "args": _validate_plan_argv(raw_args, "live_control_plan_invalid")
+            if raw_args != []
+            else [],
+            "capture": item.get("capture", {}),
+        }
+        if not isinstance(normalized["capture"], Mapping):
+            _live_plan_fail("live_control_plan_invalid")
+        for field in ("pre_record", "post_record"):
+            if field in item:
+                if isolated_root is None:
+                    normalized[field] = _validate_plan_path(item[field])
+                else:
+                    normalized[field] = _resolve_isolated_path(
+                        item[field], isolated_root=isolated_root, allow_missing_parents=True
+                    )
+                normalized_path = str(Path(normalized[field]).resolve())
+                if normalized_path in record_paths[field.removesuffix("_record")]:
+                    _live_plan_fail("sidecar_capture_incomplete")
+                record_paths[field.removesuffix("_record")].add(normalized_path)
+        normalized_controls.append(normalized)
+    if set(names) != CONTROL_NAME_SET or len(set(names)) != len(names):
+        _live_plan_fail("control_labels_incomplete")
+
+    replays = payload.get("replays")
+    replay_names = frozenset({"identity", "mutation", "deletion", "loss"})
+    if not isinstance(replays, Mapping) or frozenset(replays) != replay_names:
+        _live_plan_fail("identity_replay_incomplete")
+    normalized_replays: dict[str, dict[str, Any]] = {}
+    for name in replay_names:
+        spec = replays.get(name)
+        if not isinstance(spec, Mapping) or frozenset(spec) != frozenset(
+            {
+                "argv",
+                "executable_file",
+                "executable_sha256",
+                "argv_file_digests",
+                "artifact_file",
+                "case",
+            }
+        ) or spec.get("case") != name:
+            _live_plan_fail("identity_replay_incomplete")
+        replay = _validate_executable_spec(
+            spec,
+            isolated_root=isolated_root,
+            error_code="helper_executable_binding_mismatch",
+            extra_fields=frozenset({"artifact_file", "case"}),
+        )
+        artifact_file = _validate_plan_path(replay.get("artifact_file"))
+        if isolated_root is not None:
+            artifact_file = _resolve_isolated_path(
+                artifact_file, isolated_root=isolated_root, allow_missing_parents=True
+            )
+            if run_root is not None:
+                try:
+                    Path(artifact_file).resolve().relative_to(run_root.resolve())
+                except ValueError:
+                    _live_plan_fail("plan_path_outside_isolation")
+        replay["artifact_file"] = artifact_file
+        normalized_replays[name] = replay
+
+    return {
+        "schema": LIVE_PLAN_SCHEMA,
+        "verification_scope": LIVE_SCOPE,
+        "isolation_root": ".",
+        "candidate_identity": identity.as_dict(),
+        "binding": normalized_binding,
+        "catalog_model_entry_id": model,
+        "cli": normalized_cli,
+        "sidecars": normalized_sidecars,
+        "controls": normalized_controls,
+        "replays": normalized_replays,
+        "environment": normalized_environment,
+        "planner": dict(planner),
+    }
+
+
+def _load_manifest_builder() -> Any:
+    # The evidence scripts are intentionally loosely coupled.  Importing the
+    # builder lazily keeps fixture mode usable from a source checkout and does
+    # not add any production routing dependency.
+    try:
+        from build_issue_62_control_manifest import (  # type: ignore[import-not-found]
+            ManifestValidationError,
+            build_manifest,
+            reconcile_manifest,
+            replay_manifest,
+        )
+    except ImportError as error:
+        raise HarnessFailure("phase_exception") from error
+    return ManifestValidationError, build_manifest, reconcile_manifest, replay_manifest
+
+
+def _prepare_capture_dirs(sidecars: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+    for specs in sidecars.values():
+        for spec in specs:
+            target = Path(str(spec["output_dir"]))
+            try:
+                if target.exists():
+                    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+                        raise OSError
+                else:
+                    target.mkdir(parents=True, exist_ok=False)
+            except OSError:
+                raise LiveControlValidationError("sidecar_capture_missing")
+
+
+def _record_path_for_control(
+    control: Mapping[str, Any],
+    *,
+    hop: str,
+    specs: Sequence[Mapping[str, Any]],
+    index: int,
+) -> Path:
+    def capture_files(root: Path) -> list[Path]:
+        try:
+            if root.is_symlink() or not root.is_dir():
+                raise OSError
+            entries = list(root.iterdir())
+        except OSError:
+            raise LiveControlValidationError("sidecar_capture_missing")
+        if len(entries) > len(CONTROL_NAMES) or any(
+            entry.is_symlink()
+            or entry.is_dir()
+            or entry.suffix.lower() != ".json"
+            or os.stat(entry).st_nlink != 1
+            for entry in entries
+        ):
+            raise LiveControlValidationError("sidecar_capture_incomplete")
+        return sorted(entry for entry in entries if entry.is_file())
+
+    explicit = control.get(f"{hop}_record")
+    if explicit is not None:
+        path = Path(str(explicit))
+        for spec in specs:
+            root = Path(str(spec["output_dir"]))
+            try:
+                path.resolve().relative_to(root.resolve())
+            except ValueError:
+                continue
+            if path.resolve() not in {candidate.resolve() for candidate in capture_files(root)}:
+                raise LiveControlValidationError("sidecar_capture_missing")
+            return path
+        raise LiveControlValidationError("sidecar_capture_missing")
+    if len(specs) == len(CONTROL_NAMES):
+        root = Path(str(specs[index]["output_dir"]))
+        candidates = capture_files(root)
+        if len(candidates) == 1:
+            return candidates[0]
+        raise LiveControlValidationError("sidecar_capture_missing")
+    if len(specs) == 1:
+        root = Path(str(specs[0]["output_dir"]))
+        candidates = capture_files(root)
+        if len(candidates) == len(CONTROL_NAMES):
+            return candidates[index]
+    raise LiveControlValidationError("sidecar_capture_missing")
+
+
+def _read_sidecar_record(path: Path, *, hop: str) -> dict[str, Any]:
+    try:
+        if path.is_symlink() or not path.is_file() or os.stat(path).st_nlink != 1:
+            raise OSError
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise LiveControlValidationError("sidecar_capture_incomplete")
+    try:
+        _ManifestValidationError, _build_manifest, _reconcile_manifest, _replay_manifest = (
+            _load_manifest_builder()
+        )
+        from build_issue_62_control_manifest import sanitize_sidecar_record  # type: ignore[import-not-found]
+
+        # Validate against the capture-only schema, but keep the raw
+        # transport metadata in memory for ``build_manifest``.  The builder
+        # drops capture IDs/hop fields before writing the canonical manifest.
+        sanitize_sidecar_record(record, expected_hop=hop)
+        return dict(record)
+    except Exception as error:
+        if isinstance(error, LiveControlValidationError):
+            raise
+        raise LiveControlValidationError("sidecar_capture_incomplete") from error
+
+
+def _build_live_controls(
+    plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    sidecars = plan["sidecars"]
+    controls: list[dict[str, Any]] = []
+    for index, control in enumerate(plan["controls"]):
+        semantic = dict(control.get("capture", {}))
+        semantic["name"] = control["name"]
+        semantic["pre"] = _read_sidecar_record(
+            _record_path_for_control(control, hop="pre", specs=sidecars["pre"], index=index),
+            hop="pre",
+        )
+        semantic["post"] = _read_sidecar_record(
+            _record_path_for_control(control, hop="post", specs=sidecars["post"], index=index),
+            hop="post",
+        )
+        controls.append(semantic)
+    return controls
+
+
+def _manifest_candidate(plan: Mapping[str, Any]) -> dict[str, Any]:
+    identity = plan["candidate_identity"]
+    return {
+        "codexhub_candidate_sha": identity["candidate_sha"],
+        "cli_version": identity["cli_version"],
+        "cli_source_commit": identity.get("cli_source_commit"),
+        "cli_source_commit_status": (
+            "published" if identity.get("cli_source_commit") else "not_published_by_registry"
+        ),
+        "cli_package_sha256": identity["cli_package_sha256"],
+        "catalog_snapshot_sha256": identity["catalog_digest"],
+        "catalog_model_entry_id": plan["catalog_model_entry_id"],
+    }
+
+
+def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
+    executable = _resolve_isolated_path(
+        spec["executable_file"], isolated_root=isolated_root, must_exist=True
+    )
+    for path, expected in spec.get("argv_file_digests", {}).items():
+        resolved = _resolve_isolated_path(path, isolated_root=isolated_root, must_exist=True)
+        if _file_sha256(resolved) != expected:
+            raise LiveControlValidationError("helper_executable_binding_mismatch")
+    argv = list(spec["argv"])
+    argv[0] = executable
+    return argv
+
+
+def _remove_capture_dirs(
+    sidecars: Mapping[str, Sequence[Mapping[str, Any]]], *, run_root: Path
+) -> bool:
+    failures = 0
+    root = run_root.resolve()
+    for specs in sidecars.values():
+        for spec in specs:
+            target = Path(str(spec["output_dir"])).resolve()
+            try:
+                target.relative_to(root)
+                if target == root:
+                    raise OSError
+                if target.is_symlink():
+                    target.unlink()
+                elif target.exists():
+                    if not _remove_directory(target):
+                        raise OSError
+            except (OSError, ValueError):
+                failures += 1
+    return failures == 0
+
+
+def _remove_replay_artifacts(
+    replays: Mapping[str, Mapping[str, Any]], *, run_root: Path
+) -> bool:
+    failures = 0
+    root = run_root.resolve()
+    for replay in replays.values():
+        target = Path(str(replay["artifact_file"])).resolve()
+        try:
+            target.relative_to(root)
+            if target.is_symlink():
+                target.unlink()
+            elif target.exists():
+                target.unlink()
+        except (OSError, ValueError):
+            failures += 1
+    return failures == 0
+
+
+def _remove_directory(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            if not path.is_dir():
+                return False
+            for index, _nested in enumerate(path.rglob("*"), start=1):
+                if index >= MAX_NESTED_ARTIFACT_SCAN:
+                    return False
+            shutil.rmtree(path)
+        return not path.exists()
+    except OSError:
+        return False
+
+
+def _ensure_replay_artifacts_fresh(
+    replays: Mapping[str, Mapping[str, Any]], *, run_root: Path
+) -> None:
+    """Reject a reused replay output before any child process starts."""
+
+    root = run_root.resolve()
+    seen: set[Path] = set()
+    for replay in replays.values():
+        target = Path(str(replay["artifact_file"])).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+        if target in seen or target.exists() or target.is_symlink():
+            raise LiveControlValidationError("stale_artifact")
+        seen.add(target)
+
+
+def _validate_replay_artifact(
+    path: Path,
+    *,
+    case: str,
+    candidate_sha: str,
+    manifest_sha: str,
+) -> str:
+    # Diagnostic kept path-free; only existence is observed.
+    # (The caller redacts all path values from journal artifacts.)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError
+        artifact_sha = _file_sha256(str(path))
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is None:
+            raise OSError
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise LiveControlValidationError("identity_replay_artifact_missing")
+    expected_fields = frozenset(
+        {"schema", "case", "candidate_sha", "capture_manifest_sha256", "wire_replay", "outcome"}
+    )
+    if not isinstance(value, Mapping) or frozenset(value) != expected_fields:
+        raise LiveControlValidationError("identity_replay_artifact_invalid")
+    if (
+        value.get("schema") != "codexhub.issue62.identity-replay.v1"
+        or value.get("case") != case
+        or value.get("candidate_sha") != candidate_sha
+        or value.get("capture_manifest_sha256") != manifest_sha
+        or value.get("wire_replay") is not True
+        or value.get("outcome") != ("accepted" if case == "identity" else "rejected")
+    ):
+        raise LiveControlValidationError("identity_replay_artifact_invalid")
+    return artifact_sha
+
+
+def run_live_control(
+    plan: Path | str | Mapping[str, Any],
+    *,
+    run_root: Path,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    manifest_out: Path | None = None,
+    isolated_root: Path | None = None,
+    cancellation_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Execute an explicitly supplied live plan through bounded children.
+
+    The result is intentionally non-qualifying even when every command,
+    capture, and negative replay check succeeds.  An independent maintainer
+    review is still required before any Issue #62 claim can be made.
+    """
+
+    try:
+        if isolated_root is None:
+            raise LiveControlValidationError("plan_path_outside_isolation")
+        raw_isolation = Path(isolated_root)
+        if _is_reparse(raw_isolation):
+            raise LiveControlValidationError("plan_path_linked")
+        isolation = raw_isolation.resolve(strict=True)
+        if isinstance(plan, (str, Path)):
+            raw_plan_path = Path(plan)
+            if (
+                raw_plan_path.is_symlink()
+                or not raw_plan_path.is_file()
+                or os.stat(raw_plan_path).st_nlink != 1
+            ):
+                raise LiveControlValidationError("plan_path_linked")
+            plan_path = raw_plan_path.resolve(strict=True)
+            plan_path.relative_to(isolation)
+        run_path = Path(run_root)
+        if not run_path.is_absolute():
+            run_path = isolation / run_path
+        if _is_reparse(run_path):
+            raise LiveControlValidationError("plan_path_linked")
+        run_path = run_path.resolve(strict=False)
+        run_path.relative_to(isolation)
+        if run_path == isolation or _is_reparse(run_path):
+            raise LiveControlValidationError("plan_path_outside_isolation")
+    except (OSError, ValueError, RuntimeError):
+        raise LiveControlValidationError("plan_path_outside_isolation")
+    try:
+        loaded = load_live_control_plan(
+            plan, isolated_root=isolation, run_root=run_path
+        )
+        identity = CandidateIdentity(**loaded["candidate_identity"])
+    except LiveControlValidationError:
+        raise
+    except (OSError, ValueError, RuntimeError):
+        raise LiveControlValidationError("live_control_plan_invalid")
+    output_manifest: Path | None = None
+    if manifest_out is not None:
+        try:
+            output_manifest = Path(manifest_out)
+            if not output_manifest.is_absolute():
+                output_manifest = isolation / output_manifest
+            if output_manifest.is_symlink():
+                raise LiveControlValidationError("plan_path_linked")
+            output_manifest = output_manifest.resolve(strict=False)
+            output_manifest.relative_to(isolation)
+            try:
+                output_manifest.relative_to(run_path)
+            except ValueError:
+                pass
+            else:
+                raise LiveControlValidationError("plan_path_outside_isolation")
+            if output_manifest.exists():
+                raise LiveControlValidationError("stale_artifact")
+        except LiveControlValidationError:
+            raise
+        except (OSError, ValueError, RuntimeError):
+            raise LiveControlValidationError("plan_path_outside_isolation")
+    case_temp = run_path / "temp"
+    child_environment = dict(loaded["environment"])
+    child_environment["TEMP"] = str(case_temp)
+    child_environment["TMP"] = str(case_temp)
+    try:
+        runner = BoundedPhaseRunner(
+            run_path,
+            identity,
+            timeout_seconds=timeout_seconds,
+            environment=child_environment,
+            working_directory=isolation,
+        )
+    except HarnessFailure:
+        raise
+    except (OSError, ValueError, RuntimeError):
+        raise LiveControlValidationError("live_control_plan_invalid")
+    handles: list[BackgroundProcess] = []
+    result_status = "completed"
+    result_code = "ok"
+    manifest: dict[str, Any] | None = None
+    manifest_reconciled = False
+    replay_results: dict[str, str] = {}
+    cleanup_actions: tuple[CleanupAction, ...] = (
+        lambda: _remove_capture_dirs(loaded["sidecars"], run_root=run_path),
+        lambda: _remove_replay_artifacts(loaded["replays"], run_root=run_path),
+        lambda: _remove_directory(case_temp),
+    )
+
+    def is_cancelled() -> bool:
+        return cancellation_event is not None and cancellation_event.is_set()
+
+    try:
+        runner.mark_phase("binding_validated")
+        _ensure_replay_artifacts_fresh(loaded["replays"], run_root=run_path)
+        if is_cancelled():
+            result_status, result_code = "cancelled", "cancelled"
+        else:
+            try:
+                case_temp.mkdir(parents=False, exist_ok=False)
+            except OSError:
+                result_status, result_code = "failed", "stale_artifact"
+        if result_status == "completed":
+            _prepare_capture_dirs(loaded["sidecars"])
+            for hop in ("pre", "post"):
+                for index, spec in enumerate(loaded["sidecars"][hop]):
+                    try:
+                        handles.append(
+                            runner.start_background(
+                                f"{hop}_sidecar_{index}",
+                                _runtime_argv(spec, isolated_root=isolation),
+                            )
+                        )
+                    except HarnessFailure as error:
+                        result_status, result_code = "failed", error.code
+                        break
+                if result_status != "completed":
+                    break
+
+        if result_status == "completed" and any(
+            handle.process.poll() is not None for handle in handles
+        ):
+            result_status, result_code = "failed", "sidecar_capture_incomplete"
+        if result_status == "completed":
+            for control in loaded["controls"]:
+                if is_cancelled():
+                    result_status, result_code = "cancelled", "cancelled"
+                    break
+                result = runner.run_subprocess(
+                    f"control_{control['name']}",
+                    [
+                        *_runtime_argv(loaded["cli"], isolated_root=isolation),
+                        *control["args"],
+                    ],
+                    cancellation_event=cancellation_event,
+                )
+                if result.status != "completed":
+                    result_status, result_code = result.status, result.status_code
+                    break
+
+        # Stop sidecars before reading their atomic records.  Cleanup repeats
+        # this operation defensively for cancellation/error paths.
+        for handle in reversed(handles):
+            if not runner.stop_background(handle) and result_status == "completed":
+                result_status, result_code = "failed", "termination_failed"
+
+        if result_status == "completed":
+            try:
+                controls = _build_live_controls(loaded)
+                _ManifestValidationError, build_manifest, reconcile_manifest, replay_manifest = (
+                    _load_manifest_builder()
+                )
+                manifest = build_manifest(
+                    controls,
+                    candidate_identity=_manifest_candidate(loaded),
+                    verification_scope=LIVE_SCOPE,
+                )
+                report = reconcile_manifest(manifest)
+                if not report["reconciled"]:
+                    result_status, result_code = "failed", "manifest_reconcile_failed"
+                else:
+                    manifest_reconciled = True
+                    if output_manifest is not None:
+                        _write_sanitized_json(output_manifest, manifest)
+            except LiveControlValidationError as error:
+                result_status, result_code = "failed", error.code
+            except Exception as error:
+                result_status, result_code = "failed", "manifest_reconcile_failed"
+
+        if result_status == "completed" and manifest is not None:
+            for case in ("identity", "mutation", "deletion", "loss"):
+                replay = replay_manifest(manifest, case)
+                report = reconcile_manifest(replay)
+                expected_reconciled = case == "identity"
+                replay_results[case] = "pass" if report["reconciled"] is expected_reconciled else "fail"
+                if replay_results[case] != "pass":
+                    result_status, result_code = "failed", "identity_replay_incomplete"
+                    break
+            if result_status == "completed":
+                for case in ("identity", "mutation", "deletion", "loss"):
+                    if is_cancelled():
+                        result_status, result_code = "cancelled", "cancelled"
+                        break
+                    replay_result = runner.run_subprocess(
+                        f"replay_{case}",
+                        _runtime_argv(loaded["replays"][case], isolated_root=isolation),
+                        cancellation_event=cancellation_event,
+                    )
+                    if replay_result.status != "completed":
+                        result_status, result_code = "failed", "identity_replay_incomplete"
+                        break
+                    replay = loaded["replays"][case]
+                    artifact_sha = _validate_replay_artifact(
+                        Path(replay["artifact_file"]),
+                        case=case,
+                        candidate_sha=identity.candidate_sha,
+                        manifest_sha=str(manifest["capture_manifest_sha256"]),
+                    )
+                    replay_results[case] = f"artifact_bound:{artifact_sha}"
+    except LiveControlValidationError as error:
+        result_status, result_code = "failed", error.code
+    except HarnessFailure as error:
+        result_status, result_code = "failed", error.code
+    except Exception:
+        # Keep unexpected manifest/replay errors fail-closed and path-free.
+        result_status, result_code = "failed", "phase_exception"
+    finally:
+        try:
+            receipt = runner.cleanup(actions=cleanup_actions)
+        except HarnessFailure:
+            receipt = {
+                "cleanup_attempted": True,
+                "cleanup_completed": False,
+                "cleanup_failure_count": 1,
+                "child_processes_terminated": False,
+                "resources_released": False,
+            }
+        if receipt.get("cleanup_completed") is not True and result_status == "completed":
+            result_status, result_code = "failed", "cleanup_incomplete"
+
+    output: dict[str, Any] = {
+        "completed": result_status == "completed",
+        "ready_for_issue62": False,
+        "status": result_status,
+        "status_code": result_code,
+        "cleanup_completed": receipt.get("cleanup_completed") is True,
+        "manifest_reconciled": manifest_reconciled,
+        "replay": replay_results,
+        "reason": "independent_review_required",
+        "planner": loaded["planner"],
+    }
+    if manifest is not None:
+        output["capture_manifest_sha256"] = manifest.get("capture_manifest_sha256")
+    return output
+
+
 def _fixture_identity(args: argparse.Namespace) -> CandidateIdentity:
     return CandidateIdentity(
         candidate_sha=args.candidate_sha,
@@ -545,21 +2414,89 @@ def _fixture_identity(args: argparse.Namespace) -> CandidateIdentity:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, required=True)
-    parser.add_argument(
-        "--fixture", choices=("success", "timeout", "nonzero", "cancelled", "cleanup-failure"), required=True
+    parser.add_argument("--isolated-root", type=Path, help="Fresh-root parent for relative plan paths")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--fixture", choices=("success", "timeout", "nonzero", "cancelled", "cleanup-failure")
     )
+    mode.add_argument(
+        "--enable-live-control",
+        action="store_true",
+        help="Run an explicitly supplied authorized live-control plan.",
+    )
+    parser.add_argument("--plan", type=Path, help="Sanitized live-control plan JSON")
+    parser.add_argument("--manifest-out", type=Path, help="Sanitized live manifest output")
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--cli-version", required=True)
-    parser.add_argument("--cli-package-sha256", required=True)
-    parser.add_argument("--catalog-digest", required=True)
-    parser.add_argument("--route-digest", required=True)
+    parser.add_argument("--candidate-sha")
+    parser.add_argument("--cli-version")
+    parser.add_argument("--cli-package-sha256")
+    parser.add_argument("--catalog-digest")
+    parser.add_argument("--route-digest")
     parser.add_argument("--cli-source-commit")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.enable_live_control:
+        if args.plan is None:
+            result = {
+                "completed": False,
+                "ready_for_issue62": False,
+                "status": "failed",
+                "status_code": "live_control_plan_missing",
+                "cleanup_completed": False,
+                "reason": "live_control_plan_missing",
+            }
+            print(json.dumps(result, sort_keys=True))
+            return 2
+        try:
+            result = run_live_control(
+                args.plan,
+                run_root=args.run_root,
+                timeout_seconds=args.timeout_seconds,
+                manifest_out=args.manifest_out,
+                isolated_root=args.isolated_root,
+            )
+        except LiveControlValidationError as error:
+            result = {
+                "completed": False,
+                "ready_for_issue62": False,
+                "status": "failed",
+                "status_code": error.code,
+                "cleanup_completed": False,
+                "reason": error.code,
+            }
+        except HarnessFailure as error:
+            result = {
+                "completed": False,
+                "ready_for_issue62": False,
+                "status": "failed",
+                "status_code": error.code,
+                "cleanup_completed": False,
+                "reason": error.code,
+            }
+        except Exception:
+            result = {
+                "completed": False,
+                "ready_for_issue62": False,
+                "status": "failed",
+                "status_code": "phase_exception",
+                "cleanup_completed": False,
+                "reason": "phase_exception",
+            }
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result.get("completed") is True and result.get("cleanup_completed") is True else 2
+
+    fixture_fields = (
+        "candidate_sha",
+        "cli_version",
+        "cli_package_sha256",
+        "catalog_digest",
+        "route_digest",
+    )
+    if any(getattr(args, field) is None for field in fixture_fields):
+        raise SystemExit("fixture mode requires candidate identity arguments")
     identity = _fixture_identity(args)
     runner = BoundedPhaseRunner(
         args.run_root,
