@@ -34,6 +34,10 @@ SCHEMA = "codexhub.issue62.control-manifest.v1"
 SYNTHETIC_SCOPE = "synthetic_fixture_only"
 LIVE_SCOPE = "authorized_live_control"
 VERIFICATION_SCOPES = frozenset({SYNTHETIC_SCOPE, LIVE_SCOPE})
+QUALIFICATION_REASONS = {
+    SYNTHETIC_SCOPE: "synthetic_fixture_only",
+    LIVE_SCOPE: "wire replay and final inventory reconciliation required",
+}
 MANIFEST_FIELDS = frozenset(
     {
         "schema",
@@ -722,7 +726,7 @@ def _manifest_core(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_qualification(value: Any) -> dict[str, Any]:
+def _validate_qualification(value: Any, *, verification_scope: str) -> dict[str, Any]:
     expected = frozenset(
         {
             "candidate_identity_complete",
@@ -739,14 +743,52 @@ def _validate_qualification(value: Any) -> dict[str, Any]:
         _require_bool(value.get(key), "qualification_boolean_invalid")
     if value.get("identity_replay") not in {"not_captured", "captured"}:
         raise ManifestValidationError("qualification_identity_replay_invalid")
-    if not isinstance(value.get("reason"), str) or not value.get("reason"):
+    reason = value.get("reason")
+    if reason != QUALIFICATION_REASONS.get(verification_scope):
         raise ManifestValidationError("qualification_reason_invalid")
     return {
         "candidate_identity_complete": value["candidate_identity_complete"],
         "all_required_controls_complete": value["all_required_controls_complete"],
         "identity_replay": value["identity_replay"],
         "ready_for_issue62": value["ready_for_issue62"],
-        "reason": value["reason"],
+        "reason": reason,
+    }
+
+
+def _validate_identity_control(value: Any) -> dict[str, Any]:
+    expected = frozenset(
+        {
+            "fail_closed",
+            "unclassified_core_items",
+            "unclassified_controls",
+            "replay_cases",
+            "wire_pairing",
+        }
+    )
+    if not isinstance(value, Mapping):
+        raise ManifestValidationError("identity_control_invalid")
+    _require_exact_fields(value, expected, "identity_control_fields_invalid")
+    if _require_bool(value.get("fail_closed"), "identity_control_fail_closed_invalid") is not True:
+        raise ManifestValidationError("identity_control_fail_closed_invalid")
+    if _require_nonnegative_int(value.get("unclassified_core_items"), "identity_control_unclassified_invalid") != 0:
+        raise ManifestValidationError("identity_control_unclassified_invalid")
+    unclassified_controls = value.get("unclassified_controls")
+    if (
+        not isinstance(unclassified_controls, list)
+        or any(item not in CONTROL_NAME_SET for item in unclassified_controls)
+        or unclassified_controls != sorted(set(unclassified_controls))
+    ):
+        raise ManifestValidationError("identity_control_controls_invalid")
+    if value.get("replay_cases") != ["identity", "mutation", "deletion", "loss"]:
+        raise ManifestValidationError("identity_control_replay_cases")
+    if value.get("wire_pairing") != "control_label_ordinal_without_wire_identifier":
+        raise ManifestValidationError("identity_control_wire_pairing_invalid")
+    return {
+        "fail_closed": True,
+        "unclassified_core_items": 0,
+        "unclassified_controls": list(unclassified_controls),
+        "replay_cases": ["identity", "mutation", "deletion", "loss"],
+        "wire_pairing": "control_label_ordinal_without_wire_identifier",
     }
 
 
@@ -874,18 +916,17 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         route_models = {control["route_identity"]["model"] for control in canonical_controls}
         if route_models != {candidate.get("catalog_model_entry_id")}:
             mismatches.append("control_route_model_set_invalid")
-    identity = manifest.get("identity_control")
-    if not isinstance(identity, Mapping) or identity.get("fail_closed") is not True:
-        mismatches.append("identity_control_fail_closed")
-    else:
-        if identity.get("unclassified_core_items") != 0:
-            mismatches.append("identity_control_unclassified")
-        if identity.get("replay_cases") != ["identity", "mutation", "deletion", "loss"]:
-            mismatches.append("identity_control_replay_cases")
+    try:
+        _validate_identity_control(manifest.get("identity_control"))
+    except ManifestValidationError as exc:
+        mismatches.append(f"identity_control:{exc}")
     if manifest.get("verification_scope") not in VERIFICATION_SCOPES:
         mismatches.append("verification_scope_invalid")
     try:
-        qualification = _validate_qualification(manifest.get("qualification"))
+        qualification = _validate_qualification(
+            manifest.get("qualification"),
+            verification_scope=manifest.get("verification_scope"),
+        )
     except ManifestValidationError as exc:
         mismatches.append(f"qualification:{exc}")
         qualification = {}

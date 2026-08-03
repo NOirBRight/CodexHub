@@ -443,3 +443,15 @@ def test_manifest_reconcile_rejects_top_level_drift_and_qualification_loss() -> 
     report = manifest.reconcile_manifest(synthetic_ready)
     assert report["reconciled"] is False
     assert "synthetic_scope_cannot_qualify" in report["mismatches"]
+
+    raw_reason = copy.deepcopy(built)
+    raw_reason["qualification"]["reason"] = "https://example.invalid/prompt"
+    report = manifest.reconcile_manifest(raw_reason)
+    assert report["reconciled"] is False
+    assert any("qualification_reason_invalid" in mismatch for mismatch in report["mismatches"])
+
+    raw_identity = copy.deepcopy(built)
+    raw_identity["identity_control"]["prompt"] = "must-not-be-retained"
+    report = manifest.reconcile_manifest(raw_identity)
+    assert report["reconciled"] is False
+    assert any("identity_control_fields_invalid" in mismatch for mismatch in report["mismatches"])
