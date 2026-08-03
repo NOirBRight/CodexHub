@@ -1,8 +1,10 @@
 # Real-client E2E gate
 
 `scripts/Run-RealClientE2E.ps1` is the release-only Windows gate for proving
-that one candidate Debug build routes six compatible real clients through both
-canonical routes. HTTP/configuration preflight alone is never an E2E pass.
+that one candidate Debug build routes compatible clients through both canonical
+routes. HTTP/configuration preflight alone is never an E2E pass. Beta2 uses the
+explicit `-CliOnly` scope described below; the full GUI matrix remains available
+for a later release qualification.
 
 ## Authoritative host and compatibility baselines
 
@@ -282,6 +284,19 @@ Cloud Native Responses path; the previous Volc Chat Completions
 path remains available as ordinary, non-release regression coverage and is not represented as
 Native Responses evidence in this matrix.
 
+### Beta2 CLI-only verification
+
+Pass `-CliOnly` when the current release gate is limited to command-line
+clients. This mode runs exactly the eight automated cases for Codex CLI,
+OpenCode, Pi, and OMP (Official Luna and Ollama Cloud for each). It does not
+resolve or start Codex Desktop or ZCode, does not inspect GUI seeds, does not
+require `gui_ready = true`, and never creates or waits for
+`manual-evidence.template.json` or `manual-evidence.json`. A CLI-only summary
+has `verification_scope = "cli_only"`, `manual_case_count = 0`, and
+`automated_case_count = 8`; its `pinned_versions` contains only the four CLI
+clients. The eight cases must still pass their normal model, route, streaming,
+tool, terminal, retry, and Gateway-correlation checks.
+
 Each case creates one disposable `sentinel.txt`. The client must use exactly
 one successful read-only read tool, emit the named sentinel once, and finish
 once. The compatibility-baseline client parsers consume their real JSONL
@@ -477,6 +492,11 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -ManualEvidenceTimeoutSeconds 900
 ```
 
+For the Beta2 CLI-only gate, add `-CliOnly` to the command. GUI seed
+directories, GUI executables, and manual evidence are not needed in that
+scope; the runner must exit `0` with `verification_scope` `cli_only` and eight
+passed cases.
+
 6. Wait for the template and four case-local GUI launches (Desktop and ZCode,
    each with Luna and Ollama Cloud). Each launch consumes its own #194-applied
    root.
@@ -525,7 +545,7 @@ completion. An outer timeout references only the fixed sanitized
 artifact per case and uses `failure_classification` `none` or `case_failure`.
 
 The success summary uses schema `codexhub.real-client-e2e-summary.v2`. Its
-top-level keys are exactly `schema`, `candidate_sha`,
+top-level keys are exactly `schema`, `verification_scope`, `candidate_sha`,
 `managed_client_config_sha`, `run_binding_sha256`, `outcome`, `failure_classification`, `hashes`,
 `pinned_versions`, `canonical_models`, `counts`, `cases`, and `artifacts`.
 The legacy-named `pinned_versions` object contains the actual normalized versions
