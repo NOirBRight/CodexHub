@@ -455,3 +455,49 @@ def test_manifest_reconcile_rejects_top_level_drift_and_qualification_loss() -> 
     report = manifest.reconcile_manifest(raw_identity)
     assert report["reconciled"] is False
     assert any("identity_control_fields_invalid" in mismatch for mismatch in report["mismatches"])
+
+
+def test_manifest_reconcile_recomputes_identity_control_from_controls() -> None:
+    forged = copy.deepcopy(manifest.build_manifest(_controls(), candidate_identity=_candidate()))
+    forged["controls"][0]["identity"]["response_ref_preserved"] = False
+    forged["capture_manifest_sha256"] = manifest._canonical_digest(manifest._manifest_core(forged))
+    report = manifest.reconcile_manifest(forged)
+    assert report["reconciled"] is False
+    assert "identity_control_consistency" in report["mismatches"]
+    assert "identity_control_count_consistency" in report["mismatches"]
+
+
+@pytest.mark.parametrize(
+    ("control_name", "mutate", "expected"),
+    [
+        (
+            "choice_auto",
+            lambda control: control["request_shape"].update({"tool_choice": "none"}),
+            "control_label_choice_auto_invalid",
+        ),
+        (
+            "terminal_success",
+            lambda control: control["response_shape"].update({"terminal": "response.failed"}),
+            "control_label_terminal_success_invalid",
+        ),
+        (
+            "streaming_function_history",
+            lambda control: control["request_shape"].update(
+                {"input_item_types": [{"type": "message", "count": 1}]}
+            ),
+            "control_label_function_history_items_invalid",
+        ),
+    ],
+)
+def test_manifest_binds_control_labels_to_contract(
+    control_name: str,
+    mutate: object,
+    expected: str,
+) -> None:
+    forged = copy.deepcopy(manifest.build_manifest(_controls(), candidate_identity=_candidate()))
+    control = next(item for item in forged["controls"] if item["name"] == control_name)
+    mutate(control)  # type: ignore[operator]
+    forged["capture_manifest_sha256"] = manifest._canonical_digest(manifest._manifest_core(forged))
+    report = manifest.reconcile_manifest(forged)
+    assert report["reconciled"] is False
+    assert any(expected in mismatch for mismatch in report["mismatches"])

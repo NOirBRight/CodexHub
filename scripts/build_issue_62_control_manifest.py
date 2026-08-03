@@ -62,6 +62,12 @@ CONTROL_NAMES = (
     "error_json",
 )
 CONTROL_NAME_SET = frozenset(CONTROL_NAMES)
+IDENTITY_BOOLEAN_FIELDS = (
+    "request_pair_preserved",
+    "response_ref_preserved",
+    "item_refs_preserved",
+    "call_links_preserved",
+)
 TERMINAL_CLASSES = frozenset(
     {"response.completed", "response.failed", "error", "json_response"}
 )
@@ -430,12 +436,7 @@ def _sanitize_identity(value: Any) -> dict[str, Any]:
     _require_exact_fields(value, expected, "identity_fields_invalid")
     result = {
         key: _require_bool(value[key], "identity_boolean_invalid")
-        for key in (
-            "request_pair_preserved",
-            "response_ref_preserved",
-            "item_refs_preserved",
-            "call_links_preserved",
-        )
+        for key in IDENTITY_BOOLEAN_FIELDS
     }
     result["unclassified_core_items"] = _require_nonnegative_int(
         value.get("unclassified_core_items"), "identity_unclassified_invalid"
@@ -566,6 +567,7 @@ def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
         raise ManifestValidationError("control_terminal_content_mismatch")
     if response_shape["terminal"] != "json_response" and pre["content_type_class"] == "json":
         raise ManifestValidationError("control_json_terminal_invalid")
+    _validate_control_semantics(name, request_shape, response_shape)
     if identity["unclassified_core_items"] != 0:
         raise ManifestValidationError("control_identity_unclassified")
     return {
@@ -582,6 +584,42 @@ def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
             "sse": pre["sse"] is not None,
         },
     }
+
+
+def _validate_control_semantics(
+    name: str,
+    request_shape: Mapping[str, Any],
+    response_shape: Mapping[str, Any],
+) -> None:
+    """Bind each control label to its intended request/response contract."""
+
+    stream = request_shape["stream"]
+    choice = request_shape["tool_choice"]
+    parallel = request_shape["parallel_tool_calls"]
+    terminal = response_shape["terminal"]
+    status = response_shape["status_class"]
+    input_types = {item["type"] for item in request_shape["input_item_types"] if item["count"] > 0}
+    response_items = set(response_shape["item_types"])
+    if name in {"streaming_text", "streaming_function_history", "terminal_success", "terminal_error"} and not stream:
+        raise ManifestValidationError("control_label_stream_contract_invalid")
+    if name in {"non_streaming_text", "choice_none", "error_json"} and stream:
+        raise ManifestValidationError("control_label_non_stream_contract_invalid")
+    if name == "choice_auto" and (choice != "auto" or parallel is not True):
+        raise ManifestValidationError("control_label_choice_auto_invalid")
+    if name == "choice_none" and choice != "none":
+        raise ManifestValidationError("control_label_choice_none_invalid")
+    if name == "terminal_success" and (terminal != "response.completed" or status != "2xx"):
+        raise ManifestValidationError("control_label_terminal_success_invalid")
+    if name == "terminal_error" and (terminal != "response.failed" or status not in {"4xx", "5xx"}):
+        raise ManifestValidationError("control_label_terminal_error_invalid")
+    if name == "error_json" and (terminal != "json_response" or status not in {"4xx", "5xx"}):
+        raise ManifestValidationError("control_label_error_json_invalid")
+    if name == "streaming_function_history":
+        required = {"function_call", "function_call_output"}
+        if not required.issubset(input_types) or not required.issubset(response_items):
+            raise ManifestValidationError("control_label_function_history_items_invalid")
+        if response_shape["call_link_count"] < 1:
+            raise ManifestValidationError("control_label_function_history_links_invalid")
 
 
 def _validate_canonical_control(control: Mapping[str, Any]) -> dict[str, Any]:
@@ -645,6 +683,7 @@ def _validate_canonical_control(control: Mapping[str, Any]) -> dict[str, Any]:
         raise ManifestValidationError("control_terminal_content_mismatch")
     if response_shape["terminal"] != "json_response" and pre["content_type_class"] == "json":
         raise ManifestValidationError("control_json_terminal_invalid")
+    _validate_control_semantics(name, request_shape, response_shape)
     if identity["unclassified_core_items"] != 0:
         raise ManifestValidationError("control_identity_unclassified")
 
@@ -770,8 +809,9 @@ def _validate_identity_control(value: Any) -> dict[str, Any]:
     _require_exact_fields(value, expected, "identity_control_fields_invalid")
     if _require_bool(value.get("fail_closed"), "identity_control_fail_closed_invalid") is not True:
         raise ManifestValidationError("identity_control_fail_closed_invalid")
-    if _require_nonnegative_int(value.get("unclassified_core_items"), "identity_control_unclassified_invalid") != 0:
-        raise ManifestValidationError("identity_control_unclassified_invalid")
+    unclassified_count = _require_nonnegative_int(
+        value.get("unclassified_core_items"), "identity_control_unclassified_invalid"
+    )
     unclassified_controls = value.get("unclassified_controls")
     if (
         not isinstance(unclassified_controls, list)
@@ -779,13 +819,15 @@ def _validate_identity_control(value: Any) -> dict[str, Any]:
         or unclassified_controls != sorted(set(unclassified_controls))
     ):
         raise ManifestValidationError("identity_control_controls_invalid")
+    if unclassified_count != len(unclassified_controls):
+        raise ManifestValidationError("identity_control_count_mismatch")
     if value.get("replay_cases") != ["identity", "mutation", "deletion", "loss"]:
         raise ManifestValidationError("identity_control_replay_cases")
     if value.get("wire_pairing") != "control_label_ordinal_without_wire_identifier":
         raise ManifestValidationError("identity_control_wire_pairing_invalid")
     return {
         "fail_closed": True,
-        "unclassified_core_items": 0,
+        "unclassified_core_items": unclassified_count,
         "unclassified_controls": list(unclassified_controls),
         "replay_cases": ["identity", "mutation", "deletion", "loss"],
         "wire_pairing": "control_label_ordinal_without_wire_identifier",
@@ -815,15 +857,7 @@ def build_manifest(
     identity_failures = [
         control["name"]
         for control in controls
-        if not all(
-            control["identity"][field]
-            for field in (
-                "request_pair_preserved",
-                "response_ref_preserved",
-                "item_refs_preserved",
-                "call_links_preserved",
-            )
-        )
+        if not all(control["identity"][field] for field in IDENTITY_BOOLEAN_FIELDS)
     ]
     identity_control = {
         "fail_closed": True,
@@ -917,9 +951,20 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         if route_models != {candidate.get("catalog_model_entry_id")}:
             mismatches.append("control_route_model_set_invalid")
     try:
-        _validate_identity_control(manifest.get("identity_control"))
+        identity_control = _validate_identity_control(manifest.get("identity_control"))
     except ManifestValidationError as exc:
         mismatches.append(f"identity_control:{exc}")
+        identity_control = None
+    if identity_control is not None:
+        observed_unclassified = sorted(
+            control["name"]
+            for control in canonical_controls
+            if not all(control["identity"][field] for field in IDENTITY_BOOLEAN_FIELDS)
+        )
+        if identity_control["unclassified_controls"] != observed_unclassified:
+            mismatches.append("identity_control_consistency")
+        if identity_control["unclassified_core_items"] != len(observed_unclassified):
+            mismatches.append("identity_control_count_consistency")
     if manifest.get("verification_scope") not in VERIFICATION_SCOPES:
         mismatches.append("verification_scope_invalid")
     try:
