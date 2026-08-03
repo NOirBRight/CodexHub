@@ -78,6 +78,7 @@ class DiagnosticControlBridge:
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
         self._state_lock = threading.RLock()
+        self._batch_lock = threading.Lock()
         self._io_lock = threading.RLock()
 
     @property
@@ -121,6 +122,12 @@ class DiagnosticControlBridge:
     def process_once(self) -> int:
         """Process a bounded batch for deterministic tests and the daemon loop."""
 
+        with self._batch_lock:
+            return self._process_batch()
+
+    def _process_batch(self) -> int:
+        """Run one complete scan/execute/persist/cleanup batch under one lock."""
+
         try:
             requests = sorted(self._request_dir.glob("*.json"))[:MAX_COMMANDS_PER_TICK]
         except OSError:
@@ -130,8 +137,8 @@ class DiagnosticControlBridge:
             if self._stopped.is_set():
                 break
             try:
-                self._process_request(path)
-                processed += 1
+                if self._process_request(path):
+                    processed += 1
             except Exception:
                 # A malformed control file can never affect Gateway traffic.
                 try:
@@ -150,17 +157,36 @@ class DiagnosticControlBridge:
                 pass
             self._stopped.wait(self._poll_interval_seconds)
 
-    def _process_request(self, path: Path) -> None:
-        request = _read_json(path)
-        request_id = request.get("request_id") if isinstance(request, dict) else None
-        response = self._execute(request)
-        if isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id):
-            response["request_id"] = request_id
-            self._write_response(request_id, response)
+    def _process_request(self, path: Path) -> bool:
+        """Atomically claim one request before executing its side effects.
+
+        A claimed file is deliberately kept outside the ``*.json`` polling
+        glob until cleanup.  If cleanup itself fails, the next batch cannot
+        rediscover and execute the same accepted request a second time.
+        """
+
+        claimed = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.processing"
+        )
         try:
-            path.unlink(missing_ok=True)
+            path.replace(claimed)
         except OSError:
-            pass
+            return False
+        try:
+            request = _read_json(claimed)
+            request_id = request.get("request_id") if isinstance(request, dict) else None
+            response = self._execute(request)
+            if isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id):
+                response["request_id"] = request_id
+                self._write_response(request_id, response)
+            return True
+        finally:
+            try:
+                claimed.unlink(missing_ok=True)
+            except OSError:
+                # The claim remains outside the polling glob, preserving
+                # at-most-once semantics if cleanup is temporarily unavailable.
+                pass
 
     def _execute(self, request: Any) -> dict[str, Any]:
         status = self._status_dict()

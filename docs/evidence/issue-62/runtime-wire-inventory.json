@@ -1,0 +1,259 @@
+{
+  "artifact_kind": "runtime_wire_inventory",
+  "candidate_identity": {
+    "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "catalog_model_entry_id": "gpt-5.6-sol",
+    "catalog_snapshot_sha256": "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876",
+    "cli_version": "0.144.0-alpha.4",
+    "codex_source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "configured_provider_id": "custom",
+    "evidence_manifest_sha256": "9dfb5f48f52f27603d4d27066d0ed8a2e300600bcdbdff9a24f594a9892e5c22",
+    "inbound_format": "responses",
+    "model": "gpt-5.6-sol",
+    "route_behavior_profile": "official_codex_app_http_passthrough",
+    "route_upstream": "official",
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "upstream_format": "responses"
+  },
+  "cli_version_floor": "0.145.0",
+  "disposition_vocabulary": [
+    "preserved",
+    "reversibly_adapted",
+    "local_consume",
+    "Unsupported",
+    "Unqualified"
+  ],
+  "evidence_binding": {
+    "audit": {
+      "file": "read-only-gate-audit.json",
+      "sha256": "a27f27622f89436f9530e2a7ca31f4b1b48872a31bbced8426302682f8516fa0"
+    },
+    "trace": {
+      "file": "current-codexhub-thread-tool-surface.json",
+      "sha256": "a4367f96fc2aceaa419577ee43f91870fb3fcca4cc95644bc3347cbdd4206ee3"
+    },
+    "wire_fixture": {
+      "file": "codexhub-runtime-wire-fixture.json",
+      "sha256": "3a8654854539799b526bc013c50bc9f16c40c09319cff8da716b75e6deecbc3a"
+    }
+  },
+  "evidence_sources": {
+    "audit": "read-only-gate-audit.json",
+    "trace": "current-codexhub-thread-tool-surface.json",
+    "wire_fixture": "codexhub-runtime-wire-fixture.json"
+  },
+  "feeds": {
+    "capability_gate": "#249",
+    "chat_conversion_matrix": "#66"
+  },
+  "identity_control": {
+    "fail_closed": true,
+    "replay_cases": [
+      "identity",
+      "mutation",
+      "deletion",
+      "loss"
+    ],
+    "unclassified_core_items": 0,
+    "unclassified_scopes": [],
+    "unknown_tagged_source_count": 2
+  },
+  "items": [
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.captured",
+      "notes": "streaming response text observed and preserved across the official Responses route",
+      "scope": "core_text_streaming"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.non_streaming.captured",
+      "notes": "non-streaming response text is only qualified when a real captured fixture is present",
+      "scope": "core_text_non_streaming"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls",
+      "notes": "multi-turn history with paired call/output rows observed",
+      "scope": "core_history_multiturn"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "call_item_id and output_item_id aliases preserved per link",
+      "scope": "core_history_item_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.required_call_ids",
+      "notes": "call_id aliases preserved and reconciled with call links",
+      "scope": "core_history_call_ids"
+    },
+    {
+      "disposition": "reversibly_adapted",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.events",
+      "notes": "observed SSE event kinds sanitized to redacted payloads with stable event sequence",
+      "scope": "core_sse_streaming_events"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts",
+      "notes": "terminal event classification requires independently captured full response-body evidence",
+      "scope": "core_sse_terminal_events"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response",
+      "notes": "error classification requires independently fingerprinted pre/post response bodies",
+      "scope": "core_sse_errors"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces",
+      "notes": "Direct and Deferred function declarations observed for the codex_app namespace",
+      "scope": "core_function_declaration"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "function_call items with call_id and arguments aliases observed",
+      "scope": "core_function_call"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "function_call_output items with call_id and output aliases observed",
+      "scope": "core_function_result"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "call/result links are present, but the bounded tool-membership replay does not prove a complete function replay across the real wire",
+      "scope": "core_function_replay"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#history.call_links",
+      "notes": "item/call id aliases preserved across pre/post-Gateway replay",
+      "scope": "identity_item_call_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id",
+      "notes": "response_id aliases preserved across pre/post-Gateway replay",
+      "scope": "identity_response_ids"
+    },
+    {
+      "disposition": "preserved",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.request_id",
+      "notes": "request_id aliases preserved and equal across pre/post-Gateway replay",
+      "scope": "identity_request_ids"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false",
+      "notes": "choice controls are a contract sentinel in the wire fixture; the bounded audit observes tool_choice/parallel_tool_calls but full pre/post choice identity requires a live control",
+      "scope": "choice_controls"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+      "notes": "terminal event classification requires a real captured response body fingerprint",
+      "scope": "terminal_events"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required",
+      "notes": "error classification requires independently captured pre/post response evidence",
+      "scope": "errors"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "current-codexhub-thread-tool-surface.json#exposure_state_catalog",
+      "notes": "hosted-only and host-unavailable are tagged reconciliation sentinels; no runtime-observed host binding",
+      "scope": "hosted_only_declarations"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown",
+      "notes": "unknown tagged sentinels are preserved as opaque replay sentinels; live runtime dispositions require a real unknown item",
+      "scope": "unknown_tagged_sentinels"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence",
+      "notes": "default runtime field classification requires an independently captured full request body",
+      "scope": "default_runtime_fields"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.1-scope",
+      "notes": "Code Mode is beta.2 scope (#251/#279/#280); not advertised in beta.1",
+      "scope": "code_mode"
+    },
+    {
+      "disposition": "Unqualified",
+      "evidence_source": "current-codexhub-thread-tool-surface.json#planner_gates.caller_request",
+      "notes": "client-executed tool_search is observed in the caller request but model non-selection is owned by #63; beta.2 scope",
+      "scope": "tool_search"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.3-scope",
+      "notes": "Collaboration V2 is beta.3 scope (#64/#282/#283); observed multi_agent_version='v2' is not advertised in beta.1",
+      "scope": "collaboration_v2"
+    },
+    {
+      "disposition": "Unsupported",
+      "evidence_source": "issue-248#beta.4-scope",
+      "notes": "Chat conversion is beta.4 scope (#66/#253/#254); not advertised in beta.1",
+      "scope": "chat_conversion"
+    }
+  ],
+  "qualification": {
+    "blocking_gates": [
+      "clean_cold_start_current_binding",
+      "complete_model_visible_plan",
+      "error_events",
+      "full_pre_post_request_response",
+      "full_request_fingerprint",
+      "full_response_fingerprint",
+      "identity_replay",
+      "non_streaming",
+      "non_streaming_fixture",
+      "sse_identity",
+      "terminal_events",
+      "wire_identity_replay"
+    ],
+    "blocking_scopes": [
+      "choice_controls",
+      "core_function_replay",
+      "core_sse_errors",
+      "core_sse_terminal_events",
+      "core_text_non_streaming",
+      "default_runtime_fields",
+      "errors",
+      "hosted_only_declarations",
+      "terminal_events",
+      "unknown_tagged_sentinels"
+    ],
+    "candidate_version_eligible": false,
+    "candidate_version_status": "legacy_below_floor",
+    "evidence_gates": {
+      "clean_cold_start_current_binding": "not_run",
+      "complete_model_visible_plan": "partial",
+      "error_events": "not_captured",
+      "full_pre_post_request_response": "live_control_required",
+      "full_request_fingerprint": "not_captured",
+      "full_response_fingerprint": "not_captured",
+      "identity_replay": "partial",
+      "non_streaming": "live_control_required",
+      "non_streaming_fixture": "not_captured",
+      "sse_identity": "not_captured",
+      "terminal_events": "not_captured",
+      "wire_identity_replay": "not_captured"
+    },
+    "ready_for_beta1": false
+  },
+  "schema_version": 1
+}

@@ -18,6 +18,7 @@ import {
 } from "../lib/providerEndpoint";
 import { api, messageFromError } from "../lib/tauri";
 import type {
+  CatalogOverrideDiagnostics,
   GatewayClientSyncSummary,
   Model,
   Provider,
@@ -130,6 +131,22 @@ export function useProviderCatalogActions({
       }));
     }
     await refreshGatewayState();
+    const overrideDiagnostics = await api.catalogOverrideDiagnostics().catch(() => null);
+    if (syncResult) {
+      syncResult = {
+        ...syncResult,
+        catalog_override_diagnostics: overrideDiagnostics,
+      };
+    } else if (overrideDiagnostics) {
+      syncResult = {
+        applied: 0,
+        skipped: 0,
+        failed: 0,
+        results: [],
+        message: "",
+        catalog_override_diagnostics: overrideDiagnostics,
+      };
+    }
     return syncResult;
   }
 
@@ -137,18 +154,36 @@ export function useProviderCatalogActions({
     baseMessage: string | undefined,
     syncResult: GatewayClientSyncSummary | null,
   ) {
+    const overrideMessage = syncResult?.catalog_override_diagnostics
+      ? catalogOverrideToastMessage(syncResult.catalog_override_diagnostics)
+      : null;
     if (syncResult?.failed) {
       const syncMessage = tr("providers.syncClientsFailed", { count: syncResult.failed });
-      return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
+      return [baseMessage, syncMessage, overrideMessage].filter(Boolean).join("; ") || null;
     }
     if (syncResult?.applied) {
       const syncMessage = tr("providers.syncedClients", {
         count: syncResult.applied,
         plural: syncResult.applied === 1 ? "" : "s",
       });
-      return baseMessage ? `${baseMessage}; ${syncMessage}` : syncMessage;
+      return [baseMessage, syncMessage, overrideMessage].filter(Boolean).join("; ") || null;
     }
-    return baseMessage ?? null;
+    return [baseMessage, overrideMessage].filter(Boolean).join("; ") || null;
+  }
+
+  function catalogOverrideToastMessage(diagnostics: CatalogOverrideDiagnostics): string | null {
+    const accepted = Math.max(0, Math.min(100, diagnostics.accepted));
+    const rejected = Math.max(0, Math.min(100, diagnostics.rejected));
+    const migrated = Math.max(0, Math.min(100, diagnostics.migrated));
+    if (accepted === 0 && rejected === 0 && migrated === 0) {
+      return null;
+    }
+    return t("providers.catalogOverrideDiagnostics", {
+      accepted,
+      rejected,
+      migrated,
+      restart: t("providers.catalogOverrideRestartCodex"),
+    });
   }
 
   async function saveProviders(

@@ -7,6 +7,7 @@ param(
     [switch]$CaptureRequestShape,
     [switch]$LifecycleReplay,
     [switch]$EnvironmentIsolationReplay,
+    [switch]$LifecycleSurvivorNegativeControl,
     [switch]$HistoryAdapterReplay,
     [switch]$ToolSurfaceEvidenceReplay,
     [switch]$QualificationEvidenceReplay,
@@ -27,7 +28,7 @@ $ErrorActionPreference = 'Stop'
 $TaskkillTimeoutMilliseconds = 1500
 $TrackedProcessStopTimeoutMilliseconds = 3000
 $LifecycleReplayCleanupTimeoutMilliseconds = 6000
-$LifecycleReplayExitProbeMilliseconds = 250
+$LifecycleReplayFallbackReserveMilliseconds = 1000
 $EvidenceReplayTimeoutMilliseconds = 10000
 
 function ConvertTo-ProcessArgument {
@@ -53,6 +54,150 @@ function Invoke-Checked {
     & $FileName @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "$FileName exited with code $LASTEXITCODE"
+    }
+}
+
+function Get-TrackedProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    $startTimeUtcTicks = $null
+    try {
+        $startTimeUtcTicks = $Process.StartTime.ToUniversalTime().Ticks
+    }
+    catch {
+        # A process handle is still an exact identity even when Windows denies
+        # access to StartTime.  Keep the evidence typed and let callers decide
+        # whether a start-time comparison is required for a re-opened PID.
+    }
+    [ordered]@{
+        pid = [int]$Process.Id
+        start_time_utc_ticks = $startTimeUtcTicks
+        identity_kind = if ($null -ne $startTimeUtcTicks) {
+            'process_handle_and_pid_start_time'
+        }
+        else {
+            'process_handle_and_pid'
+        }
+    }
+}
+
+function Test-TrackedProcessIdentity {
+    param(
+        [AllowNull()]
+        [System.Diagnostics.Process]$Process,
+        [AllowNull()]
+        [System.Collections.IDictionary]$Identity
+    )
+
+    if ($null -eq $Process -or $null -eq $Identity) {
+        return [ordered]@{
+            status = 'unavailable'
+            exact = $false
+            pid_match = $false
+            start_time_match = $false
+        }
+    }
+
+    $pidMatch = $false
+    try {
+        $pidMatch = [int]$Process.Id -eq [int]$Identity['pid']
+    }
+    catch {
+    }
+    if (-not $pidMatch) {
+        return [ordered]@{
+            status = 'pid_mismatch'
+            exact = $false
+            pid_match = $false
+            start_time_match = $false
+        }
+    }
+
+    # This is the original process handle captured before teardown.  Once the
+    # handle reports exited, its identity is final even if Windows reuses the
+    # numeric PID for another process; do not query StartTime on an exited
+    # handle because PowerShell can reject that access.
+    try {
+        if ($Process.HasExited) {
+            return [ordered]@{
+                status = 'exact_handle_after_exit'
+                exact = $true
+                pid_match = $true
+                start_time_match = if ($null -ne $Identity['start_time_utc_ticks']) { $true } else { $null }
+            }
+        }
+    }
+    catch {
+        return [ordered]@{
+            status = 'state_unavailable'
+            exact = $false
+            pid_match = $true
+            start_time_match = $false
+        }
+    }
+
+    $expectedTicks = $Identity['start_time_utc_ticks']
+    if ($null -eq $expectedTicks) {
+        return [ordered]@{
+            status = 'handle_verified'
+            exact = $true
+            pid_match = $true
+            start_time_match = $null
+        }
+    }
+    try {
+        $actualTicks = $Process.StartTime.ToUniversalTime().Ticks
+        $startTimeMatch = [long]$actualTicks -eq [long]$expectedTicks
+        return [ordered]@{
+            status = if ($startTimeMatch) { 'exact' } else { 'start_time_mismatch' }
+            exact = $startTimeMatch
+            pid_match = $true
+            start_time_match = $startTimeMatch
+        }
+    }
+    catch {
+        return [ordered]@{
+            status = 'state_unavailable'
+            exact = $false
+            pid_match = $true
+            start_time_match = $false
+        }
+    }
+}
+
+function Wait-TrackedProcessUntilDeadline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [datetime]$DeadlineUtc,
+        [int]$ReserveMilliseconds = 0
+    )
+
+    try {
+        if ($Process.HasExited) {
+            return $true
+        }
+    }
+    catch {
+        return $false
+    }
+    $remainingMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $DeadlineUtc -MaximumMilliseconds ([int]::MaxValue)
+    $waitMilliseconds = $remainingMilliseconds - [Math]::Max(0, $ReserveMilliseconds)
+    if ($waitMilliseconds -le 0) {
+        return $false
+    }
+    try {
+        if ($Process.WaitForExit($waitMilliseconds)) {
+            return $true
+        }
+        return $Process.HasExited
+    }
+    catch {
+        return $false
     }
 }
 
@@ -93,6 +238,7 @@ function Start-TrackedProcess {
     }
     [pscustomobject]@{
         Process = $process
+        Identity = Get-TrackedProcessIdentity -Process $process
         StdoutTask = $process.StandardOutput.ReadToEndAsync()
         StderrTask = $process.StandardError.ReadToEndAsync()
     }
@@ -226,40 +372,174 @@ function Stop-TrackedProcess {
     param(
         $Tracked,
         [datetime]$DeadlineUtc = [datetime]::MinValue,
-        [switch]$AllowRetainedProcessFallback
+        [switch]$AllowRetainedProcessFallback,
+        [switch]$DirectProcessFallback,
+        [switch]$PassThru
     )
 
-    if ($null -eq $Tracked -or $null -eq $Tracked.Process -or $Tracked.Process.HasExited) {
-        return
-    }
     if ($DeadlineUtc -eq [datetime]::MinValue) {
         $DeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($TrackedProcessStopTimeoutMilliseconds)
     }
 
-    $treeKillMethod = $Tracked.Process.GetType().GetMethod('Kill', [Type[]]@([bool]))
-    if ($null -ne $treeKillMethod) {
-        [void]$treeKillMethod.Invoke($Tracked.Process, [object[]]@($true))
+    $evidence = [ordered]@{
+        status = 'not_started'
+        primary_tree_stop = [ordered]@{
+            attempted = $false
+            method = 'none'
+            outcome = 'not_started'
+        }
+        fallback_cleanup = [ordered]@{
+            used = $false
+            kind = 'none'
+            outcome = 'not_started'
+        }
+        root_exited = $false
+        cleanup_within_deadline = $false
     }
-    else {
+
+    if ($null -eq $Tracked -or $null -eq $Tracked.Process) {
+        $evidence.status = 'unavailable'
+        $evidence.primary_tree_stop.outcome = 'process_unavailable'
+        if ($PassThru) {
+            return [pscustomobject]$evidence
+        }
+        throw 'retained_handle_tree_stop_process_unavailable'
+    }
+
+    $process = $Tracked.Process
+    try {
+        if ($process.HasExited) {
+            $evidence.status = 'already_exited'
+            $evidence.root_exited = $true
+            $evidence.cleanup_within_deadline = [DateTime]::UtcNow -le $DeadlineUtc
+            if ($PassThru) {
+                return [pscustomobject]$evidence
+            }
+            return
+        }
+    }
+    catch {
+        $evidence.status = 'state_unavailable'
+        $evidence.primary_tree_stop.outcome = 'state_unavailable'
+        if ($PassThru) {
+            return [pscustomobject]$evidence
+        }
+        throw 'retained_handle_tree_stop_state_unavailable'
+    }
+
+    if ($DirectProcessFallback) {
+        $evidence.fallback_cleanup.used = $true
+        $evidence.fallback_cleanup.kind = 'direct_process'
+        $evidence.fallback_cleanup.outcome = 'attempted'
         try {
-            Invoke-TrackedTreeKill -ProcessId $Tracked.Process.Id -DeadlineUtc $DeadlineUtc
+            if (-not $process.HasExited) {
+                $process.Kill()
+            }
+            if (-not (Wait-TrackedProcessUntilDeadline -Process $process -DeadlineUtc $DeadlineUtc)) {
+                $evidence.fallback_cleanup.outcome = 'remained'
+                throw 'retained_handle_direct_stop_timed_out'
+            }
+            $evidence.fallback_cleanup.outcome = 'passed'
+            $evidence.root_exited = $true
+            $evidence.cleanup_within_deadline = [DateTime]::UtcNow -le $DeadlineUtc
+            if (-not $evidence.cleanup_within_deadline) {
+                throw 'retained_handle_direct_stop_timed_out'
+            }
+            $evidence.status = 'degraded'
+            if ($PassThru) {
+                return [pscustomobject]$evidence
+            }
+            return
         }
         catch {
-            if (-not $AllowRetainedProcessFallback) {
-                throw
-            }
-            try {
-                if (-not $Tracked.Process.HasExited) {
-                    $Tracked.Process.Kill()
+            $evidence.fallback_cleanup.outcome = 'failed'
+            throw
+        }
+    }
+
+    $evidence.primary_tree_stop.attempted = $true
+    $primaryTreeStopError = $null
+    try {
+        # Process.Kill(true) is the managed equivalent of taskkill /T /F.  It
+        # is preferred when available because it keeps the original process
+        # handle; taskkill remains the verified Windows fallback primitive.
+        $treeKillMethod = $process.GetType().GetMethod('Kill', [Type[]]@([bool]))
+        if ($null -ne $treeKillMethod) {
+            [void]$treeKillMethod.Invoke($process, [object[]]@($true))
+            $evidence.primary_tree_stop.method = 'process_handle_kill_tree'
+        }
+        else {
+            Invoke-TrackedTreeKill -ProcessId $process.Id -DeadlineUtc $DeadlineUtc
+            $evidence.primary_tree_stop.method = 'taskkill_tree'
+        }
+        $evidence.primary_tree_stop.outcome = 'passed'
+    }
+    catch {
+        $primaryTreeStopError = $_
+        # A taskkill invocation is still a primary tree stop, not a direct
+        # child fallback.  Try it when the managed tree primitive failed.
+        try {
+            if ($process.HasExited) {
+                # The process can exit between the initial state check and
+                # taskkill's PID open.  The retained handle is authoritative;
+                # treat that race as a completed primary stop, then verify the
+                # child handle below under the same deadline.
+                if ($evidence.primary_tree_stop.method -eq 'none') {
+                    $evidence.primary_tree_stop.method = 'taskkill_tree'
                 }
+                $evidence.primary_tree_stop.outcome = 'passed_after_exit'
+                $primaryTreeStopError = $null
+            }
+        }
+        catch {
+        }
+        try {
+            if ($null -ne $primaryTreeStopError -and $evidence.primary_tree_stop.method -eq 'none') {
+                Invoke-TrackedTreeKill -ProcessId $process.Id -DeadlineUtc $DeadlineUtc
+                $evidence.primary_tree_stop.method = 'taskkill_tree'
+                $evidence.primary_tree_stop.outcome = 'passed_alternative'
+                $primaryTreeStopError = $null
+            }
+        }
+        catch {
+            $primaryTreeStopError = $_
+        }
+        if ($null -ne $primaryTreeStopError) {
+            $evidence.primary_tree_stop.outcome = 'failed'
+            if (-not $AllowRetainedProcessFallback) {
+                throw $primaryTreeStopError
+            }
+            $evidence.fallback_cleanup.used = $true
+            $evidence.fallback_cleanup.kind = 'direct_root'
+            $evidence.fallback_cleanup.outcome = 'attempted'
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                }
+                $evidence.fallback_cleanup.outcome = 'passed'
             }
             catch {
+                $evidence.fallback_cleanup.outcome = 'failed'
+                throw $primaryTreeStopError
             }
         }
     }
-    $exitTimeoutMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $DeadlineUtc -MaximumMilliseconds $TrackedProcessStopTimeoutMilliseconds
-    if ($exitTimeoutMilliseconds -le 0 -or -not $Tracked.Process.WaitForExit($exitTimeoutMilliseconds)) {
+
+    if (-not (Wait-TrackedProcessUntilDeadline -Process $process -DeadlineUtc $DeadlineUtc)) {
+        $evidence.root_exited = $false
+        if ($evidence.fallback_cleanup.used) {
+            $evidence.fallback_cleanup.outcome = 'remained'
+        }
         throw 'retained_handle_tree_stop_timed_out'
+    }
+    $evidence.root_exited = $true
+    $evidence.cleanup_within_deadline = [DateTime]::UtcNow -le $DeadlineUtc
+    if (-not $evidence.cleanup_within_deadline) {
+        throw 'retained_handle_tree_stop_timed_out'
+    }
+    $evidence.status = if ($evidence.fallback_cleanup.used) { 'degraded' } else { 'primary' }
+    if ($PassThru) {
+        return [pscustomobject]$evidence
     }
 }
 
@@ -369,7 +649,8 @@ function Complete-TrackedProcess {
 function Invoke-LifecycleReplay {
     param(
         [string]$ReplayOutputDir,
-        [string]$Mode = 'lifecycle_replay'
+        [string]$Mode = 'lifecycle_replay',
+        [switch]$SurvivorNegativeControl
     )
 
     $runId = '{0}-{1}' -f $PID, (Get-Date -Format 'yyyyMMddHHmmss')
@@ -383,8 +664,11 @@ function Invoke-LifecycleReplay {
     $tracked = $null
     $childProcessId = 0
     $childProcess = $null
+    $childProcessIdentity = $null
     $cleanupStopwatch = $null
     $cleanupDeadlineUtc = [datetime]::MinValue
+    $cleanupEvidence = $null
+    $childCleanupEvidence = $null
     $failures = [System.Collections.Generic.List[string]]::new()
     $summary = [ordered]@{
         mode = $Mode
@@ -393,6 +677,23 @@ function Invoke-LifecycleReplay {
         tracked_root_exited = $false
         tracked_child_exited = $false
         tracked_child_exit_before_natural_timeout = $false
+        tracked_root_identity_captured = $false
+        tracked_root_identity_verified = $false
+        tracked_child_identity_captured = $false
+        tracked_child_identity_verified = $false
+        tracked_child_pid_reused = $false
+        cleanup_status = 'not_started'
+        primary_tree_stop = [ordered]@{
+            attempted = $false
+            method = 'none'
+            outcome = 'not_started'
+        }
+        fallback_cleanup = [ordered]@{
+            used = $false
+            kind = 'none'
+            outcome = 'not_started'
+        }
+        tracked_child_exit_after_fallback = $false
         cli_has_ollama_api_key = $true
         cli_has_test_secret = $true
         cli_home_is_isolated = $false
@@ -435,18 +736,54 @@ environment_snapshot_path.write_text(
 )
 # Use fresh null streams and close inherited handles so this nested process
 # cannot retain Start-TrackedProcess's redirected stdout or stderr.
-child = subprocess.Popen(
-    [sys.executable, "-c", "import time; time.sleep(10)"],
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    close_fds=True,
-)
-child_pid_path.write_text(str(child.pid), encoding="utf-8")
+negative_control = os.environ.get("CODEXHUB_LIFECYCLE_SURVIVOR_NEGATIVE_CONTROL") == "1"
+child_flags = 0
+if negative_control and os.name == "nt":
+    # Start the survivor through a short-lived detached broker.  The broker
+    # exits immediately after recording the grandchild PID, so the tracked
+    # child is no longer a member of the root's live process tree when the
+    # primary tree stop runs.
+    broker_code = (
+        "import os, pathlib, subprocess, sys; "
+        "p=pathlib.Path(sys.argv[1]); "
+        "c=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP); "
+        "p.write_text(str(c.pid), encoding='utf-8'); os._exit(0)"
+    )
+    broker = subprocess.Popen(
+        [sys.executable, "-c", broker_code, str(child_pid_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    child = broker
+else:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=child_flags,
+    )
+if not (negative_control and os.name == "nt"):
+    child_pid_path.write_text(str(child.pid), encoding="utf-8")
+else:
+    deadline = time.monotonic() + 5
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not child_pid_path.exists():
+        raise RuntimeError("negative_control_child_pid_missing")
 time.sleep(10)
 '@
         [System.IO.File]::WriteAllText($lifecycleScriptPath, $lifecycleChildCommand, [System.Text.UTF8Encoding]::new($false))
         $lifecycleEnvironment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($pythonPath)
+        if ($SurvivorNegativeControl) {
+            $lifecycleEnvironment['CODEXHUB_LIFECYCLE_SURVIVOR_NEGATIVE_CONTROL'] = '1'
+        }
         $tracked = Start-TrackedProcess -FileName $pythonPath -Arguments @(
             '-u', $lifecycleScriptPath, $childPidPath, $environmentSnapshotPath
         ) -WorkingDirectory $runRoot -Environment $lifecycleEnvironment
@@ -464,6 +801,12 @@ time.sleep(10)
         if (-not [int]::TryParse($childPidText, [ref]$childProcessId) -or $childProcessId -le 0) {
             throw 'lifecycle_child_pid_invalid'
         }
+        # Capture the original child handle and identity before any teardown.
+        # Never reopen this PID after tree stop: Windows may have reused it.
+        $childProcess = [System.Diagnostics.Process]::GetProcessById($childProcessId)
+        $childProcessIdentity = Get-TrackedProcessIdentity -Process $childProcess
+        $summary.tracked_child_identity_captured = $true
+        $summary.tracked_root_identity_captured = $null -ne $tracked.Identity
         $environmentSnapshot = Get-Content -LiteralPath $environmentSnapshotPath -Raw | ConvertFrom-Json
         $summary.cli_has_ollama_api_key = [bool]$environmentSnapshot.cli_has_ollama_api_key
         $summary.cli_has_test_secret = [bool]$environmentSnapshot.cli_has_test_secret
@@ -482,7 +825,7 @@ time.sleep(10)
         }
         $cleanupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $cleanupDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($LifecycleReplayCleanupTimeoutMilliseconds)
-        Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
+        $cleanupEvidence = Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback -PassThru
     }
     catch {
         Add-SanitizedFailure -Failures $failures -Code 'lifecycle_stop_failed'
@@ -493,18 +836,12 @@ time.sleep(10)
             $cleanupDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds($LifecycleReplayCleanupTimeoutMilliseconds)
         }
         try {
-            if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
+            if ($null -ne $tracked -and -not $tracked.Process.HasExited -and $null -eq $cleanupEvidence) {
                 try {
-                    Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
+                    $cleanupEvidence = Stop-TrackedProcess $tracked -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback -PassThru
                 }
                 catch {
                     Add-SanitizedFailure -Failures $failures -Code 'lifecycle_root_cleanup_failed'
-                }
-            }
-            if ($null -ne $tracked -and -not $tracked.Process.HasExited) {
-                $rootExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
-                if ($rootExitProbeMilliseconds -gt 0) {
-                    [void]$tracked.Process.WaitForExit($rootExitProbeMilliseconds)
                 }
             }
             if ($null -eq $tracked -or -not $tracked.Process.HasExited) {
@@ -512,49 +849,68 @@ time.sleep(10)
             }
             else {
                 $summary.tracked_root_exited = $true
+                $rootIdentity = Test-TrackedProcessIdentity -Process $tracked.Process -Identity $tracked.Identity
+                $summary.tracked_root_identity_verified = [bool]$rootIdentity.exact
+                if (-not $rootIdentity.exact) {
+                    Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_identity_unverified'
+                }
             }
         }
         catch {
             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_root_state_unavailable'
         }
         try {
-            if ($childProcessId -le 0) {
+            if ($childProcessId -le 0 -or $null -eq $childProcess) {
                 Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_pid_unavailable'
             }
             else {
                 try {
-                    $childProcess = [System.Diagnostics.Process]::GetProcessById($childProcessId)
-                    # The child sleeps for ten seconds. This short probe proves the
-                    # retained tree was stopped rather than waiting for natural exit.
-                    $childExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
-                    $childExitedWithinBound = $childExitProbeMilliseconds -gt 0 -and $childProcess.WaitForExit($childExitProbeMilliseconds)
-                    if ($childExitedWithinBound -or $childProcess.HasExited) {
+                    $childIdentity = Test-TrackedProcessIdentity -Process $childProcess -Identity $childProcessIdentity
+                    $summary.tracked_child_identity_verified = [bool]$childIdentity.exact
+                    if (-not $childIdentity.exact) {
+                        if ($childIdentity.status -eq 'pid_mismatch' -or $childIdentity.status -eq 'start_time_mismatch') {
+                            $summary.tracked_child_pid_reused = $true
+                        }
+                        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_identity_unverified'
+                    }
+                    # Wait on the original process handle until the shared
+                    # teardown deadline.  This is an exact identity check and
+                    # cannot be satisfied by a process that reused the PID.
+                    $childPrimaryWait = Wait-TrackedProcessUntilDeadline `
+                        -Process $childProcess `
+                        -DeadlineUtc $cleanupDeadlineUtc `
+                        -ReserveMilliseconds $LifecycleReplayFallbackReserveMilliseconds
+                    if ($childPrimaryWait -or $childProcess.HasExited) {
                         $summary.tracked_child_exited = $true
-                        $summary.tracked_child_exit_before_natural_timeout = $true
+                        if ($null -eq $cleanupEvidence -or $cleanupEvidence.status -eq 'primary') {
+                            $summary.tracked_child_exit_before_natural_timeout = $true
+                        }
                     }
                     else {
-                        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_remained'
+                        Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_survived_primary_tree_stop'
+                        $summary.fallback_cleanup.used = $true
+                        $summary.fallback_cleanup.kind = 'direct_child'
+                        $summary.fallback_cleanup.outcome = 'attempted'
                         try {
-                            Stop-TrackedProcess ([pscustomobject]@{ Process = $childProcess }) -DeadlineUtc $cleanupDeadlineUtc -AllowRetainedProcessFallback
-                            $childExitProbeMilliseconds = Get-RemainingTimeoutMilliseconds -DeadlineUtc $cleanupDeadlineUtc -MaximumMilliseconds $LifecycleReplayExitProbeMilliseconds
-                            if (-not $childProcess.HasExited -and $childExitProbeMilliseconds -gt 0) {
-                                [void]$childProcess.WaitForExit($childExitProbeMilliseconds)
-                            }
+                            $childCleanupEvidence = Stop-TrackedProcess `
+                                ([pscustomobject]@{ Process = $childProcess; Identity = $childProcessIdentity }) `
+                                -DeadlineUtc $cleanupDeadlineUtc `
+                                -DirectProcessFallback `
+                                -PassThru
+                            $summary.fallback_cleanup.outcome = [string]$childCleanupEvidence.fallback_cleanup.outcome
                         }
                         catch {
+                            $summary.fallback_cleanup.outcome = 'failed'
                             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_cleanup_failed'
                         }
-                        if ($childProcess.HasExited) {
+                        if (Wait-TrackedProcessUntilDeadline -Process $childProcess -DeadlineUtc $cleanupDeadlineUtc) {
                             $summary.tracked_child_exited = $true
+                            $summary.tracked_child_exit_after_fallback = $true
                         }
                         else {
                             Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_cleanup_remained'
                         }
                     }
-                }
-                catch [System.ArgumentException] {
-                    $summary.tracked_child_exited = $true
-                    $summary.tracked_child_exit_before_natural_timeout = $true
                 }
                 catch {
                     Add-SanitizedFailure -Failures $failures -Code 'lifecycle_tracked_child_state_unavailable'
@@ -571,6 +927,23 @@ time.sleep(10)
             if (-not $summary.cleanup_within_budget) {
                 Add-SanitizedFailure -Failures $failures -Code 'lifecycle_cleanup_budget_exceeded'
             }
+        }
+        if ($null -ne $cleanupEvidence) {
+            $summary.primary_tree_stop = $cleanupEvidence.primary_tree_stop
+            if ($cleanupEvidence.fallback_cleanup.used) {
+                $summary.fallback_cleanup = $cleanupEvidence.fallback_cleanup
+            }
+            $summary.cleanup_status = [string]$cleanupEvidence.status
+        }
+        if ($summary.fallback_cleanup.used) {
+            Add-SanitizedFailure -Failures $failures -Code 'lifecycle_cleanup_degraded'
+            $summary.cleanup_status = 'degraded'
+        }
+        if ($summary.tracked_child_exit_after_fallback) {
+            $summary.tracked_child_exit_before_natural_timeout = $false
+        }
+        if ($summary.cleanup_status -eq 'not_started' -and $failures.Count -gt 0) {
+            $summary.cleanup_status = 'failed'
         }
         $summary.failures = @($failures)
         $summary.passed = $failures.Count -eq 0
@@ -1464,8 +1837,17 @@ if ($ExternalIsolationQualification) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-if ($LifecycleReplay) {
-    Invoke-LifecycleReplay -ReplayOutputDir $OutputDir
+if ($LifecycleReplay -or $LifecycleSurvivorNegativeControl) {
+    $lifecycleMode = if ($LifecycleSurvivorNegativeControl) {
+        'lifecycle_survivor_negative_control'
+    }
+    else {
+        'lifecycle_replay'
+    }
+    Invoke-LifecycleReplay `
+        -ReplayOutputDir $OutputDir `
+        -Mode $lifecycleMode `
+        -SurvivorNegativeControl:$LifecycleSurvivorNegativeControl
     exit $LASTEXITCODE
 }
 if ($EnvironmentIsolationReplay) {
@@ -1809,7 +2191,9 @@ def _is_successful_apply_patch_output(value):
 def _is_exact_apply_patch_history_pair(call, result):
     return (
         isinstance(call, dict)
-        and set(call) == {"type", "status", "call_id", "name", "input"}
+        # CLI 0.146 includes an item id on both sides of the pair.  Match the
+        # stable semantic contract and tolerate additive metadata fields.
+        and {"type", "status", "call_id", "name", "input"}.issubset(call)
         and call.get("type") == "custom_tool_call"
         and call.get("status") == "completed"
         and call.get("name") == "apply_patch"
@@ -1818,7 +2202,7 @@ def _is_exact_apply_patch_history_pair(call, result):
         and isinstance(call.get("input"), str)
         and bool(call["input"].strip())
         and isinstance(result, dict)
-        and set(result) == {"type", "call_id", "output"}
+        and {"type", "call_id", "output"}.issubset(result)
         and result.get("type") == "custom_tool_call_output"
         and result.get("call_id") == call["call_id"]
     )
@@ -1869,6 +2253,29 @@ def _note_apply_patch_failure(payload):
             return
 
 
+def _sse_output_items(payload):
+    """Yield tool items from both legacy and current Responses SSE shapes.
+
+    Codex CLI 0.146 may wrap a streamed item under ``response.output`` while
+    older clients expose it directly as ``item``.  The qualification harness
+    only needs the tool name, so normalize those envelopes without retaining
+    any request or response content.
+    """
+    if not isinstance(payload, dict):
+        return
+    item = payload.get("item")
+    if isinstance(item, dict):
+        yield item
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return
+    output = response.get("output")
+    if isinstance(output, list):
+        for candidate in output:
+            if isinstance(candidate, dict):
+                yield candidate
+
+
 def _record_post_success_tool_choice(line):
     global _post_success_tool_choice_recorded
     if not _post_success_apply_patch_pending or _post_success_tool_choice_recorded:
@@ -1879,21 +2286,22 @@ def _record_post_success_tool_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if not isinstance(item, dict) or item.get("type") not in {"function_call", "custom_tool_call"}:
+    for item in _sse_output_items(payload):
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        _post_success_tool_choice_recorded = True
+        _append_capture_record(
+            {
+                "stage": "post_success_tool_choice",
+                "choice": name,
+                "expected_choice": _expected_post_success_tool_choice,
+                "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
+            }
+        )
         return
-    name = item.get("name")
-    if not isinstance(name, str) or not name:
-        return
-    _post_success_tool_choice_recorded = True
-    _append_capture_record(
-        {
-            "stage": "post_success_tool_choice",
-            "choice": name,
-            "expected_choice": _expected_post_success_tool_choice,
-            "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
-        }
-    )
 
 
 def _record_tool_search_choice(line):
@@ -1903,13 +2311,10 @@ def _record_tool_search_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if (
-        isinstance(item, dict)
-        and item.get("type") in {"function_call", "custom_tool_call"}
-        and item.get("name") == "tool_search"
-    ):
-        _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+    for item in _sse_output_items(payload):
+        if item.get("type") in {"function_call", "custom_tool_call"} and item.get("name") == "tool_search":
+            _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+            return
 
 
 def _patch_structure(arguments):
@@ -2191,7 +2596,11 @@ $windowsSandboxConfiguration
     Wait-GatewayHealth -BaseUrl $gatewayBaseUrl -StartupSeconds $GatewayStartupSeconds
 
     $cliArguments = @(
-        '-a', 'never',
+        # Codex CLI 0.146 removed the legacy `-a/--ask-for-approval` option.
+        # Keep this qualification non-interactive by supplying the current
+        # config override before the `exec` subcommand.  The unquoted value
+        # also survives the cmd.exe shim used by npm's codex.cmd launcher.
+        '-c', 'approval_policy=never',
         'exec', '--strict-config', '--ephemeral', '--json',
         '--sandbox', $cliSandbox,
         '-C', $testWorkspace,

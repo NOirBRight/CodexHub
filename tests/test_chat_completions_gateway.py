@@ -29,6 +29,11 @@ from codex_proxy import (
 )
 
 
+def _exact_external_model_resolver(*models):
+    by_alias = {model["alias"]: model for model in models}
+    return lambda model_id: by_alias.get(model_id)
+
+
 class UpstreamUrlTests(unittest.TestCase):
     def test_upstream_urls_accept_complete_responses_endpoint(self):
         upstream = {"base_url": "https://example.test/v1/responses"}
@@ -1907,6 +1912,23 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "context_source": "providers_toml",
             "max_output_source": "providers_toml",
         }
+        vision_model = {
+            "alias": "vision-chat/m3",
+            "provider_alias": "vision-chat",
+            "upstream_name": "vision_chat",
+            "display_prefix": "VisionChat",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-test-token",
+            "upstream_model": "m3",
+            "upstream_format": "chat_completions",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        resolve_external_model = _exact_external_model_resolver(external_model, vision_model)
         image_url = "data:image/png;base64,e2NoYXJ0fQ=="
         body = json.dumps({
             "model": "glm-5.2",
@@ -1959,7 +1981,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
@@ -2096,6 +2118,23 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "context_source": "providers_toml",
             "max_output_source": "providers_toml",
         }
+        vision_model = {
+            "alias": "vision-chat/m3",
+            "provider_alias": "vision-chat",
+            "upstream_name": "vision_chat",
+            "display_prefix": "VisionChat",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-test-token",
+            "upstream_model": "m3",
+            "upstream_format": "chat_completions",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        resolve_external_model = _exact_external_model_resolver(external_model, vision_model)
         image_url = "data:image/png;base64,e2NoYXJ0fQ=="
         body = json.dumps({
             "model": "glm-5.2",
@@ -2148,7 +2187,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy._image_proxy_description_for_part", return_value="A boundary-guard chart description."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
@@ -2271,6 +2310,23 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "context_source": "providers_toml",
             "max_output_source": "providers_toml",
         }
+        vision_model = {
+            "alias": "vision-chat/m3",
+            "provider_alias": "vision-chat",
+            "upstream_name": "vision_chat",
+            "display_prefix": "VisionChat",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-test-token",
+            "upstream_model": "m3",
+            "upstream_format": "chat_completions",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        resolve_external_model = _exact_external_model_resolver(external_model, vision_model)
         body = json.dumps({
             "model": "glm-5.2",
             "messages": [{
@@ -2313,7 +2369,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy._image_proxy_cache_lookup", return_value=None),
             patch("codex_proxy._image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
             patch("codex_proxy.urlopen") as mock_urlopen,
@@ -2345,6 +2401,23 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "context_source": "providers_toml",
             "max_output_source": "providers_toml",
         }
+        vision_model = {
+            "alias": "vision-chat/m3",
+            "provider_alias": "vision-chat",
+            "upstream_name": "vision_chat",
+            "display_prefix": "VisionChat",
+            "base_url": "https://vision.example.test/v1",
+            "api_key": "vision-test-token",
+            "upstream_model": "m3",
+            "upstream_format": "chat_completions",
+            "priority_base": 300,
+            "context_window": 1000000,
+            "max_output_tokens": 8192,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        resolve_external_model = _exact_external_model_resolver(external_model, vision_model)
         image_url = "data:image/png;base64,e2NoYXJ0fQ=="
         body = json.dumps({
             "model": "glm-5.2",
@@ -2399,7 +2472,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):

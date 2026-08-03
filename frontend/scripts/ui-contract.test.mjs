@@ -386,6 +386,31 @@ test("provider page state, editors, actions, and shared helpers stay in focused 
   assert.match(formSource, /export const emptyProvider/);
 });
 
+test("catalog override diagnostics stay bounded and disclose the Codex restart", async () => {
+  const [actionsSource, tauriSource, typesSource, mainSource, bridgeSource, enSource, zhSource] =
+    await Promise.all([
+      readFile(providerCatalogActionsPath, "utf8"),
+      readFile(tauriSourcePath, "utf8"),
+      readFile(typesPath, "utf8"),
+      readFile(tauriMainPath, "utf8"),
+      readFile(tauriWebBridgePath, "utf8"),
+      readFile(enLocalePath, "utf8"),
+      readFile(zhLocalePath, "utf8"),
+    ]);
+
+  assert.match(tauriSource, /catalogOverrideDiagnostics: \(\) =>/);
+  assert.match(tauriSource, /get_catalog_override_diagnostics/);
+  assert.match(typesSource, /interface CatalogOverrideDiagnostics/);
+  assert.match(typesSource, /catalog_override_diagnostics\?: CatalogOverrideDiagnostics/);
+  assert.match(actionsSource, /api\.catalogOverrideDiagnostics\(\)/);
+  assert.match(actionsSource, /catalogOverrideDiagnostics/);
+  assert.match(actionsSource, /catalogOverrideRestartCodex/);
+  assert.match(mainSource, /get_catalog_override_diagnostics/);
+  assert.match(bridgeSource, /get_catalog_override_diagnostics/);
+  assert.match(enSource, /Restart Codex App to apply/);
+  assert.match(zhSource, /请重启 Codex App 使其生效/);
+});
+
 test("ui contract keeps ids and paths but no localizable display copy", async () => {
   const contract = await readContract();
 
@@ -2092,8 +2117,8 @@ test("frontend official merge canonicalizes aliases with fresh metadata winning"
   const merge = providersSource.match(/function mergeOfficialModelSources[\s\S]*?function isOfficialModel/)?.[0] ?? "";
 
   assert.match(merge, /const knownOfficialIds = officialModelIdSet\(catalog, metadata\);/);
-  assert.match(merge, /for \(const model of catalog\.filter\(isOfficialModel\)\)/);
-  assert.match(merge, /for \(const model of metadata\.filter\(isOfficialModel\)\)/);
+  assert.match(merge, /for \(const model of catalog\.filter\(\(item\) => isOfficialModel\(item\) && isCatalogModelListable\(item\)\)\)/);
+  assert.match(merge, /for \(const model of metadata\.filter\(\(item\) => isOfficialModel\(item\) && isCatalogModelListable\(item\)\)\)/);
   assert.match(merge, /const canonicalId = normalizeOfficialModelId\(model\.id, knownOfficialIds\);/);
   assert.match(merge, /\.\.\.existing,[\s\S]*\.\.\.model,[\s\S]*id: canonicalId/);
   assert.match(
@@ -2151,6 +2176,7 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
     "mergeOfficialModelSources",
     "officialModelIdSet",
     "isOfficialModel",
+    "isCatalogModelListable",
     "filterCodexVisibleOfficialModels",
     "isOfficialGatewayFastVariant",
   ];
@@ -2174,8 +2200,8 @@ test("official alias merge keeps all-false disabled and ORs any true", async () 
   ];
   for (const item of cases) {
     const merged = mergeOfficialModelSources(
-      [{ id: "openai/gpt-5.5", enabled: item.catalog }],
-      [{ id: "gpt-5.5", enabled: item.metadata }],
+      [{ id: "openai/gpt-5.5", enabled: item.catalog, visibility: "list" }],
+      [{ id: "gpt-5.5", enabled: item.metadata, visibility: "list" }],
     );
     assert.equal(merged.length, 1, item.name);
     assert.equal(merged[0].enabled, item.expected, item.name);
@@ -2191,6 +2217,7 @@ test("published Official catalog context limits outrank stale metadata after ref
     "mergeOfficialModelSources",
     "officialModelIdSet",
     "isOfficialModel",
+    "isCatalogModelListable",
     "filterCodexVisibleOfficialModels",
     "isOfficialGatewayFastVariant",
   ];
@@ -2210,6 +2237,7 @@ test("published Official catalog context limits outrank stale metadata after ref
   const [model] = mergeOfficialModelSources(
     [{
       id: "openai/gpt-5.6-terra",
+      visibility: "list",
       context_window: 272000,
       max_context_window: 272000,
       effective_source: "fresh_direct_official_cache_authority",
@@ -2221,6 +2249,7 @@ test("published Official catalog context limits outrank stale metadata after ref
     }],
     [{
       id: "gpt-5.6-terra",
+      visibility: "list",
       context_window: 353400,
       max_context_window: 353400,
       effective_source: "pinned_metadata",

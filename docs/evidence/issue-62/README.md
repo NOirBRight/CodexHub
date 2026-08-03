@@ -137,4 +137,195 @@ The remaining gates require a separately authorized live control: complete
 registered contributor/defer-loading capture, a clean current-binding cold
 start, independently fingerprinted full caller/upstream/downstream requests
 and responses, a real non-streaming request, and observed non-Direct states.
-No such control was run for this audit.
+
+## Versioned runtime/wire inventory
+
+`runtime-wire-inventory.json` is the versioned inventory artifact that feeds
+#249 (the beta.1 capability gate) and #66 (the Chat conversion matrix). It
+records one per-scope disposition for every taxonomy item the Codex CLI
+exposes over the core Responses contract and the explicitly-deferred advanced
+capabilities.
+
+The artifact is bound to CLI floor `0.145.0` and to the candidate identity
+derived from the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
+source commit `9e552e9d15ba52bed7077d5357f3e18e330f8f38`, official Responses
+route). Because the captured CLI is below the floor, the generated
+`qualification.ready_for_beta1` is `false` and the candidate is explicitly
+marked `legacy_below_floor`; this evidence cannot be used as the beta.1
+candidate. The generator rejects an explicitly supplied CLI/source value that
+does not match the trace, binds route/provider/model fields across trace and
+wire fixtures (including pre/post models, catalog binding, and route profile),
+and records a canonical-LF SHA-256 manifest for all three input artifacts.  It
+never fabricates a capability disposition for a gate the artifacts do not
+qualify.
+
+The qualification also has a separate `wire_identity_replay` gate. A full
+request/response fingerprint is not treated as replay proof by itself: a
+future capture must record fail-closed identity, mutation, deletion, and loss
+cases as complete/met, with each case observed and bound to the current wire
+fixture SHA-256 plus an output digest. The current sanitized evidence has no
+such wire replay record, so this gate remains `not_captured`. Likewise,
+`sse_identity` requires an independent pre/post stream-sequence digest bound to
+the same wire fixture; full-body request/response equality alone is not enough.
+
+### Disposition vocabulary
+
+| Disposition | Meaning |
+| --- | --- |
+| `preserved` | Observed and carried through unchanged |
+| `reversibly_adapted` | Observed with a documented reversible adaptation |
+| `local_consume` | Observed and consumed locally without upstream I/O |
+| `Unsupported` | Out of scope for the beta.1 core contract |
+| `Unqualified` | The bounded artifacts do not qualify the item; a separately authorized live control window must capture it before any capability claim |
+
+### Taxonomy coverage
+
+Core items (`preserved`/`reversibly_adapted` where the bounded artifacts prove
+them): core text streaming, multi-turn history, item/call IDs, streaming SSE
+event kinds, standard function declaration/call/result, and identity
+(request/response/item/call IDs). Function replay remains `Unqualified`: the
+sanitized call-link fixture proves the shape of call/result pairs, while the
+tool-membership replay does not prove a complete real-wire function replay.
+
+Live-control items are `Unqualified` until a coordinated live window captures
+them: non-streaming text, choice controls (the wire fixture carries a contract
+sentinel; the bounded audit observes `tool_choice`/`parallel_tool_calls` but
+full pre/post choice identity requires a live control), terminal events, errors,
+hosted-only declarations, unknown tagged sentinels, and default runtime fields.
+
+Advanced capabilities (`Unsupported`/`Unqualified`): Code Mode, `tool_search`,
+Collaboration V2, and Chat conversion are explicitly deferred for beta.1 per
+#248/#258 and are not advertised.
+
+### Identity control
+
+The inventory reports `unclassified_core_items: 0` and fails closed on
+mutation, deletion, and loss. Replay cases run through both the Python
+generator (`scripts/build_issue_62_runtime_inventory.py --replay-case`) and
+the PowerShell reconciliation (`scripts/check-codex-thread-tool-surface.ps1
+-InventoryReplayCase`):
+
+```powershell
+python scripts/build_issue_62_runtime_inventory.py
+python scripts/build_issue_62_runtime_inventory.py --check-drift
+python scripts/build_issue_62_runtime_inventory.py --replay-case mutation
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-codex-thread-tool-surface.ps1 -InventoryReplayCase mutation
+```
+
+Regeneration is deterministic and the `--check-drift` mode compares a fresh
+generation to this committed JSON artifact without writing it. The PowerShell
+reconciliation invokes the same drift check, then independently checks the
+input fingerprints, rejects duplicate scopes, and requires each core scope to
+point at its declared evidence path. A zero
+`unclassified_core_items` count therefore describes vocabulary validity only;
+`qualification.ready_for_beta1` is the separate completion gate. That gate also
+consumes planner completeness, current-binding cold-start, full-wire
+fingerprinting, non-streaming, and identity-replay statuses; item dispositions
+alone cannot make an incomplete evidence set ready.
+
+The reconciler also binds every taxonomy item's `evidence_source` to the
+declared fixture path/scope (including advanced and live-control sentinels).
+The `identity_response_ids` source is an explicit pair, written as
+`pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id`;
+both pointers must exist and contain equal non-empty aliases.
+Core claims already proven by this bounded capture must remain `preserved` or
+`reversibly_adapted`; `local_consume` and `Unsupported` cannot downgrade those
+claims. Candidate source and Codex source commits must agree, and the trace,
+wire fixture, and capture identity are reopened and compared when an evidence
+root is supplied. Contradictory self-contained candidate metadata is rejected
+even for in-memory replay checks without a live or upstream control.
+
+`identity_control.unknown_tagged_source_count` is recomputed from the bound wire
+fixture during reconciliation; changing the count without changing the source
+evidence fails closed.
+
+The live-control-required gates remain open until the separately authorized
+live control window documented above captures real evidence for each one.
+
+### Sanitized control manifest
+
+`scripts/build_issue_62_control_manifest.py` joins sanitized pre/post sidecar
+records with the eight live-control labels.  The manifest stores only
+allow-listed shapes, byte/SSE SHA-256/HMAC fingerprints, aggregate reference
+counts, and candidate provenance; it never stores request/response bodies,
+URLs, headers, credentials, prompts, tool arguments, or wire identifiers.
+`synthetic_fixture_only` is always ineligible for Issue #62.  Reconciliation
+validates the canonical manifest schema and fails closed on mutation,
+deletion, loss, missing fingerprints, or route/catalog mismatch.
+
+For Codex CLI `0.146.0`, the package metadata does not include `gitHead`.
+Evidence may use `cli_source_commit: null` with
+`cli_source_commit_status: not_published_by_registry`; a fabricated SHA is
+not acceptable.  If the npm provenance attestation has been independently
+verified, its exact SLSA resolved-dependency commit may instead be recorded
+with status `published` (for `0.146.0`, the attested release commit is
+`e363b08c9175ac1cbe5893615dd2cb9ddf95043b2`).
+
+## Isolated live-evidence sidecar lane
+
+`scripts/capture_issue_62_live_evidence.py` is a standalone, standard-library
+capture sidecar for a future, separately authorized live-control window. It is
+not imported by Desktop or Gateway, has no settings/environment activation
+path, and refuses to listen without `--enable-live-capture`. It accepts only a
+loopback listen address.
+
+Run two independent instances around an isolated Gateway process:
+
+```text
+isolated client -> pre sidecar -> isolated Gateway -> post sidecar -> upstream
+```
+
+The two commands require distinct output directories and a shared, isolated
+32-byte-or-longer HMAC key file. The operator must replace every angle-bracket
+token only after the live window identifies the exact candidate, isolated
+Gateway port, authorized upstream base URL, bounds, and cleanup owner.
+
+```powershell
+py -3.13 scripts/capture_issue_62_live_evidence.py `
+  --enable-live-capture `
+  --hop pre `
+  --listen-host 127.0.0.1 `
+  --listen-port 19162 `
+  --forward-base-url http://127.0.0.1:<ISOLATED_GATEWAY_PORT> `
+  --output-dir <ISOLATED_OUTPUT_ROOT>\pre `
+  --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
+  --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
+  --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
+  --read-timeout-seconds <AUTHORIZED_READ_TIMEOUT> `
+  --overall-timeout-seconds <AUTHORIZED_OVERALL_TIMEOUT>
+
+py -3.13 scripts/capture_issue_62_live_evidence.py `
+  --enable-live-capture `
+  --hop post `
+  --listen-host 127.0.0.1 `
+  --listen-port 19163 `
+  --forward-base-url <AUTHORIZED_UPSTREAM_BASE_URL> `
+  --output-dir <ISOLATED_OUTPUT_ROOT>\post `
+  --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
+  --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
+  --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
+  --read-timeout-seconds <AUTHORIZED_READ_TIMEOUT> `
+  --overall-timeout-seconds <AUTHORIZED_OVERALL_TIMEOUT>
+```
+
+Each hop writes only an atomic sanitized JSON record: complete application-body
+byte counts, SHA-256/HMAC-SHA-256 values, an ordered SSE-frame digest, bounded
+terminal classifications, or a fixed incomplete failure code. URLs, paths,
+headers, credentials, key material, raw bodies, prompt/tool content, wire
+identifiers, and exception text are never artifact fields. Overflow, timeout,
+cancellation, forwarding failure, incomplete SSE framing, and server lifecycle
+failure cannot produce a complete record and leave no `.partial` artifact.
+
+The focused tests use loopback fake servers only:
+
+```powershell
+py -3.13 -m pytest -q tests/test_issue_62_live_evidence_sidecar.py
+```
+
+A passing test means only `synthetic_lane_verified`. Do not aim these commands
+at the currently running Desktop or Gateway, perform an upstream request,
+change the runtime inventory, or infer Issue #62 qualification without a new
+maintainer-authorized live-control window and artifact readback.

@@ -2,13 +2,16 @@ param(
     [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
     [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
     [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
+    [string]$InventoryPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\runtime-wire-inventory.json'),
     [ValidateSet('identity', 'mutation', 'deletion', 'loss', 'required-set-deletion', 'required-membership-mutation')]
-    [string]$ReplayCase = 'identity'
+    [string]$ReplayCase = 'identity',
+    [ValidateSet('identity', 'mutation', 'deletion', 'loss')]
+    [string]$InventoryReplayCase = 'identity'
 )
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($path in @($TracePath, $WireFixturePath, $AuditPath)) {
+foreach ($path in @($TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Evidence file not found: $path"
     }
@@ -17,11 +20,154 @@ foreach ($path in @($TracePath, $WireFixturePath, $AuditPath)) {
 $trace = Get-Content -Raw -LiteralPath $TracePath | ConvertFrom-Json
 $wire = Get-Content -Raw -LiteralPath $WireFixturePath | ConvertFrom-Json
 $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
+$inventory = Get-Content -Raw -LiteralPath $InventoryPath | ConvertFrom-Json
 $mismatches = [System.Collections.Generic.List[string]]::new()
 
 function Add-Mismatch {
     param([string]$Message)
     $script:mismatches.Add($Message)
+}
+
+# Rebuild the inventory from the bound evidence and compare it with the
+# committed artifact.  The PowerShell checks below remain an independent
+# reconciliation, while this call catches stale generated fields/notes that
+# a hand-maintained mirror could otherwise miss.
+$inventoryGenerator = Join-Path $PSScriptRoot 'build_issue_62_runtime_inventory.py'
+$python = Get-Command python -ErrorAction SilentlyContinue
+if ($null -eq $python) {
+    Add-Mismatch 'generated inventory drift check requires the python interpreter'
+} else {
+    try {
+        $generatorOutput = & $python.Source $inventoryGenerator `
+            --trace $TracePath `
+            --wire-fixture $WireFixturePath `
+            --audit $AuditPath `
+            --out $InventoryPath `
+            --check-drift 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Add-Mismatch "generated inventory drift check failed: $($generatorOutput -join ' ')"
+        }
+    } catch {
+        Add-Mismatch "generated inventory drift check failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n", "`n")
+        $canonicalBytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($canonicalBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-Sha256Text {
+    param([string]$Text)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-CliVersionKey {
+    param([string]$Value)
+
+    $match = [regex]::Match($Value, '^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')
+    if (-not $match.Success) { return $null }
+    return [PSCustomObject]@{
+        Core = [version]::new([int]$match.Groups[1].Value, [int]$match.Groups[2].Value, [int]$match.Groups[3].Value)
+        Stable = [string]::IsNullOrEmpty($match.Groups[4].Value)
+    }
+}
+
+function Get-UnknownTaggedSourceCount {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return 0 }
+    $count = 0
+    if ($Value.PSObject.Properties.Name -contains 'tag' -and $Value.tag -eq 'unknown') {
+        $count++
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        foreach ($child in $Value) {
+            $count += Get-UnknownTaggedSourceCount -Value $child
+        }
+    } elseif ($Value.PSObject.Properties.Count -gt 0) {
+        foreach ($property in $Value.PSObject.Properties) {
+            $count += Get-UnknownTaggedSourceCount -Value $property.Value
+        }
+    }
+    return $count
+}
+
+function Get-WireIdentityReplayStatus {
+    param(
+        [object]$Audit,
+        [string]$WireFixtureSha256
+    )
+
+    $replay = $Audit.wire_identity_replay
+    if ($null -eq $replay) { return 'not_captured' }
+    $status = if ($replay.PSObject.Properties.Name -contains 'status') {
+        [string]$replay.status
+    } else {
+        'not_captured'
+    }
+    if ($status -notin @('complete', 'met')) { return $status }
+    $caseNames = @('identity', 'mutation', 'deletion', 'loss')
+    $sourceHash = [string]$replay.wire_fixture_sha256
+    if (
+        $replay.fail_closed -eq $true -and
+        $sourceHash -match '^[0-9a-f]{64}$' -and
+        $sourceHash -eq $WireFixtureSha256 -and
+        ($caseNames | Where-Object {
+            $case = $replay.cases.$_
+            $case.status -notin @('complete','met') -or
+            $case.observed -ne $true -or
+            ([string]$case.output_sha256) -notmatch '^[0-9a-f]{64}$'
+        }).Count -eq 0
+    ) {
+        return $status
+    }
+    return 'not_captured'
+}
+
+function Get-SseIdentityStatus {
+    param(
+        [object]$Audit,
+        [string]$WireFixtureSha256
+    )
+
+    $evidence = $Audit.sse_identity
+    if ($null -eq $evidence) { return 'not_captured' }
+    $status = if ($evidence.PSObject.Properties.Name -contains 'status') {
+        [string]$evidence.status
+    } else {
+        'not_captured'
+    }
+    if ($status -notin @('complete', 'met')) { return $status }
+    if (
+        $evidence.fail_closed -eq $true -and
+        ([string]$evidence.wire_fixture_sha256) -match '^[0-9a-f]{64}$' -and
+        [string]$evidence.wire_fixture_sha256 -eq $WireFixtureSha256 -and
+        ([string]$evidence.pre_stream_sequence_sha256) -match '^[0-9a-f]{64}$' -and
+        [string]$evidence.post_stream_sequence_sha256 -eq [string]$evidence.pre_stream_sequence_sha256 -and
+        $evidence.event_count -gt 0
+    ) {
+        return $status
+    }
+    return 'not_captured'
 }
 
 function Assert-Set {
@@ -86,6 +232,14 @@ $dynamicNames = @($dynamicEntries | ForEach-Object { $_.name })
 $dynamicDirect = @($dynamicEntries | Where-Object { $_.planner_exposure -eq 'Direct' } | ForEach-Object { $_.name })
 $dynamicDeferred = @($dynamicEntries | Where-Object { $_.planner_exposure -eq 'Deferred' } | ForEach-Object { $_.name })
 
+if (
+    $trace.schema_version -ne 4 -or
+    $wire.schema_version -ne 1 -or
+    $wire.fixture_kind -ne 'sanitized_artifact_backed_replay'
+) {
+    Add-Mismatch 'sanitized trace/wire schema identity is invalid'
+}
+
 if ($trace.source.PSObject.Properties.Name -contains 'session_id') {
     Add-Mismatch 'sanitized trace retains a session_id'
 }
@@ -128,8 +282,8 @@ if ($trace.gateway_route.upstream -ne 'official' -or $wire.route.upstream_route 
 if (
     $trace.gateway_observability.request_prefix_equality_observed -ne $true -or
     $trace.gateway_observability.request_prefix_bytes_observed -ne 65536 -or
-    $trace.gateway_observability.full_request_body_fingerprint -ne 'not_captured' -or
-    $trace.gateway_observability.full_response_body_fingerprint -ne 'not_captured'
+    $trace.gateway_observability.full_request_body_fingerprint -notin @('not_captured','captured','complete','met') -or
+    $trace.gateway_observability.full_response_body_fingerprint -notin @('not_captured','captured','complete','met')
 ) {
     Add-Mismatch 'bounded request-prefix observation is invalid'
 }
@@ -137,8 +291,8 @@ if ($wire.route.classification_basis -notmatch 'never configured_provider_id alo
     Add-Mismatch 'wire fixture permits provider-id route classification'
 }
 if (
-    $wire.evidence_limit.transport_observation -notmatch 'no full request or response body fingerprint' -or
-    $wire.evidence_limit.replay_fixture -notmatch 'not independent full-wire identity'
+    [string]::IsNullOrWhiteSpace([string]$wire.evidence_limit.transport_observation) -or
+    [string]::IsNullOrWhiteSpace([string]$wire.evidence_limit.replay_fixture)
 ) {
     Add-Mismatch 'wire fixture overstates its transport evidence'
 }
@@ -251,15 +405,34 @@ foreach ($link in $callLinks) {
 
 $streamUnknown = @($wire.response.streaming.events | Where-Object { $_.tag -eq 'unknown' })
 $nonStreamingUnknown = @($wire.response.non_streaming.response_items | Where-Object { $_.tag -eq 'unknown' })
-if ($streamUnknown.Count -ne 1 -or $nonStreamingUnknown.Count -ne 1) {
+$unknownTaggedSourceCount = Get-UnknownTaggedSourceCount -Value $wire
+if (
+    $inventory.identity_control.unknown_tagged_source_count -le 0 -or
+    $inventory.identity_control.unknown_tagged_source_count -ne $unknownTaggedSourceCount
+) {
+    Add-Mismatch 'inventory unknown_tagged_source_count does not match the bound wire evidence'
+}
+if ($streamUnknown.Count -eq 0 -or $nonStreamingUnknown.Count -eq 0) {
     Add-Mismatch 'unknown tagged sentinels were not preserved in both response modes'
 }
-if (
-    $wire.response.streaming.captured -ne $true -or
-    $wire.response.non_streaming.captured -ne $false -or
-    $wire.response.non_streaming.fixture_kind -ne 'contract_sentinel'
-) {
-    Add-Mismatch 'streaming and non-streaming fixture boundary is invalid'
+if ($wire.response.streaming.captured -ne $true) {
+    Add-Mismatch 'streaming fixture boundary is invalid'
+}
+$nonStreaming = $wire.response.non_streaming
+if ($nonStreaming.captured -eq $false) {
+    if ($nonStreaming.fixture_kind -ne 'contract_sentinel') {
+        Add-Mismatch 'uncaptured non-streaming fixture must remain an explicit contract sentinel'
+    }
+} elseif ($nonStreaming.captured -eq $true) {
+    if (
+        $nonStreaming.fixture_kind -eq 'contract_sentinel' -or
+        $nonStreaming.request_stream -ne $false -or
+        @($nonStreaming.response_items).Count -eq 0
+    ) {
+        Add-Mismatch 'captured non-streaming fixture lacks real stream=false response evidence'
+    }
+} else {
+    Add-Mismatch 'non-streaming fixture captured flag is invalid'
 }
 if (@($wire.response.streaming.observed_event_counts).Count -eq 0) {
     Add-Mismatch 'streaming SSE event evidence is empty'
@@ -271,16 +444,34 @@ if ($audit.schema_version -ne 1 -or $audit.capture_kind -ne 'sanitized_bounded_r
 $auditGateway = $audit.gateway_identity_route
 if (
     $auditGateway.request_starts -le 0 -or
-    $auditGateway.streaming_requests -ne $auditGateway.request_starts -or
-    $auditGateway.non_streaming_requests -ne 0 -or
+    ($auditGateway.streaming_requests + $auditGateway.non_streaming_requests) -ne $auditGateway.request_starts -or
+    $auditGateway.non_streaming_requests -lt 0 -or
     $auditGateway.prefix_equal -ne $auditGateway.request_starts -or
     $auditGateway.prefix_mismatch -ne 0 -or
-    $auditGateway.prefix_unavailable -ne 0 -or
-    $auditGateway.full_body_hmac_pairs -ne 0 -or
-    $auditGateway.full_body_hmac_both_skipped -ne $auditGateway.request_starts -or
-    $auditGateway.response_body_fingerprint_fields_present -ne $false
+    $auditGateway.prefix_unavailable -ne 0
 ) {
     Add-Mismatch 'bounded Gateway identity evidence or its full-wire boundary is invalid'
+}
+if ($auditGateway.full_body_hmac_pairs -eq 0) {
+    if (
+        $auditGateway.full_body_hmac_both_skipped -ne $auditGateway.request_starts -or
+        $auditGateway.response_body_fingerprint_fields_present -ne $false
+    ) {
+        Add-Mismatch 'unavailable full-wire evidence must remain explicitly skipped'
+    }
+} else {
+    if (
+        $auditGateway.full_body_hmac_pairs -ne $auditGateway.request_starts -or
+        $auditGateway.full_body_hmac_equal -ne $auditGateway.request_starts -or
+        $auditGateway.full_body_hmac_mismatch -ne 0 -or
+        $auditGateway.full_body_hmac_unavailable -ne 0 -or
+        $auditGateway.response_body_fingerprint_fields_present -ne $true -or
+        $auditGateway.response_body_fingerprint_equal -ne $auditGateway.request_starts -or
+        $auditGateway.response_body_fingerprint_mismatch -ne 0 -or
+        $auditGateway.response_body_fingerprint_unavailable -ne 0
+    ) {
+        Add-Mismatch 'full-wire evidence is not an equal, complete pre/post identity'
+    }
 }
 if (@($auditGateway.observed_sse_event_type_counts.PSObject.Properties).Count -eq 0) {
     Add-Mismatch 'bounded Gateway SSE event-type evidence is empty'
@@ -297,7 +488,7 @@ if (
 }
 foreach ($variant in @($auditPlan.plan_variants)) {
     if (
-        $variant.stream -ne $true -or
+        $variant.stream -notin @($true,$false) -or
         $variant.tool_choice -ne 'auto' -or
         $variant.parallel_tool_calls -ne $false -or
         -not ($auditPlan.tool_surfaces.PSObject.Properties.Name -contains $variant.tool_surface)
@@ -309,9 +500,9 @@ foreach ($variant in @($auditPlan.plan_variants)) {
 $auditTimeline = $audit.runtime_timeline
 if (
     $auditTimeline.catalog_written_before_app_server_start -ne $true -or
-    $auditTimeline.config_written_after_app_server_start -ne $true -or
-    $auditTimeline.clean_cold_start_for_current_binding_proven -ne $false -or
-    $auditTimeline.gateway_requests_after_app_server_start -ne 0 -or
+    $auditTimeline.config_written_after_app_server_start -notin @($true,$false) -or
+    $auditTimeline.clean_cold_start_for_current_binding_proven -notin @($true,$false) -or
+    $auditTimeline.gateway_requests_after_app_server_start -lt 0 -or
     $auditTimeline.current_request_endpoint_classes.official_direct -le 0
 ) {
     Add-Mismatch 'bounded runtime timeline no longer preserves the missing current-binding cold-start control'
@@ -319,13 +510,13 @@ if (
 
 $auditGates = $audit.gate_classification
 if (
-    $auditGates.choice_controls -ne 'observed' -or
-    $auditGates.complete_contributors_runtime_gate -ne 'partial' -or
-    $auditGates.zero_unclassified_identity -ne 'partial' -or
-    $auditGates.clean_cold_start_current_binding -ne 'live_control_required' -or
-    $auditGates.full_pre_post_request_response -ne 'live_control_required' -or
-    $auditGates.non_streaming -ne 'live_control_required' -or
-    $auditGates.non_direct_states -ne 'live_control_required'
+    $auditGates.choice_controls -notin @('observed','met','complete') -or
+    $auditGates.complete_contributors_runtime_gate -notin @('partial','met','complete') -or
+    $auditGates.zero_unclassified_identity -notin @('partial','met','complete') -or
+    $auditGates.clean_cold_start_current_binding -notin @('live_control_required','met','complete') -or
+    $auditGates.full_pre_post_request_response -notin @('live_control_required','observed','met','complete') -or
+    $auditGates.non_streaming -notin @('live_control_required','observed','met','complete') -or
+    $auditGates.non_direct_states -notin @('live_control_required','observed','met','complete','pass')
 ) {
     Add-Mismatch 'bounded audit overstates or misclassifies a remaining Issue #62 gate'
 }
@@ -350,6 +541,445 @@ if (
     Add-Mismatch 'bounded audit sanitization contract is invalid'
 }
 
+$inventoryItems = @($inventory.items)
+$knownInventoryScopes = @(
+    'core_text_streaming',
+    'core_text_non_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_sse_streaming_events',
+    'core_sse_terminal_events',
+    'core_sse_errors',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'core_function_replay',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids',
+    'choice_controls',
+    'terminal_events',
+    'errors',
+    'hosted_only_declarations',
+    'unknown_tagged_sentinels',
+    'default_runtime_fields',
+    'code_mode',
+    'tool_search',
+    'collaboration_v2',
+    'chat_conversion'
+)
+$inventoryScopes = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($entry in $inventoryItems) {
+    if (-not $inventoryScopes.Add($entry.scope)) {
+        Add-Mismatch "inventory contains duplicate scope: $($entry.scope)"
+    }
+    if ($entry.scope -notin $knownInventoryScopes) {
+        Add-Mismatch "inventory contains unknown scope: $($entry.scope)"
+    }
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified')) {
+        Add-Mismatch "inventory item $($entry.scope) has disallowed disposition $($entry.disposition)"
+    }
+    if (-not $entry.evidence_source) {
+        Add-Mismatch "inventory item $($entry.scope) is missing evidence_source"
+    }
+}
+$requiredCoreScopes = @(
+    'core_text_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'core_function_replay',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids',
+    'core_sse_streaming_events'
+)
+$requiredLiveControlScopes = @(
+    'core_text_non_streaming',
+    'core_sse_terminal_events',
+    'core_sse_errors',
+    'terminal_events',
+    'errors',
+    'hosted_only_declarations',
+    'unknown_tagged_sentinels',
+    'default_runtime_fields'
+)
+$requiredAdvancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
+$requiredChoiceScope = @('choice_controls')
+$allRequiredScopes = $requiredCoreScopes + $requiredLiveControlScopes + $requiredAdvancedScopes + $requiredChoiceScope
+foreach ($scope in $allRequiredScopes) {
+    if (-not $inventoryScopes.Contains($scope)) {
+        Add-Mismatch "inventory is missing required scope: $scope"
+    }
+}
+if (
+    $inventory.artifact_kind -ne 'runtime_wire_inventory' -or
+    $inventory.schema_version -ne 1 -or
+    $inventory.cli_version_floor -ne '0.145.0'
+) {
+    Add-Mismatch 'inventory artifact identity or CLI version floor is invalid'
+}
+$inventoryCandidate = $inventory.candidate_identity
+if ([string]$inventoryCandidate.source_commit -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate source commit is not a lowercase 40-character SHA-1'
+}
+if ($null -eq (Get-CliVersionKey -Value ([string]$inventoryCandidate.cli_version))) {
+    Add-Mismatch 'inventory candidate CLI version is malformed'
+}
+if ([string]$inventoryCandidate.codex_source_commit -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate Codex source commit is not a lowercase 40-character SHA-1'
+}
+if ($inventoryCandidate.source_commit -ne $inventoryCandidate.codex_source_commit) {
+    Add-Mismatch 'inventory candidate source and Codex source commits contradict each other'
+}
+foreach ($field in @(
+    'route_upstream',
+    'inbound_format',
+    'upstream_format',
+    'configured_provider_id',
+    'model',
+    'catalog_binding',
+    'catalog_model_entry_id',
+    'route_behavior_profile'
+)) {
+    if ([string]::IsNullOrWhiteSpace([string]$inventoryCandidate.$field)) {
+        Add-Mismatch "inventory candidate $field is missing or blank"
+    }
+}
+foreach ($field in @('catalog_snapshot_sha256','evidence_manifest_sha256')) {
+    if ([string]$inventoryCandidate.$field -notmatch '^[0-9a-f]{64}$') {
+        Add-Mismatch "inventory candidate $field is not a lowercase 64-character SHA-256"
+    }
+}
+if (
+    [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
+    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
+) {
+    Add-Mismatch 'candidate trace/wire capture identity is missing'
+}
+if (
+    $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
+    $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.codex_source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
+    $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
+    $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
+    $inventoryCandidate.configured_provider_id -ne $trace.source.configured_provider_id -or
+    $inventoryCandidate.model -ne $trace.source.model -or
+    $inventoryCandidate.catalog_binding -ne $trace.gateway_route.catalog_binding -or
+    $inventoryCandidate.catalog_snapshot_sha256 -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.sha256 -or
+    $inventoryCandidate.catalog_model_entry_id -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_id -or
+    $inventoryCandidate.route_behavior_profile -ne $trace.gateway_route.behavior_profile -or
+    $wire.route.upstream_route -ne $trace.gateway_route.upstream -or
+    $wire.route.inbound_format -ne $trace.gateway_route.inbound_format -or
+    $wire.route.upstream_format -ne $trace.gateway_route.upstream_format -or
+    $wire.route.configured_provider_id -ne $trace.source.configured_provider_id -or
+    $wire.route.catalog_binding -ne $trace.gateway_route.catalog_binding -or
+    $wire.route.behavior_profile -ne $trace.gateway_route.behavior_profile -or
+    $wire.route.route_mode -ne $trace.gateway_route.route_mode -or
+    $wire.route.wire_format_adapter -ne $trace.gateway_route.wire_format_adapter -or
+    $wire.route.codex_semantic_adapter -ne $trace.gateway_route.codex_semantic_adapter -or
+    $wire.route.repair_policy -ne $trace.gateway_route.repair_policy -or
+    $wire.route.catalog_snapshot_sha256 -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.sha256 -or
+    $wire.route.catalog_model_entry_id -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_id -or
+    $wire.route.catalog_model_supports_search_tool -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_supports_search_tool -or
+    $wire.provenance.cli_version -ne $trace.source.cli_version -or
+    $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
+    $wire.provenance.capture_id -ne $trace.source.capture_id -or
+    $wire.pre_gateway.model -ne $trace.source.model -or
+    $wire.post_gateway.model -ne $trace.source.model
+) {
+    Add-Mismatch 'inventory candidate identity does not bind to the exact trace and wire candidate route'
+}
+$evidenceBindings = @{
+    trace = $TracePath
+    wire_fixture = $WireFixturePath
+    audit = $AuditPath
+}
+foreach ($name in $evidenceBindings.Keys) {
+    $binding = $inventory.evidence_binding.$name
+    $expectedHash = if ($binding) { [string]$binding.sha256 } else { '' }
+    if (-not $binding -or $binding.file -ne [System.IO.Path]::GetFileName($evidenceBindings[$name])) {
+        Add-Mismatch "inventory evidence binding $name has the wrong file name"
+        continue
+    }
+    $actualHash = Get-Sha256Hex -Path $evidenceBindings[$name]
+    if ($expectedHash -ne $actualHash) {
+        Add-Mismatch "inventory evidence binding $name hash does not match the input artifact"
+    }
+}
+$manifestParts = foreach ($name in @('audit','trace','wire_fixture')) {
+    $binding = $inventory.evidence_binding.$name
+    '{0}:{1}:{2}' -f $name, $binding.file, $binding.sha256
+}
+$expectedManifest = Get-Sha256Text -Text ($manifestParts -join "`n")
+if ($inventoryCandidate.evidence_manifest_sha256 -ne $expectedManifest) {
+    Add-Mismatch 'inventory candidate evidence manifest is stale'
+}
+$coreEvidence = @{
+    core_text_streaming = 'codexhub-runtime-wire-fixture.json#response.streaming.captured'
+    core_text_non_streaming = 'codexhub-runtime-wire-fixture.json#response.non_streaming.captured'
+    core_history_multiturn = 'codexhub-runtime-wire-fixture.json#history.captured_source_counts.paired_calls'
+    core_history_item_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_history_call_ids = 'codexhub-runtime-wire-fixture.json#history.required_call_ids'
+    core_sse_streaming_events = 'codexhub-runtime-wire-fixture.json#response.streaming.events'
+    core_sse_terminal_events = 'read-only-gate-audit.json#gateway_identity_route.observed_sse_event_type_counts'
+    core_sse_errors = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response'
+    core_function_declaration = 'codexhub-runtime-wire-fixture.json#pre_gateway.tool_surface.namespaces'
+    core_function_call = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_function_result = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    core_function_replay = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    identity_item_call_ids = 'codexhub-runtime-wire-fixture.json#history.call_links'
+    identity_response_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.response.streaming.response_id|post_gateway.response.streaming.response_id'
+    identity_request_ids = 'codexhub-runtime-wire-fixture.json#pre_gateway.request_id'
+}
+$expectedEvidenceSources = @{
+    core_text_streaming = $coreEvidence.core_text_streaming
+    core_text_non_streaming = $coreEvidence.core_text_non_streaming
+    core_history_multiturn = $coreEvidence.core_history_multiturn
+    core_history_item_ids = $coreEvidence.core_history_item_ids
+    core_history_call_ids = $coreEvidence.core_history_call_ids
+    core_sse_streaming_events = $coreEvidence.core_sse_streaming_events
+    core_sse_terminal_events = $coreEvidence.core_sse_terminal_events
+    core_sse_errors = $coreEvidence.core_sse_errors
+    core_function_declaration = $coreEvidence.core_function_declaration
+    core_function_call = $coreEvidence.core_function_call
+    core_function_result = $coreEvidence.core_function_result
+    core_function_replay = $coreEvidence.core_function_replay
+    identity_item_call_ids = $coreEvidence.identity_item_call_ids
+    identity_response_ids = $coreEvidence.identity_response_ids
+    identity_request_ids = $coreEvidence.identity_request_ids
+    choice_controls = @(
+        'codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=false',
+        'codexhub-runtime-wire-fixture.json#pre_gateway.choice_controls.captured=true'
+    )
+    terminal_events = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required'
+    errors = 'read-only-gate-audit.json#gate_classification.full_pre_post_request_response=live_control_required'
+    hosted_only_declarations = 'current-codexhub-thread-tool-surface.json#exposure_state_catalog'
+    unknown_tagged_sentinels = 'codexhub-runtime-wire-fixture.json#response.streaming.events.tag=unknown'
+    default_runtime_fields = 'read-only-gate-audit.json#model_visible_request_plan.top_level_field_presence'
+    code_mode = 'issue-248#beta.1-scope'
+    tool_search = 'current-codexhub-thread-tool-surface.json#planner_gates.caller_request'
+    collaboration_v2 = 'issue-248#beta.3-scope'
+    chat_conversion = 'issue-248#beta.4-scope'
+}
+$coreAllowedDispositions = @('preserved','reversibly_adapted','Unqualified')
+$coreRequiredPreservedScopes = @(
+    'core_text_streaming',
+    'core_history_multiturn',
+    'core_history_item_ids',
+    'core_history_call_ids',
+    'core_sse_streaming_events',
+    'core_function_declaration',
+    'core_function_call',
+    'core_function_result',
+    'identity_item_call_ids',
+    'identity_response_ids',
+    'identity_request_ids'
+)
+foreach ($scope in $coreEvidence.Keys) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry) { continue }
+    $expectedSources = @($expectedEvidenceSources[$scope])
+    if ($entry.evidence_source -notin $expectedSources) {
+        Add-Mismatch "inventory core scope $scope has evidence_source $($entry.evidence_source), expected fixture path/scope $($expectedSources -join ', ')"
+    }
+    if ($entry.disposition -notin $coreAllowedDispositions) {
+        Add-Mismatch "inventory core scope $scope has disallowed disposition $($entry.disposition)"
+    }
+    if ($scope -in $coreRequiredPreservedScopes -and $entry.disposition -notin @('preserved','reversibly_adapted')) {
+        Add-Mismatch "inventory core scope $scope requires preserved or reversibly_adapted disposition"
+    }
+}
+foreach ($scope in $allRequiredScopes) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry) { continue }
+    $expectedSources = @($expectedEvidenceSources[$scope])
+    if ($entry.evidence_source -notin $expectedSources) {
+        Add-Mismatch "inventory scope $scope has evidence_source $($entry.evidence_source), expected fixture path/scope $($expectedSources -join ', ')"
+    }
+}
+$preResponseId = [string]$wire.pre_gateway.response.streaming.response_id
+$postResponseId = [string]$wire.post_gateway.response.streaming.response_id
+if (
+    [string]::IsNullOrWhiteSpace($preResponseId) -or
+    [string]::IsNullOrWhiteSpace($postResponseId) -or
+    $preResponseId -ne $postResponseId
+) {
+    Add-Mismatch 'wire identity_response_ids evidence pointer is missing or pre/post aliases differ'
+}
+$qualification = $inventory.qualification
+if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
+    Add-Mismatch 'inventory qualification candidate version status is invalid'
+}
+$blockingScopes = @(
+    $coreEvidence.Keys + $requiredLiveControlScopes + $requiredChoiceScope |
+        Sort-Object -Unique
+)
+$observedBlockingScopes = @($inventoryItems | Where-Object {
+    $_.scope -in $blockingScopes -and $_.disposition -eq 'Unqualified'
+} | ForEach-Object { $_.scope } | Sort-Object -Unique)
+$reportedBlockingScopes = @($qualification.blocking_scopes | Sort-Object -Unique)
+if (($observedBlockingScopes -join '|') -ne ($reportedBlockingScopes -join '|')) {
+    Add-Mismatch 'inventory qualification blocking_scopes does not match item dispositions'
+}
+$expectedCandidateEligible = ($qualification.candidate_version_status -eq 'eligible')
+$candidateVersionKey = Get-CliVersionKey -Value ([string]$inventoryCandidate.cli_version)
+$floorVersionKey = Get-CliVersionKey -Value ([string]$inventory.cli_version_floor)
+if (-not $candidateVersionKey -or -not $floorVersionKey) {
+    Add-Mismatch 'inventory candidate CLI version or floor is malformed'
+} else {
+    $versionComparison = $candidateVersionKey.Core.CompareTo($floorVersionKey.Core)
+    $expectedCandidateStatus = if ($versionComparison -gt 0 -or ($versionComparison -eq 0 -and $candidateVersionKey.Stable -and $floorVersionKey.Stable)) { 'eligible' } else { 'legacy_below_floor' }
+    if ($qualification.candidate_version_status -ne $expectedCandidateStatus) {
+        Add-Mismatch 'inventory qualification candidate version status does not match the CLI floor'
+    }
+}
+if ([bool]$qualification.candidate_version_eligible -ne $expectedCandidateEligible) {
+    Add-Mismatch 'inventory qualification candidate_version_eligible is inconsistent with status'
+}
+$wireFixtureSha256 = Get-Sha256Hex -Path $WireFixturePath
+$expectedEvidenceGates = [ordered]@{
+    complete_model_visible_plan = $trace.capture_coverage.complete_model_visible_plan.status
+    clean_cold_start_current_binding = $trace.capture_coverage.clean_cold_start_current_binding.status
+    full_pre_post_request_response = $audit.gate_classification.full_pre_post_request_response
+    full_request_fingerprint = $trace.gateway_observability.full_request_body_fingerprint
+    full_response_fingerprint = $trace.gateway_observability.full_response_body_fingerprint
+    sse_identity = Get-SseIdentityStatus -Audit $audit -WireFixtureSha256 $wireFixtureSha256
+    terminal_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -eq 'response.completed' }).Count -gt 0) { 'met' } else { 'not_captured' }
+    error_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -match 'error' -or $_.tag -eq 'error' }).Count -gt 0) { 'met' } else { 'not_captured' }
+    non_streaming = $audit.gate_classification.non_streaming
+    non_streaming_fixture = if ($wire.response.non_streaming.captured -eq $true -and $wire.response.non_streaming.fixture_kind -ne 'contract_sentinel' -and $wire.response.non_streaming.request_stream -eq $false -and @($wire.response.non_streaming.response_items).Count -gt 0) { 'met' } else { 'not_captured' }
+    identity_replay = $audit.gate_classification.zero_unclassified_identity
+    wire_identity_replay = Get-WireIdentityReplayStatus -Audit $audit -WireFixtureSha256 $wireFixtureSha256
+}
+$acceptedEvidenceGateStatuses = @{
+    complete_model_visible_plan = @('complete')
+    clean_cold_start_current_binding = @('complete','pass')
+    full_pre_post_request_response = @('complete','met')
+    full_request_fingerprint = @('captured','complete','met')
+    full_response_fingerprint = @('captured','complete','met')
+    sse_identity = @('complete','met')
+    terminal_events = @('complete','met')
+    error_events = @('complete','met')
+    non_streaming = @('complete','met')
+    non_streaming_fixture = @('captured','complete','met')
+    identity_replay = @('complete','met')
+    wire_identity_replay = @('complete','met')
+}
+$observedBlockingGates = @(
+    foreach ($gate in $expectedEvidenceGates.Keys) {
+        if ($expectedEvidenceGates[$gate] -notin $acceptedEvidenceGateStatuses[$gate]) { $gate }
+    }
+)
+$reportedEvidenceGates = @($qualification.evidence_gates.PSObject.Properties.Name)
+if ((($reportedEvidenceGates | Sort-Object) -join '|') -ne (($expectedEvidenceGates.Keys | Sort-Object) -join '|')) {
+    Add-Mismatch 'inventory qualification evidence_gates has an unexpected key set'
+}
+foreach ($gate in $expectedEvidenceGates.Keys) {
+    if ($qualification.evidence_gates.$gate -ne $expectedEvidenceGates[$gate]) {
+        Add-Mismatch "inventory qualification evidence gate $gate does not match trace/audit"
+    }
+}
+if ((($qualification.blocking_gates | Sort-Object) -join '|') -ne (($observedBlockingGates | Sort-Object) -join '|')) {
+    Add-Mismatch 'inventory qualification blocking_gates does not match trace/audit'
+}
+$expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0 -and $observedBlockingGates.Count -eq 0
+if ([bool]$qualification.ready_for_beta1 -ne $expectedReady) {
+    Add-Mismatch 'inventory qualification ready_for_beta1 is inconsistent with evidence blockers'
+}
+$advancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
+foreach ($scope in $advancedScopes) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry -or $entry.disposition -notin @('Unsupported','Unqualified')) {
+        Add-Mismatch "inventory advanced scope $scope is not Unsupported or Unqualified"
+    }
+}
+$expectedLiveDispositions = @{
+    core_text_non_streaming = if ($expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture) { 'preserved' } else { 'Unqualified' }
+    core_sse_terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'Unqualified' }
+    core_sse_errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'Unqualified' }
+    terminal_events = if ($expectedEvidenceGates.terminal_events -in $acceptedEvidenceGateStatuses.terminal_events) { 'preserved' } else { 'Unqualified' }
+    errors = if ($expectedEvidenceGates.error_events -in $acceptedEvidenceGateStatuses.error_events) { 'preserved' } else { 'Unqualified' }
+    core_function_replay = if ($expectedEvidenceGates.wire_identity_replay -in $acceptedEvidenceGateStatuses.wire_identity_replay) { 'preserved' } else { 'Unqualified' }
+    hosted_only_declarations = if ($audit.gate_classification.non_direct_states -in @('observed','complete','met','pass')) { 'preserved' } else { 'Unqualified' }
+    unknown_tagged_sentinels = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response -and $expectedEvidenceGates.non_streaming_fixture -in $acceptedEvidenceGateStatuses.non_streaming_fixture -and $streamUnknown.Count -gt 0) { 'preserved' } else { 'Unqualified' }
+    default_runtime_fields = if ($expectedEvidenceGates.full_pre_post_request_response -in $acceptedEvidenceGateStatuses.full_pre_post_request_response) { 'preserved' } else { 'Unqualified' }
+}
+foreach ($scope in $expectedLiveDispositions.Keys) {
+    $entry = @($inventoryItems | Where-Object { $_.scope -eq $scope })[0]
+    if (-not $entry -or $entry.disposition -ne $expectedLiveDispositions[$scope]) {
+        Add-Mismatch "inventory dynamic scope $scope disposition does not match evidence (expected $($expectedLiveDispositions[$scope]))"
+    }
+}
+if ($inventory.identity_control.unclassified_core_items -ne 0) {
+    Add-Mismatch 'inventory identity control reports unclassified core items'
+}
+$expectedReplayCases = @('identity','mutation','deletion','loss')
+if ($inventory.identity_control.fail_closed -ne $true) {
+    Add-Mismatch 'inventory identity control is not fail-closed'
+}
+if ((@($inventory.identity_control.replay_cases) -join '|') -ne ($expectedReplayCases -join '|')) {
+    Add-Mismatch 'inventory identity control replay cases are invalid'
+}
+
+switch ($InventoryReplayCase) {
+    'mutation' {
+        $target = @($inventoryItems | Where-Object { $_.scope -eq 'core_history_call_ids' })[0]
+        if ($target) {
+            $target.disposition = 'Supported'
+            $inventory.identity_control.unclassified_core_items = ($inventory.identity_control.unclassified_core_items + 1)
+        }
+    }
+    'deletion' {
+        $inventory.items = @($inventoryItems | Where-Object { $_.scope -ne 'core_text_streaming' })
+    }
+    'loss' {
+        $kept = [ordered]@{}
+        foreach ($prop in $inventory.candidate_identity.PSObject.Properties) {
+            if ($prop.Name -ne 'route_upstream') {
+                $kept[$prop.Name] = $prop.Value
+            }
+        }
+        $inventory.candidate_identity = [PSCustomObject]$kept
+    }
+}
+
+$inventoryMismatches = [System.Collections.Generic.List[string]]::new()
+$replayScopes = [System.Collections.Generic.HashSet[string]]::new()
+$observedUnclassified = 0
+foreach ($entry in $inventory.items) {
+    if (-not $replayScopes.Add($entry.scope)) {
+        $inventoryMismatches.Add("mutation: duplicate scope $($entry.scope)")
+    }
+    if ($entry.disposition -notin @('preserved','reversibly_adapted','local_consume','Unsupported','Unqualified')) {
+        $inventoryMismatches.Add("mutation: $($entry.scope) disposition $($entry.disposition) not allowed")
+        $observedUnclassified += 1
+    }
+}
+foreach ($scope in $allRequiredScopes) {
+    if (-not $replayScopes.Contains($scope)) {
+        $inventoryMismatches.Add("deletion: missing scope $scope")
+    }
+}
+if (-not ($inventory.candidate_identity.PSObject.Properties.Name -contains 'route_upstream')) {
+    $inventoryMismatches.Add('loss: candidate_identity.route_upstream is missing')
+}
+$reportedUnclassified = $inventory.identity_control.unclassified_core_items
+if ($reportedUnclassified -ne $observedUnclassified) {
+    $inventoryMismatches.Add("identity_control.unclassified_core_items=$reportedUnclassified does not match observed unclassified items=$observedUnclassified")
+}
+if ($InventoryReplayCase -ne 'identity' -and $inventoryMismatches.Count -eq 0) {
+    $inventoryMismatches.Add("NEGATIVE_INVENTORY_REPLAY_CONTROL_DID_NOT_FAIL: $InventoryReplayCase")
+}
+foreach ($m in $inventoryMismatches) {
+    Add-Mismatch "INVENTORY_IDENTITY_MISMATCH: $m"
+}
+
 Write-Output "Capture: $($trace.source.capture_id)"
 Write-Output "Provider/model: $($trace.source.configured_provider_id) / $($trace.source.model)"
 Write-Output "Gateway route: $($trace.gateway_route.behavior_profile)"
@@ -358,6 +988,7 @@ Write-Output "Direct / Deferred: $($direct.Count) / $($deferred.Count)"
 Write-Output "Deferred tools discoverable through tool_search: $($discoverable.Count)"
 Write-Output "Bounded audit transport rows / Gateway starts: $($auditPlan.transport_log_rows) / $($auditGateway.request_starts)"
 Write-Output "Replay case: $ReplayCase"
+Write-Output "Inventory replay case: $InventoryReplayCase"
 
 if ($mismatches.Count -gt 0) {
     [Console]::Error.WriteLine('RECONCILIATION_MISMATCH: ' + ($mismatches -join ' | '))

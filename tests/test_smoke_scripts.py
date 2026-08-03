@@ -67,6 +67,79 @@ def test_issue_108_lifecycle_replay_stops_only_the_retained_process_tree(tmp_pat
     assert summary["tracked_child_exit_before_natural_timeout"] is True
     assert summary["cleanup_within_budget"] is True
     assert summary["cleanup_elapsed_milliseconds"] <= summary["cleanup_budget_milliseconds"]
+    assert summary["tracked_root_identity_captured"] is True
+    assert summary["tracked_root_identity_verified"] is True
+    assert summary["tracked_child_identity_captured"] is True
+    assert summary["tracked_child_identity_verified"] is True
+    assert summary["tracked_child_pid_reused"] is False
+    assert summary["cleanup_status"] == "primary"
+    assert summary["primary_tree_stop"]["attempted"] is True
+    assert summary["fallback_cleanup"]["used"] is False
+
+
+def test_issue_268_lifecycle_contract_captures_exact_identity_and_typed_cleanup():
+    source = (ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    # The lifecycle contract must retain the original Process handle and its
+    # start identity before teardown.  Re-opening a PID after tree termination
+    # is not an acceptable identity check because that PID may have been reused.
+    assert "Get-TrackedProcessIdentity" in source
+    assert "childProcess = [System.Diagnostics.Process]::GetProcessById" in source
+    assert "childProcessIdentity" in source
+    assert "StartTime" in source
+
+    # Primary tree-stop, degraded fallback, and the shared deadline are
+    # separate typed evidence rather than a boolean that can be cleared later.
+    assert "primary_tree_stop" in source
+    assert "fallback_cleanup" in source
+    assert "cleanup_status" in source
+    assert "LifecycleReplayCleanupTimeoutMilliseconds" in source
+    assert "LifecycleReplayExitProbeMilliseconds" not in source
+
+
+def test_issue_268_survivor_negative_control_stays_red_and_is_typed(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the lifecycle replay")
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1"),
+            "-LifecycleSurvivorNegativeControl",
+            "-OutputDir",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=REPLAY_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    summaries = list(tmp_path.glob("run-*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8-sig"))
+    assert summary["mode"] == "lifecycle_survivor_negative_control"
+    assert summary["passed"] is False
+    assert summary["cleanup_status"] in {"degraded", "failed"}
+    assert summary["fallback_cleanup"]["used"] is True
+    assert summary["tracked_child_exit_before_natural_timeout"] is False
+    assert any(
+        code in summary["failures"]
+        for code in (
+            "lifecycle_tracked_child_survived_primary_tree_stop",
+            "lifecycle_cleanup_degraded",
+            "lifecycle_tracked_child_remained",
+        )
+    )
 
 
 def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(tmp_path):
@@ -478,10 +551,10 @@ def test_issue_108_qualification_evidence_replay_validates_committed_live_fixtur
     assert summary["request_error_count"] == 0
     assert summary["fallback_counts"] == {"luna": 0, "terra": 0}
     assert summary["deferred_payload_digest"] == (
-        "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
+        "sha256:0a69a2512db23c06561be489e636440cd76f5350c45c20d9af4b5c5106135da5"
     )
     assert summary["canonical_tool_shape_digest"] == (
-        "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f"
+        "sha256:928b596451cd91c0a9ce953e444c80d6357d55bd4b1eff20078d6179d838b16f"
     )
     assert (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
 
@@ -732,7 +805,12 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert 'sandbox = "elevated"' in source
     assert 'sandbox = "unelevated"' not in source
     assert "'--sandbox', $cliSandbox" in source
-    assert "'-a', 'never'" in source
+    assert "'-c', 'approval_policy=never'" in source
+    assert "'-a', 'never'" not in source
+    assert "response.get(\"output\")" in source
+    assert "def _sse_output_items(payload):" in source
+    assert '{"type", "status", "call_id", "name", "input"}.issubset(call)' in source
+    assert '{"type", "call_id", "output"}.issubset(result)' in source
     assert "External qualification scratch directory must be outside the repository workspace" in source
     assert "Readiness preflight: use the accepted GLM route" in source
     assert "ReadinessTimeoutSeconds" in source
@@ -807,6 +885,15 @@ def test_codex_mode_persists_bare_official_model_ids():
     assert 'model = "openai/gpt-5.5"' not in source
 
 
+def test_codex_mode_preserves_user_owned_catalog_paths():
+    source = (ROOT / "scripts" / "codex-mode.ps1").read_text(encoding="utf-8-sig")
+
+    assert "function Get-TopLevelConfigValue" in source
+    assert "function Test-CodexHubManagedCatalogPath" in source
+    assert "$preserveCatalog" in source
+    assert "model_catalog_json = $(Convert-ToTomlLiteral -Value $existingCatalogValue)" in source
+
+
 def test_active_gateway_diagnostics_default_to_bare_official_model_ids():
     launcher = (ROOT / "scripts" / "launch-codex-proxy-app.ps1").read_text(encoding="utf-8-sig")
     replay = (ROOT / "scripts" / "replay_official_transport.py").read_text(encoding="utf-8")
@@ -840,6 +927,14 @@ def test_embedded_python_runtime_bundles_zstandard_for_app_request_bodies():
 def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
     source = (ROOT / "scripts" / "e2e_codex_app_transport.py").read_text(encoding="utf-8")
 
+    assert "--version" in source
+    assert "_VERSION_PROBE_TIMEOUT_SECONDS = 10" in source
+    assert "_VERSION_PROBE_OUTPUT_LIMIT = 64 * 1024" in source
+    assert "len(stdout) > _VERSION_PROBE_OUTPUT_LIMIT" in source
+    assert "len(stderr) > _VERSION_PROBE_OUTPUT_LIMIT" in source
+    assert "re.fullmatch(r\"codex-cli\\s+" in source
+    assert "_CODEX_CLI_VERSION_FLOOR = (0, 145, 0)" in source
+    assert "--client-version" not in source
     assert '"app-server"' in source
     assert '"thread/start"' in source
     assert '"turn/start"' in source

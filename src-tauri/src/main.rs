@@ -49,6 +49,31 @@ struct TrayToast {
     tone: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogVisibility {
+    // Provider models and older persisted metadata were user-listable before
+    // visibility became explicit; upstream parsers assign Unknown explicitly.
+    #[default]
+    List,
+    Hide,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for CatalogVisibility {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(match value.as_ref().and_then(serde_json::Value::as_str).map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("list") => Self::List,
+            Some("hide") => Self::Hide,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -65,6 +90,8 @@ pub struct Model {
     pub codex_enabled: bool,
     #[serde(default = "default_enabled")]
     pub gateway_exported: bool,
+    #[serde(default)]
+    pub visibility: CatalogVisibility,
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_window: Option<u32>,
@@ -99,6 +126,7 @@ impl Default for Model {
             locked: false,
             codex_enabled: true,
             gateway_exported: true,
+            visibility: CatalogVisibility::default(),
             context_window: None,
             max_context_window: None,
             effective_source: None,
@@ -586,6 +614,11 @@ fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String> {
 #[tauri::command]
 async fn generate_catalog() -> Result<Vec<Model>, String> {
     run_blocking("generate_catalog", catalog::generate_catalog).await
+}
+
+#[tauri::command]
+fn get_catalog_override_diagnostics() -> Result<catalog::CatalogOverrideDiagnostics, String> {
+    catalog::catalog_override_diagnostics()
 }
 
 #[tauri::command]
@@ -1096,6 +1129,7 @@ fn run_gui() {
             sync_gateway_clients,
             subagent_matrix_status,
             generate_catalog,
+            get_catalog_override_diagnostics,
             list_models,
             refresh_model_metadata,
             list_model_metadata,

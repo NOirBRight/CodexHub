@@ -7,9 +7,58 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import threading
 import time
+
+
+# Issue #62's runtime inventory raises the evidence floor to the last stable
+# CLI contract already accepted by the Beta2 candidate.
+_CODEX_CLI_VERSION_FLOOR = (0, 145, 0)
+_VERSION_PROBE_TIMEOUT_SECONDS = 10
+_VERSION_PROBE_OUTPUT_LIMIT = 64 * 1024
+
+
+def resolve_cli_version(codex_command: Path) -> str:
+    """Read the version from the exact CLI binary used by app-server.
+
+    The app-server initialize payload is part of the evidence identity.  It
+    must not retain a historical fixture version when the operator upgrades
+    the CLI, otherwise the trace is falsely attributed to an old client.
+    """
+
+    process = subprocess.Popen(
+        [str(codex_command), "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=_VERSION_PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("Codex CLI version probe timed out") from error
+    if len(stdout) > _VERSION_PROBE_OUTPUT_LIMIT or len(stderr) > _VERSION_PROBE_OUTPUT_LIMIT:
+        raise RuntimeError("Codex CLI version probe exceeded its output limit")
+    output = b"\n".join((stdout[:_VERSION_PROBE_OUTPUT_LIMIT], stderr[:_VERSION_PROBE_OUTPUT_LIMIT])).decode(
+        "utf-8", errors="replace"
+    ).strip()
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Codex CLI version probe failed with exit code {process.returncode}"
+        )
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise RuntimeError("Codex CLI version probe returned ambiguous output")
+    match = re.fullmatch(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)", lines[0], re.IGNORECASE)
+    if match is None:
+        raise RuntimeError("Codex CLI version probe returned no stable three-part version")
+    version = tuple(int(part) for part in match.groups())
+    if version < _CODEX_CLI_VERSION_FLOOR:
+        raise RuntimeError("Codex CLI version is below the supported floor")
+    return ".".join(str(part) for part in version)
 
 
 def main() -> int:
@@ -23,6 +72,7 @@ def main() -> int:
     parser.add_argument("--tool-calls", type=int, default=0)
     parser.add_argument("--pause-between-turns", type=float, default=0.0)
     args = parser.parse_args()
+    client_version = resolve_cli_version(args.codex.resolve())
 
     env = os.environ.copy()
     env["CODEX_HOME"] = str(args.home.resolve())
@@ -128,7 +178,7 @@ def main() -> int:
                 "clientInfo": {
                     "name": "codex_desktop",
                     "title": "Codex Desktop",
-                    "version": "0.144.0-alpha.4",
+                    "version": client_version,
                 },
                 "capabilities": {
                     "experimentalApi": True,

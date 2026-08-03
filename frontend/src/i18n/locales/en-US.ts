@@ -446,6 +446,8 @@ const enUS = {
     pricingUnknown: "Pricing unknown",
     providerCatalogUpdated: "Provider catalog updated",
     providerCatalogUpdateFailed: "Provider catalog update failed",
+    catalogOverrideDiagnostics: "Catalog overrides: {{accepted}} accepted, {{migrated}} migrated, {{rejected}} rejected. {{restart}}",
+    catalogOverrideRestartCodex: "Restart Codex App to apply",
     providerAdded: "{{name}} added",
     providerAlreadyExists: "Provider already exists: {{name}}",
     providerDeleted: "{{name}} deleted",

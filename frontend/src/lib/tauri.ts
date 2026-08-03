@@ -8,6 +8,7 @@ import type {
   AppUpdateStatus,
   AppVersionInfo,
   AutostartStatus,
+  CatalogOverrideDiagnostics,
   CodexContextGuardStatus,
   CodexHubError,
   DiagnosticsActionResult,
@@ -302,6 +303,8 @@ export const api = {
     call<GatewayClientSyncSummary>("sync_gateway_clients", { model: model ?? null }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>("subagent_matrix_status"),
   generateCatalog: () => call<Model[]>("generate_catalog"),
+  catalogOverrideDiagnostics: () =>
+    call<CatalogOverrideDiagnostics>("get_catalog_override_diagnostics"),
   listModels: () => call<Model[]>("list_models"),
   refreshModelMetadata: () => call<Model[]>("refresh_model_metadata"),
   listModelMetadata: () => call<Model[]>("list_model_metadata"),
