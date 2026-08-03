@@ -560,8 +560,14 @@ def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
     name = control.get("name")
     if name not in CONTROL_NAME_SET:
         raise ManifestValidationError("control_name_invalid")
-    pre = sanitize_sidecar_record(control["pre"], expected_hop="pre")
-    post = sanitize_sidecar_record(control["post"], expected_hop="post")
+    raw_pre = control["pre"]
+    raw_post = control["post"]
+    if not isinstance(raw_pre, Mapping) or not isinstance(raw_post, Mapping):
+        raise ManifestValidationError("control_sidecar_invalid")
+    if raw_pre.get("capture_id") != raw_post.get("capture_id"):
+        raise ManifestValidationError("control_capture_correlation_mismatch")
+    pre = sanitize_sidecar_record(raw_pre, expected_hop="pre")
+    post = sanitize_sidecar_record(raw_post, expected_hop="post")
     if pre["outcome"] != "complete" or post["outcome"] != "complete":
         raise ManifestValidationError("control_capture_incomplete")
     _require_complete_fingerprints(pre, post)

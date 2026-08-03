@@ -48,7 +48,7 @@ def _sidecar(name: str, hop: str, *, streaming: bool, status: int, terminal: str
     record: dict[str, object] = {
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
-        "capture_id": "c" + ("a" if hop == "pre" else "b") * 32,
+        "capture_id": "c" + hashlib.sha256(name.encode("ascii")).hexdigest()[:32],
         "hop": hop,
         "outcome": "complete",
         "failure": None,
@@ -340,6 +340,16 @@ def test_manifest_rejects_pre_post_digest_mismatch() -> None:
     controls[0]["post"]["response"]["sha256"] = "f" * 64  # type: ignore[index]
 
     with pytest.raises(manifest.ManifestValidationError, match="control_body_fingerprint_mismatch"):
+        manifest.build_manifest(controls, candidate_identity=_candidate())
+
+
+def test_manifest_rejects_pre_post_capture_correlation_mismatch() -> None:
+    controls = _controls()
+    controls[0]["post"]["capture_id"] = "c" + ("f" * 32)  # type: ignore[index]
+
+    with pytest.raises(
+        manifest.ManifestValidationError, match="control_capture_correlation_mismatch"
+    ):
         manifest.build_manifest(controls, candidate_identity=_candidate())
 
 
