@@ -28,6 +28,11 @@ sys.modules[SPEC.name] = sidecar
 SPEC.loader.exec_module(sidecar)
 
 KEY = b"h" * 32
+CORRELATION_TOKEN = "1" * 32
+
+
+def _capture_id(correlation_token: str = CORRELATION_TOKEN) -> str:
+    return sidecar._capture_id_for_token(KEY, correlation_token)
 
 
 def test_capture_id_is_deterministically_bound_to_correlation_token() -> None:
@@ -46,6 +51,9 @@ class _FakeUpstreamHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
         self.server.observed_request = self.rfile.read(length)  # type: ignore[attr-defined]
+        self.server.observed_headers = {  # type: ignore[attr-defined]
+            name.lower(): value for name, value in self.headers.items()
+        }
         body = self.server.response_body  # type: ignore[attr-defined]
         delay = self.server.response_delay  # type: ignore[attr-defined]
         if delay:
@@ -79,6 +87,7 @@ def _fake_upstream(
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeUpstreamHandler)
     server.response_body = response_body  # type: ignore[attr-defined]
     server.observed_request = None  # type: ignore[attr-defined]
+    server.observed_headers = {}  # type: ignore[attr-defined]
     server.response_delay = response_delay  # type: ignore[attr-defined]
     server.response_chunk_size = chunk_size  # type: ignore[attr-defined]
     server.chunk_delay = chunk_delay  # type: ignore[attr-defined]
@@ -224,7 +233,7 @@ def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> Non
     record = {
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
-        "capture_id": "c" + "1" * 32,
+        "capture_id": _capture_id(),
         "hop": "pre",
         "outcome": "complete",
         "failure": None,
@@ -245,12 +254,82 @@ def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> Non
         "sse": None,
     }
 
-    record_path = sidecar.write_capture_record(tmp_path, "pre", record)
+    record_path = sidecar.write_capture_record(
+        tmp_path,
+        "pre",
+        record,
+        capture_key=KEY,
+        correlation_token=CORRELATION_TOKEN,
+    )
 
     assert json.loads(record_path.read_text(encoding="utf-8")) == record
     assert record_path.name.startswith("pre-")
     assert record_path.suffix == ".json"
     assert not list(tmp_path.glob("*.partial"))
+
+
+def test_atomic_record_rejects_prebuilt_record_without_live_capture_binding(tmp_path: Path) -> None:
+    record = {
+        "schema": "codexhub.issue62.live-evidence-lane.v1",
+        "verification_scope": "capture_only_not_qualification",
+        "capture_id": _capture_id("2" * 32),
+        "hop": "pre",
+        "outcome": "complete",
+        "failure": None,
+        "status": 200,
+        "content_type_class": "json",
+        "request": {
+            "bytes": 2,
+            "sha256": "a" * 64,
+            "hmac_sha256": "b" * 64,
+            "complete": True,
+        },
+        "response": {
+            "bytes": 3,
+            "sha256": "c" * 64,
+            "hmac_sha256": "d" * 64,
+            "complete": True,
+        },
+        "sse": None,
+    }
+
+    with pytest.raises(sidecar.ArtifactValidationError, match="capture_binding_missing"):
+        sidecar.write_capture_record(tmp_path, "pre", record)
+
+
+def test_atomic_record_rejects_capture_id_from_different_live_correlation(tmp_path: Path) -> None:
+    record = {
+        "schema": "codexhub.issue62.live-evidence-lane.v1",
+        "verification_scope": "capture_only_not_qualification",
+        "capture_id": _capture_id("2" * 32),
+        "hop": "pre",
+        "outcome": "complete",
+        "failure": None,
+        "status": 200,
+        "content_type_class": "json",
+        "request": {
+            "bytes": 2,
+            "sha256": "a" * 64,
+            "hmac_sha256": "b" * 64,
+            "complete": True,
+        },
+        "response": {
+            "bytes": 3,
+            "sha256": "c" * 64,
+            "hmac_sha256": "d" * 64,
+            "complete": True,
+        },
+        "sse": None,
+    }
+
+    with pytest.raises(sidecar.ArtifactValidationError, match="capture_binding_invalid"):
+        sidecar.write_capture_record(
+            tmp_path,
+            "pre",
+            record,
+            capture_key=KEY,
+            correlation_token=CORRELATION_TOKEN,
+        )
 
 
 def test_atomic_record_rejects_unapproved_fields(tmp_path: Path) -> None:
@@ -525,6 +604,7 @@ def test_two_hops_capture_matching_complete_request_response_and_sse(
                     headers={
                         "Authorization": "Bearer forbidden-token",
                         "Content-Type": "application/json",
+                        "X-CodexHub-Issue62-Capture": ("0" * 32) + "." + ("f" * 64),
                     },
                 )
                 response = connection.getresponse()
@@ -539,10 +619,12 @@ def test_two_hops_capture_matching_complete_request_response_and_sse(
     pre_record = _read_only_record(pre_output)
     post_record = _read_only_record(post_output)
     assert pre_record["request"] == post_record["request"]
+    assert pre_record["capture_id"] == post_record["capture_id"]
     assert pre_record["response"] == post_record["response"]
     assert pre_record["sse"]["sequence_sha256"] == post_record["sse"]["sequence_sha256"]  # type: ignore[index]
     assert pre_record["sse"]["sequence_hmac_sha256"] == post_record["sse"]["sequence_hmac_sha256"]  # type: ignore[index]
     assert pre_record["outcome"] == post_record["outcome"] == "complete"
+    assert "x-codexhub-issue62-capture" not in upstream.observed_headers  # type: ignore[attr-defined]
     serialized = json.dumps([pre_record, post_record], sort_keys=True)
     for sensitive in (
         "private prompt",
@@ -555,6 +637,42 @@ def test_two_hops_capture_matching_complete_request_response_and_sse(
         str(hmac_key_file),
     ):
         assert sensitive not in serialized
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+@pytest.mark.parametrize(
+    "correlation_header",
+    [None, ("0" * 32) + "." + ("f" * 64)],
+)
+def test_post_rejects_missing_or_invalid_correlation_before_forwarding(
+    correlation_header: str | None,
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    with _fake_upstream(b'data: {"type":"response.completed"}\n\n') as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            upstream_url,
+            hop="post",
+        )
+        with _running_sidecar(config) as server:
+            connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+            headers = {}
+            if correlation_header is not None:
+                headers["X-CodexHub-Issue62-Capture"] = correlation_header
+            connection.request("POST", "/responses", body=b"{}", headers=headers)
+            response = connection.getresponse()
+            assert response.status == 400
+            response.read()
+            connection.close()
+
+    assert upstream.observed_request is None  # type: ignore[attr-defined]
+    record = _read_only_record(config.output_dir)
+    assert record["outcome"] == "incomplete"
+    assert record["failure"] == "correlation_binding_invalid"
+    assert "X-CodexHub-Issue62-Capture" not in json.dumps(record, sort_keys=True)
     assert not list(tmp_path.rglob("*.partial"))
 
 
