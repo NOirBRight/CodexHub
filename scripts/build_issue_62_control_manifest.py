@@ -45,6 +45,7 @@ MANIFEST_FIELDS = frozenset(
         "candidate_identity",
         "controls",
         "identity_control",
+        "planner",
         "capture_manifest_sha256",
         "qualification",
     }
@@ -103,7 +104,19 @@ ITEM_TYPES = frozenset(
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _SHA1 = re.compile(r"[0-9a-f]{40}\Z")
+_SHA1_OR_HEX64 = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SEMVER = re.compile(r"0\.(?:\d+)\.(?:\d+)(?:-[0-9A-Za-z.-]+)?\Z")
+
+PLANNER_FIELDS = frozenset(
+    {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
+)
+PLANNER_PLAN_STATES = frozenset({"complete", "partial", "not_captured"})
+PLANNER_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
+DEFAULT_PLANNER = {
+    "model_visible_plan": "not_captured",
+    "hosted_only_disposition": "Unqualified",
+    "unknown_tag_disposition": "Unqualified",
+}
 
 _SIDEcar_ROOT_FIELDS = frozenset(
     {
@@ -455,6 +468,7 @@ def _sanitize_route(value: Any) -> dict[str, Any]:
             "behavior_profile",
             "inbound_format",
             "upstream_format",
+            "route_digest",
         }
     )
     _require_exact_fields(value, expected, "route_identity_fields_invalid")
@@ -471,6 +485,7 @@ def _sanitize_route(value: Any) -> dict[str, Any]:
     model = value.get("model")
     if not isinstance(model, str) or not model or "/" in model:
         raise ManifestValidationError("route_identity_model_invalid")
+    _require_hex(value.get("route_digest"), _HEX64, "route_identity_digest_invalid")
     return {key: value[key] for key in expected}
 
 
@@ -721,13 +736,14 @@ def _validate_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
             "cli_package_sha256",
             "catalog_snapshot_sha256",
             "catalog_model_entry_id",
+            "route_digest",
         }
     )
     if not isinstance(value, Mapping):
         raise ManifestValidationError("candidate_identity_invalid")
     _require_exact_fields(value, expected, "candidate_identity_fields_invalid")
     result = dict(value)
-    _require_hex(result["codexhub_candidate_sha"], _SHA1, "candidate_codexhub_sha_invalid")
+    _require_hex(result["codexhub_candidate_sha"], _SHA1_OR_HEX64, "candidate_codexhub_sha_invalid")
     if not isinstance(result["cli_version"], str) or _SEMVER.fullmatch(result["cli_version"]) is None:
         raise ManifestValidationError("candidate_cli_version_invalid")
     source_status = result["cli_source_commit_status"]
@@ -740,9 +756,34 @@ def _validate_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ManifestValidationError("candidate_cli_source_commit_unexpected")
     _require_hex(result["cli_package_sha256"], _HEX64, "candidate_cli_package_sha_invalid")
     _require_hex(result["catalog_snapshot_sha256"], _HEX64, "candidate_catalog_sha_invalid")
+    _require_hex(result["route_digest"], _HEX64, "candidate_route_digest_invalid")
     if result["catalog_model_entry_id"] != "gpt-5.6-sol":
         raise ManifestValidationError("candidate_catalog_model_invalid")
     return result
+
+
+def _validate_planner(value: Any, *, verification_scope: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ManifestValidationError("planner_invalid")
+    _require_exact_fields(value, PLANNER_FIELDS, "planner_fields_invalid")
+    model_visible_plan = value.get("model_visible_plan")
+    if model_visible_plan not in PLANNER_PLAN_STATES:
+        raise ManifestValidationError("planner_model_visible_plan_invalid")
+    hosted_only = value.get("hosted_only_disposition")
+    unknown_tag = value.get("unknown_tag_disposition")
+    if hosted_only not in PLANNER_DISPOSITIONS or unknown_tag not in PLANNER_DISPOSITIONS:
+        raise ManifestValidationError("planner_disposition_invalid")
+    if verification_scope == SYNTHETIC_SCOPE and (
+        model_visible_plan == "complete"
+        or hosted_only != "Unqualified"
+        or unknown_tag != "Unqualified"
+    ):
+        raise ManifestValidationError("planner_synthetic_evidence_invalid")
+    return {
+        "model_visible_plan": model_visible_plan,
+        "hosted_only_disposition": hosted_only,
+        "unknown_tag_disposition": unknown_tag,
+    }
 
 
 def _canonical_digest(value: Any) -> str:
@@ -761,6 +802,7 @@ def _manifest_core(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_identity": manifest.get("candidate_identity"),
         "controls": manifest.get("controls"),
         "identity_control": manifest.get("identity_control"),
+        "planner": manifest.get("planner"),
         "qualification": manifest.get("qualification"),
     }
 
@@ -839,21 +881,38 @@ def build_manifest(
     *,
     candidate_identity: Mapping[str, Any],
     verification_scope: str = SYNTHETIC_SCOPE,
+    planner: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one deterministic sanitized manifest from control captures."""
 
     if verification_scope not in VERIFICATION_SCOPES:
         raise ManifestValidationError("verification_scope_invalid")
-    candidate = _validate_candidate(candidate_identity)
     controls = [_sanitize_control(capture) for capture in captures]
     if len({control["name"] for control in controls}) != len(controls):
         raise ManifestValidationError("duplicate_control_name")
     missing = sorted(CONTROL_NAME_SET - _required_control_names(controls))
     if missing:
         raise ManifestValidationError("missing_control:" + ",".join(missing))
+    route_digests = {control["route_identity"]["route_digest"] for control in controls}
+    if len(route_digests) != 1:
+        raise ManifestValidationError("control_route_digest_set_invalid")
+    route_provenance = {_canonical_digest(control["route_identity"]) for control in controls}
+    if len(route_provenance) != 1:
+        raise ManifestValidationError("control_route_provenance_inconsistent")
+    candidate_input: Mapping[str, Any] | Any = candidate_identity
+    if isinstance(candidate_identity, Mapping) and "route_digest" not in candidate_identity:
+        candidate_input = dict(candidate_identity)
+        candidate_input["route_digest"] = next(iter(route_digests))
+    candidate = _validate_candidate(candidate_input)
     route_models = {control["route_identity"]["model"] for control in controls}
     if route_models != {candidate["catalog_model_entry_id"]}:
         raise ManifestValidationError("control_route_model_set_invalid")
+    if route_digests != {candidate["route_digest"]}:
+        raise ManifestValidationError("control_route_digest_mismatch")
+    planner_data = _validate_planner(
+        DEFAULT_PLANNER if planner is None else planner,
+        verification_scope=verification_scope,
+    )
     identity_failures = [
         control["name"]
         for control in controls
@@ -883,6 +942,7 @@ def build_manifest(
         "candidate_identity": candidate,
         "controls": sorted(controls, key=lambda item: item["name"]),
         "identity_control": identity_control,
+        "planner": planner_data,
         "qualification": qualification,
     }
     core["capture_manifest_sha256"] = _canonical_digest(core)
@@ -946,10 +1006,20 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     missing = sorted(CONTROL_NAME_SET - set(names))
     if missing:
         mismatches.append("missing_control:" + ",".join(missing))
+    route_digests = {control["route_identity"]["route_digest"] for control in canonical_controls}
+    if len(route_digests) != 1:
+        mismatches.append("control_route_digest_set_invalid")
+    route_provenance = {
+        _canonical_digest(control["route_identity"]) for control in canonical_controls
+    }
+    if len(route_provenance) > 1:
+        mismatches.append("control_route_provenance_inconsistent")
     if candidate:
         route_models = {control["route_identity"]["model"] for control in canonical_controls}
         if route_models != {candidate.get("catalog_model_entry_id")}:
             mismatches.append("control_route_model_set_invalid")
+        if route_digests != {candidate.get("route_digest")}:
+            mismatches.append("control_route_digest_mismatch")
     try:
         identity_control = _validate_identity_control(manifest.get("identity_control"))
     except ManifestValidationError as exc:
@@ -965,12 +1035,17 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             mismatches.append("identity_control_consistency")
         if identity_control["unclassified_core_items"] != len(observed_unclassified):
             mismatches.append("identity_control_count_consistency")
-    if manifest.get("verification_scope") not in VERIFICATION_SCOPES:
+    verification_scope = manifest.get("verification_scope")
+    if verification_scope not in VERIFICATION_SCOPES:
         mismatches.append("verification_scope_invalid")
+    try:
+        _validate_planner(manifest.get("planner"), verification_scope=verification_scope)
+    except ManifestValidationError as exc:
+        mismatches.append(f"planner:{exc}")
     try:
         qualification = _validate_qualification(
             manifest.get("qualification"),
-            verification_scope=manifest.get("verification_scope"),
+            verification_scope=verification_scope,
         )
     except ManifestValidationError as exc:
         mismatches.append(f"qualification:{exc}")
@@ -1016,6 +1091,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cli-package-sha256", required=True)
     parser.add_argument("--catalog-snapshot-sha256", required=True)
+    parser.add_argument("--route-digest", default=None)
     parser.add_argument("--replay-case", choices=("identity", "mutation", "deletion", "loss"), default="identity")
     parser.add_argument("--check", action="store_true", help="Reconcile output without writing it")
     return parser
@@ -1037,10 +1113,14 @@ def main(argv: list[str] | None = None) -> int:
             "catalog_snapshot_sha256": args.catalog_snapshot_sha256,
             "catalog_model_entry_id": source.get("catalog_model_entry_id", "gpt-5.6-sol"),
         }
+        route_digest = args.route_digest or source.get("route_digest")
+        if route_digest is not None:
+            candidate["route_digest"] = route_digest
         manifest = build_manifest(
             captures,
             candidate_identity=candidate,
             verification_scope=args.verification_scope,
+            planner=source.get("planner"),
         )
         if args.replay_case != "identity":
             report = reconcile_manifest(replay_manifest(manifest, args.replay_case))

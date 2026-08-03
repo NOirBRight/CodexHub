@@ -150,6 +150,7 @@ def _control(
             "behavior_profile": "official_codex_app_http_passthrough",
             "inbound_format": "responses",
             "upstream_format": "responses",
+            "route_digest": "d" * 64,
         },
     }
 
@@ -292,6 +293,15 @@ def _candidate() -> dict[str, str]:
         "cli_package_sha256": "b" * 64,
         "catalog_snapshot_sha256": "c" * 64,
         "catalog_model_entry_id": "gpt-5.6-sol",
+        "route_digest": "d" * 64,
+    }
+
+
+def _planner() -> dict[str, str]:
+    return {
+        "model_visible_plan": "not_captured",
+        "hosted_only_disposition": "Unqualified",
+        "unknown_tag_disposition": "Unqualified",
     }
 
 
@@ -465,6 +475,61 @@ def test_manifest_reconcile_recomputes_identity_control_from_controls() -> None:
     assert report["reconciled"] is False
     assert "identity_control_consistency" in report["mismatches"]
     assert "identity_control_count_consistency" in report["mismatches"]
+
+
+def test_manifest_binds_route_digest_and_planner_dispositions() -> None:
+    built = manifest.build_manifest(
+        _controls(),
+        candidate_identity=_candidate(),
+        planner=_planner(),
+    )
+
+    assert built["candidate_identity"]["route_digest"] == "d" * 64
+    assert built["planner"] == _planner()
+    assert {
+        control["route_identity"]["route_digest"] for control in built["controls"]
+    } == {"d" * 64}
+    assert manifest.reconcile_manifest(built) == {"reconciled": True, "mismatches": []}
+
+
+def test_manifest_reconciliation_rejects_route_or_planner_provenance_drift() -> None:
+    built = manifest.build_manifest(
+        _controls(),
+        candidate_identity=_candidate(),
+        planner=_planner(),
+    )
+
+    route_forgery = copy.deepcopy(built)
+    route_forgery["candidate_identity"]["route_digest"] = "e" * 64
+    route_forgery["capture_manifest_sha256"] = manifest._canonical_digest(
+        manifest._manifest_core(route_forgery)
+    )
+    report = manifest.reconcile_manifest(route_forgery)
+    assert report["reconciled"] is False
+    assert "control_route_digest_mismatch" in report["mismatches"]
+
+    planner_forgery = copy.deepcopy(built)
+    planner_forgery["planner"]["unknown_tag_disposition"] = "Preserved"
+    planner_forgery["capture_manifest_sha256"] = manifest._canonical_digest(
+        manifest._manifest_core(planner_forgery)
+    )
+    report = manifest.reconcile_manifest(planner_forgery)
+    assert report["reconciled"] is False
+    assert any("planner" in mismatch for mismatch in report["mismatches"])
+
+
+def test_manifest_requires_route_digest_in_canonical_provenance() -> None:
+    built = manifest.build_manifest(
+        _controls(),
+        candidate_identity=_candidate(),
+        planner=_planner(),
+    )
+    built["candidate_identity"].pop("route_digest")
+
+    report = manifest.reconcile_manifest(built)
+
+    assert report["reconciled"] is False
+    assert any("candidate_identity_fields_invalid" in mismatch for mismatch in report["mismatches"])
 
 
 @pytest.mark.parametrize(
