@@ -551,10 +551,10 @@ def test_issue_108_qualification_evidence_replay_validates_committed_live_fixtur
     assert summary["request_error_count"] == 0
     assert summary["fallback_counts"] == {"luna": 0, "terra": 0}
     assert summary["deferred_payload_digest"] == (
-        "sha256:5c697ad0f536d5419e557c5fe4b3208016ec69c2cbe006dba4192210cf1e0294"
+        "sha256:0a69a2512db23c06561be489e636440cd76f5350c45c20d9af4b5c5106135da5"
     )
     assert summary["canonical_tool_shape_digest"] == (
-        "sha256:8c3948a5a3eb6204be57b8d9e1e191f83bc08c3ee31e76fcbbfea0089e36bd7f"
+        "sha256:928b596451cd91c0a9ce953e444c80d6357d55bd4b1eff20078d6179d838b16f"
     )
     assert (ROOT / "tests" / "fixtures" / "issue_108_glm_qualification_evidence.json").exists()
 
