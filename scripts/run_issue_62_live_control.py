@@ -119,12 +119,11 @@ LIVE_PLAN_FIELDS = frozenset(
     }
 )
 LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
-LIVE_ENV_KEYS = frozenset({"SystemRoot", "ComSpec"})
+LIVE_ENV_KEYS = frozenset(
+    {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
+)
 SENSITIVE_ENV_KEYS = frozenset(
     {
-        "PATH",
-        "PATHEXT",
-        "PYTHONPATH",
         "CODEX_HOME",
         "OPENAI_API_KEY",
         "OLLAMA_API_KEY",
@@ -846,8 +845,12 @@ def _safe_environment(overrides: Mapping[str, str]) -> dict[str, str]:
             result[key] = value
     for key, value in overrides.items():
         result[key] = value
+    # Only host-derived sensitive values are excluded.  Explicit, validated
+    # plan overrides (for example a case-local PATH/TEMP) are retained so the
+    # isolated executable can resolve its own runtime dependencies.
     for key in SENSITIVE_ENV_KEYS:
-        result.pop(key, None)
+        if key not in overrides:
+            result.pop(key, None)
     return result
 
 
@@ -1643,7 +1646,7 @@ def run_live_control(
         # Stop sidecars before reading their atomic records.  Cleanup repeats
         # this operation defensively for cancellation/error paths.
         for handle in reversed(handles):
-            if not runner.stop_background(handle):
+            if not runner.stop_background(handle) and result_status == "completed":
                 result_status, result_code = "failed", "termination_failed"
 
         if result_status == "completed":
@@ -1717,7 +1720,7 @@ def run_live_control(
                 "child_processes_terminated": False,
                 "resources_released": False,
             }
-        if receipt.get("cleanup_completed") is not True:
+        if receipt.get("cleanup_completed") is not True and result_status == "completed":
             result_status, result_code = "failed", "cleanup_incomplete"
 
     output: dict[str, Any] = {

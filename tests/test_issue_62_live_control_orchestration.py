@@ -50,6 +50,11 @@ def _plan(tmp_path: Path) -> dict[str, object]:
     python_copy = tmp_path / "tools" / "python.exe"
     python_copy.parent.mkdir()
     shutil.copy2(sys.executable, python_copy)
+    # A copied Windows interpreter needs its private runtime DLLs beside the
+    # executable.  Keep them under the isolated root and expose only that
+    # case-local directory through PATH; never rely on the host PATH.
+    for runtime_dll in Path(sys.executable).parent.glob("*.dll"):
+        shutil.copy2(runtime_dll, python_copy.parent / runtime_dll.name)
     (tmp_path / "helpers" / "cli.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
     (tmp_path / "helpers" / "sidecar-empty.py").write_text(
         "import time\n"
@@ -86,7 +91,7 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         },
         "binding": binding,
         "catalog_model_entry_id": "gpt-5.6-sol",
-        "environment": {},
+        "environment": {"PATH": "tools"},
         "planner": {
             "model_visible_plan": "complete",
             "hosted_only_disposition": "Unqualified",
