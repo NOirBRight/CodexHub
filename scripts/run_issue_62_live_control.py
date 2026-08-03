@@ -830,6 +830,8 @@ def _environment_value_is_local(
 
     if key not in LOCAL_ENV_PATH_KEYS:
         return True
+    if working_directory is None:
+        return False
     root = working_directory.resolve(strict=False) if working_directory is not None else None
     for entry in value.split(os.pathsep):
         if not entry:
