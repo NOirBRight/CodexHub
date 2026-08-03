@@ -903,11 +903,9 @@ def build_manifest(
     route_provenance = {_canonical_digest(control["route_identity"]) for control in controls}
     if len(route_provenance) != 1:
         raise ManifestValidationError("control_route_provenance_inconsistent")
-    candidate_input: Mapping[str, Any] | Any = candidate_identity
-    if isinstance(candidate_identity, Mapping) and "route_digest" not in candidate_identity:
-        candidate_input = dict(candidate_identity)
-        candidate_input["route_digest"] = next(iter(route_digests))
-    candidate = _validate_candidate(candidate_input)
+    if not isinstance(candidate_identity, Mapping) or "route_digest" not in candidate_identity:
+        raise ManifestValidationError("candidate_route_digest_required")
+    candidate = _validate_candidate(candidate_identity)
     route_models = {control["route_identity"]["model"] for control in controls}
     if route_models != {candidate["catalog_model_entry_id"]}:
         raise ManifestValidationError("control_route_model_set_invalid")
@@ -1095,7 +1093,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cli-package-sha256", required=True)
     parser.add_argument("--catalog-snapshot-sha256", required=True)
-    parser.add_argument("--route-digest", default=None)
+    parser.add_argument("--route-digest", required=True)
     parser.add_argument("--replay-case", choices=("identity", "mutation", "deletion", "loss"), default="identity")
     parser.add_argument("--check", action="store_true", help="Reconcile output without writing it")
     return parser
@@ -1117,9 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
             "catalog_snapshot_sha256": args.catalog_snapshot_sha256,
             "catalog_model_entry_id": source.get("catalog_model_entry_id", "gpt-5.6-sol"),
         }
-        route_digest = args.route_digest or source.get("route_digest")
-        if route_digest is not None:
-            candidate["route_digest"] = route_digest
+        candidate["route_digest"] = args.route_digest
         manifest = build_manifest(
             captures,
             candidate_identity=candidate,
