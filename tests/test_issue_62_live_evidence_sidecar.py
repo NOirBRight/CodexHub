@@ -263,6 +263,42 @@ def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> Non
     assert not list(tmp_path.glob("*.partial"))
 
 
+def test_atomic_record_does_not_overwrite_same_correlation_record(
+    tmp_path: Path,
+) -> None:
+    record = {
+        "schema": "codexhub.issue62.live-evidence-lane.v1",
+        "verification_scope": "capture_only_not_qualification",
+        "capture_id": _capture_id(),
+        "hop": "pre",
+        "outcome": "complete",
+        "failure": None,
+        "status": 200,
+        "content_type_class": "json",
+        "request": {"bytes": 1, "sha256": "a" * 64, "hmac_sha256": "b" * 64, "complete": True},
+        "response": {"bytes": 1, "sha256": "c" * 64, "hmac_sha256": "d" * 64, "complete": True},
+        "sse": None,
+    }
+
+    first = sidecar.write_capture_record(
+        tmp_path,
+        "pre",
+        record,
+        capture_key=KEY,
+        correlation_token=CORRELATION_TOKEN,
+    )
+    with pytest.raises(sidecar.ArtifactValidationError, match="capture_record_exists"):
+        sidecar.write_capture_record(
+            tmp_path,
+            "pre",
+            record,
+            capture_key=KEY,
+            correlation_token=CORRELATION_TOKEN,
+        )
+    assert json.loads(first.read_text(encoding="utf-8")) == record
+    assert not list(tmp_path.glob("*.partial"))
+
+
 def test_atomic_record_rejects_prebuilt_record_without_live_capture_binding(tmp_path: Path) -> None:
     record = {
         "schema": "codexhub.issue62.live-evidence-lane.v1",

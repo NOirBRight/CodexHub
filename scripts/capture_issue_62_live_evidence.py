@@ -469,16 +469,26 @@ def write_capture_record(
     directory.mkdir(parents=True, exist_ok=True)
     capture_id = str(record["capture_id"])
     target = directory / f"{hop}-{capture_id}.json"
-    partial = directory / f"{hop}-{capture_id}.partial"
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise ArtifactValidationError("capture_record_exists")
     rendered = json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+    # The capture id is deterministic for a correlation token, so two
+    # concurrent handlers can legitimately race for the same destination.
+    # Give each writer an independent temporary inode; sharing one ``.partial``
+    # path lets a losing writer delete the winner's in-flight file.
+    partial = directory / f".{hop}-{capture_id}.{uuid.uuid4().hex}.partial"
     try:
         with partial.open("x", encoding="ascii", newline="\n") as handle:
             handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(partial, target)
+        # Linking the fully written inode into place is atomic and refuses to
+        # overwrite a record published by another handler.
+        try:
+            os.link(partial, target)
+        except FileExistsError:
+            raise ArtifactValidationError("capture_record_exists") from None
+        partial.unlink()
     finally:
         try:
             partial.unlink()
