@@ -2251,6 +2251,29 @@ def _note_apply_patch_failure(payload):
             return
 
 
+def _sse_output_items(payload):
+    """Yield tool items from both legacy and current Responses SSE shapes.
+
+    Codex CLI 0.146 may wrap a streamed item under ``response.output`` while
+    older clients expose it directly as ``item``.  The qualification harness
+    only needs the tool name, so normalize those envelopes without retaining
+    any request or response content.
+    """
+    if not isinstance(payload, dict):
+        return
+    item = payload.get("item")
+    if isinstance(item, dict):
+        yield item
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return
+    output = response.get("output")
+    if isinstance(output, list):
+        for candidate in output:
+            if isinstance(candidate, dict):
+                yield candidate
+
+
 def _record_post_success_tool_choice(line):
     global _post_success_tool_choice_recorded
     if not _post_success_apply_patch_pending or _post_success_tool_choice_recorded:
@@ -2261,21 +2284,22 @@ def _record_post_success_tool_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if not isinstance(item, dict) or item.get("type") not in {"function_call", "custom_tool_call"}:
+    for item in _sse_output_items(payload):
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        _post_success_tool_choice_recorded = True
+        _append_capture_record(
+            {
+                "stage": "post_success_tool_choice",
+                "choice": name,
+                "expected_choice": _expected_post_success_tool_choice,
+                "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
+            }
+        )
         return
-    name = item.get("name")
-    if not isinstance(name, str) or not name:
-        return
-    _post_success_tool_choice_recorded = True
-    _append_capture_record(
-        {
-            "stage": "post_success_tool_choice",
-            "choice": name,
-            "expected_choice": _expected_post_success_tool_choice,
-            "outcome": "expected" if name == _expected_post_success_tool_choice else "wrong",
-        }
-    )
 
 
 def _record_tool_search_choice(line):
@@ -2285,13 +2309,10 @@ def _record_tool_search_choice(line):
         payload = json.loads(line[6:].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
-    if (
-        isinstance(item, dict)
-        and item.get("type") in {"function_call", "custom_tool_call"}
-        and item.get("name") == "tool_search"
-    ):
-        _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+    for item in _sse_output_items(payload):
+        if item.get("type") in {"function_call", "custom_tool_call"} and item.get("name") == "tool_search":
+            _append_capture_record({"stage": "tool_choice", "choice": "tool_search"})
+            return
 
 
 def _patch_structure(arguments):

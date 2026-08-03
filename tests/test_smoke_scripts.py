@@ -807,6 +807,8 @@ def test_issue_108_qualification_uses_synthetic_gateway_bearer_and_whitelisted_c
     assert "'--sandbox', $cliSandbox" in source
     assert "'-c', 'approval_policy=\"never\"'" in source
     assert "'-a', 'never'" not in source
+    assert "response.get(\"output\")" in source
+    assert "def _sse_output_items(payload):" in source
     assert "External qualification scratch directory must be outside the repository workspace" in source
     assert "Readiness preflight: use the accepted GLM route" in source
     assert "ReadinessTimeoutSeconds" in source
