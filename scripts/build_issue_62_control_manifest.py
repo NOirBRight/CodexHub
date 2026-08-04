@@ -107,9 +107,23 @@ _SHA1_OR_HEX64 = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SEMVER = re.compile(r"0\.(?:\d+)\.(?:\d+)(?:-[0-9A-Za-z.-]+)?\Z")
 
 PLANNER_FIELDS = frozenset(
-    {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
+    {"inputs", "core_plan", "hosted_only_items", "unknown_tagged_items"}
 )
-PLANNER_PLAN_STATES = frozenset({"complete", "partial", "not_captured"})
+PLANNER_INPUT_FIELDS = frozenset(
+    {
+        "provider",
+        "model",
+        "protocol",
+        "cli_version",
+        "cli_package_sha256",
+        "candidate_sha",
+        "catalog_digest",
+        "route_digest",
+    }
+)
+PLANNER_CORE_PLAN_FIELDS = frozenset({"status", "items"})
+PLANNER_ITEM_FIELDS = frozenset({"id", "type", "disposition", "evidence_ref"})
+PLANNER_PLAN_STATES = frozenset({"complete", "partial"})
 PLANNER_DISPOSITIONS = frozenset(
     {
         "preserved",
@@ -119,17 +133,18 @@ PLANNER_DISPOSITIONS = frozenset(
         "Unqualified",
     }
 )
-DEFAULT_PLANNER = {
-    "model_visible_plan": "not_captured",
-    "hosted_only_disposition": "Unqualified",
-    "unknown_tag_disposition": "Unqualified",
-}
+_PLANNER_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_PLANNER_EVIDENCE_REF = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._/-]{0,191}#[A-Za-z0-9][A-Za-z0-9_.:/-]{0,191}\Z"
+)
 
 _SIDEcar_ROOT_FIELDS = frozenset(
     {
         "schema",
         "verification_scope",
         "capture_id",
+        "run_nonce",
+        "producer_hmac_sha256",
         "hop",
         "outcome",
         "failure",
@@ -258,6 +273,12 @@ def sanitize_sidecar_record(record: Mapping[str, Any], *, expected_hop: str) -> 
     capture_id = record.get("capture_id")
     if not isinstance(capture_id, str) or not re.fullmatch(r"c[0-9a-f]{32}\Z", capture_id):
         raise ManifestValidationError("sidecar_record_capture_id_invalid")
+    run_nonce = record.get("run_nonce")
+    if not isinstance(run_nonce, str) or not re.fullmatch(r"[0-9a-f]{32}\Z", run_nonce):
+        raise ManifestValidationError("sidecar_record_nonce_invalid")
+    producer_hmac = record.get("producer_hmac_sha256")
+    if not isinstance(producer_hmac, str) or _HEX64.fullmatch(producer_hmac) is None:
+        raise ManifestValidationError("sidecar_record_producer_binding_invalid")
     outcome = record.get("outcome")
     if outcome not in {"complete", "incomplete"}:
         raise ManifestValidationError("sidecar_record_outcome_invalid")
@@ -777,33 +798,207 @@ def _validate_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _validate_planner(value: Any, *, verification_scope: str) -> dict[str, str]:
+def _planner_token(value: Any, code: str) -> str:
+    if not isinstance(value, str) or _PLANNER_TOKEN.fullmatch(value) is None:
+        raise ManifestValidationError(code)
+    return value
+
+
+def _planner_evidence_ref(value: Any) -> str:
+    if not isinstance(value, str) or _PLANNER_EVIDENCE_REF.fullmatch(value) is None:
+        raise ManifestValidationError("planner_evidence_ref_invalid")
+    source, pointer = value.split("#", 1)
+    if any(part in {"", ".", ".."} for part in source.split("/")):
+        raise ManifestValidationError("planner_evidence_ref_invalid")
+    if "://" in value or "\\" in value:
+        raise ManifestValidationError("planner_evidence_ref_invalid")
+    if not pointer or pointer.startswith("/"):
+        raise ManifestValidationError("planner_evidence_ref_invalid")
+    if any(part in {"", ".", ".."} for part in pointer.split("/")):
+        raise ManifestValidationError("planner_evidence_ref_invalid")
+    return value
+
+
+def _validate_planner_items(
+    value: Any,
+    *,
+    field: str,
+    verification_scope: str,
+    seen_ids: set[str],
+) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ManifestValidationError(f"planner_{field}_invalid")
+    items: list[dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise ManifestValidationError(f"planner_{field}_item_invalid")
+        _require_exact_fields(raw, PLANNER_ITEM_FIELDS, f"planner_{field}_item_fields_invalid")
+        item_id = _planner_token(raw.get("id"), f"planner_{field}_item_id_invalid")
+        item_type = _planner_token(raw.get("type"), f"planner_{field}_item_type_invalid")
+        disposition = raw.get("disposition")
+        if disposition not in PLANNER_DISPOSITIONS:
+            raise ManifestValidationError("planner_disposition_invalid")
+        evidence_ref = _planner_evidence_ref(raw.get("evidence_ref"))
+        if item_id in seen_ids:
+            raise ManifestValidationError("planner_duplicate_item_id")
+        seen_ids.add(item_id)
+        if verification_scope == SYNTHETIC_SCOPE and disposition != "Unqualified":
+            raise ManifestValidationError("planner_synthetic_evidence_invalid")
+        items.append(
+            {
+                "id": item_id,
+                "type": item_type,
+                "disposition": disposition,
+                "evidence_ref": evidence_ref,
+            }
+        )
+    ordered = sorted(items, key=lambda item: tuple(item[field] for field in ("id", "type", "disposition", "evidence_ref")))
+    if items != ordered:
+        raise ManifestValidationError(f"planner_{field}_unsorted")
+    return items
+
+
+def _validate_planner(
+    value: Any,
+    *,
+    verification_scope: str,
+    candidate_identity: Mapping[str, Any] | None = None,
+    route_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and copy the immutable model-visible planner contract.
+
+    The live runner validates the same shape before children start, while the
+    manifest validator additionally binds all identity inputs to the captured
+    route and candidate metadata.
+    """
+
     if not isinstance(value, Mapping):
         raise ManifestValidationError("planner_invalid")
     _require_exact_fields(value, PLANNER_FIELDS, "planner_fields_invalid")
-    model_visible_plan = value.get("model_visible_plan")
-    if not isinstance(model_visible_plan, str) or model_visible_plan not in PLANNER_PLAN_STATES:
-        raise ManifestValidationError("planner_model_visible_plan_invalid")
-    hosted_only = value.get("hosted_only_disposition")
-    unknown_tag = value.get("unknown_tag_disposition")
-    if (
-        not isinstance(hosted_only, str)
-        or not isinstance(unknown_tag, str)
-        or hosted_only not in PLANNER_DISPOSITIONS
-        or unknown_tag not in PLANNER_DISPOSITIONS
-    ):
-        raise ManifestValidationError("planner_disposition_invalid")
-    if verification_scope == SYNTHETIC_SCOPE and (
-        model_visible_plan == "complete"
-        or hosted_only != "Unqualified"
-        or unknown_tag != "Unqualified"
-    ):
+
+    raw_inputs = value.get("inputs")
+    if not isinstance(raw_inputs, Mapping):
+        raise ManifestValidationError("planner_inputs_invalid")
+    _require_exact_fields(raw_inputs, PLANNER_INPUT_FIELDS, "planner_input_fields_invalid")
+    inputs = {
+        "provider": _planner_token(raw_inputs.get("provider"), "planner_provider_invalid"),
+        "model": _planner_token(raw_inputs.get("model"), "planner_model_invalid"),
+        "protocol": _planner_token(raw_inputs.get("protocol"), "planner_protocol_invalid"),
+        "cli_version": raw_inputs.get("cli_version"),
+        "cli_package_sha256": raw_inputs.get("cli_package_sha256"),
+        "candidate_sha": raw_inputs.get("candidate_sha"),
+        "catalog_digest": raw_inputs.get("catalog_digest"),
+        "route_digest": raw_inputs.get("route_digest"),
+    }
+    if not isinstance(inputs["cli_version"], str) or _SEMVER.fullmatch(inputs["cli_version"]) is None:
+        raise ManifestValidationError("planner_cli_version_invalid")
+    _require_hex(inputs["cli_package_sha256"], _HEX64, "planner_cli_package_sha_invalid")
+    _require_hex(inputs["candidate_sha"], _SHA1_OR_HEX64, "planner_candidate_sha_invalid")
+    _require_hex(inputs["catalog_digest"], _HEX64, "planner_catalog_digest_invalid")
+    _require_hex(inputs["route_digest"], _HEX64, "planner_route_digest_invalid")
+
+    if candidate_identity is not None:
+        expected_inputs = {
+            "cli_version": candidate_identity.get("cli_version"),
+            "cli_package_sha256": candidate_identity.get("cli_package_sha256"),
+            "candidate_sha": candidate_identity.get("codexhub_candidate_sha"),
+            "catalog_digest": candidate_identity.get("catalog_snapshot_sha256"),
+            "route_digest": candidate_identity.get("route_digest"),
+            "model": candidate_identity.get("catalog_model_entry_id"),
+        }
+        if any(inputs[key] != expected for key, expected in expected_inputs.items()):
+            raise ManifestValidationError("planner_input_binding_mismatch")
+    if route_identity is not None:
+        expected_route = {
+            "provider": route_identity.get("upstream"),
+            "model": route_identity.get("model"),
+            "protocol": route_identity.get("inbound_format"),
+            "route_digest": route_identity.get("route_digest"),
+        }
+        if any(inputs[key] != expected for key, expected in expected_route.items()):
+            raise ManifestValidationError("planner_route_binding_mismatch")
+
+    raw_core = value.get("core_plan")
+    if not isinstance(raw_core, Mapping):
+        raise ManifestValidationError("planner_core_plan_invalid")
+    _require_exact_fields(raw_core, PLANNER_CORE_PLAN_FIELDS, "planner_core_plan_fields_invalid")
+    status = raw_core.get("status")
+    if status not in PLANNER_PLAN_STATES:
+        raise ManifestValidationError("planner_core_plan_status_invalid")
+    seen_ids: set[str] = set()
+    core_items = _validate_planner_items(
+        raw_core.get("items"),
+        field="core_plan",
+        verification_scope=verification_scope,
+        seen_ids=seen_ids,
+    )
+    hosted_items = _validate_planner_items(
+        value.get("hosted_only_items"),
+        field="hosted_only_items",
+        verification_scope=verification_scope,
+        seen_ids=seen_ids,
+    )
+    unknown_items = _validate_planner_items(
+        value.get("unknown_tagged_items"),
+        field="unknown_tagged_items",
+        verification_scope=verification_scope,
+        seen_ids=seen_ids,
+    )
+    if status == "complete" and not core_items:
+        raise ManifestValidationError("planner_core_plan_empty")
+    if verification_scope == SYNTHETIC_SCOPE and status == "complete":
         raise ManifestValidationError("planner_synthetic_evidence_invalid")
     return {
-        "model_visible_plan": model_visible_plan,
-        "hosted_only_disposition": hosted_only,
-        "unknown_tag_disposition": unknown_tag,
+        "inputs": inputs,
+        "core_plan": {"status": status, "items": core_items},
+        "hosted_only_items": hosted_items,
+        "unknown_tagged_items": unknown_items,
     }
+
+
+def _default_planner(
+    candidate: Mapping[str, Any], route: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the non-qualifying planner used when a capture has no plan.
+
+    Fixture captures do not claim a model-visible inventory.  They still carry
+    the complete candidate/route identity required by the v2 envelope so the
+    absence of a captured plan is explicit and cannot be mistaken for an
+    unbound or legacy planner.
+    """
+
+    return {
+        "inputs": {
+            "provider": route["upstream"],
+            "model": route["model"],
+            "protocol": route["inbound_format"],
+            "cli_version": candidate["cli_version"],
+            "cli_package_sha256": candidate["cli_package_sha256"],
+            "candidate_sha": candidate["codexhub_candidate_sha"],
+            "catalog_digest": candidate["catalog_snapshot_sha256"],
+            "route_digest": candidate["route_digest"],
+        },
+        "core_plan": {"status": "partial", "items": []},
+        "hosted_only_items": [],
+        "unknown_tagged_items": [],
+    }
+
+
+def validate_planner(
+    value: Any,
+    *,
+    verification_scope: str,
+    candidate_identity: Mapping[str, Any] | None = None,
+    route_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Public live-plan seam for the shared planner contract."""
+
+    return _validate_planner(
+        value,
+        verification_scope=verification_scope,
+        candidate_identity=candidate_identity,
+        route_identity=route_identity,
+    )
 
 
 def _canonical_digest(value: Any) -> str:
@@ -929,9 +1124,16 @@ def build_manifest(
         raise ManifestValidationError("control_route_model_set_invalid")
     if route_digests != {candidate["route_digest"]}:
         raise ManifestValidationError("control_route_digest_mismatch")
+    planner_input = (
+        _default_planner(candidate, controls[0]["route_identity"])
+        if planner is None
+        else planner
+    )
     planner_data = _validate_planner(
-        DEFAULT_PLANNER if planner is None else planner,
+        planner_input,
         verification_scope=verification_scope,
+        candidate_identity=candidate,
+        route_identity=controls[0]["route_identity"],
     )
     identity_failures = [
         control["name"]
@@ -1058,8 +1260,14 @@ def reconcile_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     verification_scope = manifest.get("verification_scope")
     if verification_scope not in VERIFICATION_SCOPES:
         mismatches.append("verification_scope_invalid")
+    route_identity = canonical_controls[0]["route_identity"] if canonical_controls else None
     try:
-        _validate_planner(manifest.get("planner"), verification_scope=verification_scope)
+        _validate_planner(
+            manifest.get("planner"),
+            verification_scope=verification_scope,
+            candidate_identity=candidate or None,
+            route_identity=route_identity,
+        )
     except ManifestValidationError as exc:
         mismatches.append(f"planner:{exc}")
     try:

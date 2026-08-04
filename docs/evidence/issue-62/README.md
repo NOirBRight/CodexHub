@@ -254,6 +254,37 @@ URLs, headers, credentials, prompts, tool arguments, or wire identifiers.
 validates the canonical manifest schema and fails closed on mutation,
 deletion, loss, missing fingerprints, or route/catalog mismatch.
 
+#### Planner v2 contract
+
+The manifest's `planner` object is an exact four-field envelope:
+
+```json
+{
+  "inputs": {
+    "provider": "official",
+    "model": "gpt-5.6-sol",
+    "protocol": "responses",
+    "cli_version": "0.146.0",
+    "cli_package_sha256": "<sha256>",
+    "candidate_sha": "<candidate sha>",
+    "catalog_digest": "<sha256>",
+    "route_digest": "<sha256>"
+  },
+  "core_plan": {"status": "complete", "items": []},
+  "hosted_only_items": [],
+  "unknown_tagged_items": []
+}
+```
+
+`core_plan.status` is explicitly `complete` or `partial`. Every item in all
+three lists has exactly `id`, `type`, `disposition`, and `evidence_ref`; IDs
+are globally unique and each list is deterministically sorted. Dispositions
+use the vocabulary above, and `evidence_ref` is a non-empty relative
+`artifact#pointer` reference (no URLs, backslashes, or parent-directory
+segments). Planner inputs are bound to the candidate identity and the official
+Responses route before a live child starts. A synthetic fixture may carry only
+`partial`/`Unqualified` planner evidence and can never qualify the issue.
+
 For Codex CLI `0.146.0`, the package metadata does not include `gitHead`.
 Evidence may use `cli_source_commit: null` with
 `cli_source_commit_status: not_published_by_registry`; a fabricated SHA is
@@ -290,6 +321,7 @@ py -3.13 scripts/capture_issue_62_live_evidence.py `
   --forward-base-url http://127.0.0.1:<ISOLATED_GATEWAY_PORT> `
   --output-dir <ISOLATED_OUTPUT_ROOT>\pre `
   --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --run-nonce <FRESH_32_HEX_RUN_NONCE> `
   --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
   --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
   --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
@@ -304,6 +336,7 @@ py -3.13 scripts/capture_issue_62_live_evidence.py `
   --forward-base-url <AUTHORIZED_UPSTREAM_BASE_URL> `
   --output-dir <ISOLATED_OUTPUT_ROOT>\post `
   --hmac-key-file <ISOLATED_HMAC_KEY_FILE> `
+  --run-nonce <SAME_FRESH_32_HEX_RUN_NONCE> `
   --max-request-bytes <AUTHORIZED_REQUEST_CAP> `
   --max-response-bytes <AUTHORIZED_RESPONSE_CAP> `
   --connect-timeout-seconds <AUTHORIZED_CONNECT_TIMEOUT> `
@@ -317,7 +350,12 @@ terminal classifications, or a fixed incomplete failure code. URLs, paths,
 headers, credentials, key material, raw bodies, prompt/tool content, wire
 identifiers, and exception text are never artifact fields. Overflow, timeout,
 cancellation, forwarding failure, incomplete SSE framing, and server lifecycle
-failure cannot produce a complete record and leave no `.partial` artifact.
+failure cannot produce a complete record and leave no `.partial` artifact. The
+operator supplies one fresh 32-hex run nonce to both hops for each window. It
+is included in the correlation HMAC context and the producer HMAC over each
+canonical record (excluding the producer-HMAC field); post accepts each token
+only once for that run. A producer snapshot is read back immediately and
+checked again at shutdown, so a rewritten record fails closed.
 
 The focused tests use loopback fake servers only:
 

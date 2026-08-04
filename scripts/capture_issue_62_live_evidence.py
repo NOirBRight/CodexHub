@@ -35,9 +35,11 @@ _OUTCOMES = frozenset({"complete", "incomplete"})
 _FAILURES = frozenset(
     {
         "capture_record_exists",
+        "capture_record_mutated",
         "capture_record_write_failed",
         "client_cancelled",
         "correlation_binding_invalid",
+        "correlation_token_replayed",
         "downstream_cancelled",
         "forwarding_failed",
         "invalid_content_length",
@@ -60,6 +62,8 @@ _ROOT_FIELDS = frozenset(
         "schema",
         "verification_scope",
         "capture_id",
+        "run_nonce",
+        "producer_hmac_sha256",
         "hop",
         "outcome",
         "failure",
@@ -84,6 +88,7 @@ _SSE_FIELDS = frozenset(
 _CAPTURE_ID = re.compile(r"c[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _CORRELATION_TOKEN = re.compile(r"[0-9a-f]{32}\Z")
+_RUN_NONCE = _CORRELATION_TOKEN
 _CORRELATION_BINDING = re.compile(r"([0-9a-f]{32})\.([0-9a-f]{64})\Z")
 _CORRELATION_HEADER = "X-CodexHub-Issue62-Capture"
 
@@ -113,6 +118,10 @@ class SidecarConfig:
     connect_timeout_seconds: float
     read_timeout_seconds: float
     overall_timeout_seconds: float
+    # Direct library callers may omit this and receive a fresh nonce.  The
+    # command-line entrypoint requires an explicit nonce so pre/post hops can
+    # be bound to the same operator-created run.
+    run_nonce: str | None = None
 
 
 class BodyFingerprint:
@@ -244,6 +253,10 @@ def validate_config(config: SidecarConfig) -> bytes:
 
     if config.hop not in _HOPS:
         raise ConfigurationError("hop_invalid")
+    if config.run_nonce is not None and (
+        not isinstance(config.run_nonce, str) or _RUN_NONCE.fullmatch(config.run_nonce) is None
+    ):
+        raise ConfigurationError("run_nonce_invalid")
     try:
         listen_address = ipaddress.ip_address(config.listen_host)
     except ValueError as error:
@@ -365,6 +378,12 @@ def validate_capture_record(record: Mapping[str, Any], hop: str) -> None:
     capture_id = record["capture_id"]
     if not isinstance(capture_id, str) or _CAPTURE_ID.fullmatch(capture_id) is None:
         raise ArtifactValidationError("capture_id_invalid")
+    run_nonce = record["run_nonce"]
+    if not isinstance(run_nonce, str) or _RUN_NONCE.fullmatch(run_nonce) is None:
+        raise ArtifactValidationError("run_nonce_invalid")
+    producer_hmac = record["producer_hmac_sha256"]
+    if not isinstance(producer_hmac, str) or _DIGEST.fullmatch(producer_hmac) is None:
+        raise ArtifactValidationError("producer_binding_invalid")
     if record["outcome"] not in _OUTCOMES:
         raise ArtifactValidationError("record_outcome_invalid")
     if record["failure"] is not None and record["failure"] not in _FAILURES:
@@ -397,7 +416,9 @@ def validate_capture_record(record: Mapping[str, Any], hop: str) -> None:
             raise ArtifactValidationError("record_completion_invalid")
 
 
-def _capture_id_for_token(key: bytes, correlation_token: str) -> str:
+def _capture_id_for_token(
+    key: bytes, correlation_token: str, run_nonce: str | None = None
+) -> str:
     if not isinstance(key, bytes) or not 32 <= len(key) <= 4096:
         raise ValueError("capture_key_invalid")
     if (
@@ -405,11 +426,12 @@ def _capture_id_for_token(key: bytes, correlation_token: str) -> str:
         or _CORRELATION_TOKEN.fullmatch(correlation_token) is None
     ):
         raise ValueError("correlation_token_invalid")
-    digest = hmac.new(
-        key,
-        b"issue62-capture\0" + correlation_token.encode("ascii"),
-        hashlib.sha256,
-    ).hexdigest()
+    context = b"issue62-capture\0"
+    if run_nonce is not None:
+        if _RUN_NONCE.fullmatch(run_nonce) is None:
+            raise ValueError("run_nonce_invalid")
+        context += run_nonce.encode("ascii") + b"\0"
+    digest = hmac.new(key, context + correlation_token.encode("ascii"), hashlib.sha256).hexdigest()
     return "c" + digest[:32]
 
 
@@ -417,35 +439,85 @@ def _new_correlation_token() -> str:
     return uuid.uuid4().hex
 
 
-def _correlation_binding(key: bytes, correlation_token: str) -> str:
+def _correlation_binding(
+    key: bytes, correlation_token: str, run_nonce: str | None = None
+) -> str:
     if (
         not isinstance(correlation_token, str)
         or _CORRELATION_TOKEN.fullmatch(correlation_token) is None
     ):
         raise ValueError("correlation_token_invalid")
-    signature = hmac.new(
-        key,
-        b"issue62-correlation\0" + correlation_token.encode("ascii"),
-        hashlib.sha256,
-    ).hexdigest()
+    context = b"issue62-correlation\0"
+    if run_nonce is not None:
+        if _RUN_NONCE.fullmatch(run_nonce) is None:
+            raise ValueError("run_nonce_invalid")
+        context += run_nonce.encode("ascii") + b"\0"
+    signature = hmac.new(key, context + correlation_token.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{correlation_token}.{signature}"
 
 
-def _correlation_token_from_header(key: bytes, value: str | None) -> str | None:
+def _correlation_token_from_header(
+    key: bytes, value: str | None, run_nonce: str | None = None
+) -> str | None:
     if not isinstance(value, str):
         return None
     match = _CORRELATION_BINDING.fullmatch(value)
     if match is None:
         return None
     correlation_token, signature = match.groups()
-    expected = hmac.new(
-        key,
-        b"issue62-correlation\0" + correlation_token.encode("ascii"),
-        hashlib.sha256,
-    ).hexdigest()
+    context = b"issue62-correlation\0"
+    if run_nonce is not None:
+        if _RUN_NONCE.fullmatch(run_nonce) is None:
+            return None
+        context += run_nonce.encode("ascii") + b"\0"
+    expected = hmac.new(key, context + correlation_token.encode("ascii"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         return None
     return correlation_token
+
+
+def _canonical_record_bytes(record: Mapping[str, Any]) -> bytes:
+    payload = dict(record)
+    payload.pop("producer_hmac_sha256", None)
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+
+
+def _render_record_bytes(record: Mapping[str, Any]) -> bytes:
+    return json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    ) + b"\n"
+
+
+def _producer_hmac_sha256(
+    key: bytes, record: Mapping[str, Any], run_nonce: str | None = None
+) -> str:
+    if not isinstance(key, bytes) or not 32 <= len(key) <= 4096:
+        raise ValueError("capture_key_invalid")
+    nonce = run_nonce if run_nonce is not None else record.get("run_nonce")
+    hop = record.get("hop")
+    capture_id = record.get("capture_id")
+    if (
+        not isinstance(nonce, str)
+        or _RUN_NONCE.fullmatch(nonce) is None
+        or not isinstance(hop, str)
+        or hop not in _HOPS
+        or not isinstance(capture_id, str)
+        or _CAPTURE_ID.fullmatch(capture_id) is None
+    ):
+        raise ValueError("producer_binding_invalid")
+    material = (
+        b"issue62-producer\0"
+        + nonce.encode("ascii")
+        + b"\0"
+        + hop.encode("ascii")
+        + b"\0"
+        + capture_id.encode("ascii")
+        + b"\0"
+        + _canonical_record_bytes(record)
+    )
+    return hmac.new(key, material, hashlib.sha256).hexdigest()
 
 
 def write_capture_record(
@@ -455,25 +527,37 @@ def write_capture_record(
     *,
     capture_key: bytes | None = None,
     correlation_token: str | None = None,
+    run_nonce: str | None = None,
 ) -> Path:
     """Atomically publish one live-bound sanitized record and remove its partial."""
 
     validate_capture_record(record, hop)
     if capture_key is None or correlation_token is None:
         raise ArtifactValidationError("capture_binding_missing")
+    expected_nonce = run_nonce if run_nonce is not None else record.get("run_nonce")
+    if not isinstance(expected_nonce, str) or _RUN_NONCE.fullmatch(expected_nonce) is None:
+        raise ArtifactValidationError("capture_binding_invalid")
     try:
-        expected_capture_id = _capture_id_for_token(capture_key, correlation_token)
+        expected_capture_id = _capture_id_for_token(capture_key, correlation_token, expected_nonce)
     except (TypeError, ValueError):
         raise ArtifactValidationError("capture_binding_invalid") from None
     if not hmac.compare_digest(str(record["capture_id"]), expected_capture_id):
         raise ArtifactValidationError("capture_binding_invalid")
+    if str(record["run_nonce"]) != expected_nonce:
+        raise ArtifactValidationError("capture_binding_invalid")
+    try:
+        expected_producer_hmac = _producer_hmac_sha256(capture_key, record, expected_nonce)
+    except (TypeError, ValueError):
+        raise ArtifactValidationError("producer_binding_invalid") from None
+    if not hmac.compare_digest(str(record["producer_hmac_sha256"]), expected_producer_hmac):
+        raise ArtifactValidationError("producer_binding_invalid")
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     capture_id = str(record["capture_id"])
     target = directory / f"{hop}-{capture_id}.json"
     if target.exists() or target.is_symlink():
         raise ArtifactValidationError("capture_record_exists")
-    rendered = json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+    rendered = _render_record_bytes(record)
     # The capture id is deterministic for a correlation token, so two
     # concurrent handlers can legitimately race for the same destination.
     # Give each writer an independent temporary inode; sharing one ``.partial``
@@ -481,7 +565,7 @@ def write_capture_record(
     partial = directory / f".{hop}-{capture_id}.{uuid.uuid4().hex}.partial"
     try:
         with partial.open("x", encoding="ascii", newline="\n") as handle:
-            handle.write(rendered)
+            handle.write(rendered.decode("ascii"))
             handle.flush()
             os.fsync(handle.fileno())
         # Linking the fully written inode into place is atomic and refuses to
@@ -491,6 +575,11 @@ def write_capture_record(
         except FileExistsError:
             raise ArtifactValidationError("capture_record_exists") from None
         partial.unlink()
+        try:
+            if target.read_bytes() != rendered:
+                raise ArtifactValidationError("capture_record_mutated")
+        except OSError:
+            raise ArtifactValidationError("capture_record_write_failed") from None
     finally:
         try:
             partial.unlink()
@@ -524,11 +613,19 @@ def _content_type_class(value: str | None) -> str:
     return "other"
 
 
-def _empty_record(hop: str, capture_id: str, failure: str) -> dict[str, Any]:
-    return {
+def _empty_record(
+    hop: str,
+    capture_id: str,
+    failure: str,
+    run_nonce: str,
+    capture_key: bytes,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
         "schema": SCHEMA,
         "verification_scope": VERIFICATION_SCOPE,
         "capture_id": capture_id,
+        "run_nonce": run_nonce,
+        "producer_hmac_sha256": "0" * 64,
         "hop": hop,
         "outcome": "incomplete",
         "failure": failure,
@@ -538,6 +635,8 @@ def _empty_record(hop: str, capture_id: str, failure: str) -> dict[str, Any]:
         "response": None,
         "sse": None,
     }
+    record["producer_hmac_sha256"] = _producer_hmac_sha256(capture_key, record, run_nonce)
+    return record
 
 
 def _join_target_path(base_path: str, incoming_path: str) -> str:
@@ -594,6 +693,7 @@ class CaptureSidecarServer:
     def __init__(self, config: SidecarConfig) -> None:
         self._config = config
         self._key = validate_config(config)
+        self._run_nonce = config.run_nonce or _new_correlation_token()
         self._target = urlsplit(config.forward_base_url)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -603,6 +703,10 @@ class CaptureSidecarServer:
             socket.socket,
             http.client.HTTPConnection | None,
         ] = {}
+        self._issued_tokens: set[str] = set()
+        self._issued_lock = threading.Lock()
+        self._published_records: dict[Path, bytes] = {}
+        self._published_lock = threading.Lock()
 
     @property
     def listen_host(self) -> str:
@@ -670,7 +774,12 @@ class CaptureSidecarServer:
         drained = self._wait_for_active_connections(drain_timeout)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=min(max(0.1, self._config.overall_timeout_seconds), 5.0))
-        return drained and (thread is None or not thread.is_alive())
+        thread_stopped = thread is None or not thread.is_alive()
+        if drained and thread_stopped and not self._verify_published_records():
+            self._thread_failure = "capture_record_mutated"
+            self._write_control_failure("capture_record_mutated")
+            drained = False
+        return drained and thread_stopped
 
     def wait(self) -> bool:
         thread = self._thread
@@ -683,19 +792,47 @@ class CaptureSidecarServer:
     def _write_control_failure(self, failure: str) -> None:
         correlation_token = _new_correlation_token()
         try:
-            write_capture_record(
+            capture_id = _capture_id_for_token(self._key, correlation_token, self._run_nonce)
+            record = _empty_record(
+                self._config.hop,
+                capture_id,
+                failure,
+                self._run_nonce,
+                self._key,
+            )
+            record_path = write_capture_record(
                 self._config.output_dir,
                 self._config.hop,
-                _empty_record(
-                    self._config.hop,
-                    _capture_id_for_token(self._key, correlation_token),
-                    failure,
-                ),
+                record,
                 capture_key=self._key,
                 correlation_token=correlation_token,
+                run_nonce=self._run_nonce,
             )
+            self._remember_published_record(record_path, _render_record_bytes(record))
         except Exception:
             return
+
+    def _claim_token(self, correlation_token: str) -> bool:
+        with self._issued_lock:
+            if correlation_token in self._issued_tokens:
+                return False
+            self._issued_tokens.add(correlation_token)
+            return True
+
+    def _remember_published_record(self, path: Path, rendered: bytes) -> None:
+        with self._published_lock:
+            self._published_records[path.resolve()] = bytes(rendered)
+
+    def _verify_published_records(self) -> bool:
+        with self._published_lock:
+            snapshots = dict(self._published_records)
+        for path, expected in snapshots.items():
+            try:
+                if path.read_bytes() != expected:
+                    return False
+            except OSError:
+                return False
+        return True
 
     def _register_client(self, connection: socket.socket) -> None:
         with self._active_condition:
@@ -751,7 +888,7 @@ class CaptureSidecarServer:
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         correlation_token = _new_correlation_token()
-        capture_id = _capture_id_for_token(self._key, correlation_token)
+        capture_id = _capture_id_for_token(self._key, correlation_token, self._run_nonce)
         started_at = time.monotonic()
         request_fingerprint = BodyFingerprint(self._key, b"request-body")
         response_fingerprint: BodyFingerprint | None = None
@@ -767,13 +904,24 @@ class CaptureSidecarServer:
                 bound_token = _correlation_token_from_header(
                     self._key,
                     handler.headers.get(_CORRELATION_HEADER),
+                    self._run_nonce,
                 )
                 if bound_token is None:
                     failure = "correlation_binding_invalid"
                     self._send_bounded_error(handler, 400)
                     return
                 correlation_token = bound_token
-                capture_id = _capture_id_for_token(self._key, correlation_token)
+                capture_id = _capture_id_for_token(self._key, correlation_token, self._run_nonce)
+                if not self._claim_token(correlation_token):
+                    failure = "correlation_token_replayed"
+                    # Preserve the original capture record and publish this
+                    # rejected attempt under a fresh, run-bound ID.
+                    correlation_token = _new_correlation_token()
+                    capture_id = _capture_id_for_token(
+                        self._key, correlation_token, self._run_nonce
+                    )
+                    self._send_bounded_error(handler, 409)
+                    return
             raw_length = handler.headers.get("Content-Length")
             try:
                 content_length = int(raw_length) if raw_length is not None else -1
@@ -817,7 +965,9 @@ class CaptureSidecarServer:
                 not in _HOP_BY_HOP_HEADERS | {"host", "content-length", _CORRELATION_HEADER.lower()}
             }
             if self._config.hop == "pre":
-                headers[_CORRELATION_HEADER] = _correlation_binding(self._key, correlation_token)
+                headers[_CORRELATION_HEADER] = _correlation_binding(
+                    self._key, correlation_token, self._run_nonce
+                )
             target_path = _join_target_path(self._target.path, handler.path)
             upstream.request("POST", target_path, body=request_body, headers=headers)
             if upstream.sock is not None:
@@ -888,6 +1038,8 @@ class CaptureSidecarServer:
                 "schema": SCHEMA,
                 "verification_scope": VERIFICATION_SCOPE,
                 "capture_id": capture_id,
+                "run_nonce": self._run_nonce,
+                "producer_hmac_sha256": "0" * 64,
                 "hop": self._config.hop,
                 "outcome": outcome,
                 "failure": failure,
@@ -909,13 +1061,21 @@ class CaptureSidecarServer:
                     else None
                 ),
             }
+            record["producer_hmac_sha256"] = _producer_hmac_sha256(
+                self._key, record, self._run_nonce
+            )
             try:
-                write_capture_record(
+                record_path = write_capture_record(
                     self._config.output_dir,
                     self._config.hop,
                     record,
                     capture_key=self._key,
                     correlation_token=correlation_token,
+                    run_nonce=self._run_nonce,
+                )
+                self._remember_published_record(
+                    record_path,
+                    _render_record_bytes(record),
                 )
             except ArtifactValidationError as error:
                 failure_code = str(error)
@@ -969,6 +1129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--connect-timeout-seconds", type=float, required=True)
     parser.add_argument("--read-timeout-seconds", type=float, required=True)
     parser.add_argument("--overall-timeout-seconds", type=float, required=True)
+    parser.add_argument("--run-nonce", required=True)
     return parser
 
 
@@ -990,6 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
         connect_timeout_seconds=options.connect_timeout_seconds,
         read_timeout_seconds=options.read_timeout_seconds,
         overall_timeout_seconds=options.overall_timeout_seconds,
+        run_nonce=options.run_nonce,
     )
     if config.listen_port == 0:
         print("listen_port_zero_not_allowed", file=sys.stderr)

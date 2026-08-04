@@ -28,12 +28,14 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
 import signal
 import shutil
+import secrets
 import stat
 import subprocess
 import sys
@@ -118,9 +120,6 @@ LIVE_PLAN_FIELDS = frozenset(
         "planner",
     }
 )
-LIVE_DISPOSITIONS = frozenset(
-    {"preserved", "reversibly_adapted", "local_consume", "Unsupported", "Unqualified"}
-)
 LIVE_ENV_KEYS = frozenset(
     {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
 )
@@ -149,7 +148,7 @@ CASE_ENVIRONMENT_PATHS = {
     "XDG_CONFIG_HOME": "xdg-config",
 }
 PLANNER_FIELDS = frozenset(
-    {"model_visible_plan", "hosted_only_disposition", "unknown_tag_disposition"}
+    {"inputs", "core_plan", "hosted_only_items", "unknown_tagged_items"}
 )
 
 
@@ -1845,15 +1844,11 @@ def load_live_control_plan(
     normalized_environment = _validate_environment(
         payload.get("environment"), isolated_root=isolated_root
     )
-    planner = payload.get("planner")
-    if not isinstance(planner, Mapping) or frozenset(planner) != PLANNER_FIELDS:
-        _live_plan_fail("planner_plan_incomplete")
-    if planner.get("model_visible_plan") != "complete":
-        _live_plan_fail("planner_plan_incomplete")
-    if planner.get("hosted_only_disposition") not in LIVE_DISPOSITIONS or planner.get(
-        "unknown_tag_disposition"
-    ) not in LIVE_DISPOSITIONS:
-        _live_plan_fail("planner_disposition_invalid")
+    planner = _validate_live_planner(
+        payload.get("planner"),
+        identity=identity,
+        model=model,
+    )
 
     controls = payload.get("controls")
     if not isinstance(controls, list) or len(controls) != len(CONTROL_NAMES):
@@ -1944,7 +1939,7 @@ def load_live_control_plan(
         "controls": normalized_controls,
         "replays": normalized_replays,
         "environment": normalized_environment,
-        "planner": dict(planner),
+        "planner": planner,
     }
 
 
@@ -1962,6 +1957,58 @@ def _load_manifest_builder() -> Any:
     except ImportError as error:
         raise HarnessFailure("phase_exception") from error
     return ManifestValidationError, build_manifest, reconcile_manifest, replay_manifest
+
+
+def _validate_live_planner(
+    value: Any,
+    *,
+    identity: CandidateIdentity,
+    model: str,
+) -> dict[str, Any]:
+    """Validate and bind the v2 planner before any child process starts."""
+
+    if not isinstance(value, Mapping) or frozenset(value) != PLANNER_FIELDS:
+        _live_plan_fail("planner_plan_incomplete")
+    try:
+        from build_issue_62_control_manifest import (  # type: ignore[import-not-found]
+            ManifestValidationError,
+            validate_planner,
+        )
+    except ImportError:
+        _live_plan_fail("live_control_plan_invalid")
+
+    candidate_identity = {
+        "cli_version": identity.cli_version,
+        "cli_package_sha256": identity.cli_package_sha256,
+        "codexhub_candidate_sha": identity.candidate_sha,
+        "catalog_snapshot_sha256": identity.catalog_digest,
+        "catalog_model_entry_id": model,
+        "route_digest": identity.route_digest,
+    }
+    route_identity = {
+        "upstream": "official",
+        "model": model,
+        "inbound_format": "responses",
+        "route_digest": identity.route_digest,
+    }
+    try:
+        return validate_planner(
+            value,
+            verification_scope=LIVE_SCOPE,
+            candidate_identity=candidate_identity,
+            route_identity=route_identity,
+        )
+    except ManifestValidationError as error:
+        # Keep live-runner failures fixed, path-free, and independent of the
+        # manifest module's internal validation vocabulary.
+        code = str(error)
+        if code == "planner_input_binding_mismatch":
+            _live_plan_fail("candidate_binding_mismatch")
+        if code == "planner_route_binding_mismatch":
+            _live_plan_fail("route_binding_mismatch")
+        if code in {"planner_disposition_invalid", "planner_synthetic_evidence_invalid"}:
+            _live_plan_fail("planner_disposition_invalid")
+        _live_plan_fail("planner_plan_incomplete")
 
 
 def _prepare_capture_dirs(sidecars: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
@@ -2029,7 +2076,13 @@ def _record_path_for_control(
     raise LiveControlValidationError("sidecar_capture_missing")
 
 
-def _read_sidecar_record(path: Path, *, hop: str) -> dict[str, Any]:
+def _read_sidecar_record(
+    path: Path,
+    *,
+    hop: str,
+    run_nonce: str,
+    capture_key: bytes,
+) -> dict[str, Any]:
     try:
         if path.is_symlink() or not path.is_file() or os.stat(path).st_nlink != 1:
             raise OSError
@@ -2041,10 +2094,16 @@ def _read_sidecar_record(path: Path, *, hop: str) -> dict[str, Any]:
             _load_manifest_builder()
         )
         from build_issue_62_control_manifest import sanitize_sidecar_record  # type: ignore[import-not-found]
+        from capture_issue_62_live_evidence import _producer_hmac_sha256  # type: ignore[import-not-found]
 
         # Validate against the capture-only schema, but keep the raw
         # transport metadata in memory for ``build_manifest``.  The builder
         # drops capture IDs/hop fields before writing the canonical manifest.
+        if record.get("run_nonce") != run_nonce:
+            raise LiveControlValidationError("sidecar_capture_incomplete")
+        expected_producer_hmac = _producer_hmac_sha256(capture_key, record, run_nonce)
+        if not hmac.compare_digest(str(record.get("producer_hmac_sha256")), expected_producer_hmac):
+            raise LiveControlValidationError("sidecar_capture_incomplete")
         sanitize_sidecar_record(record, expected_hop=hop)
         return dict(record)
     except Exception as error:
@@ -2055,8 +2114,25 @@ def _read_sidecar_record(path: Path, *, hop: str) -> dict[str, Any]:
 
 def _build_live_controls(
     plan: Mapping[str, Any],
+    *,
+    run_nonce: str,
+    isolated_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     sidecars = plan["sidecars"]
+    try:
+        key_file = str(sidecars["pre"][0]["hmac_key_file"])
+        key_path = Path(
+            _resolve_isolated_path(
+                key_file, isolated_root=isolated_root, must_exist=True
+            )
+            if isolated_root is not None
+            else key_file
+        )
+        capture_key = key_path.read_bytes()
+    except (KeyError, OSError, TypeError):
+        raise LiveControlValidationError("sidecar_capture_incomplete") from None
+    if not 32 <= len(capture_key) <= 4096:
+        raise LiveControlValidationError("sidecar_capture_incomplete")
     controls: list[dict[str, Any]] = []
     for index, control in enumerate(plan["controls"]):
         semantic = dict(control.get("capture", {}))
@@ -2064,10 +2140,14 @@ def _build_live_controls(
         semantic["pre"] = _read_sidecar_record(
             _record_path_for_control(control, hop="pre", specs=sidecars["pre"], index=index),
             hop="pre",
+            run_nonce=run_nonce,
+            capture_key=capture_key,
         )
         semantic["post"] = _read_sidecar_record(
             _record_path_for_control(control, hop="post", specs=sidecars["post"], index=index),
             hop="post",
+            run_nonce=run_nonce,
+            capture_key=capture_key,
         )
         controls.append(semantic)
     return controls
@@ -2089,7 +2169,9 @@ def _manifest_candidate(plan: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
+def _runtime_argv(
+    spec: Mapping[str, Any], *, isolated_root: Path, run_nonce: str | None = None
+) -> list[str]:
     executable = _resolve_isolated_path(
         spec["executable_file"], isolated_root=isolated_root, must_exist=True
     )
@@ -2107,6 +2189,16 @@ def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
             raise LiveControlValidationError("helper_executable_binding_mismatch")
     argv = list(spec["argv"])
     argv[0] = executable
+    if run_nonce is not None:
+        try:
+            nonce_index = argv.index("--run-nonce")
+        except ValueError:
+            argv.extend(["--run-nonce", run_nonce])
+        else:
+            if nonce_index + 1 >= len(argv):
+                argv.append(run_nonce)
+            else:
+                argv[nonce_index + 1] = run_nonce
     return argv
 
 
@@ -2311,6 +2403,10 @@ def run_live_control(
     except (OSError, ValueError, RuntimeError):
         raise LiveControlValidationError("live_control_plan_invalid")
     handles: list[BackgroundProcess] = []
+    # Every invocation gets a fresh correlation namespace.  The value is
+    # injected into both sidecar argv vectors and never enters sanitized
+    # orchestration artifacts except through the sidecar producer binding.
+    run_nonce = secrets.token_hex(16)
     result_status = "completed"
     result_code = "ok"
     manifest: dict[str, Any] | None = None
@@ -2343,7 +2439,9 @@ def run_live_control(
                         handles.append(
                             runner.start_background(
                                 f"{hop}_sidecar_{index}",
-                                _runtime_argv(spec, isolated_root=isolation),
+                                _runtime_argv(
+                                    spec, isolated_root=isolation, run_nonce=run_nonce
+                                ),
                             )
                         )
                     except HarnessFailure as error:
@@ -2381,7 +2479,9 @@ def run_live_control(
 
         if result_status == "completed":
             try:
-                controls = _build_live_controls(loaded)
+                controls = _build_live_controls(
+                    loaded, run_nonce=run_nonce, isolated_root=isolation
+                )
                 _ManifestValidationError, build_manifest, reconcile_manifest, replay_manifest = (
                     _load_manifest_builder()
                 )
@@ -2400,7 +2500,7 @@ def run_live_control(
                         _write_sanitized_json(output_manifest, manifest)
             except LiveControlValidationError as error:
                 result_status, result_code = "failed", error.code
-            except Exception as error:
+            except Exception:
                 result_status, result_code = "failed", "manifest_reconcile_failed"
 
         if result_status == "completed" and manifest is not None:

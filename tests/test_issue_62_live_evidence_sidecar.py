@@ -29,15 +29,30 @@ SPEC.loader.exec_module(sidecar)
 
 KEY = b"h" * 32
 CORRELATION_TOKEN = "1" * 32
+RUN_NONCE = "a" * 32
 
 
 def _capture_id(correlation_token: str = CORRELATION_TOKEN) -> str:
-    return sidecar._capture_id_for_token(KEY, correlation_token)
+    return sidecar._capture_id_for_token(KEY, correlation_token, RUN_NONCE)
+
+
+def _bound_record(record: dict[str, object], *, key: bytes = KEY) -> dict[str, object]:
+    record["run_nonce"] = RUN_NONCE
+    record["producer_hmac_sha256"] = "0" * 64
+    record["producer_hmac_sha256"] = sidecar._producer_hmac_sha256(key, record, RUN_NONCE)
+    return record
 
 
 def test_capture_id_is_deterministically_bound_to_correlation_token() -> None:
     assert _capture_id() == _capture_id(CORRELATION_TOKEN)
     assert _capture_id() != _capture_id("2" * 32)
+
+
+def test_correlation_binding_is_bound_to_the_current_run_nonce() -> None:
+    header = sidecar._correlation_binding(KEY, CORRELATION_TOKEN, RUN_NONCE)
+
+    assert sidecar._correlation_token_from_header(KEY, header, RUN_NONCE) == CORRELATION_TOKEN
+    assert sidecar._correlation_token_from_header(KEY, header, "b" * 32) is None
 
 
 class _FakeUpstreamHandler(BaseHTTPRequestHandler):
@@ -141,6 +156,7 @@ def _sidecar_config(
         "connect_timeout_seconds": 1.0,
         "read_timeout_seconds": 1.0,
         "overall_timeout_seconds": 3.0,
+        "run_nonce": RUN_NONCE,
     }
     values.update(overrides)
     return sidecar.SidecarConfig(**values)
@@ -167,6 +183,7 @@ def base_config(tmp_path: Path, hmac_key_file: Path):
         connect_timeout_seconds=1.0,
         read_timeout_seconds=1.0,
         overall_timeout_seconds=2.0,
+        run_nonce=RUN_NONCE,
     )
 
 
@@ -225,7 +242,7 @@ def test_config_rejects_arbitrarily_large_positive_integer_timeout(
 
 
 def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> None:
-    record = {
+    record = _bound_record({
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
         "capture_id": _capture_id(),
@@ -247,7 +264,7 @@ def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> Non
             "complete": True,
         },
         "sse": None,
-    }
+    })
 
     record_path = sidecar.write_capture_record(
         tmp_path,
@@ -266,7 +283,7 @@ def test_atomic_record_is_sanitized_and_leaves_no_partial(tmp_path: Path) -> Non
 def test_atomic_record_does_not_overwrite_same_correlation_record(
     tmp_path: Path,
 ) -> None:
-    record = {
+    record = _bound_record({
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
         "capture_id": _capture_id(),
@@ -278,7 +295,7 @@ def test_atomic_record_does_not_overwrite_same_correlation_record(
         "request": {"bytes": 1, "sha256": "a" * 64, "hmac_sha256": "b" * 64, "complete": True},
         "response": {"bytes": 1, "sha256": "c" * 64, "hmac_sha256": "d" * 64, "complete": True},
         "sse": None,
-    }
+    })
 
     first = sidecar.write_capture_record(
         tmp_path,
@@ -300,7 +317,7 @@ def test_atomic_record_does_not_overwrite_same_correlation_record(
 
 
 def test_atomic_record_rejects_prebuilt_record_without_live_capture_binding(tmp_path: Path) -> None:
-    record = {
+    record = _bound_record({
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
         "capture_id": _capture_id("2" * 32),
@@ -322,14 +339,14 @@ def test_atomic_record_rejects_prebuilt_record_without_live_capture_binding(tmp_
             "complete": True,
         },
         "sse": None,
-    }
+    })
 
     with pytest.raises(sidecar.ArtifactValidationError, match="capture_binding_missing"):
         sidecar.write_capture_record(tmp_path, "pre", record)
 
 
 def test_atomic_record_rejects_capture_id_from_different_live_correlation(tmp_path: Path) -> None:
-    record = {
+    record = _bound_record({
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
         "capture_id": _capture_id("2" * 32),
@@ -351,7 +368,7 @@ def test_atomic_record_rejects_capture_id_from_different_live_correlation(tmp_pa
             "complete": True,
         },
         "sse": None,
-    }
+    })
 
     with pytest.raises(sidecar.ArtifactValidationError, match="capture_binding_invalid"):
         sidecar.write_capture_record(
@@ -372,6 +389,8 @@ def test_atomic_record_rejects_unapproved_fields(tmp_path: Path) -> None:
                 "schema": "codexhub.issue62.live-evidence-lane.v1",
                 "verification_scope": "capture_only_not_qualification",
                 "capture_id": "c" + "2" * 32,
+                "run_nonce": RUN_NONCE,
+                "producer_hmac_sha256": "0" * 64,
                 "hop": "pre",
                 "outcome": "incomplete",
                 "failure": "forwarding_failed",
@@ -394,6 +413,8 @@ def test_atomic_record_rejects_inconsistent_sse_completion(tmp_path: Path) -> No
                 "schema": "codexhub.issue62.live-evidence-lane.v1",
                 "verification_scope": "capture_only_not_qualification",
                 "capture_id": "c" + "3" * 32,
+                "run_nonce": RUN_NONCE,
+                "producer_hmac_sha256": "0" * 64,
                 "hop": "post",
                 "outcome": "incomplete",
                 "failure": "sse_terminal_missing",
@@ -443,6 +464,8 @@ def test_complete_record_requires_complete_response_and_sse_when_streaming(
                 "schema": "codexhub.issue62.live-evidence-lane.v1",
                 "verification_scope": "capture_only_not_qualification",
                 "capture_id": "c" + ("4" if response is None else "5") * 32,
+                "run_nonce": RUN_NONCE,
+                "producer_hmac_sha256": "0" * 64,
                 "hop": "pre",
                 "outcome": "complete",
                 "failure": None,
@@ -490,6 +513,8 @@ def test_cli_rejects_ephemeral_port(
             "1",
             "--overall-timeout-seconds",
             "2",
+            "--run-nonce",
+            RUN_NONCE,
         ]
     )
 
@@ -614,7 +639,9 @@ def test_two_hops_capture_matching_complete_request_response_and_sse(
             connect_timeout_seconds=1.0,
             read_timeout_seconds=1.0,
             overall_timeout_seconds=3.0,
+            run_nonce=RUN_NONCE,
         )
+
         with _running_sidecar(post_config) as post:
             pre_config = dataclasses.replace(
                 post_config,
@@ -669,6 +696,32 @@ def test_two_hops_capture_matching_complete_request_response_and_sse(
     ):
         assert sensitive not in serialized
     assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_atomic_record_rejects_a_mutated_producer_snapshot(tmp_path: Path) -> None:
+    record = _bound_record({
+        "schema": "codexhub.issue62.live-evidence-lane.v1",
+        "verification_scope": "capture_only_not_qualification",
+        "capture_id": _capture_id(),
+        "hop": "pre",
+        "outcome": "complete",
+        "failure": None,
+        "status": 200,
+        "content_type_class": "json",
+        "request": {"bytes": 1, "sha256": "a" * 64, "hmac_sha256": "b" * 64, "complete": True},
+        "response": {"bytes": 1, "sha256": "c" * 64, "hmac_sha256": "d" * 64, "complete": True},
+        "sse": None,
+    })
+    record["status"] = 201
+
+    with pytest.raises(sidecar.ArtifactValidationError, match="producer_binding_invalid"):
+        sidecar.write_capture_record(
+            tmp_path,
+            "pre",
+            record,
+            capture_key=KEY,
+            correlation_token=CORRELATION_TOKEN,
+        )
 
 
 @pytest.mark.parametrize(
@@ -938,6 +991,103 @@ def test_server_thread_failure_writes_bounded_record_and_cleans_partial(
     assert not list(tmp_path.rglob("*.partial"))
 
 
+def test_post_rejects_a_header_issued_by_an_older_run(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = b'data: {"type":"response.completed"}\n\n'
+    with _fake_upstream(response_body) as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            upstream_url,
+            hop="post",
+            run_nonce="b" * 32,
+        )
+        old_header = sidecar._correlation_binding(
+            hmac_key_file.read_bytes(), CORRELATION_TOKEN, RUN_NONCE
+        )
+        with _running_sidecar(config) as server:
+            connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+            connection.request(
+                "POST",
+                "/responses",
+                body=b"{}",
+                headers={"X-CodexHub-Issue62-Capture": old_header},
+            )
+            response = connection.getresponse()
+            assert response.status == 400
+            response.read()
+            connection.close()
+
+    assert upstream.observed_request is None  # type: ignore[attr-defined]
+    record = _read_only_record(config.output_dir)
+    assert record["failure"] == "correlation_binding_invalid"
+
+
+def test_post_rejects_reusing_a_token_within_the_current_run(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = b'data: {"type":"response.completed"}\n\n'
+    with _fake_upstream(response_body) as upstream:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            upstream_url,
+            hop="post",
+        )
+        header = sidecar._correlation_binding(
+            hmac_key_file.read_bytes(), CORRELATION_TOKEN, RUN_NONCE
+        )
+        with _running_sidecar(config) as server:
+            for expected_status in (200, 409):
+                connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+                connection.request(
+                    "POST",
+                    "/responses",
+                    body=b"{}",
+                    headers={"X-CodexHub-Issue62-Capture": header},
+                )
+                response = connection.getresponse()
+                assert response.status == expected_status
+                response.read()
+                connection.close()
+
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in config.output_dir.glob("*.json")]
+    assert len(records) == 2
+    assert any(record["failure"] == "correlation_token_replayed" for record in records)
+    assert upstream.observed_request == b"{}"  # type: ignore[attr-defined]
+
+
+def test_shutdown_fails_closed_when_a_published_record_is_mutated(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    response_body = b'data: {"type":"response.completed"}\n\n'
+    with _fake_upstream(response_body) as upstream:
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            f"http://127.0.0.1:{upstream.server_address[1]}",
+        )
+        server = sidecar.CaptureSidecarServer(config)
+        server.start()
+        connection = http.client.HTTPConnection(server.listen_host, server.listen_port, timeout=2)
+        connection.request("POST", "/responses", body=b"{}")
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        record_path = next(config.output_dir.glob("*.json"))
+        record_path.write_text(record_path.read_text(encoding="utf-8").replace('"status":200', '"status":201'), encoding="utf-8")
+        assert server.shutdown() is False
+
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in config.output_dir.glob("*.json")]
+    assert any(record["failure"] == "capture_record_mutated" for record in records)
+
+
 def test_capture_write_failure_is_published_as_sanitized_record(
     tmp_path: Path,
     hmac_key_file: Path,
@@ -981,10 +1131,12 @@ def test_cli_configuration_error_does_not_echo_sensitive_values(
             "1",
             "--read-timeout-seconds",
             "1",
-            "--overall-timeout-seconds",
-            "2",
-        ]
-    )
+                "--overall-timeout-seconds",
+                "2",
+                "--run-nonce",
+                RUN_NONCE,
+            ]
+        )
 
     assert result == 2
     stderr = capsys.readouterr().err.strip()
@@ -1033,6 +1185,8 @@ def test_cli_explicit_enable_starts_and_cleans_up_on_interrupt(
             "1",
             "--overall-timeout-seconds",
             "2",
+            "--run-nonce",
+            RUN_NONCE,
         ]
     )
 
@@ -1079,6 +1233,8 @@ def _enabled_cli_args(tmp_path: Path, hmac_key_file: Path, port: int) -> list[st
         "1",
         "--overall-timeout-seconds",
         "2",
+        "--run-nonce",
+        RUN_NONCE,
     ]
 
 

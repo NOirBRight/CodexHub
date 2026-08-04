@@ -49,6 +49,8 @@ def _sidecar(name: str, hop: str, *, streaming: bool, status: int, terminal: str
         "schema": "codexhub.issue62.live-evidence-lane.v1",
         "verification_scope": "capture_only_not_qualification",
         "capture_id": "c" + hashlib.sha256(name.encode("ascii")).hexdigest()[:32],
+        "run_nonce": "a" * 32,
+        "producer_hmac_sha256": "b" * 64,
         "hop": hop,
         "outcome": "complete",
         "failure": None,
@@ -297,11 +299,52 @@ def _candidate() -> dict[str, str]:
     }
 
 
-def _planner() -> dict[str, str]:
+def _planner(*, verification_scope: str = manifest.SYNTHETIC_SCOPE) -> dict[str, object]:
+    candidate = _candidate()
+    live = verification_scope == manifest.LIVE_SCOPE
+    item_disposition = "preserved" if live else "Unqualified"
     return {
-        "model_visible_plan": "not_captured",
-        "hosted_only_disposition": "Unqualified",
-        "unknown_tag_disposition": "Unqualified",
+        "inputs": {
+            "provider": "official",
+            "model": candidate["catalog_model_entry_id"],
+            "protocol": "responses",
+            "cli_version": candidate["cli_version"],
+            "cli_package_sha256": candidate["cli_package_sha256"],
+            "candidate_sha": candidate["codexhub_candidate_sha"],
+            "catalog_digest": candidate["catalog_snapshot_sha256"],
+            "route_digest": candidate["route_digest"],
+        },
+        "core_plan": {
+            "status": "complete" if live else "partial",
+            "items": (
+                [
+                    {
+                        "id": "core-message",
+                        "type": "message",
+                        "disposition": item_disposition,
+                        "evidence_ref": "fixtures/issue-62.json#core.message",
+                    }
+                ]
+                if live
+                else []
+            ),
+        },
+        "hosted_only_items": [
+            {
+                "id": "hosted-tools",
+                "type": "hosted_tool",
+                "disposition": item_disposition if live else "Unqualified",
+                "evidence_ref": "fixtures/issue-62.json#hosted.tools",
+            }
+        ],
+        "unknown_tagged_items": [
+            {
+                "id": "unknown-sentinel",
+                "type": "unknown",
+                "disposition": item_disposition if live else "Unqualified",
+                "evidence_ref": "fixtures/issue-62.json#unknown.sentinel",
+            }
+        ],
     }
 
 
@@ -513,9 +556,9 @@ def test_manifest_binds_route_digest_and_planner_dispositions() -> None:
 
 
 def test_manifest_accepts_canonical_lowercase_preserved_disposition() -> None:
-    planner = _planner()
-    planner["hosted_only_disposition"] = "preserved"
-    planner["unknown_tag_disposition"] = "local_consume"
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    planner["hosted_only_items"][0]["disposition"] = "preserved"  # type: ignore[index]
+    planner["unknown_tagged_items"][0]["disposition"] = "local_consume"  # type: ignore[index]
 
     built = manifest.build_manifest(
         _controls(),
@@ -544,7 +587,7 @@ def test_manifest_reconciliation_rejects_route_or_planner_provenance_drift() -> 
     assert "control_route_digest_mismatch" in report["mismatches"]
 
     planner_forgery = copy.deepcopy(built)
-    planner_forgery["planner"]["unknown_tag_disposition"] = "not_captured"
+    planner_forgery["planner"]["unknown_tagged_items"][0]["disposition"] = "not_captured"
     planner_forgery["capture_manifest_sha256"] = manifest._canonical_digest(
         manifest._manifest_core(planner_forgery)
     )
@@ -617,3 +660,148 @@ def test_manifest_binds_control_labels_to_contract(
     report = manifest.reconcile_manifest(forged)
     assert report["reconciled"] is False
     assert any(expected in mismatch for mismatch in report["mismatches"])
+
+
+def _planner_route_context() -> tuple[dict[str, object], dict[str, object]]:
+    candidate = _candidate()
+    return (
+        candidate,
+        {
+            "upstream": "official",
+            "model": "gpt-5.6-sol",
+            "inbound_format": "responses",
+            "route_digest": candidate["route_digest"],
+        },
+    )
+
+
+def test_planner_v2_validates_exact_shape_and_bindings() -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+
+    normalized = manifest.validate_planner(
+        planner,
+        verification_scope=manifest.LIVE_SCOPE,
+        candidate_identity=candidate,
+        route_identity=route,
+    )
+
+    assert normalized == planner
+    assert set(normalized) == {
+        "inputs",
+        "core_plan",
+        "hosted_only_items",
+        "unknown_tagged_items",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda planner: planner.update({"extra": True}),
+        lambda planner: planner["inputs"].update({"extra": True}),
+        lambda planner: planner["core_plan"]["items"][0].update({"extra": True}),
+    ],
+)
+def test_planner_v2_rejects_extra_fields(mutate: object) -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    mutate(planner)  # type: ignore[operator]
+
+    with pytest.raises(manifest.ManifestValidationError):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=candidate,
+            route_identity=route,
+        )
+
+
+def test_planner_v2_rejects_duplicate_and_unsorted_items() -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    planner["hosted_only_items"][0]["id"] = "core-message"  # type: ignore[index]
+    with pytest.raises(manifest.ManifestValidationError, match="planner_duplicate_item_id"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=candidate,
+            route_identity=route,
+        )
+
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    planner["core_plan"]["items"].append(  # type: ignore[index]
+        {
+            "id": "aaa",
+            "type": "message",
+            "disposition": "preserved",
+            "evidence_ref": "fixtures/issue-62.json#core.aaa",
+        }
+    )
+    with pytest.raises(manifest.ManifestValidationError, match="planner_core_plan_unsorted"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=candidate,
+            route_identity=route,
+        )
+
+
+@pytest.mark.parametrize("evidence_ref", ["", "https://example.invalid/evidence#item", "../evidence.json#item", "evidence.json#.."])
+def test_planner_v2_requires_relative_nonempty_evidence_refs(evidence_ref: str) -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    planner["core_plan"]["items"][0]["evidence_ref"] = evidence_ref  # type: ignore[index]
+
+    with pytest.raises(manifest.ManifestValidationError, match="planner_evidence_ref_invalid"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=candidate,
+            route_identity=route,
+        )
+
+
+def test_planner_v2_rejects_identity_or_route_binding_mismatch() -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.LIVE_SCOPE)
+    mismatched_candidate = dict(candidate)
+    mismatched_candidate["route_digest"] = "e" * 64
+    with pytest.raises(manifest.ManifestValidationError, match="planner_input_binding_mismatch"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=mismatched_candidate,
+            route_identity=route,
+        )
+
+    mismatched_route = dict(route)
+    mismatched_route["inbound_format"] = "chat"
+    with pytest.raises(manifest.ManifestValidationError, match="planner_route_binding_mismatch"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.LIVE_SCOPE,
+            candidate_identity=candidate,
+            route_identity=mismatched_route,
+        )
+
+
+def test_planner_v2_keeps_synthetic_evidence_non_qualifying() -> None:
+    candidate, route = _planner_route_context()
+    planner = _planner(verification_scope=manifest.SYNTHETIC_SCOPE)
+    planner["core_plan"]["status"] = "complete"  # type: ignore[index]
+    planner["core_plan"]["items"] = [  # type: ignore[index]
+        {
+            "id": "core-message",
+            "type": "message",
+            "disposition": "preserved",
+            "evidence_ref": "fixtures/issue-62.json#core.message",
+        }
+    ]
+    with pytest.raises(manifest.ManifestValidationError, match="planner_synthetic_evidence_invalid"):
+        manifest.validate_planner(
+            planner,
+            verification_scope=manifest.SYNTHETIC_SCOPE,
+            candidate_identity=candidate,
+            route_identity=route,
+        )

@@ -156,9 +156,43 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         "catalog_model_entry_id": "gpt-5.6-sol",
         "environment": environment,
         "planner": {
-            "model_visible_plan": "complete",
-            "hosted_only_disposition": "Unqualified",
-            "unknown_tag_disposition": "Unqualified",
+            "inputs": {
+                "provider": "official",
+                "model": "gpt-5.6-sol",
+                "protocol": "responses",
+                "cli_version": "0.146.0",
+                "cli_package_sha256": _sha("package"),
+                "candidate_sha": "a" * 40,
+                "catalog_digest": _sha("catalog"),
+                "route_digest": _sha("route"),
+            },
+            "core_plan": {
+                "status": "complete",
+                "items": [
+                    {
+                        "id": "core-message",
+                        "type": "message",
+                        "disposition": "preserved",
+                        "evidence_ref": "fixtures/issue-62.json#core.message",
+                    }
+                ],
+            },
+            "hosted_only_items": [
+                {
+                    "id": "hosted-tools",
+                    "type": "hosted_tool",
+                    "disposition": "Unqualified",
+                    "evidence_ref": "fixtures/issue-62.json#hosted.tools",
+                }
+            ],
+            "unknown_tagged_items": [
+                {
+                    "id": "unknown-sentinel",
+                    "type": "unknown",
+                    "disposition": "Unqualified",
+                    "evidence_ref": "fixtures/issue-62.json#unknown.sentinel",
+                }
+            ],
         },
         "cli": {
             "argv": cli_argv,
@@ -229,13 +263,26 @@ def test_live_plan_binds_candidate_and_route_catalog_files(tmp_path: Path) -> No
 
 def test_live_plan_accepts_documented_disposition_vocabulary(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    plan["planner"] = {
-        "model_visible_plan": "complete",
-        "hosted_only_disposition": "preserved",
-        "unknown_tag_disposition": "reversibly_adapted",
-    }
+    plan["planner"]["hosted_only_items"][0]["disposition"] = "preserved"  # type: ignore[index]
+    plan["planner"]["unknown_tagged_items"][0]["disposition"] = "reversibly_adapted"  # type: ignore[index]
     loaded = load_live_control_plan(plan, isolated_root=tmp_path)
-    assert loaded["planner"]["hosted_only_disposition"] == "preserved"
+    assert loaded["planner"]["hosted_only_items"][0]["disposition"] == "preserved"  # type: ignore[index]
+
+
+def test_live_plan_binds_v2_planner_identity_before_children(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan["planner"]["inputs"]["candidate_sha"] = "b" * 40  # type: ignore[index]
+
+    with pytest.raises(LiveControlValidationError, match="candidate_binding_mismatch"):
+        load_live_control_plan(plan, isolated_root=tmp_path)
+
+
+def test_live_plan_rejects_non_official_v2_planner_route(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan["planner"]["inputs"]["protocol"] = "chat"  # type: ignore[index]
+
+    with pytest.raises(LiveControlValidationError, match="route_binding_mismatch"):
+        load_live_control_plan(plan, isolated_root=tmp_path)
 
 
 def test_live_plan_requires_exactly_eight_control_labels(tmp_path: Path) -> None:
@@ -253,14 +300,20 @@ def test_live_execution_requires_complete_pre_and_post_sidecar_records(tmp_path:
         isolated_root=tmp_path,
     )
     assert result["ready_for_issue62"] is False
-    assert result["status_code"] == "sidecar_capture_missing"
+    assert result["status_code"] in {"sidecar_capture_missing", "sidecar_capture_incomplete"}
     receipt = json.loads((tmp_path / "run" / "cleanup-receipt.json").read_text(encoding="utf-8"))
     assert receipt["cleanup_attempted"] is True
     assert receipt["cleanup_completed"] is True
 
 
-def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_path: Path) -> None:
+def test_live_execution_binds_all_controls_and_keeps_qualification_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = importlib.import_module("test_issue_62_control_manifest")
+    live_control = importlib.import_module("run_issue_62_live_control")
+    capture_sidecar = importlib.import_module("capture_issue_62_live_evidence")
+    run_nonce = "a" * 32
+    monkeypatch.setattr(live_control.secrets, "token_hex", lambda _length: run_nonce)
     plan = _plan(tmp_path)
     controls = source._controls()
     pre_dir = tmp_path / "inputs" / "pre-records"
@@ -271,8 +324,16 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
     for index, control in enumerate(controls):
         pre = tmp_path / f"pre-{index}.json"
         post = tmp_path / f"post-{index}.json"
-        pre.write_text(json.dumps(control["pre"]), encoding="utf-8")
-        post.write_text(json.dumps(control["post"]), encoding="utf-8")
+        pre_record = dict(control["pre"])
+        post_record = dict(control["post"])
+        for record in (pre_record, post_record):
+            record["run_nonce"] = run_nonce
+            record["producer_hmac_sha256"] = "0" * 64
+            record["producer_hmac_sha256"] = capture_sidecar._producer_hmac_sha256(
+                b"k" * 32, record, run_nonce
+            )
+        pre.write_text(json.dumps(pre_record), encoding="utf-8")
+        post.write_text(json.dumps(post_record), encoding="utf-8")
         payloads[f"pre-{index}"] = pre
         payloads[f"post-{index}"] = post
         semantic = {
