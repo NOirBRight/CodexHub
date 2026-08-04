@@ -454,6 +454,7 @@ def test_build_inventory_rejects_observed_source_contract_family(tmp_path: Path)
         ("selected_provider_hosted", "status", "captured"),
         ("unknown_future_kind", "status", "captured"),
         ("plain_function", "status", "future_status"),
+        ("plain_function", "unknown_field", "future_status"),
     ],
 )
 def test_build_inventory_rejects_source_contract_status_or_unknown_fields(
@@ -469,7 +470,9 @@ def test_build_inventory_rejects_source_contract_status_or_unknown_fields(
         json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
-    with pytest.raises(ValueError, match="(?:status is invalid|unknown status field)"):
+    with pytest.raises(
+        ValueError, match="(?:status is invalid|unknown status field|unknown example fields)"
+    ):
         module.build_inventory(
             source_contract=source_contract_path,
             trace=TRACE,

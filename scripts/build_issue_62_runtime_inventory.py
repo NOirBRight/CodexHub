@@ -2036,7 +2036,22 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
                 "observed": False,
                 "status": "opaque_sentinel_only",
             },
-        }.get(family, {})
+            }.get(family, {})
+        expected_example_fields = {
+            "declaration",
+            "call",
+            "result",
+            "history",
+            "streaming",
+            "terminal",
+            "error",
+            "loss_boundary",
+            *expected_status_fields,
+        }
+        if set(example) != expected_example_fields:
+            raise ValueError(
+                f"Codex 0.146 source contract {family} has unknown example fields"
+            )
         for field, expected_value in expected_status_fields.items():
             if example.get(field) != expected_value:
                 raise ValueError(
