@@ -118,7 +118,9 @@ LIVE_PLAN_FIELDS = frozenset(
         "planner",
     }
 )
-LIVE_DISPOSITIONS = frozenset({"Preserved", "Unsupported", "Unqualified"})
+LIVE_DISPOSITIONS = frozenset(
+    {"preserved", "reversibly_adapted", "local_consume", "Unsupported", "Unqualified"}
+)
 LIVE_ENV_KEYS = frozenset(
     {"PATH", "SystemRoot", "ComSpec", "TEMP", "TMP", "PATHEXT", "PYTHONPATH"}
 )
@@ -878,15 +880,25 @@ def _finish_windows_launch(
         return
     if job is None:
         # Test doubles do not expose a native process handle.  A real launch
-        # without a Job Object has no authoritative descendant readback and
-        # must fail closed instead of treating the wrapper PID as the tree.
+        # without a Job Object can still use the Toolhelp parent map as an
+        # authoritative fallback; if that inventory is unavailable, fail
+        # closed instead of treating the wrapper PID as the tree.
         if hasattr(process, "_handle"):
-            setattr(process, "_issue62_tree_readback_authoritative", False)
+            setattr(
+                process,
+                "_issue62_tree_readback_authoritative",
+                _windows_process_parent_map() is not None,
+            )
         return
     if not _attach_windows_job(process, job):
         # Assignment can be unavailable under a constrained Windows token;
-        # retain the process and use the bounded taskkill/readback fallback.
-        setattr(process, "_issue62_tree_readback_authoritative", False)
+        # retain the process and use the bounded taskkill/readback fallback
+        # only when the parent inventory is available.
+        setattr(
+            process,
+            "_issue62_tree_readback_authoritative",
+            _windows_process_parent_map() is not None,
+        )
         return
 
 
@@ -1626,6 +1638,8 @@ def _validate_sidecar_spec(value: Any, *, isolated_root: Path | None) -> dict[st
             "executable_sha256",
             "argv_file_digests",
             "output_dir",
+            "hmac_key_file",
+            "hmac_key_sha256",
         }
     ):
         _live_plan_fail("helper_executable_binding_mismatch")
@@ -1643,11 +1657,36 @@ def _validate_sidecar_spec(value: Any, *, isolated_root: Path | None) -> dict[st
         error_code="helper_executable_binding_mismatch",
     )
     output_dir = _validate_plan_path(value.get("output_dir"))
+    hmac_key_file = _validate_plan_path(value.get("hmac_key_file"))
+    hmac_key_sha256 = value.get("hmac_key_sha256")
+    if not isinstance(hmac_key_sha256, str) or re.fullmatch(
+        r"[0-9a-fA-F]{64}", hmac_key_sha256
+    ) is None:
+        _live_plan_fail("helper_executable_binding_mismatch")
+    normalized_key_path = Path(hmac_key_file).as_posix().lower()
+    key_option_bound = any(
+        item == "--hmac-key-file"
+        and index + 1 < len(executable["argv"])
+        and Path(executable["argv"][index + 1]).as_posix().lower() == normalized_key_path
+        for index, item in enumerate(executable["argv"])
+    )
+    if not key_option_bound:
+        _live_plan_fail("helper_executable_binding_mismatch")
     if isolated_root is not None:
         output_dir = _resolve_isolated_path(
             output_dir, isolated_root=isolated_root, allow_missing_parents=True
         )
-    return {**executable, "output_dir": output_dir}
+        hmac_key_path = _resolve_isolated_path(
+            hmac_key_file, isolated_root=isolated_root, must_exist=True
+        )
+        if _file_sha256(hmac_key_path) != hmac_key_sha256.lower():
+            _live_plan_fail("helper_executable_binding_mismatch")
+    return {
+        **executable,
+        "output_dir": output_dir,
+        "hmac_key_file": hmac_key_file,
+        "hmac_key_sha256": hmac_key_sha256.lower(),
+    }
 
 
 def _validate_sidecars(
@@ -1657,6 +1696,7 @@ def _validate_sidecars(
         _live_plan_fail("live_control_plan_invalid")
     result: dict[str, list[dict[str, Any]]] = {}
     output_dirs: set[str] = set()
+    hmac_key_bindings: set[tuple[str, str]] = set()
     for hop in ("pre", "post"):
         raw = value.get(hop)
         specs = raw if isinstance(raw, list) else [raw]
@@ -1666,6 +1706,9 @@ def _validate_sidecars(
             _validate_sidecar_spec(item, isolated_root=isolated_root) for item in specs
         ]
         for spec in normalized:
+            hmac_key_bindings.add(
+                (str(spec["hmac_key_file"]), str(spec["hmac_key_sha256"]))
+            )
             directory_path = Path(spec["output_dir"])
             if run_root is not None:
                 try:
@@ -1681,6 +1724,8 @@ def _validate_sidecars(
                 _live_plan_fail("live_control_plan_invalid")
             output_dirs.add(directory)
         result[hop] = normalized
+    if len(hmac_key_bindings) != 1:
+        _live_plan_fail("helper_executable_binding_mismatch")
     return result
 
 
@@ -2036,6 +2081,14 @@ def _runtime_argv(spec: Mapping[str, Any], *, isolated_root: Path) -> list[str]:
     for path, expected in spec.get("argv_file_digests", {}).items():
         resolved = _resolve_isolated_path(path, isolated_root=isolated_root, must_exist=True)
         if _file_sha256(resolved) != expected:
+            raise LiveControlValidationError("helper_executable_binding_mismatch")
+    if "hmac_key_file" in spec or "hmac_key_sha256" in spec:
+        if "hmac_key_file" not in spec or "hmac_key_sha256" not in spec:
+            raise LiveControlValidationError("helper_executable_binding_mismatch")
+        key_path = _resolve_isolated_path(
+            spec["hmac_key_file"], isolated_root=isolated_root, must_exist=True
+        )
+        if _file_sha256(key_path) != spec["hmac_key_sha256"]:
             raise LiveControlValidationError("helper_executable_binding_mismatch")
     argv = list(spec["argv"])
     argv[0] = executable

@@ -489,6 +489,14 @@ def test_manifest_reconcile_recomputes_identity_control_from_controls() -> None:
     assert "identity_control_count_consistency" in report["mismatches"]
 
 
+def test_manifest_rejects_any_unclassified_identity_item() -> None:
+    controls = _controls()
+    controls[0]["identity"] = dict(controls[0]["identity"])
+    controls[0]["identity"]["response_ref_preserved"] = False
+    with pytest.raises(manifest.ManifestValidationError, match="control_identity_unclassified"):
+        manifest.build_manifest(controls, candidate_identity=_candidate())
+
+
 def test_manifest_binds_route_digest_and_planner_dispositions() -> None:
     built = manifest.build_manifest(
         _controls(),

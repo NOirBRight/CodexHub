@@ -34,6 +34,8 @@ _HOPS = frozenset({"pre", "post"})
 _OUTCOMES = frozenset({"complete", "incomplete"})
 _FAILURES = frozenset(
     {
+        "capture_record_exists",
+        "capture_record_write_failed",
         "client_cancelled",
         "correlation_binding_invalid",
         "downstream_cancelled",
@@ -915,7 +917,18 @@ class CaptureSidecarServer:
                     capture_key=self._key,
                     correlation_token=correlation_token,
                 )
+            except ArtifactValidationError as error:
+                failure_code = str(error)
+                if failure_code not in _FAILURES:
+                    failure_code = "capture_record_write_failed"
+                # A duplicate deterministic capture id is a real failed
+                # attempt, not a benign no-op.  Surface a fresh, sanitized
+                # failure record so the run cannot silently lose evidence.
+                self._thread_failure = failure_code
+                self._write_control_failure(failure_code)
             except Exception:
+                self._thread_failure = "capture_record_write_failed"
+                self._write_control_failure("capture_record_write_failed")
                 return
 
     def _check_deadline(self, started_at: float) -> None:

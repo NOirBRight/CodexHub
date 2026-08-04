@@ -596,7 +596,9 @@ def _sanitize_control(control: Mapping[str, Any]) -> dict[str, Any]:
     if response_shape["terminal"] != "json_response" and pre["content_type_class"] == "json":
         raise ManifestValidationError("control_json_terminal_invalid")
     _validate_control_semantics(name, request_shape, response_shape)
-    if identity["unclassified_core_items"] != 0:
+    if identity["unclassified_core_items"] != 0 or not all(
+        identity[field] for field in IDENTITY_BOOLEAN_FIELDS
+    ):
         raise ManifestValidationError("control_identity_unclassified")
     return {
         "name": name,
@@ -881,6 +883,8 @@ def _validate_identity_control(value: Any) -> dict[str, Any]:
         raise ManifestValidationError("identity_control_controls_invalid")
     if unclassified_count != len(unclassified_controls):
         raise ManifestValidationError("identity_control_count_mismatch")
+    if unclassified_count != 0 or unclassified_controls:
+        raise ManifestValidationError("identity_control_unclassified")
     if value.get("replay_cases") != ["identity", "mutation", "deletion", "loss"]:
         raise ManifestValidationError("identity_control_replay_cases")
     if value.get("wire_pairing") != "control_label_ordinal_without_wire_identifier":

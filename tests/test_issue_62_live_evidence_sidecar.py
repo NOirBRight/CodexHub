@@ -938,6 +938,20 @@ def test_server_thread_failure_writes_bounded_record_and_cleans_partial(
     assert not list(tmp_path.rglob("*.partial"))
 
 
+def test_capture_write_failure_is_published_as_sanitized_record(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    config = _sidecar_config(tmp_path, hmac_key_file, "http://127.0.0.1:1")
+    server = sidecar.CaptureSidecarServer(config)
+    server._write_control_failure("capture_record_exists")
+
+    record = _read_only_record(config.output_dir)
+    assert record["outcome"] == "incomplete"
+    assert record["failure"] == "capture_record_exists"
+    assert not list(tmp_path.rglob("*.partial"))
+
+
 def test_cli_configuration_error_does_not_echo_sensitive_values(
     tmp_path: Path,
     hmac_key_file: Path,

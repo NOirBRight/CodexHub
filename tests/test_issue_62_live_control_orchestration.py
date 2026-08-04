@@ -46,6 +46,10 @@ def _binding_files(tmp_path: Path) -> dict[str, str]:
 
 def _plan(tmp_path: Path) -> dict[str, object]:
     binding = _binding_files(tmp_path)
+    capture_key = tmp_path / "inputs" / "capture.key"
+    capture_key.write_bytes(b"k" * 32)
+    capture_key_file = str(capture_key.relative_to(tmp_path))
+    capture_key_sha256 = hashlib.sha256(capture_key.read_bytes()).hexdigest()
     (tmp_path / "helpers").mkdir()
     (tmp_path / "run").mkdir()
     tools_dir = tmp_path / "tools"
@@ -80,7 +84,14 @@ def _plan(tmp_path: Path) -> dict[str, object]:
             "PATHEXT": ".COM;.EXE;.BAT;.CMD",
         }
         cli_argv = [executable_file, "/d", "/c", "helpers\\cli.cmd"]
-        sidecar_argv = [executable_file, "/d", "/c", "helpers\\sidecar-empty.cmd"]
+        sidecar_argv = [
+            executable_file,
+            "/d",
+            "/c",
+            "helpers\\sidecar-empty.cmd",
+            "--hmac-key-file",
+            capture_key_file,
+        ]
         replay_argv = lambda case: [
             executable_file,
             "/d",
@@ -112,7 +123,12 @@ def _plan(tmp_path: Path) -> dict[str, object]:
         executable_file = str(executable_path.relative_to(tmp_path))
         environment = {}
         cli_argv = [executable_file, "helpers/cli.py"]
-        sidecar_argv = [executable_file, "helpers/sidecar-empty.py"]
+        sidecar_argv = [
+            executable_file,
+            "helpers/sidecar-empty.py",
+            "--hmac-key-file",
+            capture_key_file,
+        ]
         replay_argv = lambda case: [
             executable_file, "helpers/replay.py", case, "a" * 40, "0" * 64, f"run/replay-{case}.json"
         ]
@@ -158,6 +174,8 @@ def _plan(tmp_path: Path) -> dict[str, object]:
                 "argv_file_digests": {
                     f"helpers/{helper_names['sidecar']}": file_digest(helper_names["sidecar"])
                 },
+                "hmac_key_file": capture_key_file,
+                "hmac_key_sha256": capture_key_sha256,
             },
             "post": {
                 "argv": sidecar_argv,
@@ -166,6 +184,8 @@ def _plan(tmp_path: Path) -> dict[str, object]:
                 "argv_file_digests": {
                     f"helpers/{helper_names['sidecar']}": file_digest(helper_names["sidecar"])
                 },
+                "hmac_key_file": capture_key_file,
+                "hmac_key_sha256": capture_key_sha256,
             },
         },
         "controls": [
@@ -205,6 +225,17 @@ def test_live_plan_binds_candidate_and_route_catalog_files(tmp_path: Path) -> No
     (tmp_path / "inputs" / "route.json").write_bytes(b"changed")
     with pytest.raises(LiveControlValidationError, match="route_binding_mismatch"):
         load_live_control_plan(plan, isolated_root=tmp_path)
+
+
+def test_live_plan_accepts_documented_disposition_vocabulary(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan["planner"] = {
+        "model_visible_plan": "complete",
+        "hosted_only_disposition": "preserved",
+        "unknown_tag_disposition": "reversibly_adapted",
+    }
+    loaded = load_live_control_plan(plan, isolated_root=tmp_path)
+    assert loaded["planner"]["hosted_only_disposition"] == "preserved"
 
 
 def test_live_plan_requires_exactly_eight_control_labels(tmp_path: Path) -> None:
@@ -295,13 +326,21 @@ def test_live_execution_binds_all_controls_and_keeps_qualification_closed(tmp_pa
                     f"run/{hop}-{index}",
                     str(source_paths[index].relative_to(tmp_path)),
                     f"{hop}-c{index}.json",
+                    "--hmac-key-file",
+                    "inputs/capture.key",
                 ],
                 "output_dir": f"run/{hop}-{index}",
                 "executable_file": plan["cli"]["executable_file"],
                 "executable_sha256": plan["cli"]["executable_sha256"],
                 "argv_file_digests": {
-                    f"helpers/{sidecar_name}": hashlib.sha256(sidecar_script.read_bytes()).hexdigest()
+                    f"helpers/{sidecar_name}": hashlib.sha256(
+                        sidecar_script.read_bytes()
+                    ).hexdigest()
                 },
+                "hmac_key_file": "inputs/capture.key",
+                "hmac_key_sha256": hashlib.sha256(
+                    (tmp_path / "inputs" / "capture.key").read_bytes()
+                ).hexdigest(),
             }
             for index in range(8)
         ]
