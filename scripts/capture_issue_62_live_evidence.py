@@ -648,6 +648,10 @@ def _join_target_path(base_path: str, incoming_path: str) -> str:
 class _CaptureRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
+    def do_GET(self) -> None:
+        owner = self.server.capture_owner  # type: ignore[attr-defined]
+        owner.handle_get(self)
+
     def do_POST(self) -> None:
         owner = self.server.capture_owner  # type: ignore[attr-defined]
         owner.handle_post(self)
@@ -885,6 +889,78 @@ class CaptureSidecarServer:
                     return False
                 self._active_condition.wait(timeout=remaining)
             return True
+
+    def handle_get(self, handler: BaseHTTPRequestHandler) -> None:
+        """Relay bounded client discovery GETs without creating core evidence.
+
+        Codex CLI refreshes model metadata with ``GET /models`` before it sends
+        a Responses request.  That discovery request is outside the Issue #62
+        POST control inventory, but returning 501 would make the client fall
+        back to incomplete metadata and invalidate the live run.  Keep this
+        lane deliberately narrow: forward the GET, cap the response in
+        memory, and never persist its path, headers, or body.
+        """
+
+        started_at = time.monotonic()
+        upstream: http.client.HTTPConnection | None = None
+        try:
+            connection_type = (
+                http.client.HTTPSConnection
+                if self._target.scheme == "https"
+                else http.client.HTTPConnection
+            )
+            upstream = connection_type(
+                self._target.hostname,
+                self._target.port,
+                timeout=self._config.connect_timeout_seconds,
+            )
+            self._set_active_upstream(handler.connection, upstream)
+            headers = {
+                name: value
+                for name, value in handler.headers.items()
+                if name.lower()
+                not in _HOP_BY_HOP_HEADERS | {"host", "content-length", _CORRELATION_HEADER.lower()}
+            }
+            upstream.request("GET", _join_target_path(self._target.path, handler.path), headers=headers)
+            if upstream.sock is not None:
+                upstream.sock.settimeout(self._remaining_timeout(started_at))
+            upstream_response = upstream.getresponse()
+            status = int(upstream_response.status)
+            response_headers = [
+                (name, value)
+                for name, value in upstream_response.getheaders()
+                if name.lower() not in _HOP_BY_HOP_HEADERS | {"content-length"}
+            ]
+            body = bytearray()
+            while True:
+                self._check_deadline(started_at)
+                if upstream.sock is not None:
+                    upstream.sock.settimeout(self._remaining_timeout(started_at))
+                chunk = upstream_response.read(64 * 1024)
+                if not chunk:
+                    break
+                if len(body) + len(chunk) > self._config.max_response_bytes:
+                    raise ValueError("discovery_response_overflow")
+                body.extend(chunk)
+            handler.send_response(status)
+            for name, value in response_headers:
+                handler.send_header(name, value)
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.wfile.flush()
+        except (TimeoutError, socket.timeout):
+            self._send_bounded_error(handler, 504)
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            self._send_bounded_error(handler, 502)
+        finally:
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+                self._set_active_upstream(handler.connection, None)
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         correlation_token = _new_correlation_token()

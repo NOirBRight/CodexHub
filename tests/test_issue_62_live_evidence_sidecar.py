@@ -58,6 +58,18 @@ def test_correlation_binding_is_bound_to_the_current_run_nonce() -> None:
 class _FakeUpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
+    def do_GET(self) -> None:
+        self.server.observed_get_path = self.path  # type: ignore[attr-defined]
+        self.server.observed_get_headers = {  # type: ignore[attr-defined]
+            name.lower(): value for name, value in self.headers.items()
+        }
+        body = b'{"data":[]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
         self.server.observed_request = self.rfile.read(length)  # type: ignore[attr-defined]
@@ -98,6 +110,8 @@ def _fake_upstream(
     server.response_body = response_body  # type: ignore[attr-defined]
     server.observed_request = None  # type: ignore[attr-defined]
     server.observed_headers = {}  # type: ignore[attr-defined]
+    server.observed_get_path = None  # type: ignore[attr-defined]
+    server.observed_get_headers = {}  # type: ignore[attr-defined]
     server.response_delay = response_delay  # type: ignore[attr-defined]
     server.response_chunk_size = chunk_size  # type: ignore[attr-defined]
     server.chunk_delay = chunk_delay  # type: ignore[attr-defined]
@@ -109,6 +123,35 @@ def _fake_upstream(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_get_model_refresh_is_forwarded_without_creating_capture_evidence(
+    tmp_path: Path,
+    hmac_key_file: Path,
+) -> None:
+    with _fake_upstream(b"ignored") as upstream:
+        config = _sidecar_config(
+            tmp_path,
+            hmac_key_file,
+            f"http://127.0.0.1:{upstream.server_address[1]}",
+        )
+        with _running_sidecar(config) as server:
+            connection = http.client.HTTPConnection(
+                server.listen_host, server.listen_port, timeout=2
+            )
+            connection.request(
+                "GET",
+                "/models?client_version=0.146.0",
+                headers={"Authorization": "Bearer forbidden-token"},
+            )
+            response = connection.getresponse()
+            body = response.read()
+            connection.close()
+
+    assert response.status == 200
+    assert body == b'{"data":[]}'
+    assert upstream.observed_get_path == "/models?client_version=0.146.0"  # type: ignore[attr-defined]
+    assert not list(config.output_dir.glob("*.json"))
 
 
 @contextmanager

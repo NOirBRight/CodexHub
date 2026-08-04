@@ -317,6 +317,12 @@ Run two independent instances around an isolated Gateway process:
 isolated client -> pre sidecar -> isolated Gateway -> post sidecar -> upstream
 ```
 
+Codex CLI may issue a model-refresh `GET /models` before the Responses controls.
+The sidecar forwards that discovery GET with the same bounded timeout and
+response cap, but never persists its path, headers, or body; only the required
+POST Responses controls create evidence records. A discovery failure therefore
+fails the client request without fabricating a core capture.
+
 The two commands require distinct output directories and a shared, isolated
 32-byte-or-longer HMAC key file. The operator must replace every angle-bracket
 token only after the live window identifies the exact candidate, isolated
