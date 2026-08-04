@@ -476,6 +476,114 @@ def test_audit_rejects_captured_source_contract_claim(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "mutation",
+    [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_audit_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="request_shape"):
+        module._source_contract_provenance(source_contract_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "family_runtime_type",
+        "family_wire_type",
+        "family_executor",
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+        "response_item_type",
+    ],
+)
+def test_audit_rejects_nested_source_contract_schema_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    surface = source_contract["runtime_wire_surface"]
+    examples = surface["declaration_family_examples"]
+    if mutation == "family_runtime_type":
+        surface["declaration_families"][0]["runtime_type"] = "bogus"
+    elif mutation == "family_wire_type":
+        surface["declaration_families"][0]["wire_declaration_type"] = "bogus"
+    elif mutation == "family_executor":
+        surface["declaration_families"][0]["executor"] = "bogus"
+    elif mutation == "declaration":
+        examples["plain_function"]["declaration"]["type"] = "bogus"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["type"] = "bogus"
+    elif mutation == "result":
+        examples["plain_function"]["result"]["type"] = "bogus"
+    elif mutation == "history":
+        examples["plain_function"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["event"] = "bogus"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["event"] = "bogus"
+    elif mutation == "namespace_tool":
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    else:
+        surface["response_shape"]["response_item_types"].append("future_item")
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError):
+        module._source_contract_provenance(source_contract_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
     ["top_level", "runtime_wire_surface", "request_shape", "response_shape"],
 )
 def test_audit_rejects_unknown_source_contract_fields(

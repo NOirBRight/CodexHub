@@ -504,6 +504,62 @@ def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path
 @pytest.mark.parametrize(
     "mutation",
     [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_build_inventory_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="request_shape"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
         "top_level",
         "runtime_wire_surface",
         "request_shape",
@@ -741,6 +797,50 @@ def test_inventory_reconcile_rejects_nested_representative_edits(mutation: str) 
 
     assert report["reconciled"] is False
     assert report["mismatches"]
+    assert any("unknown or missing fields" in mismatch for mismatch in report["mismatches"])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "top_level",
+        "candidate_identity",
+        "family",
+        "item",
+        "qualification",
+        "identity_control",
+        "evidence_sources",
+        "feeds",
+        "evidence_binding_entry",
+    ],
+)
+def test_inventory_reconcile_standalone_rejects_unknown_container_fields(
+    mutation: str,
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        inventory["future_field"] = "must fail"
+    elif mutation == "candidate_identity":
+        inventory["candidate_identity"]["future_field"] = "must fail"
+    elif mutation == "family":
+        inventory["declaration_families"][0]["future_field"] = "must fail"
+    elif mutation == "item":
+        inventory["items"][0]["future_field"] = "must fail"
+    elif mutation == "qualification":
+        inventory["qualification"]["future_field"] = "must fail"
+    elif mutation == "identity_control":
+        inventory["identity_control"]["future_field"] = "must fail"
+    elif mutation == "evidence_sources":
+        inventory["evidence_sources"]["future_field"] = "must fail"
+    elif mutation == "feeds":
+        inventory["feeds"]["future_field"] = "must fail"
+    else:
+        inventory["evidence_binding"]["trace"]["future_field"] = "must fail"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
     assert any("unknown or missing fields" in mismatch for mismatch in report["mismatches"])
 
 

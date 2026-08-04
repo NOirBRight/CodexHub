@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sqlite3
@@ -171,6 +172,29 @@ def _is_proven_tool_choice(value: Any) -> bool:
     )
 
 
+def _validate_source_contract_with_inventory(source_contract: dict[str, Any]) -> dict[str, Any]:
+    """Apply the canonical source-contract validator used by inventory replay.
+
+    The sanitizer and inventory are independent entry points, but they must
+    reject the same unobserved source-contract mutations.  Load the sibling
+    generator by path so this module remains directly executable and importable
+    from tests without relying on ``scripts`` being a Python package.
+    """
+
+    validator_path = Path(__file__).with_name("build_issue_62_runtime_inventory.py")
+    spec = importlib.util.spec_from_file_location(
+        "_issue_62_runtime_inventory_contract_validator", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("unable to load canonical source-contract validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    validator = getattr(module, "_validate_source_contract", None)
+    if not callable(validator):
+        raise ValueError("canonical source-contract validator is unavailable")
+    return validator(source_contract)
+
+
 def _source_contract_provenance(path: Path) -> dict[str, Any]:
     """Load and validate the unobserved 0.146 source-contract identity."""
 
@@ -180,6 +204,10 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
         raise ValueError(f"unable to read source contract: {path}") from exc
     if not isinstance(source_contract, dict):
         raise ValueError("source contract must be a JSON object")
+    try:
+        _validate_source_contract_with_inventory(source_contract)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
     if set(source_contract) != {
         "schema_version",
         "fixture_kind",

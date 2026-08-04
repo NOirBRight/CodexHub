@@ -99,6 +99,36 @@ if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.requ
         ))) {
     $sourceContractSchemaValid = $false
 }
+$expectedRequestStreamingFields = @(
+    'model', 'instructions', 'input', 'tools', 'tool_choice',
+    'parallel_tool_calls', 'reasoning', 'store', 'stream', 'stream_options',
+    'include', 'service_tier', 'prompt_cache_key', 'text', 'client_metadata'
+)
+if (
+    $sourceContract.runtime_wire_surface.request_shape.protocol -ne 'responses' -or
+    ($sourceContract.runtime_wire_surface.request_shape.streaming_fields -join '|') -ne ($expectedRequestStreamingFields -join '|')
+) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.request_shape.representative.model -ne 'gpt-5.6-sol' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.input -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.tools -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.tool_choice -ne 'auto' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.parallel_tool_calls -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.stream -ne $true -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.store -ne $false
+) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.stream -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.response_body -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.captured -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.status -ne 'unqualified'
+) {
+    $sourceContractSchemaValid = $false
+}
 $expectedResponseItemTypes = @(
     'message', 'reasoning', 'function_call', 'function_call_output',
     'custom_tool_call', 'custom_tool_call_output', 'tool_search_call',

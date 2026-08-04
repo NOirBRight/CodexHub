@@ -573,6 +573,89 @@ def test_powershell_rejects_unknown_nested_source_contract_fields(
     assert "generated inventory drift check failed" in result.stderr.lower()
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_powershell_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
 def test_negative_inventory_replays_fail_visibly(case: str) -> None:
     result = run_inventory_replay(case)

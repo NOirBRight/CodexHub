@@ -60,6 +60,40 @@ STRUCTURAL_FAMILIES = (
     "unknown_future_kind",
 )
 
+REQUEST_SHAPE_PROTOCOL = "responses"
+REQUEST_SHAPE_STREAMING_FIELDS = [
+    "model",
+    "instructions",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "store",
+    "stream",
+    "stream_options",
+    "include",
+    "service_tier",
+    "prompt_cache_key",
+    "text",
+    "client_metadata",
+]
+REQUEST_SHAPE_REPRESENTATIVE = {
+    "model": "gpt-5.6-sol",
+    "input": "<redacted>",
+    "tools": "<redacted>",
+    "tool_choice": "auto",
+    "parallel_tool_calls": False,
+    "stream": True,
+    "store": False,
+}
+REQUEST_SHAPE_NON_STREAMING_CONTROL = {
+    "stream": False,
+    "response_body": "<redacted>",
+    "captured": False,
+    "status": "unqualified",
+}
+
 ALLOWED_DISPOSITIONS = (
     "preserved",
     "reversibly_adapted",
@@ -322,6 +356,104 @@ EXPECTED_EVIDENCE_BINDING_FILES = {
     "wire_fixture": "codexhub-runtime-wire-fixture.json",
     "audit": "read-only-gate-audit.json",
 }
+INVENTORY_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "artifact_kind",
+        "cli_version_floor",
+        "candidate_identity",
+        "declaration_families",
+        "qualification",
+        "disposition_vocabulary",
+        "items",
+        "identity_control",
+        "feeds",
+        "evidence_sources",
+        "evidence_binding",
+    }
+)
+INVENTORY_CANDIDATE_FIELDS = frozenset(
+    {
+        "candidate_revision",
+        "catalog_binding",
+        "catalog_model_entry_id",
+        "catalog_snapshot_sha256",
+        "cli_binary_sha256",
+        "cli_source_commit_status",
+        "cli_source_tag",
+        "cli_version",
+        "codex_source_commit",
+        "configured_provider_id",
+        "evidence_manifest_sha256",
+        "inbound_format",
+        "model",
+        "route_behavior_profile",
+        "route_upstream",
+        "source_commit",
+        "upstream_format",
+    }
+)
+INVENTORY_FAMILY_FIELDS = frozenset(
+    {
+        "family",
+        "runtime_type",
+        "wire_declaration_type",
+        "observed",
+        "observation",
+        "executor",
+        "loss_boundary",
+        "selected_protocol_disposition",
+        "optional_rule",
+        "required_rule",
+        "evidence_source",
+        "representative",
+    }
+)
+INVENTORY_ITEM_FIELDS = frozenset({"scope", "disposition", "evidence_source"})
+INVENTORY_QUALIFICATION_FIELDS = frozenset(
+    {
+        "candidate_version_status",
+        "candidate_version_eligible",
+        "blocking_scopes",
+        "evidence_gates",
+        "blocking_gates",
+        "ready_for_beta2",
+    }
+)
+INVENTORY_EVIDENCE_GATES = frozenset(
+    {
+        "complete_model_visible_plan",
+        "clean_cold_start_current_binding",
+        "full_pre_post_request_response",
+        "full_request_fingerprint",
+        "full_response_fingerprint",
+        "sse_identity",
+        "terminal_events",
+        "error_events",
+        "non_streaming",
+        "non_streaming_fixture",
+        "identity_replay",
+        "wire_identity_replay",
+    }
+)
+INVENTORY_IDENTITY_CONTROL_FIELDS = frozenset(
+    {
+        "fail_closed",
+        "replay_cases",
+        "unclassified_core_items",
+        "unclassified_scopes",
+        "unknown_tagged_source_count",
+    }
+)
+INVENTORY_EVIDENCE_SOURCES_FIELDS = frozenset({"trace", "wire_fixture", "audit"})
+INVENTORY_FEEDS_FIELDS = frozenset({"capability_gate", "chat_conversion_matrix"})
+INVENTORY_EVIDENCE_BINDING_ENTRY_FIELDS = frozenset({"file", "sha256"})
+EXPECTED_EVIDENCE_SOURCES = {
+    "trace": "current-codexhub-thread-tool-surface.json",
+    "wire_fixture": "codexhub-runtime-wire-fixture.json",
+    "audit": "read-only-gate-audit.json",
+}
+EXPECTED_FEEDS = {"capability_gate": "#249", "chat_conversion_matrix": "#66"}
 
 # ``reconcile_inventory`` is also used as a standalone replay check.  In that
 # mode there is deliberately no evidence root to reopen, so hashes, manifests,
@@ -1072,6 +1204,25 @@ def _require_exact_fields(
         )
 
 
+def _exact_inventory_fields_mismatch(
+    value: Any,
+    expected: set[str] | frozenset[str],
+    *,
+    context: str,
+    optional: set[str] | frozenset[str] = frozenset(),
+) -> str | None:
+    """Return a fail-closed mismatch for an inventory object with extra keys."""
+
+    if not isinstance(value, dict):
+        return f"{context} must be an object"
+    actual = set(value)
+    if set(expected) <= actual and not (actual - set(expected) - set(optional)):
+        return None
+    missing = sorted(set(expected) - actual)
+    unknown = sorted(actual - set(expected) - set(optional))
+    return f"{context} has unknown or missing fields (missing={missing!r}, unknown={unknown!r})"
+
+
 def _validate_structural_section(
     family_name: str, section_name: str, section: dict[str, Any], *, context: str
 ) -> None:
@@ -1658,6 +1809,11 @@ def _structural_inventory_mismatches(
         if not isinstance(entry, dict):
             mismatches.append(f"{prefix} must be an object")
             continue
+        extra_fields = _exact_inventory_fields_mismatch(
+            entry, INVENTORY_FAMILY_FIELDS, context=prefix
+        )
+        if extra_fields:
+            mismatches.append(extra_fields)
         if entry.get("family") != family_name:
             mismatches.append(
                 f"{prefix}.family must be {family_name!r} in the canonical order"
@@ -2425,6 +2581,12 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         raise ValueError(
             "Codex 0.146 source contract request_shape has unknown fields"
         )
+    if request_shape.get("protocol") != REQUEST_SHAPE_PROTOCOL:
+        raise ValueError("Codex 0.146 source contract request_shape.protocol is invalid")
+    if request_shape.get("streaming_fields") != REQUEST_SHAPE_STREAMING_FIELDS:
+        raise ValueError(
+            "Codex 0.146 source contract request_shape.streaming_fields is invalid"
+        )
     expected_request_representative_fields = {
         "model",
         "input",
@@ -2440,6 +2602,10 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     ):
         raise ValueError(
             "Codex 0.146 source contract request_shape.representative has unknown fields"
+        )
+    if request_shape["representative"] != REQUEST_SHAPE_REPRESENTATIVE:
+        raise ValueError(
+            "Codex 0.146 source contract request_shape.representative values are invalid"
         )
     expected_non_streaming_control_fields = {
         "stream",
@@ -2459,11 +2625,10 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         raise ValueError(
             "Codex 0.146 source contract request_shape.non_streaming_control has unknown fields"
         )
-    if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
-        "captured"
-    ) is not False or non_streaming_control.get("status") != "unqualified":
+    if non_streaming_control != REQUEST_SHAPE_NON_STREAMING_CONTROL:
         raise ValueError(
-            "Codex 0.146 source contract cannot claim a captured non-streaming response"
+            "Codex 0.146 source contract cannot claim a captured non-streaming response; "
+            "request_shape.non_streaming_control values are invalid"
         )
     examples = runtime_surface.get("declaration_family_examples")
     if not isinstance(examples, dict):
@@ -2895,6 +3060,14 @@ def reconcile_inventory(
     """Reconcile an inventory (possibly mutated) against the identity contract."""
     mismatches: list[str] = []
 
+    if not isinstance(inventory, dict):
+        return {"reconciled": False, "mismatches": ["inventory must be an object"]}
+    top_level_fields = _exact_inventory_fields_mismatch(
+        inventory, INVENTORY_TOP_LEVEL_FIELDS, context="inventory"
+    )
+    if top_level_fields:
+        mismatches.append(top_level_fields)
+
     if inventory.get("schema_version") != SCHEMA_VERSION:
         mismatches.append("inventory schema_version is invalid")
     if inventory.get("artifact_kind") != ARTIFACT_KIND:
@@ -2918,6 +3091,16 @@ def reconcile_inventory(
         if not isinstance(item, dict):
             mismatches.append("item must be an object")
             continue
+        item_fields = _exact_inventory_fields_mismatch(
+            item,
+            INVENTORY_ITEM_FIELDS,
+            context="inventory item",
+            optional={"notes"},
+        )
+        if item_fields:
+            mismatches.append(item_fields)
+        if "notes" in item and not isinstance(item.get("notes"), str):
+            mismatches.append("inventory item notes must be a string")
         scope = item.get("scope")
         if not scope:
             mismatches.append("item missing scope")
@@ -2966,6 +3149,11 @@ def reconcile_inventory(
         mismatches.append(f"deletion: missing scopes {missing}")
 
     candidate_identity = inventory.get("candidate_identity", {})
+    candidate_fields = _exact_inventory_fields_mismatch(
+        candidate_identity, INVENTORY_CANDIDATE_FIELDS, context="candidate_identity"
+    )
+    if candidate_fields:
+        mismatches.append(candidate_fields)
     mismatches.extend(
         _candidate_identity_mismatches(
             candidate_identity, enforce_retained=evidence_root is None
@@ -2978,6 +3166,11 @@ def reconcile_inventory(
             mismatches.append(f"loss: candidate_identity.{field} is missing")
 
     qualification = inventory.get("qualification", {})
+    qualification_fields = _exact_inventory_fields_mismatch(
+        qualification, INVENTORY_QUALIFICATION_FIELDS, context="qualification"
+    )
+    if qualification_fields:
+        mismatches.append(qualification_fields)
     if not isinstance(qualification, dict):
         mismatches.append("qualification must be an object")
         qualification = {}
@@ -3019,21 +3212,9 @@ def reconcile_inventory(
         )
 
     evidence_gates = qualification.get("evidence_gates", {})
-    expected_gate_keys = {
-        "complete_model_visible_plan",
-        "clean_cold_start_current_binding",
-        "full_pre_post_request_response",
-        "full_request_fingerprint",
-        "full_response_fingerprint",
-        "sse_identity",
-        "terminal_events",
-        "error_events",
-        "non_streaming",
-        "non_streaming_fixture",
-        "identity_replay",
-        "wire_identity_replay",
-    }
-    if set(evidence_gates) != expected_gate_keys:
+    if not isinstance(evidence_gates, dict) or set(evidence_gates) != set(
+        INVENTORY_EVIDENCE_GATES
+    ):
         mismatches.append("qualification.evidence_gates has an unexpected key set")
     if "ready_for_beta1" in qualification:
         mismatches.append(
@@ -3088,6 +3269,13 @@ def reconcile_inventory(
         mismatches.append("evidence_binding has an unexpected key set")
     for name in ("source_contract", "trace", "wire_fixture", "audit"):
         entry = evidence_binding.get(name, {})
+        entry_fields = _exact_inventory_fields_mismatch(
+            entry,
+            INVENTORY_EVIDENCE_BINDING_ENTRY_FIELDS,
+            context=f"evidence_binding.{name}",
+        )
+        if entry_fields:
+            mismatches.append(entry_fields)
         if not isinstance(entry, dict) or not entry.get("file") or not re.fullmatch(
             r"[0-9a-f]{64}", str(entry.get("sha256", ""))
         ):
@@ -3096,6 +3284,31 @@ def reconcile_inventory(
             mismatches.append(
                 f"mutation: evidence_binding.{name}.file does not name the retained fixture"
             )
+
+    evidence_sources = inventory.get("evidence_sources")
+    evidence_sources_fields = _exact_inventory_fields_mismatch(
+        evidence_sources, INVENTORY_EVIDENCE_SOURCES_FIELDS, context="evidence_sources"
+    )
+    if evidence_sources_fields:
+        mismatches.append(evidence_sources_fields)
+    if isinstance(evidence_sources, dict):
+        for name, expected in EXPECTED_EVIDENCE_SOURCES.items():
+            if evidence_sources.get(name) != expected:
+                mismatches.append(
+                    f"mutation: evidence_sources.{name} does not match the retained fixture"
+                )
+    feeds = inventory.get("feeds")
+    feeds_fields = _exact_inventory_fields_mismatch(
+        feeds, INVENTORY_FEEDS_FIELDS, context="feeds"
+    )
+    if feeds_fields:
+        mismatches.append(feeds_fields)
+    if isinstance(feeds, dict):
+        for name, expected in EXPECTED_FEEDS.items():
+            if feeds.get(name) != expected:
+                mismatches.append(
+                    f"mutation: feeds.{name} does not match the retained issue feed"
+                )
 
     if evidence_binding and all(
         isinstance(evidence_binding.get(name), dict)
@@ -3222,6 +3435,13 @@ def reconcile_inventory(
                         )
 
     identity_control = inventory.get("identity_control", {})
+    identity_control_fields = _exact_inventory_fields_mismatch(
+        identity_control,
+        INVENTORY_IDENTITY_CONTROL_FIELDS,
+        context="identity_control",
+    )
+    if identity_control_fields:
+        mismatches.append(identity_control_fields)
     if not isinstance(identity_control, dict):
         mismatches.append("identity_control must be an object")
         identity_control = {}
