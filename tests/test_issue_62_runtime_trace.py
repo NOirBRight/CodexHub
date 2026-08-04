@@ -492,6 +492,87 @@ def test_powershell_rejects_unknown_source_contract_fields(
     assert "generated inventory drift check failed" in result.stderr.lower()
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+        "response_item_type",
+    ],
+)
+def test_powershell_rejects_unknown_nested_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "declaration":
+        examples["plain_function"]["declaration"]["future_field"] = "must fail"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["future_field"] = "must fail"
+    elif mutation == "result":
+        examples["custom_freeform"]["result"]["future_field"] = "must fail"
+    elif mutation == "history":
+        examples["client_executed_tool_discovery"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["future_field"] = "must fail"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["future_field"] = "must fail"
+    elif mutation == "namespace_tool":
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"]["response_item_types"].append(
+            "future_item"
+        )
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
 def test_negative_inventory_replays_fail_visibly(case: str) -> None:
     result = run_inventory_replay(case)

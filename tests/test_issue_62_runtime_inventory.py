@@ -627,6 +627,89 @@ def test_build_inventory_rejects_source_contract_identity_and_sse_mutations(
         )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+    ],
+)
+def test_build_inventory_rejects_unknown_nested_family_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "declaration":
+        examples["plain_function"]["declaration"]["future_field"] = "must fail"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["future_field"] = "must fail"
+    elif mutation == "result":
+        examples["custom_freeform"]["result"]["future_field"] = "must fail"
+    elif mutation == "history":
+        examples["client_executed_tool_discovery"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["future_field"] = "must fail"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["future_field"] = "must fail"
+    else:
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["redacted_value", "hosted_status", "response_item_type"],
+)
+def test_build_inventory_rejects_nested_family_value_extensions(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    surface = source_contract["runtime_wire_surface"]
+    examples = surface["declaration_family_examples"]
+    if mutation == "redacted_value":
+        examples["plain_function"]["call"]["arguments"] = "future-arguments"
+    elif mutation == "hosted_status":
+        examples["selected_provider_hosted"]["status"] = "captured"
+    else:
+        surface["response_shape"]["response_item_types"].append("future_item")
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="(?:redacted sentinel|canonical status|canonical list|status is invalid)",
+    ):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
 def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root() -> None:
     module = load_inventory_module()
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
@@ -642,6 +725,23 @@ def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root
     id_report = module.reconcile_inventory(id_mutation)
     assert id_report["reconciled"] is False
     assert any("non-empty string" in mismatch for mismatch in id_report["mismatches"])
+
+
+@pytest.mark.parametrize("mutation", ["representative_future_field", "representative_status"])
+def test_inventory_reconcile_rejects_nested_representative_edits(mutation: str) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    representative = inventory["declaration_families"][0]["representative"]
+    if mutation == "representative_future_field":
+        representative["future_field"] = "must fail"
+    else:
+        representative["status"] = "captured"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert report["mismatches"]
+    assert any("unknown or missing fields" in mismatch for mismatch in report["mismatches"])
 
 
 def test_inventory_reconcile_rejects_observed_family_without_evidence_root() -> None:
