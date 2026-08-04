@@ -504,6 +504,46 @@ def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path
 @pytest.mark.parametrize(
     "mutation",
     [
+        "top_level",
+        "runtime_wire_surface",
+        "request_shape",
+        "response_shape",
+    ],
+)
+def test_build_inventory_rejects_unknown_regenerated_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="unknown"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
         "runtime_type",
         "wire_declaration_type",
         "declaration_type",
@@ -666,6 +706,42 @@ def test_inventory_reconcile_rejects_evidence_pointer_and_self_reported_readines
     assert any("retained fixture" in mismatch for mismatch in report["mismatches"])
     assert any("cannot be asserted without bound evidence" in mismatch for mismatch in report["mismatches"])
     assert any("blocking_gates cannot be empty" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_standalone_rejects_self_consistent_hash_manifest_edit() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["evidence_binding"]["trace"]["sha256"] = "0" * 64
+    inventory["candidate_identity"]["evidence_manifest_sha256"] = module._evidence_manifest_sha256(
+        inventory["evidence_binding"]
+    )
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained evidence artifact" in mismatch for mismatch in report["mismatches"])
+    assert any("retained evidence manifest" in mismatch for mismatch in report["mismatches"])
+
+
+@pytest.mark.parametrize("mutation", ["gate", "terminal", "readiness"])
+def test_inventory_reconcile_standalone_rejects_unobserved_status_edits(
+    mutation: str,
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    if mutation == "gate":
+        inventory["qualification"]["evidence_gates"]["terminal_events"] = "met"
+    elif mutation == "terminal":
+        inventory["declaration_families"][0]["representative"]["terminal"][
+            "classification"
+        ] = "unqualified"
+    else:
+        inventory["qualification"]["ready_for_beta2"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained unobserved" in mismatch for mismatch in report["mismatches"])
 
 
 def test_inventory_reconcile_rejects_legacy_beta1_readiness_key() -> None:

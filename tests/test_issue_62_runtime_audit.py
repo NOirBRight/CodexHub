@@ -474,6 +474,41 @@ def test_audit_rejects_captured_source_contract_claim(tmp_path: Path) -> None:
         run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["top_level", "runtime_wire_surface", "request_shape", "response_shape"],
+)
+def test_audit_rejects_unknown_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
+
+
 def test_audit_detects_generic_response_body_fingerprint_fields(tmp_path: Path) -> None:
     module = load_audit_module()
     codex_db = tmp_path / "codex.sqlite"

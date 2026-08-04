@@ -180,6 +180,16 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
         raise ValueError(f"unable to read source contract: {path}") from exc
     if not isinstance(source_contract, dict):
         raise ValueError("source contract must be a JSON object")
+    if set(source_contract) != {
+        "schema_version",
+        "fixture_kind",
+        "capture_status",
+        "qualification_status",
+        "captured_at",
+        "provenance",
+        "runtime_wire_surface",
+    }:
+        raise ValueError("source contract has unknown top-level fields")
     if (
         source_contract.get("schema_version") != 1
         or source_contract.get("fixture_kind") != "codex_cli_source_contract"
@@ -192,14 +202,23 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
             "source contract must remain not_observed, unqualified, and uncaptured"
         )
     provenance = source_contract.get("provenance")
-    if not isinstance(provenance, dict) or any(
+    if not isinstance(provenance, dict) or set(provenance) != set(SOURCE_CONTRACT_PROVENANCE) or any(
         provenance.get(field) != value
         for field, value in SOURCE_CONTRACT_PROVENANCE.items()
     ):
-        raise ValueError("source contract provenance is invalid")
+        raise ValueError("source contract provenance is invalid or has unknown fields")
     runtime_surface = source_contract.get("runtime_wire_surface")
     if not isinstance(runtime_surface, dict):
         raise ValueError("source contract runtime surface is missing")
+    if set(runtime_surface) != {
+        "source",
+        "declaration_family_order",
+        "declaration_families",
+        "request_shape",
+        "response_shape",
+        "declaration_family_examples",
+    }:
+        raise ValueError("source contract runtime_wire_surface has unknown fields")
     if runtime_surface.get("declaration_family_order") != list(DECLARATION_FAMILIES):
         raise ValueError("source contract declaration family order is invalid")
     declaration_families = runtime_surface.get("declaration_families")
@@ -218,16 +237,52 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
     for family, entry in zip(DECLARATION_FAMILIES, declaration_families):
         if not isinstance(entry, dict) or entry.get("family") != family:
             raise ValueError("source contract declaration family identity is invalid")
+        if set(entry) != {
+            "family",
+            "runtime_type",
+            "wire_declaration_type",
+            "observed",
+            "observation",
+            "executor",
+            "loss_boundary",
+        }:
+            raise ValueError("source contract declaration family has unknown fields")
         if entry.get("observed") is not False:
             raise ValueError("source contract cannot claim an observed declaration family")
         if entry.get("observation") != expected_observations[family]:
             raise ValueError("source contract declaration observation is invalid")
     request_shape = runtime_surface.get("request_shape")
+    if not isinstance(request_shape, dict) or set(request_shape) != {
+        "protocol",
+        "streaming_fields",
+        "representative",
+        "non_streaming_control",
+    }:
+        raise ValueError("source contract request_shape has unknown fields")
+    if not isinstance(request_shape.get("representative"), dict) or set(
+        request_shape["representative"]
+    ) != {
+        "model",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "store",
+    }:
+        raise ValueError("source contract request_shape.representative has unknown fields")
     non_streaming_control = (
         request_shape.get("non_streaming_control")
         if isinstance(request_shape, dict)
         else None
     )
+    if not isinstance(non_streaming_control, dict) or set(non_streaming_control) != {
+        "stream",
+        "response_body",
+        "captured",
+        "status",
+    }:
+        raise ValueError("source contract request_shape has unknown fields")
     if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
         "captured"
     ) is not False or non_streaming_control.get("status") != "unqualified":
@@ -235,10 +290,33 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
     examples = runtime_surface.get("declaration_family_examples")
     if not isinstance(examples, dict):
         raise ValueError("source contract declaration examples are missing")
+    if set(examples) != set(DECLARATION_FAMILIES):
+        raise ValueError("source contract declaration examples have unknown fields")
     for family in DECLARATION_FAMILIES:
         example = examples.get(family)
         if not isinstance(example, dict):
             raise ValueError(f"source contract example is missing for {family}")
+        expected_example_fields = {
+            "declaration",
+            "call",
+            "result",
+            "history",
+            "streaming",
+            "terminal",
+            "error",
+            "loss_boundary",
+        }
+        if family == "selected_provider_hosted":
+            expected_example_fields |= {
+                "observed",
+                "status",
+                "provider_scope",
+                "cross_provider_proxy",
+            }
+        elif family == "unknown_future_kind":
+            expected_example_fields |= {"observed", "status"}
+        if set(example) != expected_example_fields:
+            raise ValueError(f"source contract {family} has unknown example fields")
         if (
             not isinstance(example.get("terminal"), dict)
             or example["terminal"].get("event") != "response.completed"
@@ -254,7 +332,26 @@ def _source_contract_provenance(path: Path) -> dict[str, Any]:
         if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
             raise ValueError(f"source contract loss boundary is invalid for {family}")
     response_shape = runtime_surface.get("response_shape")
+    if not isinstance(response_shape, dict) or set(response_shape) != {
+        "response_item_types",
+        "stream_event_order",
+        "terminal_events",
+        "error_shape",
+    }:
+        raise ValueError("source contract response_shape has unknown fields")
     error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
+    if not isinstance(error_shape, dict) or set(error_shape) != {
+        "event",
+        "response",
+        "classification",
+    }:
+        raise ValueError("source contract response_shape.error_shape has unknown fields")
+    if not isinstance(error_shape.get("response"), dict) or set(
+        error_shape["response"]
+    ) != {"id", "status", "error"}:
+        raise ValueError(
+            "source contract response_shape.error_shape.response has unknown fields"
+        )
     if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
         raise ValueError("source contract response error status is invalid")
 

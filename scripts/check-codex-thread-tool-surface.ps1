@@ -41,6 +41,86 @@ $expectedFamilySchemas = @(
 $sourceContractSchemaValid = $true
 $sourceContractFamilies = @($sourceContract.runtime_wire_surface.declaration_families)
 $sourceContractExamples = $sourceContract.runtime_wire_surface.declaration_family_examples
+
+function Test-ExactPropertySet {
+    param(
+        [object]$Value,
+        [string[]]$Expected
+    )
+
+    if ($null -eq $Value) {
+        return $false
+    }
+    $actual = @($Value.PSObject.Properties.Name)
+    foreach ($name in $Expected) {
+        if ($actual -notcontains $name) {
+            return $false
+        }
+    }
+    foreach ($name in $actual) {
+        if ($Expected -notcontains $name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+if (-not (Test-ExactPropertySet -Value $sourceContract -Expected @(
+            'schema_version', 'fixture_kind', 'capture_status',
+            'qualification_status', 'captured_at', 'provenance',
+            'runtime_wire_surface'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.provenance -Expected @(
+            'cli_version', 'source_commit', 'cli_source_tag',
+            'cli_source_commit_status', 'cli_binary_sha256', 'candidate_revision'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface -Expected @(
+            'source', 'declaration_family_order', 'declaration_families',
+            'request_shape', 'response_shape', 'declaration_family_examples'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape -Expected @(
+            'protocol', 'streaming_fields', 'representative', 'non_streaming_control'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape.representative -Expected @(
+            'model', 'input', 'tools', 'tool_choice', 'parallel_tool_calls', 'stream', 'store'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape.non_streaming_control -Expected @(
+            'stream', 'response_body', 'captured', 'status'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape -Expected @(
+            'response_item_types', 'stream_event_order', 'terminal_events', 'error_shape'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape.error_shape -Expected @(
+            'event', 'response', 'classification'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape.error_shape.response -Expected @(
+            'id', 'status', 'error'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContractExamples -Expected @(
+            'plain_function', 'custom_freeform', 'namespace',
+            'client_executed_tool_discovery', 'selected_provider_hosted',
+            'unknown_future_kind'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
 $nullableByFamily = @{
     selected_provider_hosted = @{ history = @('call_id') }
     unknown_future_kind = @{ history = @('call_id', 'call_item_id', 'output_item_id') }
@@ -66,6 +146,24 @@ foreach ($expected in $expectedFamilySchemas) {
         $family.loss_boundary -ne $expected.LossBoundary) {
         $sourceContractSchemaValid = $false
         continue
+    }
+    if (-not (Test-ExactPropertySet -Value $family -Expected @(
+                'family', 'runtime_type', 'wire_declaration_type', 'observed',
+                'observation', 'executor', 'loss_boundary'
+            ))) {
+        $sourceContractSchemaValid = $false
+    }
+    $expectedExampleFields = @(
+        'declaration', 'call', 'result', 'history', 'streaming',
+        'terminal', 'error', 'loss_boundary'
+    )
+    if ($expected.Name -eq 'selected_provider_hosted') {
+        $expectedExampleFields += @('observed', 'status', 'provider_scope', 'cross_provider_proxy')
+    } elseif ($expected.Name -eq 'unknown_future_kind') {
+        $expectedExampleFields += @('observed', 'status')
+    }
+    if (-not (Test-ExactPropertySet -Value $example -Expected $expectedExampleFields)) {
+        $sourceContractSchemaValid = $false
     }
     $sections = @(
         @{ Name = 'declaration'; Type = $expected.DeclarationType; Required = $expected.DeclarationRequired },

@@ -430,6 +430,68 @@ def test_powershell_rejects_source_contract_family_schema_drift(tmp_path: Path) 
     assert "generated inventory drift check failed" in result.stderr.lower()
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["top_level", "runtime_wire_surface", "request_shape", "response_shape"],
+)
+def test_powershell_rejects_unknown_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
 def test_negative_inventory_replays_fail_visibly(case: str) -> None:
     result = run_inventory_replay(case)

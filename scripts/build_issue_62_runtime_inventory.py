@@ -323,6 +323,74 @@ EXPECTED_EVIDENCE_BINDING_FILES = {
     "audit": "read-only-gate-audit.json",
 }
 
+# ``reconcile_inventory`` is also used as a standalone replay check.  In that
+# mode there is deliberately no evidence root to reopen, so hashes, manifests,
+# and unobserved qualification fields must be compared with the retained
+# package identity rather than recalculated from the candidate's own fields.
+# The evidence-root path below remains authoritative for a later observed
+# capture and does not use these retained-only assertions.
+RETAINED_EVIDENCE_BINDING = {
+    "source_contract": {
+        "file": "codex-0.146-source-contract.json",
+        "sha256": "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c",
+    },
+    "trace": {
+        "file": "current-codexhub-thread-tool-surface.json",
+        "sha256": "a4367f96fc2aceaa419577ee43f91870fb3fcca4cc95644bc3347cbdd4206ee3",
+    },
+    "wire_fixture": {
+        "file": "codexhub-runtime-wire-fixture.json",
+        "sha256": "1e3ecfc51f59de7f21bee8a7a0b743bba26d35fb3dc9eaca5f7b4ea3dd57705f",
+    },
+    "audit": {
+        "file": "read-only-gate-audit.json",
+        "sha256": "775efbc763dfae1c5d6a61532d9394e5cd181b2e6803bf2e42f6c886a0a964e3",
+    },
+}
+RETAINED_EVIDENCE_MANIFEST_SHA256 = (
+    "685858e1affdb073df17467f53ab3de538c0c7f2d930b01c10797a94963c6619"
+)
+RETAINED_UNOBSERVED_EVIDENCE_GATES = {
+    "clean_cold_start_current_binding": "not_run",
+    "complete_model_visible_plan": "partial",
+    "error_events": "not_captured",
+    "full_pre_post_request_response": "live_control_required",
+    "full_request_fingerprint": "not_captured",
+    "full_response_fingerprint": "not_captured",
+    "identity_replay": "partial",
+    "non_streaming": "live_control_required",
+    "non_streaming_fixture": "not_captured",
+    "sse_identity": "not_captured",
+    "terminal_events": "not_captured",
+    "wire_identity_replay": "not_captured",
+}
+RETAINED_UNOBSERVED_BLOCKING_GATES = [
+    "clean_cold_start_current_binding",
+    "complete_model_visible_plan",
+    "error_events",
+    "full_pre_post_request_response",
+    "full_request_fingerprint",
+    "full_response_fingerprint",
+    "identity_replay",
+    "non_streaming",
+    "non_streaming_fixture",
+    "sse_identity",
+    "terminal_events",
+    "wire_identity_replay",
+]
+RETAINED_UNOBSERVED_BLOCKING_SCOPES = [
+    "choice_controls",
+    "core_function_replay",
+    "core_sse_errors",
+    "core_sse_terminal_events",
+    "core_text_non_streaming",
+    "default_runtime_fields",
+    "errors",
+    "hosted_only_declarations",
+    "terminal_events",
+    "unknown_tagged_sentinels",
+]
+
 
 def _sha256_file(path: Path) -> str:
     # Evidence is JSON text; hash its canonical LF representation so a
@@ -472,6 +540,97 @@ def _candidate_identity_mismatches(
             mismatches.append(
                 f"candidate_identity.{field} is not a lowercase 64-character SHA-256"
             )
+    return mismatches
+
+
+def _standalone_retained_mismatches(
+    *,
+    inventory: dict[str, Any],
+    candidate_identity: Any,
+    qualification: Any,
+) -> list[str]:
+    """Reject self-consistent edits when retained evidence cannot be reopened.
+
+    A no-root replay has no trustworthy input from which to recompute a hash,
+    gate, or readiness value.  Compare those fields with the immutable retained
+    package identity instead.  Observed-capture reconciliation supplies an
+    evidence root and intentionally takes the dynamic path below.
+    """
+
+    mismatches: list[str] = []
+    evidence_binding = inventory.get("evidence_binding")
+    if isinstance(evidence_binding, dict):
+        for name, expected in RETAINED_EVIDENCE_BINDING.items():
+            actual = evidence_binding.get(name)
+            if actual != expected:
+                mismatches.append(
+                    f"mutation: evidence_binding.{name} does not match the retained evidence artifact"
+                )
+    if isinstance(candidate_identity, dict) and candidate_identity.get(
+        "evidence_manifest_sha256"
+    ) != RETAINED_EVIDENCE_MANIFEST_SHA256:
+        mismatches.append(
+            "mutation: candidate_identity.evidence_manifest_sha256 does not match the retained evidence manifest"
+        )
+
+    if isinstance(qualification, dict):
+        if qualification.get("evidence_gates") != RETAINED_UNOBSERVED_EVIDENCE_GATES:
+            mismatches.append(
+                "mutation: qualification.evidence_gates does not match the retained unobserved evidence"
+            )
+        if qualification.get("blocking_gates") != RETAINED_UNOBSERVED_BLOCKING_GATES:
+            mismatches.append(
+                "mutation: qualification.blocking_gates does not match the retained unobserved evidence"
+            )
+        if qualification.get("blocking_scopes") != RETAINED_UNOBSERVED_BLOCKING_SCOPES:
+            mismatches.append(
+                "mutation: qualification.blocking_scopes does not match the retained unobserved evidence"
+            )
+        if qualification.get("ready_for_beta2") is not False:
+            mismatches.append(
+                "mutation: qualification.ready_for_beta2 does not match the retained unobserved evidence"
+            )
+
+    identity_control = inventory.get("identity_control")
+    if isinstance(identity_control, dict):
+        if identity_control.get("unknown_tagged_source_count") != 2:
+            mismatches.append(
+                "mutation: identity_control.unknown_tagged_source_count does not match the retained wire evidence"
+            )
+        if identity_control.get("unclassified_core_items") != 0:
+            mismatches.append(
+                "mutation: identity_control.unclassified_core_items does not match the retained evidence"
+            )
+        if identity_control.get("unclassified_scopes") != []:
+            mismatches.append(
+                "mutation: identity_control.unclassified_scopes does not match the retained evidence"
+            )
+
+    families = inventory.get("declaration_families")
+    if isinstance(families, list):
+        expected_observations = {
+            family: STRUCTURAL_FAMILY_SCHEMAS[family]["observation"]
+            for family in STRUCTURAL_FAMILIES
+        }
+        for index, family in enumerate(STRUCTURAL_FAMILIES):
+            if index >= len(families) or not isinstance(families[index], dict):
+                continue
+            entry = families[index]
+            representative = entry.get("representative")
+            if entry.get("observed") is not False or entry.get("observation") != expected_observations[family]:
+                mismatches.append(
+                    f"mutation: declaration_families[{index}] does not match the retained unobserved source contract"
+                )
+            if not isinstance(representative, dict):
+                continue
+            expected_statuses = {"terminal": "not_observed", "error": "unqualified"}
+            for section, expected in expected_statuses.items():
+                actual_section = representative.get(section)
+                if not isinstance(actual_section, dict) or actual_section.get("classification") != expected:
+                    mismatches.append(
+                        f"mutation: declaration_families[{index}].representative.{section} classification does not match the retained unobserved source contract"
+                    )
+
     return mismatches
 
 
@@ -1943,6 +2102,17 @@ def _build_qualification(
 
 
 def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]:
+    expected_top_level_fields = {
+        "schema_version",
+        "fixture_kind",
+        "capture_status",
+        "qualification_status",
+        "captured_at",
+        "provenance",
+        "runtime_wire_surface",
+    }
+    if set(source_contract) != expected_top_level_fields:
+        raise ValueError("Codex 0.146 source contract has unknown top-level fields")
     if (
         source_contract.get("schema_version") != 1
         or source_contract.get("fixture_kind") != "codex_cli_source_contract"
@@ -1953,6 +2123,16 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     ):
         raise ValueError("Codex 0.146 source contract must remain not_observed and unqualified")
     provenance = source_contract.get("provenance", {})
+    expected_provenance_fields = {
+        "cli_version",
+        "source_commit",
+        "cli_source_tag",
+        "cli_source_commit_status",
+        "cli_binary_sha256",
+        "candidate_revision",
+    }
+    if not isinstance(provenance, dict) or set(provenance) != expected_provenance_fields:
+        raise ValueError("Codex 0.146 source contract provenance has unknown fields")
     expected = {
         "cli_version": DEFAULT_CLI_FLOOR,
         "source_commit": CLI_SOURCE_COMMIT,
@@ -1966,6 +2146,18 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     runtime_surface = source_contract.get("runtime_wire_surface")
     if not isinstance(runtime_surface, dict):
         raise ValueError("Codex 0.146 source contract runtime surface is missing")
+    expected_runtime_surface_fields = {
+        "source",
+        "declaration_family_order",
+        "declaration_families",
+        "request_shape",
+        "response_shape",
+        "declaration_family_examples",
+    }
+    if set(runtime_surface) != expected_runtime_surface_fields:
+        raise ValueError(
+            "Codex 0.146 source contract runtime_wire_surface has unknown fields"
+        )
     if runtime_surface.get("declaration_family_order") != list(STRUCTURAL_FAMILIES):
         raise ValueError("Codex 0.146 source contract declaration family order is invalid")
     declaration_families = runtime_surface.get("declaration_families")
@@ -2007,11 +2199,50 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
                 "Codex 0.146 source contract declaration observation is invalid"
             )
     request_shape = runtime_surface.get("request_shape")
+    expected_request_shape_fields = {
+        "protocol",
+        "streaming_fields",
+        "representative",
+        "non_streaming_control",
+    }
+    if not isinstance(request_shape, dict) or set(request_shape) != expected_request_shape_fields:
+        raise ValueError(
+            "Codex 0.146 source contract request_shape has unknown fields"
+        )
+    expected_request_representative_fields = {
+        "model",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "store",
+    }
+    if (
+        not isinstance(request_shape.get("representative"), dict)
+        or set(request_shape["representative"]) != expected_request_representative_fields
+    ):
+        raise ValueError(
+            "Codex 0.146 source contract request_shape.representative has unknown fields"
+        )
+    expected_non_streaming_control_fields = {
+        "stream",
+        "response_body",
+        "captured",
+        "status",
+    }
     non_streaming_control = (
         request_shape.get("non_streaming_control")
         if isinstance(request_shape, dict)
         else None
     )
+    if (
+        not isinstance(non_streaming_control, dict)
+        or set(non_streaming_control) != expected_non_streaming_control_fields
+    ):
+        raise ValueError(
+            "Codex 0.146 source contract request_shape.non_streaming_control has unknown fields"
+        )
     if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
         "captured"
     ) is not False or non_streaming_control.get("status") != "unqualified":
@@ -2021,6 +2252,10 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     examples = runtime_surface.get("declaration_family_examples")
     if not isinstance(examples, dict):
         raise ValueError("Codex 0.146 source contract declaration examples are missing")
+    if set(examples) != set(STRUCTURAL_FAMILIES):
+        raise ValueError(
+            "Codex 0.146 source contract declaration_family_examples has unknown fields"
+        )
     for family in STRUCTURAL_FAMILIES:
         example = examples.get(family)
         if not isinstance(example, dict):
@@ -2086,7 +2321,31 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
             raise ValueError(f"Codex 0.146 source contract loss boundary is invalid for {family}")
     response_shape = runtime_surface.get("response_shape")
+    expected_response_shape_fields = {
+        "response_item_types",
+        "stream_event_order",
+        "terminal_events",
+        "error_shape",
+    }
+    if not isinstance(response_shape, dict) or set(response_shape) != expected_response_shape_fields:
+        raise ValueError(
+            "Codex 0.146 source contract response_shape has unknown fields"
+        )
     error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
+    expected_error_shape_fields = {"event", "response", "classification"}
+    if not isinstance(error_shape, dict) or set(error_shape) != expected_error_shape_fields:
+        raise ValueError(
+            "Codex 0.146 source contract response_shape.error_shape has unknown fields"
+        )
+    error_response = error_shape.get("response")
+    if not isinstance(error_response, dict) or set(error_response) != {
+        "id",
+        "status",
+        "error",
+    }:
+        raise ValueError(
+            "Codex 0.146 source contract response_shape.error_shape.response has unknown fields"
+        )
     if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
         raise ValueError("Codex 0.146 source contract response error status is invalid")
 
@@ -2652,6 +2911,15 @@ def reconcile_inventory(
         manifest = _evidence_manifest_sha256(evidence_binding)
         if candidate_identity.get("evidence_manifest_sha256") != manifest:
             mismatches.append("loss: candidate_identity.evidence_manifest_sha256 is stale")
+
+    if evidence_root is None:
+        mismatches.extend(
+            _standalone_retained_mismatches(
+                inventory=inventory,
+                candidate_identity=candidate_identity,
+                qualification=qualification,
+            )
+        )
 
     if evidence_root is not None and not mismatches:
         bound_paths: dict[str, Path] = {}
