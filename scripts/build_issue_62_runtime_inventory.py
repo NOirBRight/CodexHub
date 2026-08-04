@@ -327,8 +327,10 @@ EXPECTED_EVIDENCE_BINDING_FILES = {
 # mode there is deliberately no evidence root to reopen, so hashes, manifests,
 # and unobserved qualification fields must be compared with the retained
 # package identity rather than recalculated from the candidate's own fields.
-# The evidence-root path below remains authoritative for a later observed
-# capture and does not use these retained-only assertions.
+# The evidence-root path below validates the currently retained, unobserved
+# source-contract package and does not use these retained-only assertions.  A
+# later observed source contract requires a deliberate versioned schema update;
+# this branch does not claim to admit that transition.
 RETAINED_EVIDENCE_BINDING = {
     "source_contract": {
         "file": "codex-0.146-source-contract.json",
@@ -553,8 +555,11 @@ def _standalone_retained_mismatches(
 
     A no-root replay has no trustworthy input from which to recompute a hash,
     gate, or readiness value.  Compare those fields with the immutable retained
-    package identity instead.  Observed-capture reconciliation supplies an
-    evidence root and intentionally takes the dynamic path below.
+    package identity instead.  Bound-evidence reconciliation supplies an
+    evidence root and intentionally takes the dynamic path below.  The
+    source-contract validator remains versioned and unobserved-only; an
+    observed source contract needs a separate schema transition rather than
+    silently bypassing these retained checks.
     """
 
     mismatches: list[str] = []
