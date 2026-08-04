@@ -270,7 +270,17 @@ The manifest's `planner` object is an exact four-field envelope:
     "catalog_digest": "<sha256>",
     "route_digest": "<sha256>"
   },
-  "core_plan": {"status": "complete", "items": []},
+  "core_plan": {
+    "status": "complete",
+    "items": [
+      {
+        "id": "core-message",
+        "type": "message",
+        "disposition": "preserved",
+        "evidence_ref": "artifact.json#core.message"
+      }
+    ]
+  },
   "hosted_only_items": [],
   "unknown_tagged_items": []
 }
