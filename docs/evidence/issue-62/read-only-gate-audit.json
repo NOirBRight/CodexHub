@@ -349,6 +349,62 @@
         }
       ]
     },
+    "declaration_families": [
+      {
+        "family": "plain_function",
+        "runtime_type": "function",
+        "wire_declaration_type": "function",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "custom_freeform",
+        "runtime_type": "custom",
+        "wire_declaration_type": "custom",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "namespace",
+        "runtime_type": "namespace",
+        "wire_declaration_type": "namespace",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "client_executed_tool_discovery",
+        "runtime_type": "tool_search",
+        "wire_declaration_type": "tool_search",
+        "observed": true,
+        "observation": "observed_client_execution",
+        "executor": "codex_client",
+        "loss_boundary": "discovery request/result stays client-executed"
+      },
+      {
+        "family": "selected_provider_hosted",
+        "runtime_type": "web_search",
+        "wire_declaration_type": "web_search",
+        "observed": false,
+        "observation": "not_observed_selected_provider_only",
+        "executor": "selected_provider",
+        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly"
+      },
+      {
+        "family": "unknown_future_kind",
+        "runtime_type": "unknown",
+        "wire_declaration_type": "<unknown>",
+        "observed": false,
+        "observation": "opaque_sentinel_only",
+        "executor": "unknown",
+        "loss_boundary": "retain tag and opaque payload; do not normalize"
+      }
+    ],
     "top_level_field_presence": [
       "client_metadata",
       "include",

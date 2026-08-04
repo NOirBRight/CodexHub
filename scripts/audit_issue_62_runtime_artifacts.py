@@ -37,6 +37,24 @@ KNOWN_INPUT_ITEM_TYPES = {
     "web_search_call",
 }
 VALID_TOOL_CHOICE_STRINGS = {"auto", "none", "required"}
+# Structural declaration families emitted by Codex CLI 0.146's Responses
+# ``ToolSpec`` surface.  These labels describe shape/execution only; they are
+# deliberately not model or Provider qualification records.
+DECLARATION_FAMILIES = (
+    "plain_function",
+    "custom_freeform",
+    "namespace",
+    "client_executed_tool_discovery",
+    "selected_provider_hosted",
+    "unknown_future_kind",
+)
+_TOOL_TYPE_TO_FAMILY = {
+    "function": "plain_function",
+    "custom": "custom_freeform",
+    "namespace": "namespace",
+    "tool_search": "client_executed_tool_discovery",
+    "web_search": "selected_provider_hosted",
+}
 ROUTE_FIELDS = (
     "upstream",
     "route_mode",
@@ -158,6 +176,73 @@ def _sanitize_tool(tool: dict[str, Any]) -> dict[str, Any]:
     if tool_type == "tool_search" and isinstance(tool.get("execution"), str):
         sanitized["execution"] = tool["execution"]
     return sanitized
+
+
+def _declaration_families(tool_surfaces: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Summarize observed declaration families without retaining tool content.
+
+    The selected-provider hosted family and the unknown future sentinel are
+    included even when the bounded request rows do not observe them.  This is
+    intentional: #62 inventories the runtime contract and makes the evidence
+    boundary explicit rather than silently dropping a family.
+    """
+
+    observed_types = {
+        str(tool.get("type"))
+        for surface in tool_surfaces
+        for tool in surface
+        if isinstance(tool, dict) and isinstance(tool.get("type"), str)
+    }
+    families: list[dict[str, Any]] = []
+    for family in DECLARATION_FAMILIES:
+        runtime_type = next(
+            (
+                tool_type
+                for tool_type, mapped_family in _TOOL_TYPE_TO_FAMILY.items()
+                if mapped_family == family
+            ),
+            None,
+        )
+        if family == "unknown_future_kind":
+            families.append(
+                {
+                    "family": family,
+                    "runtime_type": "unknown",
+                    "wire_declaration_type": "<unknown>",
+                    "observed": False,
+                    "observation": "opaque_sentinel_only",
+                    "executor": "unknown",
+                    "loss_boundary": "retain tag and opaque payload; do not normalize",
+                }
+            )
+            continue
+        observed = runtime_type in observed_types
+        if family == "selected_provider_hosted":
+            executor = "selected_provider"
+            observation = "not_observed_selected_provider_only"
+            loss_boundary = (
+                "optional unsupported hosted capability is omitted; required capability fails visibly"
+            )
+        elif family == "client_executed_tool_discovery":
+            executor = "codex_client"
+            observation = "observed_client_execution" if observed else "not_observed"
+            loss_boundary = "discovery request/result stays client-executed"
+        else:
+            executor = "codex_client"
+            observation = "observed" if observed else "not_observed"
+            loss_boundary = "preserve declaration and inverse call/result/history IDs"
+        families.append(
+            {
+                "family": family,
+                "runtime_type": runtime_type,
+                "wire_declaration_type": runtime_type,
+                "observed": observed,
+                "observation": observation,
+                "executor": executor,
+                "loss_boundary": loss_boundary,
+            }
+        )
+    return families
 
 
 def _sanitize_request_plan(payload: dict[str, Any]) -> dict[str, Any]:
@@ -285,6 +370,7 @@ def _codex_request_evidence(
         variants.append(variant)
 
     unclassified = sorted(set(observed_item_types) - KNOWN_INPUT_ITEM_TYPES)
+    declaration_families = _declaration_families(list(tool_surfaces.values()))
     return {
         "current_request_endpoint_classes": dict(sorted(current_endpoint_classes.items())),
         "model_visible_request_plan": {
@@ -292,6 +378,7 @@ def _codex_request_evidence(
             "observed_input_item_type_counts": dict(sorted(observed_item_types.items())),
             "plan_variants": variants,
             "tool_surfaces": tool_surfaces,
+            "declaration_families": declaration_families,
             "top_level_field_presence": sorted(top_level_fields),
             "transport_log_rows": transport_log_rows,
             "unclassified_item_types": unclassified,

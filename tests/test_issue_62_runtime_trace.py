@@ -57,6 +57,11 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
 
     assert trace["schema_version"] == 4
     assert "session_id" not in trace["source"]
+    assert trace["source"]["cli_version"] == "0.146.0"
+    assert trace["source"]["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+    assert trace["source"]["cli_source_commit_status"] == "published_attested"
+    assert trace["planner_gates"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+    assert trace["planner_gates"]["cli_source_tag"] == "rust-v0.146.0"
     assert len(trace["registered_codex_app_tools"]) == 15
     required = set(trace["required_thread_tools"])
     assert required <= set(trace["registered_codex_app_tools"])
@@ -103,11 +108,24 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
     assert snapshot["model_entry_supports_search_tool"] is True
     assert len(snapshot["sha256"]) == 64
 
+    families = trace["planner_gates"]["declaration_families"]
+    assert [family["family"] for family in families] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+
 
 def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
 
     assert wire["route"]["upstream_route"] == "official"
+    assert wire["provenance"]["cli_version"] == "0.146.0"
+    assert wire["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+    assert wire["provenance"]["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
     assert "no full request or response body fingerprint" in wire["evidence_limit"][
         "transport_observation"
     ]
@@ -140,6 +158,19 @@ def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
         item.get("tag") == "unknown"
         for item in wire["response"]["non_streaming"]["response_items"]
     )
+    assert wire["runtime_wire_surface"]["declaration_family_order"] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+    hosted = wire["runtime_wire_surface"]["declaration_family_examples"][
+        "selected_provider_hosted"
+    ]
+    assert hosted["provider_scope"] == "selected_provider_only"
+    assert hosted["cross_provider_proxy"] == "forbidden"
 
 
 def test_identity_replay_passes() -> None:

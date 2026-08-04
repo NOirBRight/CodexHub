@@ -282,6 +282,14 @@ def test_audit_reports_only_sanitized_schema_and_gate_facts(tmp_path: Path) -> N
             "type": "tool_search",
         },
     ]
+    assert [entry["family"] for entry in planner["declaration_families"]] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
 
     gateway = audit["gateway_identity_route"]
     assert gateway["request_starts"] == 1

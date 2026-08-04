@@ -36,10 +36,21 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 ARTIFACT_KIND = "runtime_wire_inventory"
-DEFAULT_CLI_FLOOR = "0.145.0"
+DEFAULT_CLI_FLOOR = "0.146.0"
 SUPPORTED_CLI_FLOOR = DEFAULT_CLI_FLOOR
 DEFAULT_CANDIDATE_CLI_VERSION = None
 DEFAULT_CANDIDATE_SOURCE_COMMIT = None
+CLI_SOURCE_TAG = "rust-v0.146.0"
+CLI_SOURCE_COMMIT_STATUS = "published_attested"
+CLI_BINARY_SHA256 = "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+STRUCTURAL_FAMILIES = (
+    "plain_function",
+    "custom_freeform",
+    "namespace",
+    "client_executed_tool_discovery",
+    "selected_provider_hosted",
+    "unknown_future_kind",
+)
 
 ALLOWED_DISPOSITIONS = (
     "preserved",
@@ -269,6 +280,10 @@ REQUIRED_CANDIDATE_FIELDS = (
     "catalog_model_entry_id",
     "route_behavior_profile",
     "evidence_manifest_sha256",
+    "candidate_revision",
+    "cli_binary_sha256",
+    "cli_source_commit_status",
+    "cli_source_tag",
 )
 
 
@@ -387,7 +402,25 @@ def _candidate_identity_mismatches(candidate_identity: Any) -> list[str]:
         if not isinstance(value, str) or not value.strip():
             mismatches.append(f"candidate_identity.{field} is missing or blank")
 
-    for field in ("catalog_snapshot_sha256", "evidence_manifest_sha256"):
+    candidate_revision = candidate_identity.get("candidate_revision")
+    if not isinstance(candidate_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", candidate_revision
+    ):
+        mismatches.append(
+            "candidate_identity.candidate_revision is not a lowercase 40-character SHA-1"
+        )
+    source_status = candidate_identity.get("cli_source_commit_status")
+    if source_status not in {"published_attested", "not_published_by_registry"}:
+        mismatches.append("candidate_identity.cli_source_commit_status is invalid")
+    source_tag = candidate_identity.get("cli_source_tag")
+    if not isinstance(source_tag, str) or not source_tag.strip():
+        mismatches.append("candidate_identity.cli_source_tag is missing or blank")
+
+    for field in (
+        "catalog_snapshot_sha256",
+        "evidence_manifest_sha256",
+        "cli_binary_sha256",
+    ):
         value = candidate_identity.get(field)
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
             mismatches.append(
@@ -495,6 +528,23 @@ def _count_unknown_tags(value: Any) -> int:
     return 0
 
 
+def _count_response_unknown_tags(wire: dict[str, Any]) -> int:
+    """Count unknown-tag sentinels in the two response modes only.
+
+    Structural family examples intentionally carry their own opaque unknown
+    sentinel.  That declaration inventory is separate from the response-tag
+    evidence used by the identity control, so it must not inflate this count.
+    """
+
+    response = wire.get("response", {})
+    return _count_unknown_tags(
+        {
+            "streaming": response.get("streaming", {}),
+            "non_streaming": response.get("non_streaming", {}),
+        }
+    )
+
+
 def _unknown_tag_mode_counts(wire: dict[str, Any]) -> tuple[int, int]:
     streaming = _streaming_events(wire)
     non_streaming = wire.get("response", {}).get("non_streaming", {}).get(
@@ -513,6 +563,186 @@ def _unknown_tag_mode_counts(wire: dict[str, Any]) -> tuple[int, int]:
 def _streaming_events(wire: dict[str, Any]) -> list[dict[str, Any]]:
     events = wire.get("response", {}).get("streaming", {}).get("events", [])
     return [event for event in events if isinstance(event, dict)]
+
+
+_STRUCTURAL_RULES = {
+    "plain_function": {
+        "selected_protocol_disposition": "native",
+        "optional_rule": "preserve_when_supported_else_omit",
+        "required_rule": "preserve_when_supported_else_required-but-unavailable",
+        "executor": "codex_client",
+    },
+    "custom_freeform": {
+        "selected_protocol_disposition": "native",
+        "optional_rule": "preserve_when_supported_else_omit",
+        "required_rule": "preserve_when_supported_else_required-but-unavailable",
+        "executor": "codex_client",
+    },
+    "namespace": {
+        "selected_protocol_disposition": "native",
+        "optional_rule": "preserve_when_supported_else_omit",
+        "required_rule": "preserve_when_supported_else_required-but-unavailable",
+        "executor": "codex_client",
+    },
+    "client_executed_tool_discovery": {
+        "selected_protocol_disposition": "native",
+        "optional_rule": "preserve_client_execution_else_omit",
+        "required_rule": "preserve_client_execution_else_required-but-unavailable",
+        "executor": "codex_client",
+    },
+    "selected_provider_hosted": {
+        "selected_protocol_disposition": "native_if_selected_provider_supports",
+        "optional_rule": "omit_if_selected_provider_unsupported",
+        "required_rule": "required-but-unavailable_if_selected_provider_unsupported",
+        "executor": "selected_provider",
+    },
+    "unknown_future_kind": {
+        "selected_protocol_disposition": "omit",
+        "optional_rule": "omit_and_emit_sanitized_diagnostic",
+        "required_rule": "required-but-unavailable",
+        "executor": "unknown",
+    },
+}
+
+
+def _build_structural_inventory(
+    *, trace: dict[str, Any], wire: dict[str, Any], audit: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Join exact 0.146 planner family records with sanitized wire examples."""
+
+    audit_families = (
+        audit.get("model_visible_request_plan", {}).get("declaration_families", [])
+    )
+    trace_families = trace.get("planner_gates", {}).get("declaration_families", [])
+    if audit_families and trace_families and audit_families != trace_families:
+        raise ValueError("runtime planner declaration families contradict across trace and audit")
+    families = audit_families or trace_families
+    if not isinstance(families, list):
+        raise ValueError("runtime planner declaration_families must be an array")
+    by_family: dict[str, dict[str, Any]] = {}
+    for family in families:
+        if not isinstance(family, dict) or not isinstance(family.get("family"), str):
+            raise ValueError("runtime planner declaration family is malformed")
+        name = family["family"]
+        if name in by_family:
+            raise ValueError(f"duplicate runtime planner declaration family: {name}")
+        by_family[name] = family
+    if set(by_family) != set(STRUCTURAL_FAMILIES):
+        missing = sorted(set(STRUCTURAL_FAMILIES) - set(by_family))
+        extra = sorted(set(by_family) - set(STRUCTURAL_FAMILIES))
+        raise ValueError(
+            "runtime planner declaration families are incomplete: "
+            f"missing={missing!r} extra={extra!r}"
+        )
+
+    examples = (
+        wire.get("runtime_wire_surface", {}).get("declaration_family_examples", {})
+    )
+    if not isinstance(examples, dict):
+        raise ValueError("wire runtime declaration_family_examples must be an object")
+    output: list[dict[str, Any]] = []
+    for family_name in STRUCTURAL_FAMILIES:
+        family = by_family[family_name]
+        example = examples.get(family_name)
+        if not isinstance(example, dict):
+            raise ValueError(f"wire runtime example missing for {family_name}")
+        required_example_parts = {"declaration", "call", "result", "history", "streaming"}
+        if not required_example_parts.issubset(example):
+            missing = sorted(required_example_parts - set(example))
+            raise ValueError(
+                f"wire runtime example for {family_name} is missing {missing!r}"
+            )
+        rule = _STRUCTURAL_RULES[family_name]
+        if family.get("executor") != rule["executor"]:
+            raise ValueError(
+                f"runtime planner executor for {family_name} contradicts the CLI contract"
+            )
+        if family_name == "selected_provider_hosted":
+            if example.get("provider_scope") != "selected_provider_only":
+                raise ValueError("hosted declaration is not bound to the selected Provider")
+            if example.get("cross_provider_proxy") != "forbidden":
+                raise ValueError("hosted declaration permits a cross-Provider proxy")
+        output.append(
+            {
+                "family": family_name,
+                "runtime_type": family.get("runtime_type"),
+                "wire_declaration_type": family.get("wire_declaration_type"),
+                "observed": bool(family.get("observed")),
+                "observation": family.get("observation"),
+                "executor": rule["executor"],
+                "selected_protocol_disposition": rule["selected_protocol_disposition"],
+                "optional_rule": rule["optional_rule"],
+                "required_rule": rule["required_rule"],
+                "loss_boundary": family.get("loss_boundary"),
+                "evidence_source": (
+                    "read-only-gate-audit.json#model_visible_request_plan.declaration_families"
+                    if family_name != "unknown_future_kind"
+                    else "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future"
+                ),
+                "representative": example,
+            }
+        )
+    return output
+
+
+def _structural_inventory_mismatches(value: Any) -> list[str]:
+    """Validate the stable shape of the emitted declaration-family inventory."""
+
+    if not isinstance(value, list):
+        return ["declaration_families must be an array"]
+    mismatches: list[str] = []
+    if len(value) != len(STRUCTURAL_FAMILIES):
+        mismatches.append(
+            "declaration_families must contain exactly the six known families"
+        )
+    required_example_parts = {"declaration", "call", "result", "history", "streaming"}
+    for index, family_name in enumerate(STRUCTURAL_FAMILIES):
+        if index >= len(value):
+            break
+        entry = value[index]
+        prefix = f"declaration_families[{index}]"
+        if not isinstance(entry, dict):
+            mismatches.append(f"{prefix} must be an object")
+            continue
+        if entry.get("family") != family_name:
+            mismatches.append(
+                f"{prefix}.family must be {family_name!r} in the canonical order"
+            )
+            continue
+        rule = _STRUCTURAL_RULES[family_name]
+        if entry.get("executor") != rule["executor"]:
+            mismatches.append(f"{prefix}.executor does not match the family rule")
+        for field in ("runtime_type", "wire_declaration_type", "observation", "loss_boundary"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                mismatches.append(f"{prefix}.{field} is missing or blank")
+        if not isinstance(entry.get("observed"), bool):
+            mismatches.append(f"{prefix}.observed must be boolean")
+        for field in ("selected_protocol_disposition", "optional_rule", "required_rule"):
+            if entry.get(field) != rule[field]:
+                mismatches.append(f"{prefix}.{field} does not match the family rule")
+        expected_source = (
+            "read-only-gate-audit.json#model_visible_request_plan.declaration_families"
+            if family_name != "unknown_future_kind"
+            else "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future"
+        )
+        if entry.get("evidence_source") != expected_source:
+            mismatches.append(f"{prefix}.evidence_source does not match the family source")
+        representative = entry.get("representative")
+        if not isinstance(representative, dict):
+            mismatches.append(f"{prefix}.representative must be an object")
+            continue
+        if not required_example_parts.issubset(representative):
+            mismatches.append(f"{prefix}.representative is missing a wire example section")
+        if family_name == "selected_provider_hosted":
+            if representative.get("provider_scope") != "selected_provider_only":
+                mismatches.append(f"{prefix}.representative is not selected-provider scoped")
+            if representative.get("cross_provider_proxy") != "forbidden":
+                mismatches.append(f"{prefix}.representative permits a cross-provider proxy")
+        if family_name == "unknown_future_kind":
+            declaration = representative.get("declaration", {})
+            if not isinstance(declaration, dict) or declaration.get("tag") != "unknown":
+                mismatches.append(f"{prefix}.representative does not retain the unknown sentinel")
+    return mismatches
 
 
 def _has_terminal_event(wire: dict[str, Any]) -> bool:
@@ -778,7 +1008,7 @@ def _classify_live_control_items(
     full_wire_gate = gate_classification.get("full_pre_post_request_response")
     non_direct_gate = gate_classification.get("non_direct_states")
     non_streaming_captured = _real_non_streaming_captured(wire)
-    unknown_tag_count = _count_unknown_tags(wire)
+    unknown_tag_count = _count_response_unknown_tags(wire)
     unknown_stream_count, unknown_non_stream_count = _unknown_tag_mode_counts(wire)
 
     choice_captured = (
@@ -1048,10 +1278,22 @@ def _validate_candidate_binding(
     trace_cli_version = source.get("cli_version")
     trace_source_commit = planner_gates.get("source_commit")
     trace_capture_id = source.get("capture_id")
-    if not trace_cli_version or not trace_source_commit or not trace_capture_id:
+    trace_candidate_revision = source.get("candidate_revision")
+    trace_binary_sha256 = source.get("cli_binary_sha256")
+    trace_source_status = source.get("cli_source_commit_status")
+    trace_source_tag = planner_gates.get("cli_source_tag")
+    if (
+        not trace_cli_version
+        or not trace_source_commit
+        or not trace_capture_id
+        or not trace_candidate_revision
+        or not trace_binary_sha256
+        or not trace_source_status
+        or not trace_source_tag
+    ):
         raise ValueError(
             "trace evidence is missing source.cli_version, source.capture_id, "
-            "or planner_gates.source_commit"
+            "source candidate provenance, or planner_gates.source_commit"
         )
     if not isinstance(trace_cli_version, str):
         raise ValueError("trace source.cli_version must be a string")
@@ -1064,6 +1306,24 @@ def _validate_candidate_binding(
     ):
         raise ValueError(
             "trace planner_gates.source_commit must be a lowercase 40-character SHA-1"
+        )
+    if not isinstance(trace_candidate_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", trace_candidate_revision
+    ):
+        raise ValueError("trace source.candidate_revision must be a lowercase 40-character SHA-1")
+    if not isinstance(trace_binary_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", trace_binary_sha256
+    ):
+        raise ValueError("trace source.cli_binary_sha256 must be a lowercase 64-character SHA-256")
+    if trace_binary_sha256 != CLI_BINARY_SHA256:
+        raise ValueError(
+            "trace source.cli_binary_sha256 does not match Codex CLI 0.146.0"
+        )
+    if trace_source_status not in {"published_attested", "not_published_by_registry"}:
+        raise ValueError("trace source.cli_source_commit_status is invalid")
+    if trace_source_tag != CLI_SOURCE_TAG:
+        raise ValueError(
+            f"trace planner_gates.cli_source_tag must bind to {CLI_SOURCE_TAG}"
         )
 
     if candidate_cli_version is None:
@@ -1138,6 +1398,10 @@ def _validate_candidate_binding(
         wire_provenance.get("cli_version") != trace_cli_version
         or wire_provenance.get("source_commit") != trace_source_commit
         or wire_provenance.get("capture_id") != trace_capture_id
+        or wire_provenance.get("candidate_revision") != trace_candidate_revision
+        or wire_provenance.get("cli_binary_sha256") != trace_binary_sha256
+        or wire_provenance.get("cli_source_commit_status") != trace_source_status
+        or wire_provenance.get("cli_source_tag") != trace_source_tag
     ):
         raise ValueError("wire provenance is not bound to the trace candidate")
     catalog_snapshot = (
@@ -1175,6 +1439,10 @@ def _validate_candidate_binding(
         "catalog_snapshot_sha256": wire_route["catalog_snapshot_sha256"],
         "catalog_model_entry_id": wire_route["catalog_model_entry_id"],
         "route_behavior_profile": trace_route.get("behavior_profile"),
+        "candidate_revision": trace_candidate_revision,
+        "cli_binary_sha256": trace_binary_sha256,
+        "cli_source_commit_status": trace_source_status,
+        "cli_source_tag": trace_source_tag,
     }
     return identity, status
 
@@ -1218,7 +1486,7 @@ def build_inventory(
             raise ValueError(f"duplicate scope: {item['scope']}")
         seen.add(item["scope"])
 
-    unknown_tagged_source_count = _count_unknown_tags(wire_data)
+    unknown_tagged_source_count = _count_response_unknown_tags(wire_data)
     unknown_stream_count, unknown_non_stream_count = _unknown_tag_mode_counts(wire_data)
     if unknown_tagged_source_count == 0:
         raise ValueError("wire evidence contains no unknown-tag sentinel to classify")
@@ -1228,6 +1496,11 @@ def build_inventory(
         )
     identity_control = _build_identity_control(
         items, unknown_tagged_source_count=unknown_tagged_source_count
+    )
+    structural_families = _build_structural_inventory(
+        trace=trace_data,
+        wire=wire_data,
+        audit=audit_data,
     )
     candidate_identity, candidate_version_status = _validate_candidate_binding(
         trace_data=trace_data,
@@ -1261,6 +1534,7 @@ def build_inventory(
         "artifact_kind": ARTIFACT_KIND,
         "cli_version_floor": cli_version_floor,
         "candidate_identity": candidate_identity,
+        "declaration_families": structural_families,
         "qualification": qualification,
         "disposition_vocabulary": list(ALLOWED_DISPOSITIONS),
         "items": items,
@@ -1328,6 +1602,12 @@ def reconcile_inventory(
         mismatches.append("inventory artifact_kind is invalid")
     if inventory.get("disposition_vocabulary") != list(ALLOWED_DISPOSITIONS):
         mismatches.append("inventory disposition_vocabulary is invalid")
+    mismatches.extend(
+        f"mutation: {message}"
+        for message in _structural_inventory_mismatches(
+            inventory.get("declaration_families")
+        )
+    )
 
     items = inventory.get("items", [])
     if not isinstance(items, list):
@@ -1634,7 +1914,7 @@ def reconcile_inventory(
         wire_entry = evidence_binding.get("wire_fixture", {})
         wire_path = evidence_root / str(wire_entry.get("file", ""))
         if wire_path.is_file():
-            actual_unknown_tagged_source_count = _count_unknown_tags(
+            actual_unknown_tagged_source_count = _count_response_unknown_tags(
                 _load_json(wire_path)
             )
             if unknown_tagged_source_count != actual_unknown_tagged_source_count:

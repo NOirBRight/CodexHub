@@ -1,21 +1,303 @@
 {
   "artifact_kind": "runtime_wire_inventory",
   "candidate_identity": {
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
     "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
     "catalog_model_entry_id": "gpt-5.6-sol",
     "catalog_snapshot_sha256": "307a09f22b0c827ae77192a4beaf7059efcf8a698ec4f252aa4ba4787f8d1876",
-    "cli_version": "0.144.0-alpha.4",
-    "codex_source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "cli_source_commit_status": "published_attested",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_version": "0.146.0",
+    "codex_source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     "configured_provider_id": "custom",
-    "evidence_manifest_sha256": "9dfb5f48f52f27603d4d27066d0ed8a2e300600bcdbdff9a24f594a9892e5c22",
+    "evidence_manifest_sha256": "1e7d07eed427926b69b7bf7d8113f9b3913e02b16be7ffbf17ee64ca58e3d94f",
     "inbound_format": "responses",
     "model": "gpt-5.6-sol",
     "route_behavior_profile": "official_codex_app_http_passthrough",
     "route_upstream": "official",
-    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     "upstream_format": "responses"
   },
-  "cli_version_floor": "0.145.0",
+  "cli_version_floor": "0.146.0",
+  "declaration_families": [
+    {
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "executor": "codex_client",
+      "family": "plain_function",
+      "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+      "observation": "observed",
+      "observed": true,
+      "optional_rule": "preserve_when_supported_else_omit",
+      "representative": {
+        "call": {
+          "arguments": "<redacted>",
+          "call_id": "call_function_001",
+          "item_id": "item_call_function_001",
+          "type": "function_call"
+        },
+        "declaration": {
+          "name": "function_alpha",
+          "parameters": "<redacted>",
+          "type": "function"
+        },
+        "history": {
+          "call_id": "call_function_001",
+          "call_item_id": "item_call_function_001",
+          "output_item_id": "item_output_function_001"
+        },
+        "result": {
+          "call_id": "call_function_001",
+          "item_id": "item_output_function_001",
+          "output": "<redacted>",
+          "type": "function_call_output"
+        },
+        "streaming": {
+          "added": "response.output_item.added",
+          "delta": "response.function_call_arguments.delta",
+          "done": "response.output_item.done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "preserve_when_supported_else_required-but-unavailable",
+      "runtime_type": "function",
+      "selected_protocol_disposition": "native",
+      "wire_declaration_type": "function"
+    },
+    {
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "executor": "codex_client",
+      "family": "custom_freeform",
+      "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+      "observation": "observed",
+      "observed": true,
+      "optional_rule": "preserve_when_supported_else_omit",
+      "representative": {
+        "call": {
+          "call_id": "call_custom_001",
+          "input": "<redacted>",
+          "item_id": "item_call_custom_001",
+          "type": "custom_tool_call"
+        },
+        "declaration": {
+          "format": "<redacted>",
+          "name": "custom_alpha",
+          "type": "custom"
+        },
+        "history": {
+          "call_id": "call_custom_001",
+          "call_item_id": "item_call_custom_001",
+          "output_item_id": "item_output_custom_001"
+        },
+        "result": {
+          "call_id": "call_custom_001",
+          "item_id": "item_output_custom_001",
+          "output": "<redacted>",
+          "type": "custom_tool_call_output"
+        },
+        "streaming": {
+          "added": "response.output_item.added",
+          "delta": "response.custom_tool_call_input.delta",
+          "done": "response.output_item.done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "preserve_when_supported_else_required-but-unavailable",
+      "runtime_type": "custom",
+      "selected_protocol_disposition": "native",
+      "wire_declaration_type": "custom"
+    },
+    {
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "executor": "codex_client",
+      "family": "namespace",
+      "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+      "observation": "observed",
+      "observed": true,
+      "optional_rule": "preserve_when_supported_else_omit",
+      "representative": {
+        "call": {
+          "arguments": "<redacted>",
+          "call_id": "call_namespace_001",
+          "item_id": "item_call_namespace_001",
+          "namespace": "namespace_alpha",
+          "type": "function_call"
+        },
+        "declaration": {
+          "name": "namespace_alpha",
+          "tools": [
+            {
+              "name": "function_beta",
+              "parameters": "<redacted>",
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        },
+        "history": {
+          "call_id": "call_namespace_001",
+          "call_item_id": "item_call_namespace_001",
+          "namespace": "namespace_alpha",
+          "output_item_id": "item_output_namespace_001"
+        },
+        "result": {
+          "call_id": "call_namespace_001",
+          "item_id": "item_output_namespace_001",
+          "output": "<redacted>",
+          "type": "function_call_output"
+        },
+        "streaming": {
+          "added": "response.output_item.added",
+          "delta": "response.function_call_arguments.delta",
+          "done": "response.output_item.done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "preserve_when_supported_else_required-but-unavailable",
+      "runtime_type": "namespace",
+      "selected_protocol_disposition": "native",
+      "wire_declaration_type": "namespace"
+    },
+    {
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "executor": "codex_client",
+      "family": "client_executed_tool_discovery",
+      "loss_boundary": "discovery request/result stays client-executed",
+      "observation": "observed_client_execution",
+      "observed": true,
+      "optional_rule": "preserve_client_execution_else_omit",
+      "representative": {
+        "call": {
+          "arguments": "<redacted>",
+          "call_id": "call_search_001",
+          "execution": "client",
+          "item_id": "item_call_search_001",
+          "type": "tool_search_call"
+        },
+        "declaration": {
+          "execution": "client",
+          "parameters": "<redacted>",
+          "type": "tool_search"
+        },
+        "history": {
+          "call_id": "call_search_001",
+          "call_item_id": "item_call_search_001",
+          "executor": "codex_client",
+          "output_item_id": "item_output_search_001"
+        },
+        "result": {
+          "call_id": "call_search_001",
+          "execution": "client",
+          "item_id": "item_output_search_001",
+          "tools": "<redacted>",
+          "type": "tool_search_output"
+        },
+        "streaming": {
+          "added": "response.output_item.added",
+          "delta": "response.output_text.delta",
+          "done": "response.output_item.done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "preserve_client_execution_else_required-but-unavailable",
+      "runtime_type": "tool_search",
+      "selected_protocol_disposition": "native",
+      "wire_declaration_type": "tool_search"
+    },
+    {
+      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "executor": "selected_provider",
+      "family": "selected_provider_hosted",
+      "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
+      "observation": "not_observed_selected_provider_only",
+      "observed": false,
+      "optional_rule": "omit_if_selected_provider_unsupported",
+      "representative": {
+        "call": {
+          "action": "<redacted>",
+          "item_id": "item_call_hosted_001",
+          "status": "<redacted>",
+          "type": "web_search_call"
+        },
+        "cross_provider_proxy": "forbidden",
+        "declaration": {
+          "executor": "selected_provider",
+          "provider_scope": "selected_provider_only",
+          "type": "web_search"
+        },
+        "history": {
+          "call_id": null,
+          "call_item_id": "item_call_hosted_001",
+          "cross_provider_proxy": "forbidden",
+          "executor": "selected_provider",
+          "output_item_id": "item_output_hosted_001"
+        },
+        "observed": false,
+        "provider_scope": "selected_provider_only",
+        "result": {
+          "item_id": "item_output_hosted_001",
+          "provider_scope": "selected_provider_only",
+          "status": "<redacted>",
+          "type": "web_search_call"
+        },
+        "status": "selected_provider_control_required",
+        "streaming": {
+          "added": "response.output_item.added",
+          "delta": "<provider-defined>",
+          "done": "response.output_item.done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "required-but-unavailable_if_selected_provider_unsupported",
+      "runtime_type": "web_search",
+      "selected_protocol_disposition": "native_if_selected_provider_supports",
+      "wire_declaration_type": "web_search"
+    },
+    {
+      "evidence_source": "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future",
+      "executor": "unknown",
+      "family": "unknown_future_kind",
+      "loss_boundary": "retain tag and opaque payload; do not normalize",
+      "observation": "opaque_sentinel_only",
+      "observed": false,
+      "optional_rule": "omit_and_emit_sanitized_diagnostic",
+      "representative": {
+        "call": {
+          "opaque_payload": "<redacted>",
+          "tag": "unknown",
+          "type": "unknown"
+        },
+        "declaration": {
+          "opaque_payload": "<redacted>",
+          "tag": "unknown",
+          "type": "unknown"
+        },
+        "history": {
+          "call_id": null,
+          "call_item_id": null,
+          "loss_rule": "retain opaque sentinel",
+          "output_item_id": null
+        },
+        "observed": false,
+        "result": {
+          "opaque_payload": "<redacted>",
+          "tag": "unknown",
+          "type": "unknown"
+        },
+        "status": "opaque_sentinel_only",
+        "streaming": {
+          "added": "unknown.future_event",
+          "delta": "unknown.future_delta",
+          "done": "unknown.future_done",
+          "terminal": "response.completed"
+        }
+      },
+      "required_rule": "required-but-unavailable",
+      "runtime_type": "unknown",
+      "selected_protocol_disposition": "omit",
+      "wire_declaration_type": "<unknown>"
+    }
+  ],
   "disposition_vocabulary": [
     "preserved",
     "reversibly_adapted",
@@ -26,15 +308,15 @@
   "evidence_binding": {
     "audit": {
       "file": "read-only-gate-audit.json",
-      "sha256": "a27f27622f89436f9530e2a7ca31f4b1b48872a31bbced8426302682f8516fa0"
+      "sha256": "eeed7c0ad927d2abf0a10f695530bc38242fafa0ec59ae5898c0bfb307bc83f0"
     },
     "trace": {
       "file": "current-codexhub-thread-tool-surface.json",
-      "sha256": "a4367f96fc2aceaa419577ee43f91870fb3fcca4cc95644bc3347cbdd4206ee3"
+      "sha256": "47bdc0b56a879a734779aeb66aedce6c18f024578219a77548077a25a2976856"
     },
     "wire_fixture": {
       "file": "codexhub-runtime-wire-fixture.json",
-      "sha256": "3a8654854539799b526bc013c50bc9f16c40c09319cff8da716b75e6deecbc3a"
+      "sha256": "106cfe30d5933d758fb52f8ff015d578c7c3211107f8c490c3fd1ebd9224d8ce"
     }
   },
   "evidence_sources": {
@@ -237,8 +519,8 @@
       "terminal_events",
       "unknown_tagged_sentinels"
     ],
-    "candidate_version_eligible": false,
-    "candidate_version_status": "legacy_below_floor",
+    "candidate_version_eligible": true,
+    "candidate_version_status": "eligible",
     "evidence_gates": {
       "clean_cold_start_current_binding": "not_run",
       "complete_model_visible_plan": "partial",

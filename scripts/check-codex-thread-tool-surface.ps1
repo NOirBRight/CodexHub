@@ -405,7 +405,11 @@ foreach ($link in $callLinks) {
 
 $streamUnknown = @($wire.response.streaming.events | Where-Object { $_.tag -eq 'unknown' })
 $nonStreamingUnknown = @($wire.response.non_streaming.response_items | Where-Object { $_.tag -eq 'unknown' })
-$unknownTaggedSourceCount = Get-UnknownTaggedSourceCount -Value $wire
+$responseUnknownSource = [PSCustomObject]@{
+    streaming = $wire.response.streaming
+    non_streaming = $wire.response.non_streaming
+}
+$unknownTaggedSourceCount = Get-UnknownTaggedSourceCount -Value $responseUnknownSource
 if (
     $inventory.identity_control.unknown_tagged_source_count -le 0 -or
     $inventory.identity_control.unknown_tagged_source_count -ne $unknownTaggedSourceCount
@@ -619,7 +623,7 @@ foreach ($scope in $allRequiredScopes) {
 if (
     $inventory.artifact_kind -ne 'runtime_wire_inventory' -or
     $inventory.schema_version -ne 1 -or
-    $inventory.cli_version_floor -ne '0.145.0'
+    $inventory.cli_version_floor -ne '0.146.0'
 ) {
     Add-Mismatch 'inventory artifact identity or CLI version floor is invalid'
 }
@@ -655,6 +659,21 @@ foreach ($field in @('catalog_snapshot_sha256','evidence_manifest_sha256')) {
         Add-Mismatch "inventory candidate $field is not a lowercase 64-character SHA-256"
     }
 }
+if ([string]$inventoryCandidate.candidate_revision -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate revision is not a lowercase 40-character SHA-1'
+}
+if ([string]$inventoryCandidate.cli_binary_sha256 -notmatch '^[0-9a-f]{64}$') {
+    Add-Mismatch 'inventory candidate CLI binary SHA-256 is invalid'
+}
+if ([string]$inventoryCandidate.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb') {
+    Add-Mismatch 'inventory candidate CLI binary SHA-256 is not the retained Codex 0.146.0 binary'
+}
+if ([string]$inventoryCandidate.cli_source_commit_status -notin @('published_attested','not_published_by_registry')) {
+    Add-Mismatch 'inventory candidate CLI source commit status is invalid'
+}
+if ([string]::IsNullOrWhiteSpace([string]$inventoryCandidate.cli_source_tag)) {
+    Add-Mismatch 'inventory candidate CLI source tag is missing or blank'
+}
 if (
     [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
     [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
@@ -665,6 +684,10 @@ if (
     $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
     $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
     $inventoryCandidate.codex_source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.candidate_revision -ne $trace.source.candidate_revision -or
+    $inventoryCandidate.cli_binary_sha256 -ne $trace.source.cli_binary_sha256 -or
+    $inventoryCandidate.cli_source_commit_status -ne $trace.source.cli_source_commit_status -or
+    $inventoryCandidate.cli_source_tag -ne $trace.planner_gates.cli_source_tag -or
     $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
     $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
     $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
@@ -689,6 +712,10 @@ if (
     $wire.route.catalog_model_supports_search_tool -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_supports_search_tool -or
     $wire.provenance.cli_version -ne $trace.source.cli_version -or
     $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
+    $wire.provenance.candidate_revision -ne $trace.source.candidate_revision -or
+    $wire.provenance.cli_binary_sha256 -ne $trace.source.cli_binary_sha256 -or
+    $wire.provenance.cli_source_commit_status -ne $trace.source.cli_source_commit_status -or
+    $wire.provenance.cli_source_tag -ne $trace.planner_gates.cli_source_tag -or
     $wire.provenance.capture_id -ne $trace.source.capture_id -or
     $wire.pre_gateway.model -ne $trace.source.model -or
     $wire.post_gateway.model -ne $trace.source.model

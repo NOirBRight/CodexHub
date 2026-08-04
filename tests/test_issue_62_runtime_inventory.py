@@ -35,11 +35,15 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
 
     assert inventory["schema_version"] == 1
     assert inventory["artifact_kind"] == "runtime_wire_inventory"
-    assert inventory["cli_version_floor"] == "0.145.0"
+    assert inventory["cli_version_floor"] == "0.146.0"
     candidate = inventory["candidate_identity"]
-    assert candidate["cli_version"] == "0.144.0-alpha.4"
-    assert candidate["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+    assert candidate["cli_version"] == "0.146.0"
+    assert candidate["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
     assert candidate["codex_source_commit"] == candidate["source_commit"]
+    assert candidate["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+    assert candidate["cli_binary_sha256"] == "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+    assert candidate["cli_source_commit_status"] == "published_attested"
+    assert candidate["cli_source_tag"] == "rust-v0.146.0"
     assert candidate["route_upstream"] == "official"
     assert candidate["inbound_format"] == "responses"
     assert candidate["upstream_format"] == "responses"
@@ -48,8 +52,8 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert candidate["catalog_model_entry_id"] == "gpt-5.6-sol"
     assert candidate["route_behavior_profile"] == "official_codex_app_http_passthrough"
     assert len(candidate["evidence_manifest_sha256"]) == 64
-    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
-    assert inventory["qualification"]["candidate_version_eligible"] is False
+    assert inventory["qualification"]["candidate_version_status"] == "eligible"
+    assert inventory["qualification"]["candidate_version_eligible"] is True
     assert inventory["qualification"]["ready_for_beta1"] is False
     assert inventory["identity_control"]["unknown_tagged_source_count"] == 2
     assert inventory["qualification"]["blocking_gates"] == [
@@ -127,6 +131,25 @@ def test_inventory_covers_every_required_taxonomy_scope() -> None:
     }
     missing = required - scopes
     assert not missing, f"missing required scopes: {sorted(missing)}"
+
+
+def test_inventory_records_all_structural_declaration_families() -> None:
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    families = inventory["declaration_families"]
+    assert [entry["family"] for entry in families] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+    by_family = {entry["family"]: entry for entry in families}
+    assert by_family["client_executed_tool_discovery"]["executor"] == "codex_client"
+    assert by_family["selected_provider_hosted"]["executor"] == "selected_provider"
+    assert by_family["selected_provider_hosted"]["representative"]["cross_provider_proxy"] == "forbidden"
+    assert by_family["unknown_future_kind"]["selected_protocol_disposition"] == "omit"
 
 
 def test_every_item_carries_an_allowed_disposition() -> None:
@@ -249,19 +272,19 @@ def test_build_inventory_reads_existing_artifacts_and_clamps_live_gates() -> Non
         trace=TRACE,
         wire_fixture=WIRE_FIXTURE,
         audit=AUDIT,
-        cli_version_floor="0.145.0",
-        candidate_cli_version="0.144.0-alpha.4",
-        candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+        cli_version_floor="0.146.0",
+        candidate_cli_version="0.146.0",
+        candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     )
 
     assert inventory["schema_version"] == 1
-    assert inventory["cli_version_floor"] == "0.145.0"
-    assert inventory["candidate_identity"]["cli_version"] == "0.144.0-alpha.4"
+    assert inventory["cli_version_floor"] == "0.146.0"
+    assert inventory["candidate_identity"]["cli_version"] == "0.146.0"
     scopes = {entry["scope"] for entry in inventory["items"]}
     assert "core_text_streaming" in scopes
     assert "code_mode" in scopes
     assert inventory["identity_control"]["unclassified_core_items"] == 0
-    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
+    assert inventory["qualification"]["candidate_version_status"] == "eligible"
 
 
 def test_build_inventory_rejects_candidate_metadata_drift() -> None:
@@ -273,7 +296,7 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
             candidate_cli_version="0.145.0",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
     with pytest.raises(ValueError, match="candidate source commit"):
@@ -281,7 +304,7 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            candidate_cli_version="0.144.0-alpha.4",
+            candidate_cli_version="0.146.0",
             candidate_source_commit="0" * 40,
         )
 
@@ -294,9 +317,9 @@ def test_build_inventory_rejects_a_floor_other_than_supported_candidate_floor() 
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            cli_version_floor="0.144.0",
-            candidate_cli_version="0.144.0-alpha.4",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            cli_version_floor="0.145.0",
+            candidate_cli_version="0.146.0",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
 
@@ -309,7 +332,7 @@ def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
             candidate_cli_version="not-a-version",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
     with pytest.raises(ValueError, match="candidate source commit"):
@@ -317,7 +340,7 @@ def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            candidate_cli_version="0.144.0-alpha.4",
+            candidate_cli_version="0.146.0",
             candidate_source_commit="A" * 40,
         )
 
@@ -429,6 +452,12 @@ def test_inventory_reconcile_rejects_duplicate_and_wrong_core_evidence() -> None
     assert report["reconciled"] is False
     assert any("unknown scope" in mismatch for mismatch in report["mismatches"])
 
+    structural_mutation = json.loads(json.dumps(base))
+    structural_mutation["declaration_families"][4]["representative"]["cross_provider_proxy"] = "allowed"
+    report = module.reconcile_inventory(structural_mutation)
+    assert report["reconciled"] is False
+    assert any("declaration_families" in mismatch for mismatch in report["mismatches"])
+
 
 def test_inventory_reconcile_rejects_provenance_contradictions_without_evidence_root() -> None:
     module = load_inventory_module()
@@ -528,7 +557,7 @@ def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
     )
 
     tampered_status = json.loads(json.dumps(base))
-    tampered_status["qualification"]["candidate_version_status"] = "eligible"
+    tampered_status["qualification"]["candidate_version_status"] = "legacy_below_floor"
     report = module.reconcile_inventory(tampered_status)
     assert report["reconciled"] is False
     assert any("CLI floor" in mismatch for mismatch in report["mismatches"])
