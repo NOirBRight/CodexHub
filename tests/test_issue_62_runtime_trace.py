@@ -338,6 +338,51 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
 
 
+def test_powershell_rejects_historical_capture_provenance_drift(tmp_path: Path) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(SOURCE_CONTRACT, source_contract_path)
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["historical_capture"]["captured_at"] = "2026-07-13T14:57:55+08:00"
+    audit_path.write_text(
+        json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
 def test_negative_inventory_replays_fail_visibly(case: str) -> None:
     result = run_inventory_replay(case)

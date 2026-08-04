@@ -11,7 +11,7 @@
     "cli_version": "0.146.0",
     "codex_source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     "configured_provider_id": "custom",
-    "evidence_manifest_sha256": "b25da7980235919ddfe19f11d34e2aba2bb8b42ec7828398362e71f01ce79fa9",
+    "evidence_manifest_sha256": "685858e1affdb073df17467f53ab3de538c0c7f2d930b01c10797a94963c6619",
     "inbound_format": "responses",
     "model": "gpt-5.6-sol",
     "route_behavior_profile": "official_codex_app_http_passthrough",
@@ -414,7 +414,7 @@
     },
     "wire_fixture": {
       "file": "codexhub-runtime-wire-fixture.json",
-      "sha256": "3a8654854539799b526bc013c50bc9f16c40c09319cff8da716b75e6deecbc3a"
+      "sha256": "1e3ecfc51f59de7f21bee8a7a0b743bba26d35fb3dc9eaca5f7b4ea3dd57705f"
     }
   },
   "evidence_sources": {

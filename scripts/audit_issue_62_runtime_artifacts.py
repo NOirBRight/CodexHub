@@ -15,6 +15,22 @@ from urllib.parse import urlparse
 
 
 TRANSPORT_TARGET = "codex_http_client::transport"
+DEFAULT_SOURCE_CONTRACT = Path(
+    "docs/evidence/issue-62/codex-0.146-source-contract.json"
+)
+SOURCE_CONTRACT_PROVENANCE = {
+    "cli_version": "0.146.0",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_source_commit_status": "published_attested",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
+}
+HISTORICAL_CAPTURE = {
+    "captured_at": "2026-07-12T14:57:55+08:00",
+    "cli_version": "0.144.0-alpha.4",
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+}
 POST_BODY_PATTERN = re.compile(
     r": POST to (?P<endpoint>https?://.+?): (?P<body>\{.*\})\s*$",
     re.DOTALL,
@@ -153,6 +169,113 @@ def _is_proven_tool_choice(value: Any) -> bool:
         and bool(value["name"].strip())
         and value["name"] == value["name"].strip()
     )
+
+
+def _source_contract_provenance(path: Path) -> dict[str, Any]:
+    """Load and validate the unobserved 0.146 source-contract identity."""
+
+    try:
+        source_contract = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unable to read source contract: {path}") from exc
+    if not isinstance(source_contract, dict):
+        raise ValueError("source contract must be a JSON object")
+    if (
+        source_contract.get("schema_version") != 1
+        or source_contract.get("fixture_kind") != "codex_cli_source_contract"
+        or source_contract.get("capture_status") != "not_observed"
+        or source_contract.get("qualification_status") != "unqualified"
+        or "captured_at" not in source_contract
+        or source_contract.get("captured_at") is not None
+    ):
+        raise ValueError(
+            "source contract must remain not_observed, unqualified, and uncaptured"
+        )
+    provenance = source_contract.get("provenance")
+    if not isinstance(provenance, dict) or any(
+        provenance.get(field) != value
+        for field, value in SOURCE_CONTRACT_PROVENANCE.items()
+    ):
+        raise ValueError("source contract provenance is invalid")
+    runtime_surface = source_contract.get("runtime_wire_surface")
+    if not isinstance(runtime_surface, dict):
+        raise ValueError("source contract runtime surface is missing")
+    if runtime_surface.get("declaration_family_order") != list(DECLARATION_FAMILIES):
+        raise ValueError("source contract declaration family order is invalid")
+    declaration_families = runtime_surface.get("declaration_families")
+    if not isinstance(declaration_families, list) or len(declaration_families) != len(
+        DECLARATION_FAMILIES
+    ):
+        raise ValueError("source contract declaration families are invalid")
+    expected_observations = {
+        "plain_function": "not_observed_source_contract_only",
+        "custom_freeform": "not_observed_source_contract_only",
+        "namespace": "not_observed_source_contract_only",
+        "client_executed_tool_discovery": "not_observed_source_contract_only",
+        "selected_provider_hosted": "not_observed_selected_provider_control_required",
+        "unknown_future_kind": "opaque_sentinel_only",
+    }
+    for family, entry in zip(DECLARATION_FAMILIES, declaration_families):
+        if not isinstance(entry, dict) or entry.get("family") != family:
+            raise ValueError("source contract declaration family identity is invalid")
+        if entry.get("observed") is not False:
+            raise ValueError("source contract cannot claim an observed declaration family")
+        if entry.get("observation") != expected_observations[family]:
+            raise ValueError("source contract declaration observation is invalid")
+    request_shape = runtime_surface.get("request_shape")
+    non_streaming_control = (
+        request_shape.get("non_streaming_control")
+        if isinstance(request_shape, dict)
+        else None
+    )
+    if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
+        "captured"
+    ) is not False or non_streaming_control.get("status") != "unqualified":
+        raise ValueError("source contract cannot claim a captured non-streaming response")
+    examples = runtime_surface.get("declaration_family_examples")
+    if not isinstance(examples, dict):
+        raise ValueError("source contract declaration examples are missing")
+    for family in DECLARATION_FAMILIES:
+        example = examples.get(family)
+        if not isinstance(example, dict):
+            raise ValueError(f"source contract example is missing for {family}")
+        if (
+            not isinstance(example.get("terminal"), dict)
+            or example["terminal"].get("event") != "response.completed"
+            or example["terminal"].get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"source contract terminal status is invalid for {family}")
+        if (
+            not isinstance(example.get("error"), dict)
+            or example["error"].get("event") != "response.failed"
+            or example["error"].get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"source contract error status is invalid for {family}")
+        if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
+            raise ValueError(f"source contract loss boundary is invalid for {family}")
+    response_shape = runtime_surface.get("response_shape")
+    error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
+    if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
+        raise ValueError("source contract response error status is invalid")
+
+    def _captured_true(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                (key in {"captured", "observed"} and child is True)
+                or _captured_true(child)
+                for key, child in value.items()
+            )
+        if isinstance(value, list):
+            return any(_captured_true(child) for child in value)
+        return False
+
+    if _captured_true(runtime_surface):
+        raise ValueError("source contract contains a captured response claim")
+    return {
+        "capture_status": source_contract["capture_status"],
+        **SOURCE_CONTRACT_PROVENANCE,
+        "historical_capture": dict(HISTORICAL_CAPTURE),
+    }
 
 
 def _sanitize_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -610,7 +733,9 @@ def audit_artifacts(
     config_written_at: str,
     catalog_written_at: str,
     snapshot_ended_at: str,
+    source_contract: Path = DEFAULT_SOURCE_CONTRACT,
 ) -> dict[str, Any]:
+    provenance = _source_contract_provenance(source_contract)
     codex = _codex_request_evidence(
         codex_log_db,
         model=model,
@@ -661,6 +786,7 @@ def audit_artifacts(
 
     return {
         "capture_kind": "sanitized_bounded_read_only_audit",
+        "provenance": provenance,
         "gate_classification": {
             "choice_controls": "observed" if choice_observed else "unclassified",
             "clean_cold_start_current_binding": "met"
@@ -715,6 +841,7 @@ def audit_artifacts(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-contract", type=Path, default=DEFAULT_SOURCE_CONTRACT)
     parser.add_argument("--codex-log-db", type=Path, required=True)
     parser.add_argument("--gateway-db", type=Path, required=True)
     parser.add_argument("--model", required=True)
@@ -737,6 +864,7 @@ def main() -> int:
         config_written_at=args.config_written_at,
         catalog_written_at=args.catalog_written_at,
         snapshot_ended_at=args.snapshot_ended_at,
+        source_contract=args.source_contract,
     )
     print(json.dumps(audit, ensure_ascii=True, indent=2, sort_keys=True))
     return 0

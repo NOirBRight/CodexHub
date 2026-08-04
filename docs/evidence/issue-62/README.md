@@ -134,6 +134,7 @@ Run the sanitizer with explicit bounded inputs and observation cutoffs:
 
 ```powershell
 python scripts/audit_issue_62_runtime_artifacts.py `
+  --source-contract docs/evidence/issue-62/codex-0.146-source-contract.json `
   --codex-log-db <codex-log-db> `
   --gateway-db <gateway-telemetry-db> `
   --model gpt-5.6-sol `
@@ -161,9 +162,11 @@ The artifact is bound to CLI floor `0.146.0` and to the candidate identity
 from the unobserved 0.146 source contract (`cli_version=0.146.0`, source
 commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`, candidate revision
 `accab8ff6eb4d6ebd93cda84585fb5f6cb89da82`, official Responses route). The
-historical trace, wire fixture, and audit remain explicitly bound as
-0.144.0/historical evidence; they do not become 0.146 runtime captures. The
-candidate is version-eligible, but `qualification.ready_for_beta1` remains
+historical trace and wire fixture remain explicitly bound as 0.144.0 evidence.
+The audit carries the 0.146 source-contract provenance with
+`capture_status=not_observed` and nested historical-capture metadata; it is not
+a 0.146 runtime capture. The candidate is version-eligible, but
+`qualification.ready_for_beta1` remains
 `false`: planner completeness, clean current-binding cold start,
 independently fingerprinted full pre/post request and response bodies,
 non-streaming/terminal/error/hosted/unknown controls, and wire replay evidence
@@ -172,8 +175,11 @@ qualification or capability unlock. The generator rejects an explicitly
 supplied CLI/source value that does not match the trace, binds route/provider/
 model fields across trace and wire fixtures (including pre/post models, catalog
 binding, and route profile), and records a canonical-LF SHA-256 manifest for
-all four input artifacts (including the source contract). It never fabricates a
-capability disposition for a gate the artifacts do not qualify.
+all four input artifacts (including the source contract). The audit sanitizer
+must receive that source-contract path so reruns retain the exact
+`capture_status=not_observed` 0.146 provenance and nested historical 0.144
+capture metadata. It never fabricates a capability disposition for a gate the
+artifacts do not qualify.
 
 The qualification also has a separate `wire_identity_replay` gate. A full
 request/response fingerprint is not treated as replay proof by itself: a

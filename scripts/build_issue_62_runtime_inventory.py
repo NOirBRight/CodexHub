@@ -47,6 +47,7 @@ CLI_SOURCE_COMMIT = "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
 CANDIDATE_REVISION = "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
 HISTORICAL_CLI_VERSION = "0.144.0-alpha.4"
 HISTORICAL_SOURCE_COMMIT = "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+HISTORICAL_CAPTURED_AT = "2026-07-12T14:57:55+08:00"
 DEFAULT_SOURCE_CONTRACT = Path(
     "docs/evidence/issue-62/codex-0.146-source-contract.json"
 )
@@ -1527,6 +1528,7 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         or source_contract.get("fixture_kind") != "codex_cli_source_contract"
         or source_contract.get("capture_status") != "not_observed"
         or source_contract.get("qualification_status") != "unqualified"
+        or "captured_at" not in source_contract
         or source_contract.get("captured_at") is not None
     ):
         raise ValueError("Codex 0.146 source contract must remain not_observed and unqualified")
@@ -1541,6 +1543,88 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     }
     if any(provenance.get(field) != value for field, value in expected.items()):
         raise ValueError("Codex 0.146 source contract provenance is invalid")
+    runtime_surface = source_contract.get("runtime_wire_surface")
+    if not isinstance(runtime_surface, dict):
+        raise ValueError("Codex 0.146 source contract runtime surface is missing")
+    if runtime_surface.get("declaration_family_order") != list(STRUCTURAL_FAMILIES):
+        raise ValueError("Codex 0.146 source contract declaration family order is invalid")
+    declaration_families = runtime_surface.get("declaration_families")
+    if not isinstance(declaration_families, list) or len(declaration_families) != len(
+        STRUCTURAL_FAMILIES
+    ):
+        raise ValueError("Codex 0.146 source contract declaration families are invalid")
+    expected_observations = {
+        "plain_function": "not_observed_source_contract_only",
+        "custom_freeform": "not_observed_source_contract_only",
+        "namespace": "not_observed_source_contract_only",
+        "client_executed_tool_discovery": "not_observed_source_contract_only",
+        "selected_provider_hosted": "not_observed_selected_provider_control_required",
+        "unknown_future_kind": "opaque_sentinel_only",
+    }
+    for family, expected_family in zip(STRUCTURAL_FAMILIES, declaration_families):
+        if not isinstance(expected_family, dict) or expected_family.get("family") != family:
+            raise ValueError("Codex 0.146 source contract declaration family identity is invalid")
+        if expected_family.get("observed") is not False:
+            raise ValueError(
+                "Codex 0.146 source contract cannot claim an observed declaration family"
+            )
+        if expected_family.get("observation") != expected_observations[family]:
+            raise ValueError(
+                "Codex 0.146 source contract declaration observation is invalid"
+            )
+    request_shape = runtime_surface.get("request_shape")
+    non_streaming_control = (
+        request_shape.get("non_streaming_control")
+        if isinstance(request_shape, dict)
+        else None
+    )
+    if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
+        "captured"
+    ) is not False or non_streaming_control.get("status") != "unqualified":
+        raise ValueError(
+            "Codex 0.146 source contract cannot claim a captured non-streaming response"
+        )
+    examples = runtime_surface.get("declaration_family_examples")
+    if not isinstance(examples, dict):
+        raise ValueError("Codex 0.146 source contract declaration examples are missing")
+    for family in STRUCTURAL_FAMILIES:
+        example = examples.get(family)
+        if not isinstance(example, dict):
+            raise ValueError(f"Codex 0.146 source contract example is missing for {family}")
+        terminal = example.get("terminal")
+        error = example.get("error")
+        if (
+            not isinstance(terminal, dict)
+            or terminal.get("event") != "response.completed"
+            or terminal.get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"Codex 0.146 source contract terminal status is invalid for {family}")
+        if (
+            not isinstance(error, dict)
+            or error.get("event") != "response.failed"
+            or error.get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"Codex 0.146 source contract error status is invalid for {family}")
+        if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
+            raise ValueError(f"Codex 0.146 source contract loss boundary is invalid for {family}")
+    response_shape = runtime_surface.get("response_shape")
+    error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
+    if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
+        raise ValueError("Codex 0.146 source contract response error status is invalid")
+
+    def _captured_true(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                (key in {"captured", "observed"} and child is True)
+                or _captured_true(child)
+                for key, child in value.items()
+            )
+        if isinstance(value, list):
+            return any(_captured_true(child) for child in value)
+        return False
+
+    if _captured_true(runtime_surface):
+        raise ValueError("Codex 0.146 source contract contains a captured response claim")
     return provenance
 
 
@@ -1561,10 +1645,16 @@ def _validate_candidate_binding(
     trace_cli_version = source.get("cli_version")
     trace_source_commit = planner_gates.get("source_commit")
     trace_capture_id = source.get("capture_id")
-    if not trace_cli_version or not trace_source_commit or not trace_capture_id:
+    trace_captured_at = trace_data.get("captured_at")
+    if (
+        not trace_cli_version
+        or not trace_source_commit
+        or not trace_capture_id
+        or not trace_captured_at
+    ):
         raise ValueError(
             "historical trace evidence is missing source.cli_version, "
-            "source.capture_id, or planner_gates.source_commit"
+            "source.capture_id, planner_gates.source_commit, or captured_at"
         )
     if not isinstance(trace_cli_version, str):
         raise ValueError("trace source.cli_version must be a string")
@@ -1572,7 +1662,11 @@ def _validate_candidate_binding(
         _version_key(trace_cli_version)
     except ValueError as exc:
         raise ValueError("trace source.cli_version is malformed") from exc
-    if trace_cli_version != HISTORICAL_CLI_VERSION or trace_source_commit != HISTORICAL_SOURCE_COMMIT:
+    if (
+        trace_cli_version != HISTORICAL_CLI_VERSION
+        or trace_source_commit != HISTORICAL_SOURCE_COMMIT
+        or trace_captured_at != HISTORICAL_CAPTURED_AT
+    ):
         raise ValueError(
             "trace evidence must retain the historical Codex 0.144.0-alpha.4 provenance"
         )
@@ -1649,6 +1743,7 @@ def _validate_candidate_binding(
         wire_provenance.get("cli_version") != trace_cli_version
         or wire_provenance.get("source_commit") != trace_source_commit
         or wire_provenance.get("capture_id") != trace_capture_id
+        or wire_provenance.get("captured_at") != trace_captured_at
     ):
         raise ValueError("historical wire provenance is not bound to the historical trace")
     audit_provenance = audit_data.get("provenance", {})
@@ -1657,6 +1752,17 @@ def _validate_candidate_binding(
         or any(audit_provenance.get(field) != value for field, value in contract_provenance.items())
     ):
         raise ValueError("read-only audit provenance is not bound to the 0.146 source contract")
+    historical_capture = audit_provenance.get("historical_capture")
+    if (
+        not isinstance(historical_capture, dict)
+        or historical_capture.get("captured_at") != trace_captured_at
+        or historical_capture.get("cli_version") != trace_cli_version
+        or historical_capture.get("source_commit") != trace_source_commit
+        or historical_capture.get("captured_at") != wire_provenance.get("captured_at")
+        or historical_capture.get("cli_version") != wire_provenance.get("cli_version")
+        or historical_capture.get("source_commit") != wire_provenance.get("source_commit")
+    ):
+        raise ValueError("read-only audit historical capture provenance is not bound")
     catalog_snapshot = (
         trace_data.get("planner_gates", {})
         .get("catalog_source", {})

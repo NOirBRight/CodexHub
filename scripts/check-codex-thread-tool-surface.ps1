@@ -689,16 +689,25 @@ if (
     $sourceContract.provenance.cli_source_commit_status -ne 'published_attested' -or
     $sourceContract.provenance.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb' -or
     $sourceContract.provenance.candidate_revision -ne 'accab8ff6eb4d6ebd93cda84585fb5f6cb89da82' -or
+    $sourceContract.runtime_wire_surface.declaration_families.Count -ne 6 -or
+    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observed -ne $false }).Count -ne 0 -or
+    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observation -notin @('not_observed_source_contract_only', 'not_observed_selected_provider_control_required', 'opaque_sentinel_only') }).Count -ne 0 -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.captured -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.status -ne 'unqualified' -or
     [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
-    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
+    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id) -or
+    $trace.captured_at -ne '2026-07-12T14:57:55+08:00' -or
+    $wire.provenance.captured_at -ne '2026-07-12T14:57:55+08:00'
 ) {
     Add-Mismatch 'source contract or historical trace/wire provenance is invalid'
 }
 if (
     $trace.source.cli_version -ne '0.144.0-alpha.4' -or
     $trace.planner_gates.source_commit -ne '9e552e9d15ba52bed7077d5357f3e18e330f8f38' -or
+    $trace.captured_at -ne '2026-07-12T14:57:55+08:00' -or
     $wire.provenance.cli_version -ne $trace.source.cli_version -or
     $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
+    $wire.provenance.captured_at -ne $trace.captured_at -or
     $inventoryCandidate.cli_version -ne $sourceContract.provenance.cli_version -or
     $inventoryCandidate.source_commit -ne $sourceContract.provenance.source_commit -or
     $inventoryCandidate.codex_source_commit -ne $sourceContract.provenance.source_commit -or
@@ -713,6 +722,9 @@ if (
     $audit.provenance.cli_binary_sha256 -ne $sourceContract.provenance.cli_binary_sha256 -or
     $audit.provenance.cli_source_commit_status -ne $sourceContract.provenance.cli_source_commit_status -or
     $audit.provenance.cli_source_tag -ne $sourceContract.provenance.cli_source_tag -or
+    $audit.provenance.historical_capture.captured_at -ne $trace.captured_at -or
+    $audit.provenance.historical_capture.cli_version -ne $trace.source.cli_version -or
+    $audit.provenance.historical_capture.source_commit -ne $trace.planner_gates.source_commit -or
     $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
     $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
     $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or

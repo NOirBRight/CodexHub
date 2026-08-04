@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "audit_issue_62_runtime_artifacts.py"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 
 
 def load_audit_module():
@@ -27,6 +28,7 @@ def run_audit(
     gateway_db: Path,
     *,
     config_written_at: str = "1970-01-01T00:06:00Z",
+    source_contract: Path = SOURCE_CONTRACT,
 ):
     return module.audit_artifacts(
         codex_log_db=codex_db,
@@ -37,6 +39,7 @@ def run_audit(
         config_written_at=config_written_at,
         catalog_written_at="1970-01-01T00:02:00Z",
         snapshot_ended_at="1970-01-01T00:10:00Z",
+        source_contract=source_contract,
     )
 
 
@@ -393,11 +396,17 @@ def test_audit_surfaces_unclassified_items_and_prefix_mismatch(tmp_path: Path) -
 
 def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() -> None:
     audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
 
     assert audit["provenance"]["capture_status"] == "not_observed"
-    assert audit["provenance"]["cli_version"] == "0.146.0"
-    assert audit["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
-    assert audit["provenance"]["historical_capture"]["cli_version"] == "0.144.0-alpha.4"
+    assert audit["provenance"]["capture_status"] == source_contract["capture_status"]
+    for field, value in source_contract["provenance"].items():
+        assert audit["provenance"][field] == value
+    assert audit["provenance"]["historical_capture"] == {
+        "captured_at": "2026-07-12T14:57:55+08:00",
+        "cli_version": "0.144.0-alpha.4",
+        "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    }
     assert audit["gateway_identity_route"]["request_starts"] == 525
     assert audit["gateway_identity_route"]["prefix_equal"] == 525
     assert audit["gateway_identity_route"]["prefix_mismatch"] == 0
@@ -425,6 +434,44 @@ def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() 
     assert sha256_values == [
         "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
     ]
+
+
+def test_audit_rejects_source_contract_provenance_drift(tmp_path: Path) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["provenance"]["source_commit"] = "0" * 40
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source contract provenance"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
+
+
+def test_audit_rejects_captured_source_contract_claim(tmp_path: Path) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["request_shape"]["non_streaming_control"][
+        "captured"
+    ] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="captured non-streaming"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
 
 
 def test_audit_detects_generic_response_body_fingerprint_fields(tmp_path: Path) -> None:

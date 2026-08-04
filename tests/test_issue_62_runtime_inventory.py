@@ -415,6 +415,59 @@ def test_build_inventory_rejects_audit_candidate_provenance_drift(tmp_path: Path
         )
 
 
+def test_build_inventory_rejects_audit_historical_capture_drift(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["historical_capture"]["captured_at"] = "2026-07-13T14:57:55+08:00"
+    audit_path = tmp_path / AUDIT.name
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="historical capture"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=audit_path,
+        )
+
+
+def test_build_inventory_rejects_observed_source_contract_family(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["declaration_families"][0]["observed"] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="cannot claim an observed"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["request_shape"]["non_streaming_control"][
+        "captured"
+    ] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="captured non-streaming"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
 def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
