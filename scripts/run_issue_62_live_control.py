@@ -753,6 +753,21 @@ def _process_tree_is_gone(
             return False
         return int(process.pid) not in parents
 
+    # A daemonized child can leave its original process group and be
+    # reparented after the root exits.  The observed PID set is the only
+    # conservative evidence available on POSIX without a cgroup/pidfd
+    # supervisor; any still-live observed PID keeps cleanup fail-closed.
+    for pid in tracked_pids:
+        if pid == int(process.pid):
+            continue
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            return False
+        return False
+
     # ``/proc`` retains the process group even after the session leader exits;
     # use the kernel's group existence check as a second readback path.
     try:
