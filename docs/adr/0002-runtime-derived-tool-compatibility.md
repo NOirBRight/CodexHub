@@ -61,15 +61,17 @@ of these dispositions; it must not leave an implicit fallback path.
 | --- | --- | --- | --- |
 | `native` | The selected protocol carries the declaration and its lifecycle with the same semantics. | Include it unchanged. | Include it unchanged. |
 | `adapt` | The selected protocol cannot carry the native shape directly, but a structural Adapter is injective, request-scoped, and invertible for the complete lifecycle. | Apply that Adapter. | Apply that Adapter; if any required lifecycle mapping is not provably reversible, use `required-but-unavailable`. |
-| `omit` | The selected Provider/protocol cannot execute or safely represent the declaration and it is not required. | Leave it out of the model-visible plan and emit only a bounded, sanitized classification diagnostic. | Not valid; a required declaration becomes `required-but-unavailable`. |
-| `required-but-unavailable` | A required declaration cannot be native or safely adapted for the selected Provider/protocol. | Not valid. | Fail visibly before upstream sampling, with a stable bounded error; do not fall back or proxy. |
+| `omit` | The optional declaration is either provider-hosted without native support from the selected Provider, or not safely representable on the selected protocol. | Leave it out of the model-visible plan and emit only a bounded, sanitized classification diagnostic. | Not valid; a required declaration becomes `required-but-unavailable`. |
+| `required-but-unavailable` | The required declaration is not native or safely adaptable on the selected protocol, or is provider-hosted without support from the selected Provider. | Not valid. | Fail visibly before upstream sampling, with a stable bounded error; do not fall back or proxy. |
 
 An optional hosted tool that the selected Provider does not natively support is
 `omit`. If `tool_choice` requires that hosted tool, it is
 `required-but-unavailable` and the request fails before upstream sampling.
 There is no second Provider for search, compaction, or any other hosted
-operation. The same optional/required rules apply to client-executed,
-namespace, custom/freeform, and future declaration kinds.
+operation. Client-executed tools remain owned and executed by the Codex
+client; lack of Provider execution support alone does not omit one when the
+selected protocol safely represents it. The same optional/required rules apply
+to client-executed, namespace, custom/freeform, and future declaration kinds.
 
 ### Native passthrough and Adapter boundaries
 
