@@ -41,6 +41,19 @@ $expectedFamilySchemas = @(
 $sourceContractSchemaValid = $true
 $sourceContractFamilies = @($sourceContract.runtime_wire_surface.declaration_families)
 $sourceContractExamples = $sourceContract.runtime_wire_surface.declaration_family_examples
+$nullableByFamily = @{
+    selected_provider_hosted = @{ history = @('call_id') }
+    unknown_future_kind = @{ history = @('call_id', 'call_item_id', 'output_item_id') }
+}
+$nonEmptyStringFields = @('name', 'namespace', 'executor', 'execution', 'provider_scope', 'cross_provider_proxy', 'tag', 'loss_rule', 'item_id', 'call_id', 'call_item_id', 'output_item_id')
+$expectedSseSchemas = @{
+    plain_function = @{ Added = 'response.output_item.added'; Delta = 'response.function_call_arguments.delta'; DoneField = 'arguments_done'; Done = 'response.function_call_arguments.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.function_call_arguments.delta', 'response.function_call_arguments.done', 'response.output_item.done', 'response.completed') }
+    custom_freeform = @{ Added = 'response.output_item.added'; Delta = 'response.custom_tool_call_input.delta'; DoneField = 'input_done'; Done = 'response.custom_tool_call_input.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.custom_tool_call_input.delta', 'response.custom_tool_call_input.done', 'response.output_item.done', 'response.completed') }
+    namespace = @{ Added = 'response.output_item.added'; Delta = 'response.function_call_arguments.delta'; DoneField = 'arguments_done'; Done = 'response.function_call_arguments.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.function_call_arguments.delta', 'response.function_call_arguments.done', 'response.output_item.done', 'response.completed') }
+    client_executed_tool_discovery = @{ Added = $null; Delta = $null; DoneField = 'done'; Done = 'response.output_item.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.done', 'response.completed') }
+    selected_provider_hosted = @{ Added = 'response.output_item.added'; Delta = '<provider-defined>'; DoneField = 'done'; Done = 'response.output_item.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', '<provider-defined>', 'response.output_item.done', 'response.completed') }
+    unknown_future_kind = @{ Added = 'unknown.future_event'; Delta = 'unknown.future_delta'; DoneField = 'done'; Done = 'unknown.future_done'; ItemDone = 'unknown.future_done'; Terminal = 'response.completed'; Order = @('unknown.future_event', 'unknown.future_delta', 'unknown.future_done', 'response.completed') }
+}
 foreach ($expected in $expectedFamilySchemas) {
     $family = @($sourceContractFamilies | Where-Object { $_.family -eq $expected.Name }) | Select-Object -First 1
     $exampleProperty = if ($null -ne $sourceContractExamples) { $sourceContractExamples.PSObject.Properties[$expected.Name] } else { $null }
@@ -68,10 +81,34 @@ foreach ($expected in $expectedFamilySchemas) {
             continue
         }
         foreach ($required in $sectionSpec.Required) {
-            if ($null -eq $section.PSObject.Properties[$required]) {
+            $requiredProperty = $section.PSObject.Properties[$required]
+            $nullableFields = @()
+            if ($nullableByFamily.ContainsKey($expected.Name) -and $nullableByFamily[$expected.Name].ContainsKey($sectionSpec.Name)) {
+                $nullableFields = @($nullableByFamily[$expected.Name][$sectionSpec.Name])
+            }
+            if ($null -eq $requiredProperty -or
+                ($required -in $nonEmptyStringFields -and
+                    $required -notin $nullableFields -and
+                    ($null -eq $requiredProperty.Value -or
+                        $requiredProperty.Value -isnot [string] -or
+                        [string]::IsNullOrEmpty($requiredProperty.Value)))) {
                 $sourceContractSchemaValid = $false
             }
         }
+    }
+    $sseSchema = $expectedSseSchemas[$expected.Name]
+    $streamProperty = $example.PSObject.Properties['streaming']
+    $stream = if ($null -ne $streamProperty) { $streamProperty.Value } else { $null }
+    $doneProperty = if ($null -ne $stream) { $stream.PSObject.Properties[$sseSchema.DoneField] } else { $null }
+    if ($null -eq $stream -or
+        $stream.added -ne $sseSchema.Added -or
+        $stream.delta -ne $sseSchema.Delta -or
+        $stream.terminal -ne $sseSchema.Terminal -or
+        $stream.done -ne $sseSchema.ItemDone -or
+        $null -eq $doneProperty -or
+        $doneProperty.Value -ne $sseSchema.Done -or
+        (($stream.event_order -join '|') -ne ($sseSchema.Order -join '|'))) {
+        $sourceContractSchemaValid = $false
     }
 }
 

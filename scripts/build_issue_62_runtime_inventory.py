@@ -767,6 +767,22 @@ STRUCTURAL_FAMILY_SCHEMAS = {
         },
     },
 }
+STRUCTURAL_NONEMPTY_STRING_FIELDS = frozenset(
+    {
+        "name",
+        "namespace",
+        "executor",
+        "execution",
+        "provider_scope",
+        "cross_provider_proxy",
+        "tag",
+        "loss_rule",
+        "item_id",
+        "call_id",
+        "call_item_id",
+        "output_item_id",
+    }
+)
 
 
 def _validate_structural_family_schema(
@@ -794,6 +810,12 @@ def _validate_structural_family_schema(
         for key in section_schema.get("required", ()):
             if key not in section:
                 raise ValueError(f"{context}.{section_name}.{key} is required")
+            if key in STRUCTURAL_NONEMPTY_STRING_FIELDS and section[key] is not None and (
+                not isinstance(section[key], str) or not section[key]
+            ):
+                raise ValueError(
+                    f"{context}.{section_name}.{key} must be a non-empty string"
+                )
             if key not in nullable and section[key] is None:
                 raise ValueError(f"{context}.{section_name}.{key} cannot be null")
         for key, expected in section_schema.get("equals", {}).items():
@@ -807,6 +829,7 @@ def _validate_structural_family_schema(
             if (
                 not isinstance(nested, dict)
                 or nested.get("type") != "function"
+                or not isinstance(nested.get("name"), str)
                 or not nested.get("name")
                 or "parameters" not in nested
             ):
@@ -830,6 +853,11 @@ def _validate_structural_family_schema(
             != example["history"].get("output_item_id")
         ):
             raise ValueError(f"{context} call/result item IDs do not reconcile")
+    _validate_structural_stream_example(
+        family_name,
+        example.get("streaming"),
+        context=context,
+    )
 
 STRUCTURAL_EVIDENCE_SOURCES = {
     "plain_function": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.plain_function",
@@ -846,6 +874,114 @@ STRUCTURAL_STREAM_DONE_EVENTS = {
     "namespace": ("arguments_done", "response.function_call_arguments.done"),
     "unknown_future_kind": ("done", "unknown.future_done"),
 }
+
+STRUCTURAL_STREAM_SCHEMAS = {
+    "plain_function": {
+        "added": "response.output_item.added",
+        "delta": "response.function_call_arguments.delta",
+        "done_field": "arguments_done",
+        "done": "response.function_call_arguments.done",
+        "item_done": "response.output_item.done",
+        "terminal": "response.completed",
+        "event_order": [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+        ],
+    },
+    "custom_freeform": {
+        "added": "response.output_item.added",
+        "delta": "response.custom_tool_call_input.delta",
+        "done_field": "input_done",
+        "done": "response.custom_tool_call_input.done",
+        "item_done": "response.output_item.done",
+        "terminal": "response.completed",
+        "event_order": [
+            "response.output_item.added",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.output_item.done",
+            "response.completed",
+        ],
+    },
+    "namespace": {
+        "added": "response.output_item.added",
+        "delta": "response.function_call_arguments.delta",
+        "done_field": "arguments_done",
+        "done": "response.function_call_arguments.done",
+        "item_done": "response.output_item.done",
+        "terminal": "response.completed",
+        "event_order": [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+        ],
+    },
+    "client_executed_tool_discovery": {
+        "added": None,
+        "delta": None,
+        "done_field": "done",
+        "done": "response.output_item.done",
+        "item_done": "response.output_item.done",
+        "terminal": "response.completed",
+        "event_order": ["response.output_item.done", "response.completed"],
+    },
+    "selected_provider_hosted": {
+        "added": "response.output_item.added",
+        "delta": "<provider-defined>",
+        "done_field": "done",
+        "done": "response.output_item.done",
+        "item_done": "response.output_item.done",
+        "terminal": "response.completed",
+        "event_order": [
+            "response.output_item.added",
+            "<provider-defined>",
+            "response.output_item.done",
+            "response.completed",
+        ],
+    },
+    "unknown_future_kind": {
+        "added": "unknown.future_event",
+        "delta": "unknown.future_delta",
+        "done_field": "done",
+        "done": "unknown.future_done",
+        "item_done": "unknown.future_done",
+        "terminal": "response.completed",
+        "event_order": [
+            "unknown.future_event",
+            "unknown.future_delta",
+            "unknown.future_done",
+            "response.completed",
+        ],
+    },
+}
+
+
+def _validate_structural_stream_example(
+    family_name: str,
+    streaming: Any,
+    *,
+    context: str,
+) -> None:
+    schema = STRUCTURAL_STREAM_SCHEMAS.get(family_name)
+    if schema is None:
+        raise ValueError(f"{context} has an unknown stream schema")
+    if not isinstance(streaming, dict):
+        raise ValueError(f"{context}.streaming must be an object")
+    for field in ("added", "delta", "terminal"):
+        if streaming.get(field) != schema[field]:
+            raise ValueError(f"{context}.streaming.{field} does not match the canonical SSE schema")
+    done_field = schema["done_field"]
+    if streaming.get(done_field) != schema["done"]:
+        raise ValueError(f"{context}.streaming.{done_field} does not match the canonical SSE schema")
+    if streaming.get("done") != schema["item_done"]:
+        raise ValueError(f"{context}.streaming.done does not match the canonical SSE schema")
+    if streaming.get("event_order") != schema["event_order"]:
+        raise ValueError(f"{context}.streaming.event_order does not match the canonical SSE schema")
 
 
 def _validate_structural_stream_contract(
@@ -883,6 +1019,11 @@ def _validate_structural_stream_contract(
     for family_name in STRUCTURAL_FAMILIES:
         example = examples[family_name]
         streaming = example.get("streaming")
+        _validate_structural_stream_example(
+            family_name,
+            streaming,
+            context=f"wire runtime family {family_name}",
+        )
         if not isinstance(streaming, dict):
             raise ValueError(f"wire runtime streaming example is malformed for {family_name}")
         event_order = streaming.get("event_order")

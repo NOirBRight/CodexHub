@@ -503,6 +503,57 @@ def test_build_inventory_rejects_source_contract_schema_mutations(
         )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "plain_call_item_id_empty",
+        "plain_history_call_id_empty",
+        "namespace_owner_empty",
+        "plain_added_event",
+        "custom_delta_event",
+        "namespace_done_event",
+        "tool_search_added_event",
+        "unknown_event_label",
+    ],
+)
+def test_build_inventory_rejects_source_contract_identity_and_sse_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "plain_call_item_id_empty":
+        examples["plain_function"]["call"]["item_id"] = ""
+    elif mutation == "plain_history_call_id_empty":
+        examples["plain_function"]["history"]["call_id"] = ""
+    elif mutation == "namespace_owner_empty":
+        examples["namespace"]["call"]["namespace"] = ""
+    elif mutation == "plain_added_event":
+        examples["plain_function"]["streaming"]["added"] = "bogus.event"
+    elif mutation == "custom_delta_event":
+        examples["custom_freeform"]["streaming"]["delta"] = "bogus.event"
+    elif mutation == "namespace_done_event":
+        examples["namespace"]["streaming"]["arguments_done"] = "bogus.event"
+    elif mutation == "tool_search_added_event":
+        examples["client_executed_tool_discovery"]["streaming"]["added"] = (
+            "response.output_item.added"
+        )
+    elif mutation == "unknown_event_label":
+        examples["unknown_future_kind"]["streaming"]["event_order"][0] = "bogus.event"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="(?:non-empty string|canonical SSE)"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
 def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root() -> None:
     module = load_inventory_module()
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
@@ -512,6 +563,12 @@ def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root
 
     assert report["reconciled"] is False
     assert any("canonical family schema" in mismatch for mismatch in report["mismatches"])
+
+    id_mutation = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    id_mutation["declaration_families"][0]["representative"]["call"]["item_id"] = ""
+    id_report = module.reconcile_inventory(id_mutation)
+    assert id_report["reconciled"] is False
+    assert any("non-empty string" in mismatch for mismatch in id_report["mismatches"])
 
 
 def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
