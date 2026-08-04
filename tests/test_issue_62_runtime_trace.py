@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = ROOT / "docs" / "evidence" / "issue-62" / "current-codexhub-thread-tool-surface.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 WIRE_FIXTURE = ROOT / "docs" / "evidence" / "issue-62" / "codexhub-runtime-wire-fixture.json"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
 REPLAY_SCRIPT = ROOT / "scripts" / "check-codex-thread-tool-surface.ps1"
@@ -57,11 +58,9 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
 
     assert trace["schema_version"] == 4
     assert "session_id" not in trace["source"]
-    assert trace["source"]["cli_version"] == "0.146.0"
-    assert trace["source"]["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
-    assert trace["source"]["cli_source_commit_status"] == "published_attested"
-    assert trace["planner_gates"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
-    assert trace["planner_gates"]["cli_source_tag"] == "rust-v0.146.0"
+    assert trace["captured_at"] == "2026-07-12T14:57:55+08:00"
+    assert trace["source"]["cli_version"] == "0.144.0-alpha.4"
+    assert trace["planner_gates"]["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
     assert len(trace["registered_codex_app_tools"]) == 15
     required = set(trace["required_thread_tools"])
     assert required <= set(trace["registered_codex_app_tools"])
@@ -108,7 +107,12 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
     assert snapshot["model_entry_supports_search_tool"] is True
     assert len(snapshot["sha256"]) == 64
 
-    families = trace["planner_gates"]["declaration_families"]
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    assert source_contract["capture_status"] == "not_observed"
+    assert source_contract["qualification_status"] == "unqualified"
+    assert source_contract["provenance"]["cli_version"] == "0.146.0"
+    assert source_contract["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+    families = source_contract["runtime_wire_surface"]["declaration_families"]
     assert [family["family"] for family in families] == [
         "plain_function",
         "custom_freeform",
@@ -123,9 +127,8 @@ def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
 
     assert wire["route"]["upstream_route"] == "official"
-    assert wire["provenance"]["cli_version"] == "0.146.0"
-    assert wire["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
-    assert wire["provenance"]["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+    assert wire["provenance"]["cli_version"] == "0.144.0-alpha.4"
+    assert wire["provenance"]["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
     assert "no full request or response body fingerprint" in wire["evidence_limit"][
         "transport_observation"
     ]
@@ -158,7 +161,7 @@ def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
         item.get("tag") == "unknown"
         for item in wire["response"]["non_streaming"]["response_items"]
     )
-    assert wire["runtime_wire_surface"]["declaration_family_order"] == [
+    assert json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))["runtime_wire_surface"]["declaration_family_order"] == [
         "plain_function",
         "custom_freeform",
         "namespace",
@@ -166,7 +169,7 @@ def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
         "selected_provider_hosted",
         "unknown_future_kind",
     ]
-    hosted = wire["runtime_wire_surface"]["declaration_family_examples"][
+    hosted = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))["runtime_wire_surface"]["declaration_family_examples"][
         "selected_provider_hosted"
     ]
     assert hosted["provider_scope"] == "selected_provider_only"
@@ -288,8 +291,10 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
     audit["gate_classification"]["non_direct_states"] = "pass"
     trace_path = tmp_path / TRACE.name
     wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
     shutil.copyfile(TRACE, trace_path)
     shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(SOURCE_CONTRACT, source_contract_path)
     audit_path = tmp_path / "read-only-gate-audit.json"
     audit_path.write_text(
         json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -313,6 +318,8 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
             "Bypass",
             "-File",
             str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
             "-TracePath",
             str(trace_path),
             "-WireFixturePath",

@@ -1,5 +1,19 @@
 {
   "capture_kind": "sanitized_bounded_read_only_audit",
+  "provenance": {
+    "capture_status": "not_observed",
+    "cli_version": "0.146.0",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_source_commit_status": "published_attested",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
+    "historical_capture": {
+      "captured_at": "2026-07-12T14:57:55+08:00",
+      "cli_version": "0.144.0-alpha.4",
+      "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+    }
+  },
   "gate_classification": {
     "choice_controls": "observed",
     "clean_cold_start_current_binding": "live_control_required",

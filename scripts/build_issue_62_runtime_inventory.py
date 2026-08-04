@@ -43,6 +43,13 @@ DEFAULT_CANDIDATE_SOURCE_COMMIT = None
 CLI_SOURCE_TAG = "rust-v0.146.0"
 CLI_SOURCE_COMMIT_STATUS = "published_attested"
 CLI_BINARY_SHA256 = "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+CLI_SOURCE_COMMIT = "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+CANDIDATE_REVISION = "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+HISTORICAL_CLI_VERSION = "0.144.0-alpha.4"
+HISTORICAL_SOURCE_COMMIT = "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+DEFAULT_SOURCE_CONTRACT = Path(
+    "docs/evidence/issue-62/codex-0.146-source-contract.json"
+)
 STRUCTURAL_FAMILIES = (
     "plain_function",
     "custom_freeform",
@@ -604,21 +611,137 @@ _STRUCTURAL_RULES = {
     },
 }
 
+STRUCTURAL_EVIDENCE_SOURCES = {
+    "plain_function": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.plain_function",
+    "custom_freeform": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.custom_freeform",
+    "namespace": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.namespace",
+    "client_executed_tool_discovery": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.client_executed_tool_discovery",
+    "selected_provider_hosted": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.selected_provider_hosted",
+    "unknown_future_kind": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.unknown_future_kind",
+}
+
+STRUCTURAL_STREAM_DONE_EVENTS = {
+    "plain_function": ("arguments_done", "response.function_call_arguments.done"),
+    "custom_freeform": ("input_done", "response.custom_tool_call_input.done"),
+    "namespace": ("arguments_done", "response.function_call_arguments.done"),
+    "unknown_future_kind": ("done", "unknown.future_done"),
+}
+
+
+def _validate_structural_stream_contract(
+    *, wire: dict[str, Any], examples: dict[str, Any]
+) -> None:
+    """Require family SSE examples to retain done-before-terminal ordering."""
+
+    response_shape = wire.get("runtime_wire_surface", {}).get("response_shape", {})
+    stream_event_order = response_shape.get("stream_event_order")
+    if not isinstance(stream_event_order, list) or not all(
+        isinstance(event, str) and event for event in stream_event_order
+    ):
+        raise ValueError("wire response_shape.stream_event_order must be a non-empty string array")
+    if "response.completed" not in stream_event_order:
+        raise ValueError("wire response_shape.stream_event_order is missing response.completed")
+    completed_index = stream_event_order.index("response.completed")
+    output_done_index = (
+        stream_event_order.index("response.output_item.done")
+        if "response.output_item.done" in stream_event_order
+        else None
+    )
+    for family_name, (_, event) in STRUCTURAL_STREAM_DONE_EVENTS.items():
+        if event.startswith("unknown."):
+            continue
+        if event not in stream_event_order:
+            raise ValueError(
+                f"wire response_shape.stream_event_order is missing {event} for {family_name}"
+            )
+        event_index = stream_event_order.index(event)
+        if event_index >= completed_index or (
+            output_done_index is not None and event_index >= output_done_index
+        ):
+            raise ValueError(f"wire stream event {event} must precede terminal/item completion")
+
+    for family_name in STRUCTURAL_FAMILIES:
+        example = examples[family_name]
+        streaming = example.get("streaming")
+        if not isinstance(streaming, dict):
+            raise ValueError(f"wire runtime streaming example is malformed for {family_name}")
+        event_order = streaming.get("event_order")
+        if not isinstance(event_order, list) or not all(
+            isinstance(event, str) and event for event in event_order
+        ):
+            raise ValueError(f"wire runtime streaming event_order is invalid for {family_name}")
+        if streaming.get("terminal") != "response.completed" or event_order[-1] != "response.completed":
+            raise ValueError(f"wire runtime streaming terminal ordering is invalid for {family_name}")
+        if family_name != "unknown_future_kind" and (
+            "response.output_item.done" not in event_order
+            or event_order.index("response.output_item.done") >= len(event_order) - 1
+        ):
+            raise ValueError(f"wire runtime streaming item completion is invalid for {family_name}")
+        done_spec = STRUCTURAL_STREAM_DONE_EVENTS.get(family_name)
+        if done_spec is not None:
+            field, event = done_spec
+            if streaming.get(field) != event or event not in event_order:
+                raise ValueError(
+                    f"wire runtime streaming family done event is missing for {family_name}"
+                )
+            if event_order.index(event) >= event_order.index("response.completed"):
+                raise ValueError(f"wire runtime streaming family done event follows terminal for {family_name}")
+        if family_name == "client_executed_tool_discovery":
+            if event_order != ["response.output_item.done", "response.completed"]:
+                raise ValueError("tool_search_call SSE must contain only item completion and terminal events")
+            if streaming.get("added") is not None or streaming.get("delta") is not None:
+                raise ValueError("tool_search_call SSE must not claim a text delta or item-added event")
+
+
+def _validate_structural_evidence_pointers(
+    *,
+    source_contract: dict[str, Any],
+    wire: dict[str, Any],
+    audit: dict[str, Any],
+    declaration_families: list[dict[str, Any]],
+) -> None:
+    """Require every declaration-family evidence source to resolve in its fixture."""
+
+    documents = {
+        "codex-0.146-source-contract.json": source_contract,
+        "codexhub-runtime-wire-fixture.json": wire,
+        "read-only-gate-audit.json": audit,
+    }
+    for entry in declaration_families:
+        family = entry.get("family")
+        source = entry.get("evidence_source")
+        expected = STRUCTURAL_EVIDENCE_SOURCES.get(family)
+        if expected is None or source != expected:
+            raise ValueError(
+                f"declaration-family evidence source is invalid for {family!r}: {source!r}"
+            )
+        filename, pointer_text = source.split("#", 1)
+        document = documents.get(filename)
+        if document is None:
+            raise ValueError(f"declaration-family evidence fixture is unknown: {filename}")
+        try:
+            _resolve_fixture_pointer(document, tuple(pointer_text.split(".")))
+        except KeyError as exc:
+            raise ValueError(
+                f"declaration-family evidence pointer for {family} is missing: "
+                f"{filename}#{exc.args[0]}"
+            ) from exc
+
 
 def _build_structural_inventory(
-    *, trace: dict[str, Any], wire: dict[str, Any], audit: dict[str, Any]
+    *,
+    source_contract: dict[str, Any],
+    trace: dict[str, Any],
+    wire: dict[str, Any],
+    audit: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Join exact 0.146 planner family records with sanitized wire examples."""
+    """Join the unobserved 0.146 source contract with sanitized examples."""
 
-    audit_families = (
-        audit.get("model_visible_request_plan", {}).get("declaration_families", [])
+    families = source_contract.get("runtime_wire_surface", {}).get(
+        "declaration_families", []
     )
-    trace_families = trace.get("planner_gates", {}).get("declaration_families", [])
-    if audit_families and trace_families and audit_families != trace_families:
-        raise ValueError("runtime planner declaration families contradict across trace and audit")
-    families = audit_families or trace_families
     if not isinstance(families, list):
-        raise ValueError("runtime planner declaration_families must be an array")
+        raise ValueError("source contract declaration_families must be an array")
     by_family: dict[str, dict[str, Any]] = {}
     for family in families:
         if not isinstance(family, dict) or not isinstance(family.get("family"), str):
@@ -635,8 +758,8 @@ def _build_structural_inventory(
             f"missing={missing!r} extra={extra!r}"
         )
 
-    examples = (
-        wire.get("runtime_wire_surface", {}).get("declaration_family_examples", {})
+    examples = source_contract.get("runtime_wire_surface", {}).get(
+        "declaration_family_examples", {}
     )
     if not isinstance(examples, dict):
         raise ValueError("wire runtime declaration_family_examples must be an object")
@@ -646,12 +769,31 @@ def _build_structural_inventory(
         example = examples.get(family_name)
         if not isinstance(example, dict):
             raise ValueError(f"wire runtime example missing for {family_name}")
-        required_example_parts = {"declaration", "call", "result", "history", "streaming"}
+        required_example_parts = {
+            "declaration",
+            "call",
+            "result",
+            "history",
+            "streaming",
+            "terminal",
+            "error",
+            "loss_boundary",
+        }
         if not required_example_parts.issubset(example):
             missing = sorted(required_example_parts - set(example))
             raise ValueError(
                 f"wire runtime example for {family_name} is missing {missing!r}"
             )
+        if not isinstance(example.get("terminal"), dict) or example["terminal"].get(
+            "classification"
+        ) not in {"not_observed", "unqualified"}:
+            raise ValueError(f"runtime terminal classification is invalid for {family_name}")
+        if not isinstance(example.get("error"), dict) or example["error"].get(
+            "classification"
+        ) not in {"not_observed", "unqualified"}:
+            raise ValueError(f"runtime error classification is invalid for {family_name}")
+        if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
+            raise ValueError(f"runtime loss boundary is missing for {family_name}")
         rule = _STRUCTURAL_RULES[family_name]
         if family.get("executor") != rule["executor"]:
             raise ValueError(
@@ -662,6 +804,24 @@ def _build_structural_inventory(
                 raise ValueError("hosted declaration is not bound to the selected Provider")
             if example.get("cross_provider_proxy") != "forbidden":
                 raise ValueError("hosted declaration permits a cross-Provider proxy")
+        if family_name in {
+            "plain_function",
+            "custom_freeform",
+            "namespace",
+            "client_executed_tool_discovery",
+        }:
+            call = example["call"]
+            result = example["result"]
+            history = example["history"]
+            if not all(isinstance(part, dict) for part in (call, result, history)):
+                raise ValueError(f"runtime identity sections are malformed for {family_name}")
+            if (
+                call.get("item_id") != history.get("call_item_id")
+                or result.get("item_id") != history.get("output_item_id")
+                or call.get("call_id") != result.get("call_id")
+                or call.get("call_id") != history.get("call_id")
+            ):
+                raise ValueError(f"runtime call/result/history IDs do not reconcile for {family_name}")
         output.append(
             {
                 "family": family_name,
@@ -674,14 +834,17 @@ def _build_structural_inventory(
                 "optional_rule": rule["optional_rule"],
                 "required_rule": rule["required_rule"],
                 "loss_boundary": family.get("loss_boundary"),
-                "evidence_source": (
-                    "read-only-gate-audit.json#model_visible_request_plan.declaration_families"
-                    if family_name != "unknown_future_kind"
-                    else "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future"
-                ),
+                "evidence_source": STRUCTURAL_EVIDENCE_SOURCES[family_name],
                 "representative": example,
             }
         )
+    _validate_structural_stream_contract(wire=source_contract, examples=examples)
+    _validate_structural_evidence_pointers(
+        source_contract=source_contract,
+        wire=wire,
+        audit=audit,
+        declaration_families=output,
+    )
     return output
 
 
@@ -695,7 +858,16 @@ def _structural_inventory_mismatches(value: Any) -> list[str]:
         mismatches.append(
             "declaration_families must contain exactly the six known families"
         )
-    required_example_parts = {"declaration", "call", "result", "history", "streaming"}
+    required_example_parts = {
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "loss_boundary",
+    }
     for index, family_name in enumerate(STRUCTURAL_FAMILIES):
         if index >= len(value):
             break
@@ -720,11 +892,7 @@ def _structural_inventory_mismatches(value: Any) -> list[str]:
         for field in ("selected_protocol_disposition", "optional_rule", "required_rule"):
             if entry.get(field) != rule[field]:
                 mismatches.append(f"{prefix}.{field} does not match the family rule")
-        expected_source = (
-            "read-only-gate-audit.json#model_visible_request_plan.declaration_families"
-            if family_name != "unknown_future_kind"
-            else "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future"
-        )
+        expected_source = STRUCTURAL_EVIDENCE_SOURCES[family_name]
         if entry.get("evidence_source") != expected_source:
             mismatches.append(f"{prefix}.evidence_source does not match the family source")
         representative = entry.get("representative")
@@ -733,6 +901,95 @@ def _structural_inventory_mismatches(value: Any) -> list[str]:
             continue
         if not required_example_parts.issubset(representative):
             mismatches.append(f"{prefix}.representative is missing a wire example section")
+        terminal = representative.get("terminal")
+        if not isinstance(terminal, dict):
+            mismatches.append(f"{prefix}.representative.terminal must be an object")
+        else:
+            if terminal.get("event") != "response.completed":
+                mismatches.append(
+                    f"{prefix}.representative.terminal.event must be response.completed"
+                )
+            if terminal.get("classification") not in {"not_observed", "unqualified"}:
+                mismatches.append(
+                    f"{prefix}.representative.terminal.classification is invalid"
+                )
+        error = representative.get("error")
+        if not isinstance(error, dict):
+            mismatches.append(f"{prefix}.representative.error must be an object")
+        else:
+            if error.get("event") != "response.failed":
+                mismatches.append(
+                    f"{prefix}.representative.error.event must be response.failed"
+                )
+            if error.get("classification") not in {"not_observed", "unqualified"}:
+                mismatches.append(
+                    f"{prefix}.representative.error.classification is invalid"
+                )
+        if not isinstance(representative.get("loss_boundary"), str) or not representative[
+            "loss_boundary"
+        ]:
+            mismatches.append(f"{prefix}.representative.loss_boundary is missing or blank")
+        elif representative["loss_boundary"] != entry.get("loss_boundary"):
+            mismatches.append(
+                f"{prefix}.representative.loss_boundary does not match the family boundary"
+            )
+        streaming = representative.get("streaming")
+        if not isinstance(streaming, dict):
+            mismatches.append(f"{prefix}.representative.streaming must be an object")
+        else:
+            event_order = streaming.get("event_order")
+            if not isinstance(event_order, list) or not event_order:
+                mismatches.append(f"{prefix}.representative.streaming.event_order is invalid")
+            elif streaming.get("terminal") != "response.completed" or event_order[-1] != "response.completed":
+                mismatches.append(
+                    f"{prefix}.representative.streaming terminal ordering is invalid"
+                )
+            else:
+                done_spec = STRUCTURAL_STREAM_DONE_EVENTS.get(family_name)
+                if family_name != "unknown_future_kind" and (
+                    "response.output_item.done" not in event_order
+                    or event_order.index("response.output_item.done") >= len(event_order) - 1
+                ):
+                    mismatches.append(
+                        f"{prefix}.representative.streaming item completion is invalid"
+                    )
+                if done_spec is not None:
+                    field, event = done_spec
+                    if streaming.get(field) != event or event not in event_order:
+                        mismatches.append(
+                            f"{prefix}.representative.streaming family done event is missing"
+                        )
+                    elif event_order.index(event) >= event_order.index("response.completed"):
+                        mismatches.append(
+                            f"{prefix}.representative.streaming family done event follows terminal"
+                        )
+                if family_name == "client_executed_tool_discovery":
+                    if event_order != ["response.output_item.done", "response.completed"]:
+                        mismatches.append(
+                            f"{prefix}.representative.streaming tool-search order is invalid"
+                        )
+                    if streaming.get("added") is not None or streaming.get("delta") is not None:
+                        mismatches.append(
+                            f"{prefix}.representative.streaming tool-search claims text events"
+                        )
+        if family_name in {
+            "plain_function",
+            "custom_freeform",
+            "namespace",
+            "client_executed_tool_discovery",
+        }:
+            call = representative.get("call")
+            result = representative.get("result")
+            history = representative.get("history")
+            if not all(isinstance(part, dict) for part in (call, result, history)):
+                mismatches.append(f"{prefix}.representative identity sections are malformed")
+            elif (
+                call.get("item_id") != history.get("call_item_id")
+                or result.get("item_id") != history.get("output_item_id")
+                or call.get("call_id") != result.get("call_id")
+                or call.get("call_id") != history.get("call_id")
+            ):
+                mismatches.append(f"{prefix}.representative call/result/history IDs do not reconcile")
         if family_name == "selected_provider_hosted":
             if representative.get("provider_scope") != "selected_provider_only":
                 mismatches.append(f"{prefix}.representative is not selected-provider scoped")
@@ -1264,36 +1521,50 @@ def _build_qualification(
     }
 
 
+def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]:
+    if (
+        source_contract.get("schema_version") != 1
+        or source_contract.get("fixture_kind") != "codex_cli_source_contract"
+        or source_contract.get("capture_status") != "not_observed"
+        or source_contract.get("qualification_status") != "unqualified"
+        or source_contract.get("captured_at") is not None
+    ):
+        raise ValueError("Codex 0.146 source contract must remain not_observed and unqualified")
+    provenance = source_contract.get("provenance", {})
+    expected = {
+        "cli_version": DEFAULT_CLI_FLOOR,
+        "source_commit": CLI_SOURCE_COMMIT,
+        "cli_source_tag": CLI_SOURCE_TAG,
+        "cli_source_commit_status": CLI_SOURCE_COMMIT_STATUS,
+        "cli_binary_sha256": CLI_BINARY_SHA256,
+        "candidate_revision": CANDIDATE_REVISION,
+    }
+    if any(provenance.get(field) != value for field, value in expected.items()):
+        raise ValueError("Codex 0.146 source contract provenance is invalid")
+    return provenance
+
+
 def _validate_candidate_binding(
     *,
+    source_contract_data: dict[str, Any],
     trace_data: dict[str, Any],
     wire_data: dict[str, Any],
+    audit_data: dict[str, Any],
     cli_version_floor: str,
     candidate_cli_version: str | None,
     candidate_source_commit: str | None,
 ) -> tuple[dict[str, Any], str]:
     _validate_supported_floor(cli_version_floor)
+    contract_provenance = _validate_source_contract(source_contract_data)
     source = trace_data.get("source", {})
     planner_gates = trace_data.get("planner_gates", {})
     trace_cli_version = source.get("cli_version")
     trace_source_commit = planner_gates.get("source_commit")
     trace_capture_id = source.get("capture_id")
-    trace_candidate_revision = source.get("candidate_revision")
-    trace_binary_sha256 = source.get("cli_binary_sha256")
-    trace_source_status = source.get("cli_source_commit_status")
-    trace_source_tag = planner_gates.get("cli_source_tag")
-    if (
-        not trace_cli_version
-        or not trace_source_commit
-        or not trace_capture_id
-        or not trace_candidate_revision
-        or not trace_binary_sha256
-        or not trace_source_status
-        or not trace_source_tag
-    ):
+    if not trace_cli_version or not trace_source_commit or not trace_capture_id:
         raise ValueError(
-            "trace evidence is missing source.cli_version, source.capture_id, "
-            "source candidate provenance, or planner_gates.source_commit"
+            "historical trace evidence is missing source.cli_version, "
+            "source.capture_id, or planner_gates.source_commit"
         )
     if not isinstance(trace_cli_version, str):
         raise ValueError("trace source.cli_version must be a string")
@@ -1301,47 +1572,27 @@ def _validate_candidate_binding(
         _version_key(trace_cli_version)
     except ValueError as exc:
         raise ValueError("trace source.cli_version is malformed") from exc
-    if not isinstance(trace_source_commit, str) or not re.fullmatch(
-        r"[0-9a-f]{40}", trace_source_commit
-    ):
+    if trace_cli_version != HISTORICAL_CLI_VERSION or trace_source_commit != HISTORICAL_SOURCE_COMMIT:
         raise ValueError(
-            "trace planner_gates.source_commit must be a lowercase 40-character SHA-1"
-        )
-    if not isinstance(trace_candidate_revision, str) or not re.fullmatch(
-        r"[0-9a-f]{40}", trace_candidate_revision
-    ):
-        raise ValueError("trace source.candidate_revision must be a lowercase 40-character SHA-1")
-    if not isinstance(trace_binary_sha256, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", trace_binary_sha256
-    ):
-        raise ValueError("trace source.cli_binary_sha256 must be a lowercase 64-character SHA-256")
-    if trace_binary_sha256 != CLI_BINARY_SHA256:
-        raise ValueError(
-            "trace source.cli_binary_sha256 does not match Codex CLI 0.146.0"
-        )
-    if trace_source_status not in {"published_attested", "not_published_by_registry"}:
-        raise ValueError("trace source.cli_source_commit_status is invalid")
-    if trace_source_tag != CLI_SOURCE_TAG:
-        raise ValueError(
-            f"trace planner_gates.cli_source_tag must bind to {CLI_SOURCE_TAG}"
+            "trace evidence must retain the historical Codex 0.144.0-alpha.4 provenance"
         )
 
     if candidate_cli_version is None:
-        candidate_cli_version = trace_cli_version
-    elif candidate_cli_version != trace_cli_version:
+        candidate_cli_version = contract_provenance["cli_version"]
+    elif candidate_cli_version != contract_provenance["cli_version"]:
         raise ValueError(
-            "candidate CLI version does not match trace evidence: "
-            f"requested={candidate_cli_version!r} observed={trace_cli_version!r}"
+            "candidate CLI version does not match the source contract: "
+            f"requested={candidate_cli_version!r} observed={contract_provenance['cli_version']!r}"
         )
     if not isinstance(candidate_cli_version, str):
         raise ValueError("candidate CLI version must be a string")
 
     if candidate_source_commit is None:
-        candidate_source_commit = trace_source_commit
-    elif candidate_source_commit != trace_source_commit:
+        candidate_source_commit = contract_provenance["source_commit"]
+    elif candidate_source_commit != contract_provenance["source_commit"]:
         raise ValueError(
-            "candidate source commit does not match trace evidence: "
-            f"requested={candidate_source_commit!r} observed={trace_source_commit!r}"
+            "candidate source commit does not match the source contract: "
+            f"requested={candidate_source_commit!r} observed={contract_provenance['source_commit']!r}"
         )
 
     if not isinstance(candidate_source_commit, str) or not re.fullmatch(
@@ -1398,12 +1649,14 @@ def _validate_candidate_binding(
         wire_provenance.get("cli_version") != trace_cli_version
         or wire_provenance.get("source_commit") != trace_source_commit
         or wire_provenance.get("capture_id") != trace_capture_id
-        or wire_provenance.get("candidate_revision") != trace_candidate_revision
-        or wire_provenance.get("cli_binary_sha256") != trace_binary_sha256
-        or wire_provenance.get("cli_source_commit_status") != trace_source_status
-        or wire_provenance.get("cli_source_tag") != trace_source_tag
     ):
-        raise ValueError("wire provenance is not bound to the trace candidate")
+        raise ValueError("historical wire provenance is not bound to the historical trace")
+    audit_provenance = audit_data.get("provenance", {})
+    if (
+        audit_provenance.get("capture_status") != "not_observed"
+        or any(audit_provenance.get(field) != value for field, value in contract_provenance.items())
+    ):
+        raise ValueError("read-only audit provenance is not bound to the 0.146 source contract")
     catalog_snapshot = (
         trace_data.get("planner_gates", {})
         .get("catalog_source", {})
@@ -1439,16 +1692,17 @@ def _validate_candidate_binding(
         "catalog_snapshot_sha256": wire_route["catalog_snapshot_sha256"],
         "catalog_model_entry_id": wire_route["catalog_model_entry_id"],
         "route_behavior_profile": trace_route.get("behavior_profile"),
-        "candidate_revision": trace_candidate_revision,
-        "cli_binary_sha256": trace_binary_sha256,
-        "cli_source_commit_status": trace_source_status,
-        "cli_source_tag": trace_source_tag,
+        "candidate_revision": contract_provenance["candidate_revision"],
+        "cli_binary_sha256": contract_provenance["cli_binary_sha256"],
+        "cli_source_commit_status": contract_provenance["cli_source_commit_status"],
+        "cli_source_tag": contract_provenance["cli_source_tag"],
     }
     return identity, status
 
 
 def build_inventory(
     *,
+    source_contract: Path = DEFAULT_SOURCE_CONTRACT,
     trace: Path,
     wire_fixture: Path,
     audit: Path,
@@ -1460,6 +1714,7 @@ def build_inventory(
     trace_data = _load_json(trace)
     wire_data = _load_json(wire_fixture)
     audit_data = _load_json(audit)
+    source_contract_data = _load_json(source_contract)
     wire_fixture_sha256 = _sha256_file(wire_fixture)
     if (
         trace_data.get("schema_version") != 4
@@ -1469,6 +1724,7 @@ def build_inventory(
         or audit_data.get("capture_kind") != "sanitized_bounded_read_only_audit"
     ):
         raise ValueError("Issue #62 evidence schema identity is invalid")
+    _validate_source_contract(source_contract_data)
     _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
 
     items: list[dict[str, Any]] = []
@@ -1498,13 +1754,16 @@ def build_inventory(
         items, unknown_tagged_source_count=unknown_tagged_source_count
     )
     structural_families = _build_structural_inventory(
+        source_contract=source_contract_data,
         trace=trace_data,
         wire=wire_data,
         audit=audit_data,
     )
     candidate_identity, candidate_version_status = _validate_candidate_binding(
+        source_contract_data=source_contract_data,
         trace_data=trace_data,
         wire_data=wire_data,
+        audit_data=audit_data,
         cli_version_floor=cli_version_floor,
         candidate_cli_version=candidate_cli_version,
         candidate_source_commit=candidate_source_commit,
@@ -1516,6 +1775,10 @@ def build_inventory(
             "sha256": wire_fixture_sha256,
         },
         "audit": {"file": audit.name, "sha256": _sha256_file(audit)},
+        "source_contract": {
+            "file": source_contract.name,
+            "sha256": _sha256_file(source_contract),
+        },
     }
     candidate_identity["evidence_manifest_sha256"] = _evidence_manifest_sha256(
         evidence_binding
@@ -1768,7 +2031,7 @@ def reconcile_inventory(
     if not isinstance(evidence_binding, dict):
         mismatches.append("evidence_binding must be an object")
         evidence_binding = {}
-    for name in ("trace", "wire_fixture", "audit"):
+    for name in ("source_contract", "trace", "wire_fixture", "audit"):
         entry = evidence_binding.get(name, {})
         if not isinstance(entry, dict) or not entry.get("file") or not re.fullmatch(
             r"[0-9a-f]{64}", str(entry.get("sha256", ""))
@@ -1777,7 +2040,7 @@ def reconcile_inventory(
 
     if evidence_binding and all(
         isinstance(evidence_binding.get(name), dict)
-        for name in ("trace", "wire_fixture", "audit")
+        for name in ("source_contract", "trace", "wire_fixture", "audit")
     ):
         manifest = _evidence_manifest_sha256(evidence_binding)
         if candidate_identity.get("evidence_manifest_sha256") != manifest:
@@ -1785,7 +2048,7 @@ def reconcile_inventory(
 
     if evidence_root is not None and not mismatches:
         bound_paths: dict[str, Path] = {}
-        for name in ("trace", "wire_fixture", "audit"):
+        for name in ("source_contract", "trace", "wire_fixture", "audit"):
             entry = evidence_binding[name]
             relative_name = str(entry["file"])
             relative_path = Path(relative_name)
@@ -1805,7 +2068,11 @@ def reconcile_inventory(
             trace_data = _load_json(bound_paths["trace"])
             wire_data = _load_json(bound_paths["wire_fixture"])
             audit_data = _load_json(bound_paths["audit"])
+            source_contract_data = _load_json(bound_paths["source_contract"])
             if (
+                source_contract_data.get("schema_version") != 1
+                or source_contract_data.get("fixture_kind") != "codex_cli_source_contract"
+                or
                 trace_data.get("schema_version") != 4
                 or wire_data.get("schema_version") != 1
                 or wire_data.get("fixture_kind") != "sanitized_artifact_backed_replay"
@@ -1815,14 +2082,23 @@ def reconcile_inventory(
                 mismatches.append("mutation: bound evidence schema identity is invalid")
                 return {"reconciled": False, "mismatches": mismatches}
             try:
+                _validate_source_contract(source_contract_data)
+                _validate_structural_evidence_pointers(
+                    source_contract=source_contract_data,
+                    wire=wire_data,
+                    audit=audit_data,
+                    declaration_families=inventory.get("declaration_families", []),
+                )
                 _validate_core_evidence_pointers(wire=wire_data, audit=audit_data)
             except ValueError as exc:
                 mismatches.append(f"mutation: bound evidence pointer validation failed: {exc}")
                 return {"reconciled": False, "mismatches": mismatches}
             try:
                 expected_identity, expected_status_from_evidence = _validate_candidate_binding(
+                    source_contract_data=source_contract_data,
                     trace_data=trace_data,
                     wire_data=wire_data,
+                    audit_data=audit_data,
                     cli_version_floor=str(inventory.get("cli_version_floor", "")),
                     candidate_cli_version=candidate_identity.get("cli_version"),
                     candidate_source_commit=candidate_identity.get("source_commit"),
@@ -1859,6 +2135,7 @@ def reconcile_inventory(
                         )
                 try:
                     generated_inventory = build_inventory(
+                        source_contract=bound_paths["source_contract"],
                         trace=bound_paths["trace"],
                         wire_fixture=bound_paths["wire_fixture"],
                         audit=bound_paths["audit"],
@@ -1929,6 +2206,11 @@ def reconcile_inventory(
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--source-contract",
+        type=Path,
+        default=DEFAULT_SOURCE_CONTRACT,
+    )
+    parser.add_argument(
         "--trace",
         type=Path,
         default=Path("docs/evidence/issue-62/current-codexhub-thread-tool-surface.json"),
@@ -1969,6 +2251,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_arg_parser().parse_args()
     inventory = build_inventory(
+        source_contract=args.source_contract,
         trace=args.trace,
         wire_fixture=args.wire_fixture,
         audit=args.audit,

@@ -1,4 +1,5 @@
 param(
+    [string]$SourceContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codex-0.146-source-contract.json'),
     [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
     [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
     [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
@@ -11,12 +12,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($path in @($TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
+foreach ($path in @($SourceContractPath, $TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Evidence file not found: $path"
     }
 }
 
+$sourceContract = Get-Content -Raw -LiteralPath $SourceContractPath | ConvertFrom-Json
 $trace = Get-Content -Raw -LiteralPath $TracePath | ConvertFrom-Json
 $wire = Get-Content -Raw -LiteralPath $WireFixturePath | ConvertFrom-Json
 $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
@@ -39,6 +41,7 @@ if ($null -eq $python) {
 } else {
     try {
         $generatorOutput = & $python.Source $inventoryGenerator `
+            --source-contract $SourceContractPath `
             --trace $TracePath `
             --wire-fixture $WireFixturePath `
             --audit $AuditPath `
@@ -675,19 +678,41 @@ if ([string]::IsNullOrWhiteSpace([string]$inventoryCandidate.cli_source_tag)) {
     Add-Mismatch 'inventory candidate CLI source tag is missing or blank'
 }
 if (
+    $sourceContract.schema_version -ne 1 -or
+    $sourceContract.fixture_kind -ne 'codex_cli_source_contract' -or
+    $sourceContract.capture_status -ne 'not_observed' -or
+    $sourceContract.qualification_status -ne 'unqualified' -or
+    $null -ne $sourceContract.captured_at -or
+    $sourceContract.provenance.cli_version -ne '0.146.0' -or
+    $sourceContract.provenance.source_commit -ne 'e363b08c9175ac1cbe5893615dd2cb9ddf95043b' -or
+    $sourceContract.provenance.cli_source_tag -ne 'rust-v0.146.0' -or
+    $sourceContract.provenance.cli_source_commit_status -ne 'published_attested' -or
+    $sourceContract.provenance.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb' -or
+    $sourceContract.provenance.candidate_revision -ne 'accab8ff6eb4d6ebd93cda84585fb5f6cb89da82' -or
     [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
     [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
 ) {
-    Add-Mismatch 'candidate trace/wire capture identity is missing'
+    Add-Mismatch 'source contract or historical trace/wire provenance is invalid'
 }
 if (
-    $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
-    $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
-    $inventoryCandidate.codex_source_commit -ne $trace.planner_gates.source_commit -or
-    $inventoryCandidate.candidate_revision -ne $trace.source.candidate_revision -or
-    $inventoryCandidate.cli_binary_sha256 -ne $trace.source.cli_binary_sha256 -or
-    $inventoryCandidate.cli_source_commit_status -ne $trace.source.cli_source_commit_status -or
-    $inventoryCandidate.cli_source_tag -ne $trace.planner_gates.cli_source_tag -or
+    $trace.source.cli_version -ne '0.144.0-alpha.4' -or
+    $trace.planner_gates.source_commit -ne '9e552e9d15ba52bed7077d5357f3e18e330f8f38' -or
+    $wire.provenance.cli_version -ne $trace.source.cli_version -or
+    $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
+    $inventoryCandidate.cli_version -ne $sourceContract.provenance.cli_version -or
+    $inventoryCandidate.source_commit -ne $sourceContract.provenance.source_commit -or
+    $inventoryCandidate.codex_source_commit -ne $sourceContract.provenance.source_commit -or
+    $inventoryCandidate.candidate_revision -ne $sourceContract.provenance.candidate_revision -or
+    $inventoryCandidate.cli_binary_sha256 -ne $sourceContract.provenance.cli_binary_sha256 -or
+    $inventoryCandidate.cli_source_commit_status -ne $sourceContract.provenance.cli_source_commit_status -or
+    $inventoryCandidate.cli_source_tag -ne $sourceContract.provenance.cli_source_tag -or
+    $audit.provenance.capture_status -ne 'not_observed' -or
+    $audit.provenance.cli_version -ne $sourceContract.provenance.cli_version -or
+    $audit.provenance.source_commit -ne $sourceContract.provenance.source_commit -or
+    $audit.provenance.candidate_revision -ne $sourceContract.provenance.candidate_revision -or
+    $audit.provenance.cli_binary_sha256 -ne $sourceContract.provenance.cli_binary_sha256 -or
+    $audit.provenance.cli_source_commit_status -ne $sourceContract.provenance.cli_source_commit_status -or
+    $audit.provenance.cli_source_tag -ne $sourceContract.provenance.cli_source_tag -or
     $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
     $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
     $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
@@ -710,12 +735,6 @@ if (
     $wire.route.catalog_snapshot_sha256 -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.sha256 -or
     $wire.route.catalog_model_entry_id -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_id -or
     $wire.route.catalog_model_supports_search_tool -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_supports_search_tool -or
-    $wire.provenance.cli_version -ne $trace.source.cli_version -or
-    $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
-    $wire.provenance.candidate_revision -ne $trace.source.candidate_revision -or
-    $wire.provenance.cli_binary_sha256 -ne $trace.source.cli_binary_sha256 -or
-    $wire.provenance.cli_source_commit_status -ne $trace.source.cli_source_commit_status -or
-    $wire.provenance.cli_source_tag -ne $trace.planner_gates.cli_source_tag -or
     $wire.provenance.capture_id -ne $trace.source.capture_id -or
     $wire.pre_gateway.model -ne $trace.source.model -or
     $wire.post_gateway.model -ne $trace.source.model
@@ -723,6 +742,7 @@ if (
     Add-Mismatch 'inventory candidate identity does not bind to the exact trace and wire candidate route'
 }
 $evidenceBindings = @{
+    source_contract = $SourceContractPath
     trace = $TracePath
     wire_fixture = $WireFixturePath
     audit = $AuditPath
@@ -739,7 +759,7 @@ foreach ($name in $evidenceBindings.Keys) {
         Add-Mismatch "inventory evidence binding $name hash does not match the input artifact"
     }
 }
-$manifestParts = foreach ($name in @('audit','trace','wire_fixture')) {
+$manifestParts = foreach ($name in @('audit','source_contract','trace','wire_fixture')) {
     $binding = $inventory.evidence_binding.$name
     '{0}:{1}:{2}' -f $name, $binding.file, $binding.sha256
 }

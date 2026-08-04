@@ -8,6 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_issue_62_runtime_inventory.py"
 INVENTORY = ROOT / "docs" / "evidence" / "issue-62" / "runtime-wire-inventory.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 TRACE = ROOT / "docs" / "evidence" / "issue-62" / "current-codexhub-thread-tool-surface.json"
 WIRE_FIXTURE = ROOT / "docs" / "evidence" / "issue-62" / "codexhub-runtime-wire-fixture.json"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
@@ -86,6 +87,8 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     }
     assert inventory["evidence_binding"]["trace"]["file"] == TRACE.name
     assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
+    assert inventory["evidence_binding"]["source_contract"]["file"] == SOURCE_CONTRACT.name
+    assert len(inventory["evidence_binding"]["source_contract"]["sha256"]) == 64
 
 
 def test_inventory_uses_only_final_capability_disposition_vocabulary() -> None:
@@ -150,6 +153,43 @@ def test_inventory_records_all_structural_declaration_families() -> None:
     assert by_family["selected_provider_hosted"]["executor"] == "selected_provider"
     assert by_family["selected_provider_hosted"]["representative"]["cross_provider_proxy"] == "forbidden"
     assert by_family["unknown_future_kind"]["selected_protocol_disposition"] == "omit"
+    assert by_family["plain_function"]["representative"]["streaming"]["arguments_done"] == "response.function_call_arguments.done"
+    assert by_family["custom_freeform"]["representative"]["streaming"]["input_done"] == "response.custom_tool_call_input.done"
+    assert by_family["client_executed_tool_discovery"]["representative"]["streaming"]["event_order"] == [
+        "response.output_item.done",
+        "response.completed",
+    ]
+    for entry in families:
+        representative = entry["representative"]
+        assert representative["terminal"]["classification"] in {"not_observed", "unqualified"}
+        assert representative["error"]["classification"] in {"not_observed", "unqualified"}
+        assert representative["loss_boundary"]
+
+
+def test_declaration_family_evidence_sources_resolve_to_bound_fixtures() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+
+    module._validate_structural_evidence_pointers(
+        source_contract=json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8")),
+        wire=wire,
+        audit=audit,
+        declaration_families=inventory["declaration_families"],
+    )
+
+    dangling = json.loads(json.dumps(inventory["declaration_families"]))
+    dangling[-1]["evidence_source"] = (
+        "codex-0.146-source-contract.json#runtime_wire_surface.unknown_future"
+    )
+    with pytest.raises(ValueError, match="evidence source is invalid"):
+        module._validate_structural_evidence_pointers(
+            source_contract=json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8")),
+            wire=wire,
+            audit=audit,
+            declaration_families=dangling,
+        )
 
 
 def test_every_item_carries_an_allowed_disposition() -> None:
@@ -357,6 +397,21 @@ def test_build_inventory_rejects_missing_capture_provenance(tmp_path: Path) -> N
             trace=trace_path,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
+        )
+
+
+def test_build_inventory_rejects_audit_candidate_provenance_drift(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["source_commit"] = "0" * 40
+    audit_path = tmp_path / AUDIT.name
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="audit provenance"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=audit_path,
         )
 
 

@@ -11,7 +11,7 @@
     "cli_version": "0.146.0",
     "codex_source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     "configured_provider_id": "custom",
-    "evidence_manifest_sha256": "1e7d07eed427926b69b7bf7d8113f9b3913e02b16be7ffbf17ee64ca58e3d94f",
+    "evidence_manifest_sha256": "b25da7980235919ddfe19f11d34e2aba2bb8b42ec7828398362e71f01ce79fa9",
     "inbound_format": "responses",
     "model": "gpt-5.6-sol",
     "route_behavior_profile": "official_codex_app_http_passthrough",
@@ -22,12 +22,12 @@
   "cli_version_floor": "0.146.0",
   "declaration_families": [
     {
-      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.plain_function",
       "executor": "codex_client",
       "family": "plain_function",
       "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-      "observation": "observed",
-      "observed": true,
+      "observation": "not_observed_source_contract_only",
+      "observed": false,
       "optional_rule": "preserve_when_supported_else_omit",
       "representative": {
         "call": {
@@ -41,11 +41,16 @@
           "parameters": "<redacted>",
           "type": "function"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": "call_function_001",
           "call_item_id": "item_call_function_001",
           "output_item_id": "item_output_function_001"
         },
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
         "result": {
           "call_id": "call_function_001",
           "item_id": "item_output_function_001",
@@ -54,9 +59,21 @@
         },
         "streaming": {
           "added": "response.output_item.added",
+          "arguments_done": "response.function_call_arguments.done",
           "delta": "response.function_call_arguments.delta",
           "done": "response.output_item.done",
+          "event_order": [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed"
+          ],
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "preserve_when_supported_else_required-but-unavailable",
@@ -65,12 +82,12 @@
       "wire_declaration_type": "function"
     },
     {
-      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.custom_freeform",
       "executor": "codex_client",
       "family": "custom_freeform",
       "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-      "observation": "observed",
-      "observed": true,
+      "observation": "not_observed_source_contract_only",
+      "observed": false,
       "optional_rule": "preserve_when_supported_else_omit",
       "representative": {
         "call": {
@@ -84,11 +101,16 @@
           "name": "custom_alpha",
           "type": "custom"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": "call_custom_001",
           "call_item_id": "item_call_custom_001",
           "output_item_id": "item_output_custom_001"
         },
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
         "result": {
           "call_id": "call_custom_001",
           "item_id": "item_output_custom_001",
@@ -99,7 +121,19 @@
           "added": "response.output_item.added",
           "delta": "response.custom_tool_call_input.delta",
           "done": "response.output_item.done",
+          "event_order": [
+            "response.output_item.added",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.output_item.done",
+            "response.completed"
+          ],
+          "input_done": "response.custom_tool_call_input.done",
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "preserve_when_supported_else_required-but-unavailable",
@@ -108,12 +142,12 @@
       "wire_declaration_type": "custom"
     },
     {
-      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.namespace",
       "executor": "codex_client",
       "family": "namespace",
       "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-      "observation": "observed",
-      "observed": true,
+      "observation": "not_observed_source_contract_only",
+      "observed": false,
       "optional_rule": "preserve_when_supported_else_omit",
       "representative": {
         "call": {
@@ -134,12 +168,17 @@
           ],
           "type": "namespace"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": "call_namespace_001",
           "call_item_id": "item_call_namespace_001",
           "namespace": "namespace_alpha",
           "output_item_id": "item_output_namespace_001"
         },
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
         "result": {
           "call_id": "call_namespace_001",
           "item_id": "item_output_namespace_001",
@@ -148,9 +187,21 @@
         },
         "streaming": {
           "added": "response.output_item.added",
+          "arguments_done": "response.function_call_arguments.done",
           "delta": "response.function_call_arguments.delta",
           "done": "response.output_item.done",
+          "event_order": [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed"
+          ],
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "preserve_when_supported_else_required-but-unavailable",
@@ -159,12 +210,12 @@
       "wire_declaration_type": "namespace"
     },
     {
-      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.client_executed_tool_discovery",
       "executor": "codex_client",
       "family": "client_executed_tool_discovery",
       "loss_boundary": "discovery request/result stays client-executed",
-      "observation": "observed_client_execution",
-      "observed": true,
+      "observation": "not_observed_source_contract_only",
+      "observed": false,
       "optional_rule": "preserve_client_execution_else_omit",
       "representative": {
         "call": {
@@ -179,12 +230,17 @@
           "parameters": "<redacted>",
           "type": "tool_search"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": "call_search_001",
           "call_item_id": "item_call_search_001",
           "executor": "codex_client",
           "output_item_id": "item_output_search_001"
         },
+        "loss_boundary": "discovery request/result stays client-executed",
         "result": {
           "call_id": "call_search_001",
           "execution": "client",
@@ -193,10 +249,18 @@
           "type": "tool_search_output"
         },
         "streaming": {
-          "added": "response.output_item.added",
-          "delta": "response.output_text.delta",
+          "added": null,
+          "delta": null,
           "done": "response.output_item.done",
+          "event_order": [
+            "response.output_item.done",
+            "response.completed"
+          ],
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "preserve_client_execution_else_required-but-unavailable",
@@ -205,11 +269,11 @@
       "wire_declaration_type": "tool_search"
     },
     {
-      "evidence_source": "read-only-gate-audit.json#model_visible_request_plan.declaration_families",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.selected_provider_hosted",
       "executor": "selected_provider",
       "family": "selected_provider_hosted",
       "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
-      "observation": "not_observed_selected_provider_only",
+      "observation": "not_observed_selected_provider_control_required",
       "observed": false,
       "optional_rule": "omit_if_selected_provider_unsupported",
       "representative": {
@@ -225,6 +289,10 @@
           "provider_scope": "selected_provider_only",
           "type": "web_search"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": null,
           "call_item_id": "item_call_hosted_001",
@@ -232,6 +300,7 @@
           "executor": "selected_provider",
           "output_item_id": "item_output_hosted_001"
         },
+        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
         "observed": false,
         "provider_scope": "selected_provider_only",
         "result": {
@@ -245,7 +314,17 @@
           "added": "response.output_item.added",
           "delta": "<provider-defined>",
           "done": "response.output_item.done",
+          "event_order": [
+            "response.output_item.added",
+            "<provider-defined>",
+            "response.output_item.done",
+            "response.completed"
+          ],
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "required-but-unavailable_if_selected_provider_unsupported",
@@ -254,7 +333,7 @@
       "wire_declaration_type": "web_search"
     },
     {
-      "evidence_source": "codexhub-runtime-wire-fixture.json#runtime_wire_surface.unknown_future",
+      "evidence_source": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.unknown_future_kind",
       "executor": "unknown",
       "family": "unknown_future_kind",
       "loss_boundary": "retain tag and opaque payload; do not normalize",
@@ -272,12 +351,17 @@
           "tag": "unknown",
           "type": "unknown"
         },
+        "error": {
+          "classification": "unqualified",
+          "event": "response.failed"
+        },
         "history": {
           "call_id": null,
           "call_item_id": null,
           "loss_rule": "retain opaque sentinel",
           "output_item_id": null
         },
+        "loss_boundary": "retain tag and opaque payload; do not normalize",
         "observed": false,
         "result": {
           "opaque_payload": "<redacted>",
@@ -289,7 +373,17 @@
           "added": "unknown.future_event",
           "delta": "unknown.future_delta",
           "done": "unknown.future_done",
+          "event_order": [
+            "unknown.future_event",
+            "unknown.future_delta",
+            "unknown.future_done",
+            "response.completed"
+          ],
           "terminal": "response.completed"
+        },
+        "terminal": {
+          "classification": "not_observed",
+          "event": "response.completed"
         }
       },
       "required_rule": "required-but-unavailable",
@@ -308,15 +402,19 @@
   "evidence_binding": {
     "audit": {
       "file": "read-only-gate-audit.json",
-      "sha256": "eeed7c0ad927d2abf0a10f695530bc38242fafa0ec59ae5898c0bfb307bc83f0"
+      "sha256": "775efbc763dfae1c5d6a61532d9394e5cd181b2e6803bf2e42f6c886a0a964e3"
+    },
+    "source_contract": {
+      "file": "codex-0.146-source-contract.json",
+      "sha256": "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c"
     },
     "trace": {
       "file": "current-codexhub-thread-tool-surface.json",
-      "sha256": "47bdc0b56a879a734779aeb66aedce6c18f024578219a77548077a25a2976856"
+      "sha256": "a4367f96fc2aceaa419577ee43f91870fb3fcca4cc95644bc3347cbdd4206ee3"
     },
     "wire_fixture": {
       "file": "codexhub-runtime-wire-fixture.json",
-      "sha256": "106cfe30d5933d758fb52f8ff015d578c7c3211107f8c490c3fd1ebd9224d8ce"
+      "sha256": "3a8654854539799b526bc013c50bc9f16c40c09319cff8da716b75e6deecbc3a"
     }
   },
   "evidence_sources": {

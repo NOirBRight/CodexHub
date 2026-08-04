@@ -394,6 +394,10 @@ def test_audit_surfaces_unclassified_items_and_prefix_mismatch(tmp_path: Path) -
 def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() -> None:
     audit = json.loads(AUDIT.read_text(encoding="utf-8"))
 
+    assert audit["provenance"]["capture_status"] == "not_observed"
+    assert audit["provenance"]["cli_version"] == "0.146.0"
+    assert audit["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+    assert audit["provenance"]["historical_capture"]["cli_version"] == "0.144.0-alpha.4"
     assert audit["gateway_identity_route"]["request_starts"] == 525
     assert audit["gateway_identity_route"]["prefix_equal"] == 525
     assert audit["gateway_identity_route"]["prefix_mismatch"] == 0
@@ -414,7 +418,13 @@ def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() 
     assert "https://" not in serialized
     assert ".codex" not in serialized.lower()
     assert not re.search(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", serialized)
-    assert not re.search(r'(?<![A-Za-z0-9])[a-f0-9]{64}(?![A-Za-z0-9])', serialized)
+    # The only full SHA-256 permitted in this sanitized audit is the public,
+    # attested source-contract binary identity.  Raw capture/body fingerprints
+    # must remain absent.
+    sha256_values = re.findall(r'(?<![A-Za-z0-9])[a-f0-9]{64}(?![A-Za-z0-9])', serialized)
+    assert sha256_values == [
+        "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+    ]
 
 
 def test_audit_detects_generic_response_body_fingerprint_fields(tmp_path: Path) -> None:
