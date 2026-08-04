@@ -8,6 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_issue_62_runtime_inventory.py"
 INVENTORY = ROOT / "docs" / "evidence" / "issue-62" / "runtime-wire-inventory.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 TRACE = ROOT / "docs" / "evidence" / "issue-62" / "current-codexhub-thread-tool-surface.json"
 WIRE_FIXTURE = ROOT / "docs" / "evidence" / "issue-62" / "codexhub-runtime-wire-fixture.json"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
@@ -35,11 +36,15 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
 
     assert inventory["schema_version"] == 1
     assert inventory["artifact_kind"] == "runtime_wire_inventory"
-    assert inventory["cli_version_floor"] == "0.145.0"
+    assert inventory["cli_version_floor"] == "0.146.0"
     candidate = inventory["candidate_identity"]
-    assert candidate["cli_version"] == "0.144.0-alpha.4"
-    assert candidate["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+    assert candidate["cli_version"] == "0.146.0"
+    assert candidate["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
     assert candidate["codex_source_commit"] == candidate["source_commit"]
+    assert candidate["candidate_revision"] == "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+    assert candidate["cli_binary_sha256"] == "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+    assert candidate["cli_source_commit_status"] == "published_attested"
+    assert candidate["cli_source_tag"] == "rust-v0.146.0"
     assert candidate["route_upstream"] == "official"
     assert candidate["inbound_format"] == "responses"
     assert candidate["upstream_format"] == "responses"
@@ -48,9 +53,9 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert candidate["catalog_model_entry_id"] == "gpt-5.6-sol"
     assert candidate["route_behavior_profile"] == "official_codex_app_http_passthrough"
     assert len(candidate["evidence_manifest_sha256"]) == 64
-    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
-    assert inventory["qualification"]["candidate_version_eligible"] is False
-    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["qualification"]["candidate_version_status"] == "eligible"
+    assert inventory["qualification"]["candidate_version_eligible"] is True
+    assert inventory["qualification"]["ready_for_beta2"] is False
     assert inventory["identity_control"]["unknown_tagged_source_count"] == 2
     assert inventory["qualification"]["blocking_gates"] == [
         "clean_cold_start_current_binding",
@@ -82,6 +87,8 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     }
     assert inventory["evidence_binding"]["trace"]["file"] == TRACE.name
     assert len(inventory["evidence_binding"]["trace"]["sha256"]) == 64
+    assert inventory["evidence_binding"]["source_contract"]["file"] == SOURCE_CONTRACT.name
+    assert len(inventory["evidence_binding"]["source_contract"]["sha256"]) == 64
 
 
 def test_inventory_uses_only_final_capability_disposition_vocabulary() -> None:
@@ -127,6 +134,62 @@ def test_inventory_covers_every_required_taxonomy_scope() -> None:
     }
     missing = required - scopes
     assert not missing, f"missing required scopes: {sorted(missing)}"
+
+
+def test_inventory_records_all_structural_declaration_families() -> None:
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    families = inventory["declaration_families"]
+    assert [entry["family"] for entry in families] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+    by_family = {entry["family"]: entry for entry in families}
+    assert by_family["client_executed_tool_discovery"]["executor"] == "codex_client"
+    assert by_family["selected_provider_hosted"]["executor"] == "selected_provider"
+    assert by_family["selected_provider_hosted"]["representative"]["cross_provider_proxy"] == "forbidden"
+    assert by_family["unknown_future_kind"]["selected_protocol_disposition"] == "omit"
+    assert by_family["plain_function"]["representative"]["streaming"]["arguments_done"] == "response.function_call_arguments.done"
+    assert by_family["custom_freeform"]["representative"]["streaming"]["input_done"] == "response.custom_tool_call_input.done"
+    assert by_family["client_executed_tool_discovery"]["representative"]["streaming"]["event_order"] == [
+        "response.output_item.done",
+        "response.completed",
+    ]
+    for entry in families:
+        representative = entry["representative"]
+        assert representative["terminal"]["classification"] in {"not_observed", "unqualified"}
+        assert representative["error"]["classification"] in {"not_observed", "unqualified"}
+        assert representative["loss_boundary"]
+
+
+def test_declaration_family_evidence_sources_resolve_to_bound_fixtures() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+
+    module._validate_structural_evidence_pointers(
+        source_contract=json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8")),
+        wire=wire,
+        audit=audit,
+        declaration_families=inventory["declaration_families"],
+    )
+
+    dangling = json.loads(json.dumps(inventory["declaration_families"]))
+    dangling[-1]["evidence_source"] = (
+        "codex-0.146-source-contract.json#runtime_wire_surface.unknown_future"
+    )
+    with pytest.raises(ValueError, match="evidence source is invalid"):
+        module._validate_structural_evidence_pointers(
+            source_contract=json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8")),
+            wire=wire,
+            audit=audit,
+            declaration_families=dangling,
+        )
 
 
 def test_every_item_carries_an_allowed_disposition() -> None:
@@ -196,7 +259,7 @@ def test_inventory_reports_zero_unclassified_core_items() -> None:
 
     assert inventory["identity_control"]["unclassified_core_items"] == 0
     assert inventory["identity_control"]["unclassified_scopes"] == []
-    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["qualification"]["ready_for_beta2"] is False
     assert "core_function_replay" in inventory["qualification"]["blocking_scopes"]
 
 
@@ -249,19 +312,19 @@ def test_build_inventory_reads_existing_artifacts_and_clamps_live_gates() -> Non
         trace=TRACE,
         wire_fixture=WIRE_FIXTURE,
         audit=AUDIT,
-        cli_version_floor="0.145.0",
-        candidate_cli_version="0.144.0-alpha.4",
-        candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+        cli_version_floor="0.146.0",
+        candidate_cli_version="0.146.0",
+        candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
     )
 
     assert inventory["schema_version"] == 1
-    assert inventory["cli_version_floor"] == "0.145.0"
-    assert inventory["candidate_identity"]["cli_version"] == "0.144.0-alpha.4"
+    assert inventory["cli_version_floor"] == "0.146.0"
+    assert inventory["candidate_identity"]["cli_version"] == "0.146.0"
     scopes = {entry["scope"] for entry in inventory["items"]}
     assert "core_text_streaming" in scopes
     assert "code_mode" in scopes
     assert inventory["identity_control"]["unclassified_core_items"] == 0
-    assert inventory["qualification"]["candidate_version_status"] == "legacy_below_floor"
+    assert inventory["qualification"]["candidate_version_status"] == "eligible"
 
 
 def test_build_inventory_rejects_candidate_metadata_drift() -> None:
@@ -273,7 +336,7 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
             candidate_cli_version="0.145.0",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
     with pytest.raises(ValueError, match="candidate source commit"):
@@ -281,7 +344,7 @@ def test_build_inventory_rejects_candidate_metadata_drift() -> None:
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            candidate_cli_version="0.144.0-alpha.4",
+            candidate_cli_version="0.146.0",
             candidate_source_commit="0" * 40,
         )
 
@@ -294,9 +357,9 @@ def test_build_inventory_rejects_a_floor_other_than_supported_candidate_floor() 
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            cli_version_floor="0.144.0",
-            candidate_cli_version="0.144.0-alpha.4",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            cli_version_floor="0.145.0",
+            candidate_cli_version="0.146.0",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
 
@@ -309,7 +372,7 @@ def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
             candidate_cli_version="not-a-version",
-            candidate_source_commit="9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+            candidate_source_commit="e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
         )
 
     with pytest.raises(ValueError, match="candidate source commit"):
@@ -317,7 +380,7 @@ def test_build_inventory_rejects_malformed_candidate_provenance() -> None:
             trace=TRACE,
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
-            candidate_cli_version="0.144.0-alpha.4",
+            candidate_cli_version="0.146.0",
             candidate_source_commit="A" * 40,
         )
 
@@ -335,6 +398,563 @@ def test_build_inventory_rejects_missing_capture_provenance(tmp_path: Path) -> N
             wire_fixture=WIRE_FIXTURE,
             audit=AUDIT,
         )
+
+
+def test_build_inventory_rejects_audit_candidate_provenance_drift(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["source_commit"] = "0" * 40
+    audit_path = tmp_path / AUDIT.name
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="audit provenance"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=audit_path,
+        )
+
+
+def test_build_inventory_rejects_audit_historical_capture_drift(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["historical_capture"]["captured_at"] = "2026-07-13T14:57:55+08:00"
+    audit_path = tmp_path / AUDIT.name
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="historical capture"):
+        module.build_inventory(
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=audit_path,
+        )
+
+
+def test_build_inventory_rejects_observed_source_contract_family(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["declaration_families"][0]["observed"] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="cannot claim an observed"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "family, field, value",
+    [
+        ("selected_provider_hosted", "status", "captured"),
+        ("unknown_future_kind", "status", "captured"),
+        ("plain_function", "status", "future_status"),
+        ("plain_function", "unknown_field", "future_status"),
+    ],
+)
+def test_build_inventory_rejects_source_contract_status_or_unknown_fields(
+    tmp_path: Path, family: str, field: str, value: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["declaration_family_examples"][family][
+        field
+    ] = value
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(
+        ValueError, match="(?:status is invalid|unknown status field|unknown example fields)"
+    ):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["request_shape"]["non_streaming_control"][
+        "captured"
+    ] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="captured non-streaming"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_build_inventory_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="request_shape"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "top_level",
+        "runtime_wire_surface",
+        "request_shape",
+        "response_shape",
+    ],
+)
+def test_build_inventory_rejects_unknown_regenerated_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="unknown"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "runtime_type",
+        "wire_declaration_type",
+        "declaration_type",
+        "call_type",
+        "result_type",
+    ],
+)
+def test_build_inventory_rejects_source_contract_schema_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation in {"runtime_type", "wire_declaration_type"}:
+        source_contract["runtime_wire_surface"]["declaration_families"][0][mutation] = "bogus"
+    else:
+        source_contract["runtime_wire_surface"]["declaration_family_examples"]["plain_function"][
+            {"declaration_type": "declaration", "call_type": "call", "result_type": "result"}[mutation]
+        ]["type"] = "web_search_call"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="canonical family schema"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "plain_call_item_id_empty",
+        "plain_history_call_id_empty",
+        "namespace_owner_empty",
+        "plain_added_event",
+        "custom_delta_event",
+        "namespace_done_event",
+        "tool_search_added_event",
+        "unknown_event_label",
+    ],
+)
+def test_build_inventory_rejects_source_contract_identity_and_sse_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "plain_call_item_id_empty":
+        examples["plain_function"]["call"]["item_id"] = ""
+    elif mutation == "plain_history_call_id_empty":
+        examples["plain_function"]["history"]["call_id"] = ""
+    elif mutation == "namespace_owner_empty":
+        examples["namespace"]["call"]["namespace"] = ""
+    elif mutation == "plain_added_event":
+        examples["plain_function"]["streaming"]["added"] = "bogus.event"
+    elif mutation == "custom_delta_event":
+        examples["custom_freeform"]["streaming"]["delta"] = "bogus.event"
+    elif mutation == "namespace_done_event":
+        examples["namespace"]["streaming"]["arguments_done"] = "bogus.event"
+    elif mutation == "tool_search_added_event":
+        examples["client_executed_tool_discovery"]["streaming"]["added"] = (
+            "response.output_item.added"
+        )
+    elif mutation == "unknown_event_label":
+        examples["unknown_future_kind"]["streaming"]["event_order"][0] = "bogus.event"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="(?:non-empty string|canonical SSE)"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+    ],
+)
+def test_build_inventory_rejects_unknown_nested_family_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "declaration":
+        examples["plain_function"]["declaration"]["future_field"] = "must fail"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["future_field"] = "must fail"
+    elif mutation == "result":
+        examples["custom_freeform"]["result"]["future_field"] = "must fail"
+    elif mutation == "history":
+        examples["client_executed_tool_discovery"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["future_field"] = "must fail"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["future_field"] = "must fail"
+    else:
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["redacted_value", "hosted_status", "response_item_type"],
+)
+def test_build_inventory_rejects_nested_family_value_extensions(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    surface = source_contract["runtime_wire_surface"]
+    examples = surface["declaration_family_examples"]
+    if mutation == "redacted_value":
+        examples["plain_function"]["call"]["arguments"] = "future-arguments"
+    elif mutation == "hosted_status":
+        examples["selected_provider_hosted"]["status"] = "captured"
+    else:
+        surface["response_shape"]["response_item_types"].append("future_item")
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="(?:redacted sentinel|canonical status|canonical list|status is invalid)",
+    ):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["representative"]["call"]["type"] = "web_search_call"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("canonical family schema" in mismatch for mismatch in report["mismatches"])
+
+    id_mutation = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    id_mutation["declaration_families"][0]["representative"]["call"]["item_id"] = ""
+    id_report = module.reconcile_inventory(id_mutation)
+    assert id_report["reconciled"] is False
+    assert any("non-empty string" in mismatch for mismatch in id_report["mismatches"])
+
+
+@pytest.mark.parametrize("mutation", ["representative_future_field", "representative_status"])
+def test_inventory_reconcile_rejects_nested_representative_edits(mutation: str) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    representative = inventory["declaration_families"][0]["representative"]
+    if mutation == "representative_future_field":
+        representative["future_field"] = "must fail"
+    else:
+        representative["status"] = "captured"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert report["mismatches"]
+    assert any("unknown or missing fields" in mismatch for mismatch in report["mismatches"])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "top_level",
+        "candidate_identity",
+        "family",
+        "item",
+        "qualification",
+        "identity_control",
+        "evidence_sources",
+        "feeds",
+        "evidence_binding_entry",
+    ],
+)
+def test_inventory_reconcile_standalone_rejects_unknown_container_fields(
+    mutation: str,
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        inventory["future_field"] = "must fail"
+    elif mutation == "candidate_identity":
+        inventory["candidate_identity"]["future_field"] = "must fail"
+    elif mutation == "family":
+        inventory["declaration_families"][0]["future_field"] = "must fail"
+    elif mutation == "item":
+        inventory["items"][0]["future_field"] = "must fail"
+    elif mutation == "qualification":
+        inventory["qualification"]["future_field"] = "must fail"
+    elif mutation == "identity_control":
+        inventory["identity_control"]["future_field"] = "must fail"
+    elif mutation == "evidence_sources":
+        inventory["evidence_sources"]["future_field"] = "must fail"
+    elif mutation == "feeds":
+        inventory["feeds"]["future_field"] = "must fail"
+    else:
+        inventory["evidence_binding"]["trace"]["future_field"] = "must fail"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("unknown or missing fields" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_observed_family_without_evidence_root() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["observed"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("observed must remain false" in mismatch for mismatch in report["mismatches"])
+
+
+def test_structural_reconcile_allows_observed_family_when_bound_evidence_is_authoritative() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["observed"] = True
+
+    assert not any(
+        "observed must remain false"
+        in mismatch
+        for mismatch in module._structural_inventory_mismatches(
+            inventory["declaration_families"], require_unobserved=False
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("source_commit", "0" * 40),
+        ("route_upstream", "custom"),
+        ("model", "gpt-5.5"),
+    ],
+)
+def test_inventory_reconcile_rejects_candidate_binding_mutation_without_evidence_root(
+    field: str, value: str
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["candidate_identity"][field] = value
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained Issue #62 candidate" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_evidence_pointer_and_self_reported_readiness_mutation() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["evidence_binding"]["trace"]["file"] = "evil.json"
+    inventory["qualification"]["evidence_gates"] = {
+        gate: "complete" for gate in inventory["qualification"]["evidence_gates"]
+    }
+    inventory["qualification"]["blocking_gates"] = []
+    inventory["qualification"]["ready_for_beta2"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained fixture" in mismatch for mismatch in report["mismatches"])
+    assert any("cannot be asserted without bound evidence" in mismatch for mismatch in report["mismatches"])
+    assert any("blocking_gates cannot be empty" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_standalone_rejects_self_consistent_hash_manifest_edit() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["evidence_binding"]["trace"]["sha256"] = "0" * 64
+    inventory["candidate_identity"]["evidence_manifest_sha256"] = module._evidence_manifest_sha256(
+        inventory["evidence_binding"]
+    )
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained evidence artifact" in mismatch for mismatch in report["mismatches"])
+    assert any("retained evidence manifest" in mismatch for mismatch in report["mismatches"])
+
+
+@pytest.mark.parametrize("mutation", ["gate", "terminal", "readiness"])
+def test_inventory_reconcile_standalone_rejects_unobserved_status_edits(
+    mutation: str,
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    if mutation == "gate":
+        inventory["qualification"]["evidence_gates"]["terminal_events"] = "met"
+    elif mutation == "terminal":
+        inventory["declaration_families"][0]["representative"]["terminal"][
+            "classification"
+        ] = "unqualified"
+    else:
+        inventory["qualification"]["ready_for_beta2"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained unobserved" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_legacy_beta1_readiness_key() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["qualification"]["ready_for_beta1"] = inventory["qualification"].pop(
+        "ready_for_beta2"
+    )
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("ready_for_beta1 is stale" in mismatch for mismatch in report["mismatches"])
 
 
 def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
@@ -385,7 +1005,7 @@ def test_captured_sse_status_does_not_satisfy_independent_sse_gate() -> None:
     )
     assert qualification["evidence_gates"]["sse_identity"] == "captured"
     assert "sse_identity" in qualification["blocking_gates"]
-    assert qualification["ready_for_beta1"] is False
+    assert qualification["ready_for_beta2"] is False
 
 
 def test_committed_inventory_matches_generator_output() -> None:
@@ -428,6 +1048,12 @@ def test_inventory_reconcile_rejects_duplicate_and_wrong_core_evidence() -> None
     report = module.reconcile_inventory(unknown_scope)
     assert report["reconciled"] is False
     assert any("unknown scope" in mismatch for mismatch in report["mismatches"])
+
+    structural_mutation = json.loads(json.dumps(base))
+    structural_mutation["declaration_families"][4]["representative"]["cross_provider_proxy"] = "allowed"
+    report = module.reconcile_inventory(structural_mutation)
+    assert report["reconciled"] is False
+    assert any("declaration_families" in mismatch for mismatch in report["mismatches"])
 
 
 def test_inventory_reconcile_rejects_provenance_contradictions_without_evidence_root() -> None:
@@ -528,7 +1154,7 @@ def test_inventory_reconcile_binds_input_hashes_and_candidate_gates() -> None:
     )
 
     tampered_status = json.loads(json.dumps(base))
-    tampered_status["qualification"]["candidate_version_status"] = "eligible"
+    tampered_status["qualification"]["candidate_version_status"] = "legacy_below_floor"
     report = module.reconcile_inventory(tampered_status)
     assert report["reconciled"] is False
     assert any("CLI floor" in mismatch for mismatch in report["mismatches"])
@@ -633,7 +1259,7 @@ def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() ->
         },
     )
     assert qualification["blocking_gates"] == []
-    assert qualification["ready_for_beta1"] is True
+    assert qualification["ready_for_beta2"] is True
 
 
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])

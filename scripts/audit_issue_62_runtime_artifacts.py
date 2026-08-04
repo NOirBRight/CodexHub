@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sqlite3
@@ -15,6 +16,22 @@ from urllib.parse import urlparse
 
 
 TRANSPORT_TARGET = "codex_http_client::transport"
+DEFAULT_SOURCE_CONTRACT = Path(
+    "docs/evidence/issue-62/codex-0.146-source-contract.json"
+)
+SOURCE_CONTRACT_PROVENANCE = {
+    "cli_version": "0.146.0",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_source_commit_status": "published_attested",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
+}
+HISTORICAL_CAPTURE = {
+    "captured_at": "2026-07-12T14:57:55+08:00",
+    "cli_version": "0.144.0-alpha.4",
+    "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+}
 POST_BODY_PATTERN = re.compile(
     r": POST to (?P<endpoint>https?://.+?): (?P<body>\{.*\})\s*$",
     re.DOTALL,
@@ -37,6 +54,24 @@ KNOWN_INPUT_ITEM_TYPES = {
     "web_search_call",
 }
 VALID_TOOL_CHOICE_STRINGS = {"auto", "none", "required"}
+# Structural declaration families emitted by Codex CLI 0.146's Responses
+# ``ToolSpec`` surface.  These labels describe shape/execution only; they are
+# deliberately not model or Provider qualification records.
+DECLARATION_FAMILIES = (
+    "plain_function",
+    "custom_freeform",
+    "namespace",
+    "client_executed_tool_discovery",
+    "selected_provider_hosted",
+    "unknown_future_kind",
+)
+_TOOL_TYPE_TO_FAMILY = {
+    "function": "plain_function",
+    "custom": "custom_freeform",
+    "namespace": "namespace",
+    "tool_search": "client_executed_tool_discovery",
+    "web_search": "selected_provider_hosted",
+}
 ROUTE_FIELDS = (
     "upstream",
     "route_mode",
@@ -137,6 +172,237 @@ def _is_proven_tool_choice(value: Any) -> bool:
     )
 
 
+def _validate_source_contract_with_inventory(source_contract: dict[str, Any]) -> dict[str, Any]:
+    """Apply the canonical source-contract validator used by inventory replay.
+
+    The sanitizer and inventory are independent entry points, but they must
+    reject the same unobserved source-contract mutations.  Load the sibling
+    generator by path so this module remains directly executable and importable
+    from tests without relying on ``scripts`` being a Python package.
+    """
+
+    validator_path = Path(__file__).with_name("build_issue_62_runtime_inventory.py")
+    spec = importlib.util.spec_from_file_location(
+        "_issue_62_runtime_inventory_contract_validator", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("unable to load canonical source-contract validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    validator = getattr(module, "_validate_source_contract", None)
+    if not callable(validator):
+        raise ValueError("canonical source-contract validator is unavailable")
+    return validator(source_contract)
+
+
+def _source_contract_provenance(path: Path) -> dict[str, Any]:
+    """Load and validate the unobserved 0.146 source-contract identity."""
+
+    try:
+        source_contract = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unable to read source contract: {path}") from exc
+    if not isinstance(source_contract, dict):
+        raise ValueError("source contract must be a JSON object")
+    try:
+        _validate_source_contract_with_inventory(source_contract)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if set(source_contract) != {
+        "schema_version",
+        "fixture_kind",
+        "capture_status",
+        "qualification_status",
+        "captured_at",
+        "provenance",
+        "runtime_wire_surface",
+    }:
+        raise ValueError("source contract has unknown top-level fields")
+    if (
+        source_contract.get("schema_version") != 1
+        or source_contract.get("fixture_kind") != "codex_cli_source_contract"
+        or source_contract.get("capture_status") != "not_observed"
+        or source_contract.get("qualification_status") != "unqualified"
+        or "captured_at" not in source_contract
+        or source_contract.get("captured_at") is not None
+    ):
+        raise ValueError(
+            "source contract must remain not_observed, unqualified, and uncaptured"
+        )
+    provenance = source_contract.get("provenance")
+    if not isinstance(provenance, dict) or set(provenance) != set(SOURCE_CONTRACT_PROVENANCE) or any(
+        provenance.get(field) != value
+        for field, value in SOURCE_CONTRACT_PROVENANCE.items()
+    ):
+        raise ValueError("source contract provenance is invalid or has unknown fields")
+    runtime_surface = source_contract.get("runtime_wire_surface")
+    if not isinstance(runtime_surface, dict):
+        raise ValueError("source contract runtime surface is missing")
+    if set(runtime_surface) != {
+        "source",
+        "declaration_family_order",
+        "declaration_families",
+        "request_shape",
+        "response_shape",
+        "declaration_family_examples",
+    }:
+        raise ValueError("source contract runtime_wire_surface has unknown fields")
+    if runtime_surface.get("declaration_family_order") != list(DECLARATION_FAMILIES):
+        raise ValueError("source contract declaration family order is invalid")
+    declaration_families = runtime_surface.get("declaration_families")
+    if not isinstance(declaration_families, list) or len(declaration_families) != len(
+        DECLARATION_FAMILIES
+    ):
+        raise ValueError("source contract declaration families are invalid")
+    expected_observations = {
+        "plain_function": "not_observed_source_contract_only",
+        "custom_freeform": "not_observed_source_contract_only",
+        "namespace": "not_observed_source_contract_only",
+        "client_executed_tool_discovery": "not_observed_source_contract_only",
+        "selected_provider_hosted": "not_observed_selected_provider_control_required",
+        "unknown_future_kind": "opaque_sentinel_only",
+    }
+    for family, entry in zip(DECLARATION_FAMILIES, declaration_families):
+        if not isinstance(entry, dict) or entry.get("family") != family:
+            raise ValueError("source contract declaration family identity is invalid")
+        if set(entry) != {
+            "family",
+            "runtime_type",
+            "wire_declaration_type",
+            "observed",
+            "observation",
+            "executor",
+            "loss_boundary",
+        }:
+            raise ValueError("source contract declaration family has unknown fields")
+        if entry.get("observed") is not False:
+            raise ValueError("source contract cannot claim an observed declaration family")
+        if entry.get("observation") != expected_observations[family]:
+            raise ValueError("source contract declaration observation is invalid")
+    request_shape = runtime_surface.get("request_shape")
+    if not isinstance(request_shape, dict) or set(request_shape) != {
+        "protocol",
+        "streaming_fields",
+        "representative",
+        "non_streaming_control",
+    }:
+        raise ValueError("source contract request_shape has unknown fields")
+    if not isinstance(request_shape.get("representative"), dict) or set(
+        request_shape["representative"]
+    ) != {
+        "model",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "store",
+    }:
+        raise ValueError("source contract request_shape.representative has unknown fields")
+    non_streaming_control = (
+        request_shape.get("non_streaming_control")
+        if isinstance(request_shape, dict)
+        else None
+    )
+    if not isinstance(non_streaming_control, dict) or set(non_streaming_control) != {
+        "stream",
+        "response_body",
+        "captured",
+        "status",
+    }:
+        raise ValueError("source contract request_shape has unknown fields")
+    if not isinstance(non_streaming_control, dict) or non_streaming_control.get(
+        "captured"
+    ) is not False or non_streaming_control.get("status") != "unqualified":
+        raise ValueError("source contract cannot claim a captured non-streaming response")
+    examples = runtime_surface.get("declaration_family_examples")
+    if not isinstance(examples, dict):
+        raise ValueError("source contract declaration examples are missing")
+    if set(examples) != set(DECLARATION_FAMILIES):
+        raise ValueError("source contract declaration examples have unknown fields")
+    for family in DECLARATION_FAMILIES:
+        example = examples.get(family)
+        if not isinstance(example, dict):
+            raise ValueError(f"source contract example is missing for {family}")
+        expected_example_fields = {
+            "declaration",
+            "call",
+            "result",
+            "history",
+            "streaming",
+            "terminal",
+            "error",
+            "loss_boundary",
+        }
+        if family == "selected_provider_hosted":
+            expected_example_fields |= {
+                "observed",
+                "status",
+                "provider_scope",
+                "cross_provider_proxy",
+            }
+        elif family == "unknown_future_kind":
+            expected_example_fields |= {"observed", "status"}
+        if set(example) != expected_example_fields:
+            raise ValueError(f"source contract {family} has unknown example fields")
+        if (
+            not isinstance(example.get("terminal"), dict)
+            or example["terminal"].get("event") != "response.completed"
+            or example["terminal"].get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"source contract terminal status is invalid for {family}")
+        if (
+            not isinstance(example.get("error"), dict)
+            or example["error"].get("event") != "response.failed"
+            or example["error"].get("classification") not in {"not_observed", "unqualified"}
+        ):
+            raise ValueError(f"source contract error status is invalid for {family}")
+        if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
+            raise ValueError(f"source contract loss boundary is invalid for {family}")
+    response_shape = runtime_surface.get("response_shape")
+    if not isinstance(response_shape, dict) or set(response_shape) != {
+        "response_item_types",
+        "stream_event_order",
+        "terminal_events",
+        "error_shape",
+    }:
+        raise ValueError("source contract response_shape has unknown fields")
+    error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
+    if not isinstance(error_shape, dict) or set(error_shape) != {
+        "event",
+        "response",
+        "classification",
+    }:
+        raise ValueError("source contract response_shape.error_shape has unknown fields")
+    if not isinstance(error_shape.get("response"), dict) or set(
+        error_shape["response"]
+    ) != {"id", "status", "error"}:
+        raise ValueError(
+            "source contract response_shape.error_shape.response has unknown fields"
+        )
+    if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
+        raise ValueError("source contract response error status is invalid")
+
+    def _captured_true(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                (key in {"captured", "observed"} and child is True)
+                or _captured_true(child)
+                for key, child in value.items()
+            )
+        if isinstance(value, list):
+            return any(_captured_true(child) for child in value)
+        return False
+
+    if _captured_true(runtime_surface):
+        raise ValueError("source contract contains a captured response claim")
+    return {
+        "capture_status": source_contract["capture_status"],
+        **SOURCE_CONTRACT_PROVENANCE,
+        "historical_capture": dict(HISTORICAL_CAPTURE),
+    }
+
+
 def _sanitize_tool(tool: dict[str, Any]) -> dict[str, Any]:
     tool_type = tool.get("type") if isinstance(tool.get("type"), str) else None
     name = tool.get("name") if isinstance(tool.get("name"), str) else None
@@ -158,6 +424,73 @@ def _sanitize_tool(tool: dict[str, Any]) -> dict[str, Any]:
     if tool_type == "tool_search" and isinstance(tool.get("execution"), str):
         sanitized["execution"] = tool["execution"]
     return sanitized
+
+
+def _declaration_families(tool_surfaces: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Summarize observed declaration families without retaining tool content.
+
+    The selected-provider hosted family and the unknown future sentinel are
+    included even when the bounded request rows do not observe them.  This is
+    intentional: #62 inventories the runtime contract and makes the evidence
+    boundary explicit rather than silently dropping a family.
+    """
+
+    observed_types = {
+        str(tool.get("type"))
+        for surface in tool_surfaces
+        for tool in surface
+        if isinstance(tool, dict) and isinstance(tool.get("type"), str)
+    }
+    families: list[dict[str, Any]] = []
+    for family in DECLARATION_FAMILIES:
+        runtime_type = next(
+            (
+                tool_type
+                for tool_type, mapped_family in _TOOL_TYPE_TO_FAMILY.items()
+                if mapped_family == family
+            ),
+            None,
+        )
+        if family == "unknown_future_kind":
+            families.append(
+                {
+                    "family": family,
+                    "runtime_type": "unknown",
+                    "wire_declaration_type": "<unknown>",
+                    "observed": False,
+                    "observation": "opaque_sentinel_only",
+                    "executor": "unknown",
+                    "loss_boundary": "retain tag and opaque payload; do not normalize",
+                }
+            )
+            continue
+        observed = runtime_type in observed_types
+        if family == "selected_provider_hosted":
+            executor = "selected_provider"
+            observation = "not_observed_selected_provider_only"
+            loss_boundary = (
+                "optional unsupported hosted capability is omitted; required capability fails visibly"
+            )
+        elif family == "client_executed_tool_discovery":
+            executor = "codex_client"
+            observation = "observed_client_execution" if observed else "not_observed"
+            loss_boundary = "discovery request/result stays client-executed"
+        else:
+            executor = "codex_client"
+            observation = "observed" if observed else "not_observed"
+            loss_boundary = "preserve declaration and inverse call/result/history IDs"
+        families.append(
+            {
+                "family": family,
+                "runtime_type": runtime_type,
+                "wire_declaration_type": runtime_type,
+                "observed": observed,
+                "observation": observation,
+                "executor": executor,
+                "loss_boundary": loss_boundary,
+            }
+        )
+    return families
 
 
 def _sanitize_request_plan(payload: dict[str, Any]) -> dict[str, Any]:
@@ -285,6 +618,7 @@ def _codex_request_evidence(
         variants.append(variant)
 
     unclassified = sorted(set(observed_item_types) - KNOWN_INPUT_ITEM_TYPES)
+    declaration_families = _declaration_families(list(tool_surfaces.values()))
     return {
         "current_request_endpoint_classes": dict(sorted(current_endpoint_classes.items())),
         "model_visible_request_plan": {
@@ -292,6 +626,7 @@ def _codex_request_evidence(
             "observed_input_item_type_counts": dict(sorted(observed_item_types.items())),
             "plan_variants": variants,
             "tool_surfaces": tool_surfaces,
+            "declaration_families": declaration_families,
             "top_level_field_presence": sorted(top_level_fields),
             "transport_log_rows": transport_log_rows,
             "unclassified_item_types": unclassified,
@@ -523,7 +858,9 @@ def audit_artifacts(
     config_written_at: str,
     catalog_written_at: str,
     snapshot_ended_at: str,
+    source_contract: Path = DEFAULT_SOURCE_CONTRACT,
 ) -> dict[str, Any]:
+    provenance = _source_contract_provenance(source_contract)
     codex = _codex_request_evidence(
         codex_log_db,
         model=model,
@@ -574,6 +911,7 @@ def audit_artifacts(
 
     return {
         "capture_kind": "sanitized_bounded_read_only_audit",
+        "provenance": provenance,
         "gate_classification": {
             "choice_controls": "observed" if choice_observed else "unclassified",
             "clean_cold_start_current_binding": "met"
@@ -628,6 +966,7 @@ def audit_artifacts(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-contract", type=Path, default=DEFAULT_SOURCE_CONTRACT)
     parser.add_argument("--codex-log-db", type=Path, required=True)
     parser.add_argument("--gateway-db", type=Path, required=True)
     parser.add_argument("--model", required=True)
@@ -650,6 +989,7 @@ def main() -> int:
         config_written_at=args.config_written_at,
         catalog_written_at=args.catalog_written_at,
         snapshot_ended_at=args.snapshot_ended_at,
+        source_contract=args.source_contract,
     )
     print(json.dumps(audit, ensure_ascii=True, indent=2, sort_keys=True))
     return 0
