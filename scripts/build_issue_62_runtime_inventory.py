@@ -612,6 +612,206 @@ _STRUCTURAL_RULES = {
     },
 }
 
+# The source contract is intentionally closed over the six declaration
+# families.  Keep the wire/runtime names and identity-bearing sections
+# canonical so a regenerated inventory cannot turn an arbitrary fixture value
+# into a qualified family claim.
+STRUCTURAL_FAMILY_SCHEMAS = {
+    "plain_function": {
+        "runtime_type": "function",
+        "wire_declaration_type": "function",
+        "executor": "codex_client",
+        "observation": "not_observed_source_contract_only",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+        "declaration": {"type": "function", "required": ("name", "parameters")},
+        "call": {
+            "type": "function_call",
+            "required": ("item_id", "call_id", "arguments"),
+        },
+        "result": {
+            "type": "function_call_output",
+            "required": ("item_id", "call_id", "output"),
+        },
+        "history": {"required": ("call_id", "call_item_id", "output_item_id")},
+    },
+    "custom_freeform": {
+        "runtime_type": "custom",
+        "wire_declaration_type": "custom",
+        "executor": "codex_client",
+        "observation": "not_observed_source_contract_only",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+        "declaration": {"type": "custom", "required": ("name", "format")},
+        "call": {
+            "type": "custom_tool_call",
+            "required": ("item_id", "call_id", "input"),
+        },
+        "result": {
+            "type": "custom_tool_call_output",
+            "required": ("item_id", "call_id", "output"),
+        },
+        "history": {"required": ("call_id", "call_item_id", "output_item_id")},
+    },
+    "namespace": {
+        "runtime_type": "namespace",
+        "wire_declaration_type": "namespace",
+        "executor": "codex_client",
+        "observation": "not_observed_source_contract_only",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
+        "declaration": {"type": "namespace", "required": ("name", "tools")},
+        "call": {
+            "type": "function_call",
+            "required": ("item_id", "call_id", "namespace", "arguments"),
+        },
+        "result": {
+            "type": "function_call_output",
+            "required": ("item_id", "call_id", "output"),
+        },
+        "history": {
+            "required": ("call_id", "call_item_id", "output_item_id", "namespace")
+        },
+    },
+    "client_executed_tool_discovery": {
+        "runtime_type": "tool_search",
+        "wire_declaration_type": "tool_search",
+        "executor": "codex_client",
+        "observation": "not_observed_source_contract_only",
+        "loss_boundary": "discovery request/result stays client-executed",
+        "declaration": {
+            "type": "tool_search",
+            "required": ("execution", "parameters"),
+            "equals": {"execution": "client"},
+        },
+        "call": {
+            "type": "tool_search_call",
+            "required": ("item_id", "call_id", "execution", "arguments"),
+            "equals": {"execution": "client"},
+        },
+        "result": {
+            "type": "tool_search_output",
+            "required": ("item_id", "call_id", "execution", "tools"),
+            "equals": {"execution": "client"},
+        },
+        "history": {
+            "required": ("call_id", "call_item_id", "output_item_id", "executor"),
+            "equals": {"executor": "codex_client"},
+        },
+    },
+    "selected_provider_hosted": {
+        "runtime_type": "web_search",
+        "wire_declaration_type": "web_search",
+        "executor": "selected_provider",
+        "observation": "not_observed_selected_provider_control_required",
+        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
+        "declaration": {
+            "type": "web_search",
+            "required": ("executor", "provider_scope"),
+            "equals": {
+                "executor": "selected_provider",
+                "provider_scope": "selected_provider_only",
+            },
+        },
+        "call": {
+            "type": "web_search_call",
+            "required": ("item_id", "status", "action"),
+        },
+        "result": {
+            "type": "web_search_call",
+            "required": ("item_id", "status", "provider_scope"),
+            "equals": {"provider_scope": "selected_provider_only"},
+        },
+        "history": {
+            "required": (
+                "call_id",
+                "call_item_id",
+                "output_item_id",
+                "executor",
+                "cross_provider_proxy",
+            ),
+            "equals": {
+                "executor": "selected_provider",
+                "cross_provider_proxy": "forbidden",
+            },
+            "nullable": ("call_id",),
+        },
+    },
+    "unknown_future_kind": {
+        "runtime_type": "unknown",
+        "wire_declaration_type": "<unknown>",
+        "executor": "unknown",
+        "observation": "opaque_sentinel_only",
+        "loss_boundary": "retain tag and opaque payload; do not normalize",
+        "declaration": {
+            "type": "unknown",
+            "required": ("tag", "opaque_payload"),
+            "equals": {"tag": "unknown"},
+        },
+        "call": {
+            "type": "unknown",
+            "required": ("tag", "opaque_payload"),
+            "equals": {"tag": "unknown"},
+        },
+        "result": {
+            "type": "unknown",
+            "required": ("tag", "opaque_payload"),
+            "equals": {"tag": "unknown"},
+        },
+        "history": {
+            "required": ("call_id", "call_item_id", "output_item_id", "loss_rule"),
+            "nullable": ("call_id", "call_item_id", "output_item_id"),
+            "equals": {
+                "call_id": None,
+                "call_item_id": None,
+                "output_item_id": None,
+                "loss_rule": "retain opaque sentinel",
+            },
+        },
+    },
+}
+
+
+def _validate_structural_family_schema(
+    family_name: str,
+    family: dict[str, Any],
+    example: dict[str, Any],
+    *,
+    context: str,
+) -> None:
+    schema = STRUCTURAL_FAMILY_SCHEMAS.get(family_name)
+    if schema is None:
+        raise ValueError(f"{context} has an unknown family schema")
+    for field in ("runtime_type", "wire_declaration_type", "executor", "observation", "loss_boundary"):
+        if family.get(field) != schema[field]:
+            raise ValueError(f"{context}.{field} does not match the canonical family schema")
+    for section_name in ("declaration", "call", "result", "history"):
+        section = example.get(section_name)
+        section_schema = schema[section_name]
+        if not isinstance(section, dict):
+            raise ValueError(f"{context}.{section_name} must be an object")
+        expected_type = section_schema.get("type")
+        if expected_type is not None and section.get("type") != expected_type:
+            raise ValueError(f"{context}.{section_name}.type does not match the canonical family schema")
+        nullable = set(section_schema.get("nullable", ()))
+        for key in section_schema.get("required", ()):
+            if key not in section:
+                raise ValueError(f"{context}.{section_name}.{key} is required")
+            if key not in nullable and section[key] is None:
+                raise ValueError(f"{context}.{section_name}.{key} cannot be null")
+        for key, expected in section_schema.get("equals", {}).items():
+            if section.get(key) != expected:
+                raise ValueError(f"{context}.{section_name}.{key} does not match the canonical family schema")
+    if family_name == "namespace":
+        tools = example["declaration"].get("tools")
+        if not isinstance(tools, list) or not tools:
+            raise ValueError(f"{context}.declaration.tools must contain a function")
+        for nested in tools:
+            if (
+                not isinstance(nested, dict)
+                or nested.get("type") != "function"
+                or not nested.get("name")
+                or "parameters" not in nested
+            ):
+                raise ValueError(f"{context}.declaration.tools contains an invalid function")
+
 STRUCTURAL_EVIDENCE_SOURCES = {
     "plain_function": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.plain_function",
     "custom_freeform": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.custom_freeform",
@@ -785,6 +985,12 @@ def _build_structural_inventory(
             raise ValueError(
                 f"wire runtime example for {family_name} is missing {missing!r}"
             )
+        _validate_structural_family_schema(
+            family_name,
+            family,
+            example,
+            context=f"runtime planner family {family_name}",
+        )
         if not isinstance(example.get("terminal"), dict) or example["terminal"].get(
             "classification"
         ) not in {"not_observed", "unqualified"}:
@@ -902,6 +1108,16 @@ def _structural_inventory_mismatches(value: Any) -> list[str]:
             continue
         if not required_example_parts.issubset(representative):
             mismatches.append(f"{prefix}.representative is missing a wire example section")
+        else:
+            try:
+                _validate_structural_family_schema(
+                    family_name,
+                    entry,
+                    representative,
+                    context=prefix,
+                )
+            except ValueError as exc:
+                mismatches.append(str(exc))
         terminal = representative.get("terminal")
         if not isinstance(terminal, dict):
             mismatches.append(f"{prefix}.representative.terminal must be an object")
@@ -1553,6 +1769,7 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         STRUCTURAL_FAMILIES
     ):
         raise ValueError("Codex 0.146 source contract declaration families are invalid")
+    declaration_families_by_name: dict[str, dict[str, Any]] = {}
     expected_observations = {
         "plain_function": "not_observed_source_contract_only",
         "custom_freeform": "not_observed_source_contract_only",
@@ -1564,6 +1781,7 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     for family, expected_family in zip(STRUCTURAL_FAMILIES, declaration_families):
         if not isinstance(expected_family, dict) or expected_family.get("family") != family:
             raise ValueError("Codex 0.146 source contract declaration family identity is invalid")
+        declaration_families_by_name[family] = expected_family
         if expected_family.get("observed") is not False:
             raise ValueError(
                 "Codex 0.146 source contract cannot claim an observed declaration family"
@@ -1591,6 +1809,12 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         example = examples.get(family)
         if not isinstance(example, dict):
             raise ValueError(f"Codex 0.146 source contract example is missing for {family}")
+        _validate_structural_family_schema(
+            family,
+            declaration_families_by_name[family],
+            example,
+            context=f"Codex 0.146 source contract family {family}",
+        )
         terminal = example.get("terminal")
         error = example.get("error")
         if (

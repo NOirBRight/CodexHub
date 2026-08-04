@@ -30,6 +30,51 @@ function Add-Mismatch {
     $script:mismatches.Add($Message)
 }
 
+$expectedFamilySchemas = @(
+    @{ Name = 'plain_function'; RuntimeType = 'function'; WireType = 'function'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'function'; CallType = 'function_call'; ResultType = 'function_call_output'; DeclarationRequired = @('name', 'parameters'); CallRequired = @('item_id', 'call_id', 'arguments'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id') },
+    @{ Name = 'custom_freeform'; RuntimeType = 'custom'; WireType = 'custom'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'custom'; CallType = 'custom_tool_call'; ResultType = 'custom_tool_call_output'; DeclarationRequired = @('name', 'format'); CallRequired = @('item_id', 'call_id', 'input'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id') },
+    @{ Name = 'namespace'; RuntimeType = 'namespace'; WireType = 'namespace'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'namespace'; CallType = 'function_call'; ResultType = 'function_call_output'; DeclarationRequired = @('name', 'tools'); CallRequired = @('item_id', 'call_id', 'namespace', 'arguments'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'namespace') },
+    @{ Name = 'client_executed_tool_discovery'; RuntimeType = 'tool_search'; WireType = 'tool_search'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'discovery request/result stays client-executed'; DeclarationType = 'tool_search'; CallType = 'tool_search_call'; ResultType = 'tool_search_output'; DeclarationRequired = @('execution', 'parameters'); CallRequired = @('item_id', 'call_id', 'execution', 'arguments'); ResultRequired = @('item_id', 'call_id', 'execution', 'tools'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'executor') },
+    @{ Name = 'selected_provider_hosted'; RuntimeType = 'web_search'; WireType = 'web_search'; Executor = 'selected_provider'; Observation = 'not_observed_selected_provider_control_required'; LossBoundary = 'optional unsupported hosted capability is omitted; required capability fails visibly'; DeclarationType = 'web_search'; CallType = 'web_search_call'; ResultType = 'web_search_call'; DeclarationRequired = @('executor', 'provider_scope'); CallRequired = @('item_id', 'status', 'action'); ResultRequired = @('item_id', 'status', 'provider_scope'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'executor', 'cross_provider_proxy') },
+    @{ Name = 'unknown_future_kind'; RuntimeType = 'unknown'; WireType = '<unknown>'; Executor = 'unknown'; Observation = 'opaque_sentinel_only'; LossBoundary = 'retain tag and opaque payload; do not normalize'; DeclarationType = 'unknown'; CallType = 'unknown'; ResultType = 'unknown'; DeclarationRequired = @('tag', 'opaque_payload'); CallRequired = @('tag', 'opaque_payload'); ResultRequired = @('tag', 'opaque_payload'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'loss_rule') }
+)
+$sourceContractSchemaValid = $true
+$sourceContractFamilies = @($sourceContract.runtime_wire_surface.declaration_families)
+$sourceContractExamples = $sourceContract.runtime_wire_surface.declaration_family_examples
+foreach ($expected in $expectedFamilySchemas) {
+    $family = @($sourceContractFamilies | Where-Object { $_.family -eq $expected.Name }) | Select-Object -First 1
+    $exampleProperty = if ($null -ne $sourceContractExamples) { $sourceContractExamples.PSObject.Properties[$expected.Name] } else { $null }
+    $example = if ($null -ne $exampleProperty) { $exampleProperty.Value } else { $null }
+    if ($null -eq $family -or $null -eq $example -or
+        $family.runtime_type -ne $expected.RuntimeType -or
+        $family.wire_declaration_type -ne $expected.WireType -or
+        $family.executor -ne $expected.Executor -or
+        $family.observation -ne $expected.Observation -or
+        $family.loss_boundary -ne $expected.LossBoundary) {
+        $sourceContractSchemaValid = $false
+        continue
+    }
+    $sections = @(
+        @{ Name = 'declaration'; Type = $expected.DeclarationType; Required = $expected.DeclarationRequired },
+        @{ Name = 'call'; Type = $expected.CallType; Required = $expected.CallRequired },
+        @{ Name = 'result'; Type = $expected.ResultType; Required = $expected.ResultRequired },
+        @{ Name = 'history'; Type = $null; Required = $expected.HistoryRequired }
+    )
+    foreach ($sectionSpec in $sections) {
+        $sectionProperty = $example.PSObject.Properties[$sectionSpec.Name]
+        $section = if ($null -ne $sectionProperty) { $sectionProperty.Value } else { $null }
+        if ($null -eq $section -or ($null -ne $sectionSpec.Type -and $section.type -ne $sectionSpec.Type)) {
+            $sourceContractSchemaValid = $false
+            continue
+        }
+        foreach ($required in $sectionSpec.Required) {
+            if ($null -eq $section.PSObject.Properties[$required]) {
+                $sourceContractSchemaValid = $false
+            }
+        }
+    }
+}
+
 # Rebuild the inventory from the bound evidence and compare it with the
 # committed artifact.  The PowerShell checks below remain an independent
 # reconciliation, while this call catches stale generated fields/notes that
@@ -689,6 +734,7 @@ if (
     $sourceContract.provenance.cli_source_commit_status -ne 'published_attested' -or
     $sourceContract.provenance.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb' -or
     $sourceContract.provenance.candidate_revision -ne 'accab8ff6eb4d6ebd93cda84585fb5f6cb89da82' -or
+    -not $sourceContractSchemaValid -or
     $sourceContract.runtime_wire_surface.declaration_families.Count -ne 6 -or
     ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observed -ne $false }).Count -ne 0 -or
     ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observation -notin @('not_observed_source_contract_only', 'not_observed_selected_provider_control_required', 'opaque_sentinel_only') }).Count -ne 0 -or

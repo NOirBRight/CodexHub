@@ -468,6 +468,52 @@ def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path
         )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "runtime_type",
+        "wire_declaration_type",
+        "declaration_type",
+        "call_type",
+        "result_type",
+    ],
+)
+def test_build_inventory_rejects_source_contract_schema_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation in {"runtime_type", "wire_declaration_type"}:
+        source_contract["runtime_wire_surface"]["declaration_families"][0][mutation] = "bogus"
+    else:
+        source_contract["runtime_wire_surface"]["declaration_family_examples"]["plain_function"][
+            {"declaration_type": "declaration", "call_type": "call", "result_type": "result"}[mutation]
+        ]["type"] = "web_search_call"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="canonical family schema"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
+def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["representative"]["call"]["type"] = "web_search_call"
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("canonical family schema" in mismatch for mismatch in report["mismatches"])
+
+
 def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
