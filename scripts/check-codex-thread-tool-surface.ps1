@@ -99,6 +99,21 @@ if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.requ
         ))) {
     $sourceContractSchemaValid = $false
 }
+$expectedResponseItemTypes = @(
+    'message', 'reasoning', 'function_call', 'function_call_output',
+    'custom_tool_call', 'custom_tool_call_output', 'tool_search_call',
+    'tool_search_output', 'web_search_call', 'local_shell_call',
+    'compaction', 'context_compaction', 'unknown'
+)
+$expectedResponseStreamEventOrder = @(
+    'response.created', 'response.in_progress', 'response.output_item.added',
+    'response.output_text.delta', 'response.function_call_arguments.delta',
+    'response.custom_tool_call_input.delta', 'response.function_call_arguments.done',
+    'response.custom_tool_call_input.done', 'response.output_item.done',
+    'response.reasoning_summary_part.added', 'response.reasoning_summary_text.delta',
+    'response.reasoning_summary_text.done', 'response.completed'
+)
+$expectedResponseTerminalEvents = @('response.completed', 'response.incomplete', 'response.failed')
 if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape -Expected @(
             'response_item_types', 'stream_event_order', 'terminal_events', 'error_shape'
         ))) {
@@ -112,6 +127,24 @@ if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.resp
 if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape.error_shape.response -Expected @(
             'id', 'status', 'error'
         ))) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.response_item_types -join '|') -ne ($expectedResponseItemTypes -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.stream_event_order -join '|') -ne ($expectedResponseStreamEventOrder -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.terminal_events -join '|') -ne ($expectedResponseTerminalEvents -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.event -ne 'response.failed' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.classification -ne 'unqualified' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.id -ne 'response_error_001' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.status -ne 'failed' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.error -ne '<redacted>'
+) {
     $sourceContractSchemaValid = $false
 }
 if (-not (Test-ExactPropertySet -Value $sourceContractExamples -Expected @(
@@ -134,6 +167,8 @@ $expectedSseSchemas = @{
     selected_provider_hosted = @{ Added = 'response.output_item.added'; Delta = '<provider-defined>'; DoneField = 'done'; Done = 'response.output_item.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', '<provider-defined>', 'response.output_item.done', 'response.completed') }
     unknown_future_kind = @{ Added = 'unknown.future_event'; Delta = 'unknown.future_delta'; DoneField = 'done'; Done = 'unknown.future_done'; ItemDone = 'unknown.future_done'; Terminal = 'response.completed'; Order = @('unknown.future_event', 'unknown.future_delta', 'unknown.future_done', 'response.completed') }
 }
+$redactedStructuralFields = @('parameters', 'arguments', 'input', 'output', 'format', 'action', 'status', 'tools', 'opaque_payload')
+$nonEmptyStructuralFields = @('name', 'namespace', 'executor', 'execution', 'provider_scope', 'cross_provider_proxy', 'tag', 'loss_rule', 'item_id', 'call_id', 'call_item_id', 'output_item_id')
 foreach ($expected in $expectedFamilySchemas) {
     $family = @($sourceContractFamilies | Where-Object { $_.family -eq $expected.Name }) | Select-Object -First 1
     $exampleProperty = if ($null -ne $sourceContractExamples) { $sourceContractExamples.PSObject.Properties[$expected.Name] } else { $null }
@@ -165,6 +200,16 @@ foreach ($expected in $expectedFamilySchemas) {
     if (-not (Test-ExactPropertySet -Value $example -Expected $expectedExampleFields)) {
         $sourceContractSchemaValid = $false
     }
+    if ($expected.Name -eq 'selected_provider_hosted' -and
+        ($example.observed -ne $false -or
+         $example.status -ne 'selected_provider_control_required' -or
+         $example.provider_scope -ne 'selected_provider_only' -or
+         $example.cross_provider_proxy -ne 'forbidden')) {
+        $sourceContractSchemaValid = $false
+    } elseif ($expected.Name -eq 'unknown_future_kind' -and
+        ($example.observed -ne $false -or $example.status -ne 'opaque_sentinel_only')) {
+        $sourceContractSchemaValid = $false
+    }
     $sections = @(
         @{ Name = 'declaration'; Type = $expected.DeclarationType; Required = $expected.DeclarationRequired },
         @{ Name = 'call'; Type = $expected.CallType; Required = $expected.CallRequired },
@@ -177,6 +222,13 @@ foreach ($expected in $expectedFamilySchemas) {
         if ($null -eq $section -or ($null -ne $sectionSpec.Type -and $section.type -ne $sectionSpec.Type)) {
             $sourceContractSchemaValid = $false
             continue
+        }
+        $expectedSectionFields = @($sectionSpec.Required)
+        if ($null -ne $sectionSpec.Type) {
+            $expectedSectionFields += 'type'
+        }
+        if (-not (Test-ExactPropertySet -Value $section -Expected $expectedSectionFields)) {
+            $sourceContractSchemaValid = $false
         }
         foreach ($required in $sectionSpec.Required) {
             $requiredProperty = $section.PSObject.Properties[$required]
@@ -193,11 +245,74 @@ foreach ($expected in $expectedFamilySchemas) {
                 $sourceContractSchemaValid = $false
             }
         }
+        foreach ($property in $section.PSObject.Properties) {
+            if ($property.Name -eq 'type' -or $property.Name -in $nonEmptyStructuralFields) {
+                continue
+            }
+            if ($property.Name -eq 'tools' -and $expected.Name -eq 'namespace' -and $sectionSpec.Name -eq 'declaration') {
+                if ($property.Value -isnot [array] -or @($property.Value).Count -eq 0) {
+                    $sourceContractSchemaValid = $false
+                    continue
+                }
+                foreach ($nested in @($property.Value)) {
+                    if (-not (Test-ExactPropertySet -Value $nested -Expected @('type', 'name', 'parameters')) -or
+                        $nested.type -ne 'function' -or
+                        $nested.name -isnot [string] -or [string]::IsNullOrEmpty($nested.name) -or
+                        $nested.parameters -ne '<redacted>') {
+                        $sourceContractSchemaValid = $false
+                    }
+                }
+                continue
+            }
+            if ($property.Name -in $redactedStructuralFields -and $property.Value -ne '<redacted>') {
+                $sourceContractSchemaValid = $false
+            } elseif ($property.Value -isnot [string]) {
+                $sourceContractSchemaValid = $false
+            }
+        }
+    }
+    if ($expected.Name -eq 'client_executed_tool_discovery' -and
+        ($example.declaration.execution -ne 'client' -or
+         $example.call.execution -ne 'client' -or
+         $example.result.execution -ne 'client' -or
+         $example.history.executor -ne 'codex_client')) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($expected.Name -eq 'selected_provider_hosted' -and
+        ($example.declaration.executor -ne 'selected_provider' -or
+         $example.declaration.provider_scope -ne 'selected_provider_only' -or
+         $example.result.provider_scope -ne 'selected_provider_only' -or
+         $example.history.executor -ne 'selected_provider' -or
+         $example.history.cross_provider_proxy -ne 'forbidden')) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($expected.Name -eq 'unknown_future_kind' -and
+        ($example.declaration.tag -ne 'unknown' -or
+         $example.call.tag -ne 'unknown' -or
+         $example.result.tag -ne 'unknown' -or
+         $example.history.call_id -ne $null -or
+         $example.history.call_item_id -ne $null -or
+         $example.history.output_item_id -ne $null -or
+         $example.history.loss_rule -ne 'retain opaque sentinel')) {
+        $sourceContractSchemaValid = $false
+    }
+    if (-not (Test-ExactPropertySet -Value $example.terminal -Expected @('event', 'classification')) -or
+        $example.terminal.event -ne 'response.completed' -or
+        $example.terminal.classification -notin @('not_observed', 'unqualified') -or
+        -not (Test-ExactPropertySet -Value $example.error -Expected @('event', 'classification')) -or
+        $example.error.event -ne 'response.failed' -or
+        $example.error.classification -notin @('not_observed', 'unqualified') -or
+        $example.loss_boundary -isnot [string] -or [string]::IsNullOrEmpty($example.loss_boundary)) {
+        $sourceContractSchemaValid = $false
     }
     $sseSchema = $expectedSseSchemas[$expected.Name]
     $streamProperty = $example.PSObject.Properties['streaming']
     $stream = if ($null -ne $streamProperty) { $streamProperty.Value } else { $null }
     $doneProperty = if ($null -ne $stream) { $stream.PSObject.Properties[$sseSchema.DoneField] } else { $null }
+    $expectedStreamFields = @('added', 'delta', 'done', 'terminal', 'event_order', $sseSchema.DoneField) | Select-Object -Unique
+    if (-not (Test-ExactPropertySet -Value $stream -Expected $expectedStreamFields)) {
+        $sourceContractSchemaValid = $false
+    }
     if ($null -eq $stream -or
         $stream.added -ne $sseSchema.Added -or
         $stream.delta -ne $sseSchema.Delta -or

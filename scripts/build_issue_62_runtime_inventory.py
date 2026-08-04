@@ -969,6 +969,78 @@ STRUCTURAL_FAMILY_SCHEMAS = {
         },
     },
 }
+STRUCTURAL_EXAMPLE_BASE_FIELDS = frozenset(
+    {
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "loss_boundary",
+    }
+)
+STRUCTURAL_EXAMPLE_STATUS_FIELDS = {
+    "selected_provider_hosted": {
+        "observed": False,
+        "status": "selected_provider_control_required",
+        "provider_scope": "selected_provider_only",
+        "cross_provider_proxy": "forbidden",
+    },
+    "unknown_future_kind": {
+        "observed": False,
+        "status": "opaque_sentinel_only",
+    },
+}
+STRUCTURAL_REDACTED_FIELDS = frozenset(
+    {
+        "parameters",
+        "arguments",
+        "input",
+        "output",
+        "format",
+        "action",
+        "status",
+        "tools",
+        "opaque_payload",
+    }
+)
+STRUCTURAL_RESPONSE_ITEM_TYPES = [
+    "message",
+    "reasoning",
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "tool_search_call",
+    "tool_search_output",
+    "web_search_call",
+    "local_shell_call",
+    "compaction",
+    "context_compaction",
+    "unknown",
+]
+STRUCTURAL_RESPONSE_STREAM_EVENT_ORDER = [
+    "response.created",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.output_text.delta",
+    "response.function_call_arguments.delta",
+    "response.custom_tool_call_input.delta",
+    "response.function_call_arguments.done",
+    "response.custom_tool_call_input.done",
+    "response.output_item.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.completed",
+]
+STRUCTURAL_RESPONSE_TERMINAL_EVENTS = [
+    "response.completed",
+    "response.incomplete",
+    "response.failed",
+]
 STRUCTURAL_NONEMPTY_STRING_FIELDS = frozenset(
     {
         "name",
@@ -987,6 +1059,147 @@ STRUCTURAL_NONEMPTY_STRING_FIELDS = frozenset(
 )
 
 
+def _require_exact_fields(
+    value: dict[str, Any], expected: set[str] | frozenset[str], *, context: str
+) -> None:
+    actual = set(value)
+    if actual != set(expected):
+        missing = sorted(set(expected) - actual)
+        unknown = sorted(actual - set(expected))
+        raise ValueError(
+            f"{context} has unknown or missing fields "
+            f"(missing={missing!r}, unknown={unknown!r})"
+        )
+
+
+def _validate_structural_section(
+    family_name: str, section_name: str, section: dict[str, Any], *, context: str
+) -> None:
+    section_schema = STRUCTURAL_FAMILY_SCHEMAS[family_name][section_name]
+    expected_fields = set(section_schema.get("required", ()))
+    if section_schema.get("type") is not None:
+        expected_fields.add("type")
+    _require_exact_fields(section, expected_fields, context=context)
+    nullable = set(section_schema.get("nullable", ()))
+    equals = section_schema.get("equals", {})
+    for key in expected_fields:
+        value = section[key]
+        if key in equals:
+            if value != equals[key]:
+                raise ValueError(
+                    f"{context}.{key} does not match the canonical family schema"
+                )
+            continue
+        if key == "type":
+            if value != section_schema["type"]:
+                raise ValueError(
+                    f"{context}.type does not match the canonical family schema"
+                )
+            continue
+        if value is None:
+            if key not in nullable:
+                raise ValueError(f"{context}.{key} cannot be null")
+            continue
+        if family_name == "namespace" and section_name == "declaration" and key == "tools":
+            continue
+        if key in STRUCTURAL_REDACTED_FIELDS:
+            if value != "<redacted>":
+                raise ValueError(f"{context}.{key} must remain the redacted sentinel")
+            continue
+        if key in STRUCTURAL_NONEMPTY_STRING_FIELDS and (
+            not isinstance(value, str) or not value
+        ):
+            raise ValueError(f"{context}.{key} must be a non-empty string")
+        if not isinstance(value, str):
+            raise ValueError(f"{context}.{key} must be a string")
+
+    if family_name == "namespace" and section_name == "declaration":
+        tools = section["tools"]
+        if not isinstance(tools, list) or not tools:
+            raise ValueError(f"{context}.tools must contain a function")
+        for index, nested in enumerate(tools):
+            nested_context = f"{context}.tools[{index}]"
+            if not isinstance(nested, dict):
+                raise ValueError(f"{nested_context} must be an object")
+            _require_exact_fields(
+                nested,
+                {"type", "name", "parameters"},
+                context=nested_context,
+            )
+            if nested.get("type") != "function":
+                raise ValueError(f"{nested_context}.type must be function")
+            if not isinstance(nested.get("name"), str) or not nested["name"]:
+                raise ValueError(f"{nested_context}.name must be a non-empty string")
+            if nested.get("parameters") != "<redacted>":
+                raise ValueError(
+                    f"{nested_context}.parameters must remain the redacted sentinel"
+                )
+
+
+def _validate_structural_terminal_error(
+    example: dict[str, Any], *, context: str
+) -> None:
+    terminal = example.get("terminal")
+    if not isinstance(terminal, dict):
+        raise ValueError(f"{context}.terminal must be an object")
+    _require_exact_fields(terminal, {"event", "classification"}, context=f"{context}.terminal")
+    if terminal.get("event") != "response.completed":
+        raise ValueError(f"{context}.terminal.event is invalid")
+    if terminal.get("classification") not in {"not_observed", "unqualified"}:
+        raise ValueError(f"{context}.terminal.classification is invalid")
+
+    error = example.get("error")
+    if not isinstance(error, dict):
+        raise ValueError(f"{context}.error must be an object")
+    _require_exact_fields(error, {"event", "classification"}, context=f"{context}.error")
+    if error.get("event") != "response.failed":
+        raise ValueError(f"{context}.error.event is invalid")
+    if error.get("classification") not in {"not_observed", "unqualified"}:
+        raise ValueError(f"{context}.error.classification is invalid")
+
+
+def _validate_response_shape_schema(response_shape: Any, *, context: str) -> None:
+    if not isinstance(response_shape, dict):
+        raise ValueError(f"{context} must be an object")
+    _require_exact_fields(
+        response_shape,
+        {"response_item_types", "stream_event_order", "terminal_events", "error_shape"},
+        context=context,
+    )
+    if response_shape.get("response_item_types") != STRUCTURAL_RESPONSE_ITEM_TYPES:
+        raise ValueError(f"{context}.response_item_types does not match the canonical list")
+    if response_shape.get("stream_event_order") != STRUCTURAL_RESPONSE_STREAM_EVENT_ORDER:
+        raise ValueError(f"{context}.stream_event_order does not match the canonical list")
+    if response_shape.get("terminal_events") != STRUCTURAL_RESPONSE_TERMINAL_EVENTS:
+        raise ValueError(f"{context}.terminal_events does not match the canonical list")
+    error_shape = response_shape.get("error_shape")
+    if not isinstance(error_shape, dict):
+        raise ValueError(f"{context}.error_shape must be an object")
+    _require_exact_fields(
+        error_shape,
+        {"event", "response", "classification"},
+        context=f"{context}.error_shape",
+    )
+    if error_shape.get("event") != "response.failed":
+        raise ValueError(f"{context}.error_shape.event is invalid")
+    if error_shape.get("classification") != "unqualified":
+        raise ValueError(f"{context}.error_shape.classification is invalid")
+    error_response = error_shape.get("response")
+    if not isinstance(error_response, dict):
+        raise ValueError(f"{context}.error_shape.response must be an object")
+    _require_exact_fields(
+        error_response,
+        {"id", "status", "error"},
+        context=f"{context}.error_shape.response",
+    )
+    if error_response.get("id") != "response_error_001":
+        raise ValueError(f"{context}.error_shape.response.id is invalid")
+    if error_response.get("status") != "failed":
+        raise ValueError(f"{context}.error_shape.response.status is invalid")
+    if error_response.get("error") != "<redacted>":
+        raise ValueError(f"{context}.error_shape.response.error must remain redacted")
+
+
 def _validate_structural_family_schema(
     family_name: str,
     family: dict[str, Any],
@@ -1000,42 +1213,31 @@ def _validate_structural_family_schema(
     for field in ("runtime_type", "wire_declaration_type", "executor", "observation", "loss_boundary"):
         if family.get(field) != schema[field]:
             raise ValueError(f"{context}.{field} does not match the canonical family schema")
+    if not isinstance(example, dict):
+        raise ValueError(f"{context} must be an object")
+    expected_example_fields = STRUCTURAL_EXAMPLE_BASE_FIELDS | set(
+        STRUCTURAL_EXAMPLE_STATUS_FIELDS.get(family_name, {})
+    )
+    _require_exact_fields(example, expected_example_fields, context=context)
+    for field, expected in STRUCTURAL_EXAMPLE_STATUS_FIELDS.get(family_name, {}).items():
+        if example.get(field) != expected:
+            raise ValueError(f"{context}.{field} does not match the canonical status")
     for section_name in ("declaration", "call", "result", "history"):
         section = example.get(section_name)
-        section_schema = schema[section_name]
         if not isinstance(section, dict):
             raise ValueError(f"{context}.{section_name} must be an object")
-        expected_type = section_schema.get("type")
-        if expected_type is not None and section.get("type") != expected_type:
-            raise ValueError(f"{context}.{section_name}.type does not match the canonical family schema")
-        nullable = set(section_schema.get("nullable", ()))
-        for key in section_schema.get("required", ()):
-            if key not in section:
-                raise ValueError(f"{context}.{section_name}.{key} is required")
-            if key in STRUCTURAL_NONEMPTY_STRING_FIELDS and section[key] is not None and (
-                not isinstance(section[key], str) or not section[key]
-            ):
-                raise ValueError(
-                    f"{context}.{section_name}.{key} must be a non-empty string"
-                )
-            if key not in nullable and section[key] is None:
-                raise ValueError(f"{context}.{section_name}.{key} cannot be null")
-        for key, expected in section_schema.get("equals", {}).items():
-            if section.get(key) != expected:
-                raise ValueError(f"{context}.{section_name}.{key} does not match the canonical family schema")
+        _validate_structural_section(
+            family_name,
+            section_name,
+            section,
+            context=f"{context}.{section_name}",
+        )
+    if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
+        raise ValueError(f"{context}.loss_boundary is missing or blank")
+    if example["loss_boundary"] != schema["loss_boundary"]:
+        raise ValueError(f"{context}.loss_boundary does not match the canonical family schema")
+    _validate_structural_terminal_error(example, context=context)
     if family_name == "namespace":
-        tools = example["declaration"].get("tools")
-        if not isinstance(tools, list) or not tools:
-            raise ValueError(f"{context}.declaration.tools must contain a function")
-        for nested in tools:
-            if (
-                not isinstance(nested, dict)
-                or nested.get("type") != "function"
-                or not isinstance(nested.get("name"), str)
-                or not nested.get("name")
-                or "parameters" not in nested
-            ):
-                raise ValueError(f"{context}.declaration.tools contains an invalid function")
         namespace = example["declaration"].get("name")
         if (
             example["call"].get("namespace") != namespace
@@ -1174,6 +1376,15 @@ def _validate_structural_stream_example(
         raise ValueError(f"{context} has an unknown stream schema")
     if not isinstance(streaming, dict):
         raise ValueError(f"{context}.streaming must be an object")
+    expected_fields = {
+        "added",
+        "delta",
+        "done",
+        "terminal",
+        "event_order",
+        schema["done_field"],
+    }
+    _require_exact_fields(streaming, expected_fields, context=f"{context}.streaming")
     for field in ("added", "delta", "terminal"):
         if streaming.get(field) != schema[field]:
             raise ValueError(f"{context}.streaming.{field} does not match the canonical SSE schema")
@@ -2326,33 +2537,10 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         if not isinstance(example.get("loss_boundary"), str) or not example["loss_boundary"]:
             raise ValueError(f"Codex 0.146 source contract loss boundary is invalid for {family}")
     response_shape = runtime_surface.get("response_shape")
-    expected_response_shape_fields = {
-        "response_item_types",
-        "stream_event_order",
-        "terminal_events",
-        "error_shape",
-    }
-    if not isinstance(response_shape, dict) or set(response_shape) != expected_response_shape_fields:
-        raise ValueError(
-            "Codex 0.146 source contract response_shape has unknown fields"
-        )
-    error_shape = response_shape.get("error_shape") if isinstance(response_shape, dict) else None
-    expected_error_shape_fields = {"event", "response", "classification"}
-    if not isinstance(error_shape, dict) or set(error_shape) != expected_error_shape_fields:
-        raise ValueError(
-            "Codex 0.146 source contract response_shape.error_shape has unknown fields"
-        )
-    error_response = error_shape.get("response")
-    if not isinstance(error_response, dict) or set(error_response) != {
-        "id",
-        "status",
-        "error",
-    }:
-        raise ValueError(
-            "Codex 0.146 source contract response_shape.error_shape.response has unknown fields"
-        )
-    if not isinstance(error_shape, dict) or error_shape.get("classification") != "unqualified":
-        raise ValueError("Codex 0.146 source contract response error status is invalid")
+    _validate_response_shape_schema(
+        response_shape,
+        context="Codex 0.146 source contract response_shape",
+    )
 
     def _captured_true(value: Any) -> bool:
         if isinstance(value, dict):
