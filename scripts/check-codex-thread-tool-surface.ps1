@@ -958,6 +958,9 @@ $qualification = $inventory.qualification
 if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
     Add-Mismatch 'inventory qualification candidate version status is invalid'
 }
+if ($qualification.PSObject.Properties.Name -contains 'ready_for_beta1') {
+    Add-Mismatch 'inventory qualification ready_for_beta1 is stale; use ready_for_beta2'
+}
 $blockingScopes = @(
     $coreEvidence.Keys + $requiredLiveControlScopes + $requiredChoiceScope |
         Sort-Object -Unique
@@ -1031,8 +1034,8 @@ if ((($qualification.blocking_gates | Sort-Object) -join '|') -ne (($observedBlo
     Add-Mismatch 'inventory qualification blocking_gates does not match trace/audit'
 }
 $expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0 -and $observedBlockingGates.Count -eq 0
-if ([bool]$qualification.ready_for_beta1 -ne $expectedReady) {
-    Add-Mismatch 'inventory qualification ready_for_beta1 is inconsistent with evidence blockers'
+if ([bool]$qualification.ready_for_beta2 -ne $expectedReady) {
+    Add-Mismatch 'inventory qualification ready_for_beta2 is inconsistent with evidence blockers'
 }
 $advancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
 foreach ($scope in $advancedScopes) {

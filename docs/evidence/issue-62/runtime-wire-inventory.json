@@ -633,7 +633,7 @@
       "terminal_events": "not_captured",
       "wire_identity_replay": "not_captured"
     },
-    "ready_for_beta1": false
+    "ready_for_beta2": false
   },
   "schema_version": 1
 }

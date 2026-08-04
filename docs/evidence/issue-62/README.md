@@ -166,7 +166,7 @@ historical trace and wire fixture remain explicitly bound as 0.144.0 evidence.
 The audit carries the 0.146 source-contract provenance with
 `capture_status=not_observed` and nested historical-capture metadata; it is not
 a 0.146 runtime capture. The candidate is version-eligible, but
-`qualification.ready_for_beta1` remains
+`qualification.ready_for_beta2` remains
 `false`: planner completeness, clean current-binding cold start,
 independently fingerprinted full pre/post request and response bodies,
 non-streaming/terminal/error/hosted/unknown controls, and wire replay evidence
@@ -241,7 +241,7 @@ reconciliation invokes the same drift check, then independently checks the
 input fingerprints, rejects duplicate scopes, and requires each core scope to
 point at its declared evidence path. A zero
 `unclassified_core_items` count therefore describes vocabulary validity only;
-`qualification.ready_for_beta1` is the separate completion gate. That gate also
+`qualification.ready_for_beta2` is the separate completion gate. That gate also
 consumes planner completeness, current-binding cold-start, full-wire
 fingerprinting, non-streaming, and identity-replay statuses; item dispositions
 alone cannot make an incomplete evidence set ready.

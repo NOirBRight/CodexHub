@@ -294,6 +294,35 @@ REQUIRED_CANDIDATE_FIELDS = (
     "cli_source_tag",
 )
 
+# This artifact is deliberately bound to the current Issue #62 evidence
+# package.  A standalone reconciliation has no evidence root to reopen, so
+# it must still reject a hand-edited candidate or pointer that merely has the
+# right type/shape but no longer names the retained package.
+EXPECTED_CANDIDATE_VALUES = {
+    "cli_version": DEFAULT_CLI_FLOOR,
+    "source_commit": CLI_SOURCE_COMMIT,
+    "codex_source_commit": CLI_SOURCE_COMMIT,
+    "route_upstream": "official",
+    "inbound_format": "responses",
+    "upstream_format": "responses",
+    "configured_provider_id": "custom",
+    "model": "gpt-5.6-sol",
+    "catalog_binding": "official Codex catalog entry for openai/gpt-5.6-sol",
+    "catalog_model_entry_id": "gpt-5.6-sol",
+    "route_behavior_profile": "official_codex_app_http_passthrough",
+    "candidate_revision": CANDIDATE_REVISION,
+    "cli_binary_sha256": CLI_BINARY_SHA256,
+    "cli_source_commit_status": CLI_SOURCE_COMMIT_STATUS,
+    "cli_source_tag": CLI_SOURCE_TAG,
+}
+
+EXPECTED_EVIDENCE_BINDING_FILES = {
+    "source_contract": "codex-0.146-source-contract.json",
+    "trace": "current-codexhub-thread-tool-surface.json",
+    "wire_fixture": "codexhub-runtime-wire-fixture.json",
+    "audit": "read-only-gate-audit.json",
+}
+
 
 def _sha256_file(path: Path) -> str:
     # Evidence is JSON text; hash its canonical LF representation so a
@@ -355,7 +384,9 @@ def _validate_supported_floor(value: str) -> str:
     return value
 
 
-def _candidate_identity_mismatches(candidate_identity: Any) -> list[str]:
+def _candidate_identity_mismatches(
+    candidate_identity: Any, *, enforce_retained: bool = False
+) -> list[str]:
     """Validate candidate metadata that is self-contained in the inventory.
 
     Reconciliation is also used for in-memory replay controls where no evidence
@@ -423,6 +454,13 @@ def _candidate_identity_mismatches(candidate_identity: Any) -> list[str]:
     source_tag = candidate_identity.get("cli_source_tag")
     if not isinstance(source_tag, str) or not source_tag.strip():
         mismatches.append("candidate_identity.cli_source_tag is missing or blank")
+
+    if enforce_retained:
+        for field, expected in EXPECTED_CANDIDATE_VALUES.items():
+            if candidate_identity.get(field) != expected:
+                mismatches.append(
+                    f"candidate_identity.{field} does not match the retained Issue #62 candidate"
+                )
 
     for field in (
         "catalog_snapshot_sha256",
@@ -1215,7 +1253,9 @@ def _build_structural_inventory(
     return output
 
 
-def _structural_inventory_mismatches(value: Any) -> list[str]:
+def _structural_inventory_mismatches(
+    value: Any, *, require_unobserved: bool = False
+) -> list[str]:
     """Validate the stable shape of the emitted declaration-family inventory."""
 
     if not isinstance(value, list):
@@ -1256,6 +1296,10 @@ def _structural_inventory_mismatches(value: Any) -> list[str]:
                 mismatches.append(f"{prefix}.{field} is missing or blank")
         if not isinstance(entry.get("observed"), bool):
             mismatches.append(f"{prefix}.observed must be boolean")
+        elif require_unobserved and entry.get("observed") is not False:
+            mismatches.append(
+                f"{prefix}.observed must remain false for the unobserved 0.146 source contract"
+            )
         for field in ("selected_protocol_disposition", "optional_rule", "required_rule"):
             if entry.get(field) != rule[field]:
                 mismatches.append(f"{prefix}.{field} does not match the family rule")
@@ -1892,7 +1936,7 @@ def _build_qualification(
         "blocking_scopes": blocking_scopes,
         "evidence_gates": evidence_gates,
         "blocking_gates": blocking_gates,
-        "ready_for_beta1": candidate_version_eligible
+        "ready_for_beta2": candidate_version_eligible
         and not blocking_scopes
         and not blocking_gates,
     }
@@ -1941,6 +1985,18 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
     for family, expected_family in zip(STRUCTURAL_FAMILIES, declaration_families):
         if not isinstance(expected_family, dict) or expected_family.get("family") != family:
             raise ValueError("Codex 0.146 source contract declaration family identity is invalid")
+        if set(expected_family) != {
+            "family",
+            "runtime_type",
+            "wire_declaration_type",
+            "observed",
+            "observation",
+            "executor",
+            "loss_boundary",
+        }:
+            raise ValueError(
+                "Codex 0.146 source contract declaration family has unknown fields"
+            )
         declaration_families_by_name[family] = expected_family
         if expected_family.get("observed") is not False:
             raise ValueError(
@@ -1969,6 +2025,29 @@ def _validate_source_contract(source_contract: dict[str, Any]) -> dict[str, Any]
         example = examples.get(family)
         if not isinstance(example, dict):
             raise ValueError(f"Codex 0.146 source contract example is missing for {family}")
+        expected_status_fields = {
+            "selected_provider_hosted": {
+                "observed": False,
+                "status": "selected_provider_control_required",
+                "provider_scope": "selected_provider_only",
+                "cross_provider_proxy": "forbidden",
+            },
+            "unknown_future_kind": {
+                "observed": False,
+                "status": "opaque_sentinel_only",
+            },
+        }.get(family, {})
+        for field, expected_value in expected_status_fields.items():
+            if example.get(field) != expected_value:
+                raise ValueError(
+                    f"Codex 0.146 source contract {family} {field} status is invalid"
+                )
+        if not expected_status_fields and any(
+            field in example for field in ("observed", "status")
+        ):
+            raise ValueError(
+                f"Codex 0.146 source contract {family} has an unknown status field"
+            )
         _validate_structural_family_schema(
             family,
             declaration_families_by_name[family],
@@ -2358,7 +2437,8 @@ def reconcile_inventory(
     mismatches.extend(
         f"mutation: {message}"
         for message in _structural_inventory_mismatches(
-            inventory.get("declaration_families")
+            inventory.get("declaration_families"),
+            require_unobserved=evidence_root is None,
         )
     )
 
@@ -2419,7 +2499,11 @@ def reconcile_inventory(
         mismatches.append(f"deletion: missing scopes {missing}")
 
     candidate_identity = inventory.get("candidate_identity", {})
-    mismatches.extend(_candidate_identity_mismatches(candidate_identity))
+    mismatches.extend(
+        _candidate_identity_mismatches(
+            candidate_identity, enforce_retained=evidence_root is None
+        )
+    )
     if not isinstance(candidate_identity, dict):
         candidate_identity = {}
     for field in REQUIRED_CANDIDATE_FIELDS:
@@ -2484,6 +2568,10 @@ def reconcile_inventory(
     }
     if set(evidence_gates) != expected_gate_keys:
         mismatches.append("qualification.evidence_gates has an unexpected key set")
+    if "ready_for_beta1" in qualification:
+        mismatches.append(
+            "qualification.ready_for_beta1 is stale; use ready_for_beta2"
+        )
     accepted_gate_statuses = {
         "complete_model_visible_plan": {"complete"},
         "clean_cold_start_current_binding": {"complete", "pass"},
@@ -2512,21 +2600,35 @@ def reconcile_inventory(
         and not actual_blocking_scopes
         and not actual_blocking_gates
     )
-    if qualification.get("ready_for_beta1") is not expected_ready:
+    if qualification.get("ready_for_beta2") is not expected_ready:
         mismatches.append(
-            "qualification.ready_for_beta1 is inconsistent with candidate eligibility and blockers"
+            "qualification.ready_for_beta2 is inconsistent with candidate eligibility and blockers"
+        )
+    if evidence_root is None and qualification.get("ready_for_beta2") is True:
+        mismatches.append(
+            "qualification.ready_for_beta2 cannot be asserted without bound evidence"
+        )
+    if evidence_root is None and not actual_blocking_gates:
+        mismatches.append(
+            "qualification.blocking_gates cannot be empty without bound evidence"
         )
 
     evidence_binding = inventory.get("evidence_binding", {})
     if not isinstance(evidence_binding, dict):
         mismatches.append("evidence_binding must be an object")
         evidence_binding = {}
+    elif set(evidence_binding) != set(EXPECTED_EVIDENCE_BINDING_FILES):
+        mismatches.append("evidence_binding has an unexpected key set")
     for name in ("source_contract", "trace", "wire_fixture", "audit"):
         entry = evidence_binding.get(name, {})
         if not isinstance(entry, dict) or not entry.get("file") or not re.fullmatch(
             r"[0-9a-f]{64}", str(entry.get("sha256", ""))
         ):
             mismatches.append(f"loss: evidence_binding.{name} is missing or malformed")
+        elif entry.get("file") != EXPECTED_EVIDENCE_BINDING_FILES[name]:
+            mismatches.append(
+                f"mutation: evidence_binding.{name}.file does not name the retained fixture"
+            )
 
     if evidence_binding and all(
         isinstance(evidence_binding.get(name), dict)
@@ -2617,7 +2719,7 @@ def reconcile_inventory(
                     "evidence_gates",
                     "blocking_gates",
                     "blocking_scopes",
-                    "ready_for_beta1",
+                    "ready_for_beta2",
                 ):
                     if qualification.get(field) != expected_qualification[field]:
                         mismatches.append(

@@ -55,7 +55,7 @@ def test_inventory_is_bound_to_supported_cli_floor_and_candidate_identity() -> N
     assert len(candidate["evidence_manifest_sha256"]) == 64
     assert inventory["qualification"]["candidate_version_status"] == "eligible"
     assert inventory["qualification"]["candidate_version_eligible"] is True
-    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["qualification"]["ready_for_beta2"] is False
     assert inventory["identity_control"]["unknown_tagged_source_count"] == 2
     assert inventory["qualification"]["blocking_gates"] == [
         "clean_cold_start_current_binding",
@@ -259,7 +259,7 @@ def test_inventory_reports_zero_unclassified_core_items() -> None:
 
     assert inventory["identity_control"]["unclassified_core_items"] == 0
     assert inventory["identity_control"]["unclassified_scopes"] == []
-    assert inventory["qualification"]["ready_for_beta1"] is False
+    assert inventory["qualification"]["ready_for_beta2"] is False
     assert "core_function_replay" in inventory["qualification"]["blocking_scopes"]
 
 
@@ -448,6 +448,36 @@ def test_build_inventory_rejects_observed_source_contract_family(tmp_path: Path)
         )
 
 
+@pytest.mark.parametrize(
+    "family, field, value",
+    [
+        ("selected_provider_hosted", "status", "captured"),
+        ("unknown_future_kind", "status", "captured"),
+        ("plain_function", "status", "future_status"),
+    ],
+)
+def test_build_inventory_rejects_source_contract_status_or_unknown_fields(
+    tmp_path: Path, family: str, field: str, value: str
+) -> None:
+    module = load_inventory_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["declaration_family_examples"][family][
+        field
+    ] = value
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="(?:status is invalid|unknown status field)"):
+        module.build_inventory(
+            source_contract=source_contract_path,
+            trace=TRACE,
+            wire_fixture=WIRE_FIXTURE,
+            audit=AUDIT,
+        )
+
+
 def test_build_inventory_rejects_captured_source_contract_control(tmp_path: Path) -> None:
     module = load_inventory_module()
     source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
@@ -571,6 +601,83 @@ def test_inventory_reconcile_rejects_mutated_family_schema_without_evidence_root
     assert any("non-empty string" in mismatch for mismatch in id_report["mismatches"])
 
 
+def test_inventory_reconcile_rejects_observed_family_without_evidence_root() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["observed"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("observed must remain false" in mismatch for mismatch in report["mismatches"])
+
+
+def test_structural_reconcile_allows_observed_family_when_bound_evidence_is_authoritative() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["declaration_families"][0]["observed"] = True
+
+    assert not any(
+        "observed must remain false"
+        in mismatch
+        for mismatch in module._structural_inventory_mismatches(
+            inventory["declaration_families"], require_unobserved=False
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("source_commit", "0" * 40),
+        ("route_upstream", "custom"),
+        ("model", "gpt-5.5"),
+    ],
+)
+def test_inventory_reconcile_rejects_candidate_binding_mutation_without_evidence_root(
+    field: str, value: str
+) -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["candidate_identity"][field] = value
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained Issue #62 candidate" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_evidence_pointer_and_self_reported_readiness_mutation() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["evidence_binding"]["trace"]["file"] = "evil.json"
+    inventory["qualification"]["evidence_gates"] = {
+        gate: "complete" for gate in inventory["qualification"]["evidence_gates"]
+    }
+    inventory["qualification"]["blocking_gates"] = []
+    inventory["qualification"]["ready_for_beta2"] = True
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("retained fixture" in mismatch for mismatch in report["mismatches"])
+    assert any("cannot be asserted without bound evidence" in mismatch for mismatch in report["mismatches"])
+    assert any("blocking_gates cannot be empty" in mismatch for mismatch in report["mismatches"])
+
+
+def test_inventory_reconcile_rejects_legacy_beta1_readiness_key() -> None:
+    module = load_inventory_module()
+    inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory["qualification"]["ready_for_beta1"] = inventory["qualification"].pop(
+        "ready_for_beta2"
+    )
+
+    report = module.reconcile_inventory(inventory)
+
+    assert report["reconciled"] is False
+    assert any("ready_for_beta1 is stale" in mismatch for mismatch in report["mismatches"])
+
+
 def test_build_inventory_rejects_unbound_response_identity_pointer(tmp_path: Path) -> None:
     module = load_inventory_module()
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
@@ -619,7 +726,7 @@ def test_captured_sse_status_does_not_satisfy_independent_sse_gate() -> None:
     )
     assert qualification["evidence_gates"]["sse_identity"] == "captured"
     assert "sse_identity" in qualification["blocking_gates"]
-    assert qualification["ready_for_beta1"] is False
+    assert qualification["ready_for_beta2"] is False
 
 
 def test_committed_inventory_matches_generator_output() -> None:
@@ -873,7 +980,7 @@ def test_qualification_accepts_audit_met_status_when_all_gates_are_complete() ->
         },
     )
     assert qualification["blocking_gates"] == []
-    assert qualification["ready_for_beta1"] is True
+    assert qualification["ready_for_beta2"] is True
 
 
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])
