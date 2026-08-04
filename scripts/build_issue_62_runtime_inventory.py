@@ -811,6 +811,25 @@ def _validate_structural_family_schema(
                 or "parameters" not in nested
             ):
                 raise ValueError(f"{context}.declaration.tools contains an invalid function")
+        namespace = example["declaration"].get("name")
+        if (
+            example["call"].get("namespace") != namespace
+            or example["history"].get("namespace") != namespace
+        ):
+            raise ValueError(f"{context} namespace ownership does not reconcile")
+    if family_name in {
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+    }:
+        if (
+            example["call"].get("item_id") != example["history"].get("call_item_id")
+            or example["result"].get("item_id")
+            != example["history"].get("output_item_id")
+        ):
+            raise ValueError(f"{context} call/result item IDs do not reconcile")
 
 STRUCTURAL_EVIDENCE_SOURCES = {
     "plain_function": "codex-0.146-source-contract.json#runtime_wire_surface.declaration_family_examples.plain_function",
