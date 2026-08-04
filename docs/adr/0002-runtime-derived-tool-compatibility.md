@@ -42,6 +42,12 @@ disposition and any structural Adapter needed to encode and decode that
 declaration. It cannot mutate `ResolvedRoute`, select a model, select a
 Provider, or add execution/scheduling authority.
 
+Execution ownership—Codex-client execution versus selected-Provider-hosted
+execution—is an input and recorded classification distinct from protocol
+representability. Client execution does not require Provider execution
+support; hosted execution does.
+This is an ADR clarification only and adds no product field or API.
+
 The resulting flow is:
 
 ```text
