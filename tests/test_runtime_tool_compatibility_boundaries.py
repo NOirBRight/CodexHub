@@ -14,6 +14,7 @@ from runtime_tool_compatibility import (
     PLAIN_FUNCTION,
     ProtocolCapabilities,
     SELECTED_PROVIDER_HOSTED,
+    RequiredToolUnavailableError,
     ToolCompatibilityError,
     build_tool_compatibility_plan,
 )
@@ -845,41 +846,7 @@ def test_optional_unknown_selected_provider_hosted_history_omits_without_call_id
     assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
 
 
-def test_native_unknown_lifecycle_is_not_misclassified_as_hosted_in_body_and_stream():
-    declaration = {"type": "vendor_extension", "executor": "codex_client"}
-    capabilities = ProtocolCapabilities.responses_structured(
-        unknown_lifecycles=frozenset({"vendor_extension"}),
-    )
-    plan = build_tool_compatibility_plan(
-        [declaration],
-        selected_protocol="responses_structured",
-        protocol_capabilities=capabilities,
-        request_token="native-unknown-lifecycle",
-    )
-    item = {
-        "type": "vendor_extension_call",
-        "id": "extension-item",
-        "payload": {"opaque": True},
-    }
-    assert plan.entries[0].disposition == NATIVE
-    assert plan.decode_payload({"output": [item]})["output"] == [item]
-
-    state = CompatibilityStreamState(plan)
-    added = {"type": "response.output_item.added", "item": item}
-    assert state.decode_events_for_event(added) == [added]
-    delta = {
-        "type": "response.vendor_extension_call.delta",
-        "item_id": "extension-item",
-        "opaque": "fragment",
-    }
-    assert state.decode_events_for_event(delta) == [delta]
-    done = {"type": "response.output_item.done", "item": item}
-    assert state.decode_events_for_event(done) == [done]
-    terminal = {"type": "response.completed", "response": {"id": "extension-response"}}
-    assert state.decode_events_for_event(terminal) == [terminal]
-
-
-def test_unknown_selected_provider_lifecycle_requires_provider_hosted_fact():
+def test_unknown_selected_provider_lifecycle_remains_omitted_without_full_contract():
     declaration = {"type": "vendor_extension", "executor": "selected_provider"}
     protocol = ProtocolCapabilities.responses_structured(
         unknown_lifecycles=frozenset({"vendor_extension"}),
@@ -900,7 +867,30 @@ def test_unknown_selected_provider_lifecycle_requires_provider_hosted_fact():
         protocol_capabilities=protocol,
         request_token="unknown-hosted-with-provider-fact",
     )
-    assert with_provider_fact.entries[0].disposition == NATIVE
+    assert with_provider_fact.entries[0].disposition == OMIT
+
+
+def test_unknown_lifecycle_name_fact_alone_is_not_a_complete_native_contract():
+    declaration = {"type": "vendor_extension", "executor": "codex_client"}
+    protocol = ProtocolCapabilities.responses_structured(
+        unknown_lifecycles=frozenset({"vendor_extension"}),
+    )
+    optional = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="responses_structured",
+        protocol_capabilities=protocol,
+        request_token="unknown-name-only-optional",
+    )
+    assert optional.entries[0].disposition == OMIT
+
+    with pytest.raises(RequiredToolUnavailableError):
+        build_tool_compatibility_plan(
+            [declaration],
+            selected_protocol="responses_structured",
+            protocol_capabilities=protocol,
+            required=True,
+            request_token="unknown-name-only-required",
+        )
 
 
 def test_with_final_declarations_does_not_expose_hosted_without_provider_fact():
