@@ -607,6 +607,22 @@ def test_native_terminal_reconciles_semantic_arguments_not_only_identity():
         )
 
 
+@pytest.mark.parametrize("adapted", [False, True], ids=["native", "namespace-adapter"])
+def test_arguments_done_must_match_received_delta_fragments(adapted):
+    plan = _adapted_namespace_plan() if adapted else _native_plan({"type": "function", "name": "keep"})
+    state = CompatibilityStreamState(plan)
+    name = plan.entries[0].aliases[0] if adapted else "keep"
+    item = {"type": "function_call", "id": "delta-item", "call_id": "delta-call", "name": name, "arguments": ""}
+    state.decode_events_for_event({"type": "response.output_item.added", "item": item})
+    state.decode_events_for_event(
+        {"type": "response.function_call_arguments.delta", "item_id": "delta-item", "call_id": "delta-call", "delta": '{"value":1}' }
+    )
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.function_call_arguments.done", "item_id": "delta-item", "call_id": "delta-call", "arguments": '{"value":2}' }
+        )
+
+
 @pytest.mark.parametrize("output_type", ["function_call_output", "vendor_extension_call_output"])
 def test_sse_output_before_adapted_call_fails_closed(output_type):
     plan = _adapted_namespace_plan()

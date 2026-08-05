@@ -2501,6 +2501,7 @@ class CompatibilityStreamState:
         self._wire_payloads: dict[str, Any] = {}
         self._native_done: set[str] = set()
         self._native_delta_done: set[str] = set()
+        self._native_fragments: dict[str, list[str]] = {}
         self._hosted_pending: dict[str, _HostedStreamState] = {}
         self._buffered_custom: dict[str, _BufferedCustomStreamItem] = {}
         self._terminal = False
@@ -3013,6 +3014,7 @@ class CompatibilityStreamState:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_delta", surface="stream")
                 if item_id in self._native_delta_done:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_stream_done", surface="stream")
+                self._native_fragments.setdefault(item_id, []).append(delta)
                 return result
             if item_id not in self._pending:
                 if self.plan.has_adaptations:
@@ -3044,6 +3046,9 @@ class CompatibilityStreamState:
                 arguments = result.get("arguments", result.get("input"))
                 if not isinstance(arguments, str):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+                fragments = self._native_fragments.get(item_id, [])
+                if fragments and "".join(fragments) != arguments:
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                 payload_item = (
                     {"type": "custom_tool_call", "input": result.get("input", arguments)}
                     if expected_entry.family == CUSTOM_FREEFORM
@@ -3067,6 +3072,8 @@ class CompatibilityStreamState:
             arguments = result.get("arguments", result.get("input"))
             if not isinstance(arguments, str):
                 arguments = "".join(pending.fragments)
+            elif pending.fragments and "".join(pending.fragments) != arguments:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
             if not arguments:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
             pending.delta_done = True
