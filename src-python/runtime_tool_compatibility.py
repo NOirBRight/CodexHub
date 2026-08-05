@@ -1466,6 +1466,45 @@ class ToolCompatibilityPlan:
                 return hosted_kind, True
         return None
 
+    @staticmethod
+    def _unknown_response_item_kind(item_type: Any) -> str | None:
+        if not isinstance(item_type, str):
+            return None
+        if item_type.endswith("_call_output"):
+            kind = item_type[: -len("_call_output")]
+            return kind if kind else None
+        if item_type.endswith("_call"):
+            kind = item_type[: -len("_call")]
+            return kind if kind else None
+        return None
+
+    def _omitted_response_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+        hosted_item_key = self._hosted_history_item_key(item.get("type"))
+        if hosted_item_key is not None:
+            hosted_item_kind, _is_output = hosted_item_key
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.disposition in {NATIVE, OMIT}
+                and self._hosted_entry_item_kind(entry) == hosted_item_kind
+            ]
+            if len(matches) > 1:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="response")
+            return matches[0] if matches and matches[0].disposition == OMIT else None
+        unknown_kind = self._unknown_response_item_kind(item.get("type"))
+        if unknown_kind is None:
+            return None
+        matches = [
+            entry
+            for entry in self.entries
+            if entry.family == UNKNOWN_FUTURE_KIND
+            and entry.disposition in {NATIVE, OMIT}
+            and entry.declaration.get("type") == unknown_kind
+        ]
+        if len(matches) > 1:
+            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="response")
+        return matches[0] if matches and matches[0].disposition == OMIT else None
+
     def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
         hosted_item_key = self._hosted_history_item_key(item_type)
@@ -1774,7 +1813,7 @@ class ToolCompatibilityPlan:
             if require_completed and item.get("status") not in {None, "completed"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_hosted_lifecycle", surface="history")
 
-    def _decode_items(self, items: Any) -> tuple[Any, bool]:
+    def _decode_items(self, items: Any, *, reject_omitted_response: bool = False) -> tuple[Any, bool]:
         if not isinstance(items, list):
             return items, False
         result: list[Any] = []
@@ -1788,6 +1827,12 @@ class ToolCompatibilityPlan:
                 continue
             item_type = raw_item.get("type")
             item = _copy_mapping(raw_item)
+            if reject_omitted_response and self._omitted_response_entry_for_item(item) is not None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unsupported_hosted_lifecycle",
+                    surface="response",
+                )
             item_id = _item_identity(item)
             call_id = item.get("call_id")
             if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
@@ -1882,7 +1927,10 @@ class ToolCompatibilityPlan:
         changed = False
         for key in ("output", "input", "history"):
             if key in result:
-                decoded, item_changed = self._decode_items(result[key])
+                decoded, item_changed = self._decode_items(
+                    result[key],
+                    reject_omitted_response=key == "output",
+                )
                 if item_changed:
                     result[key] = decoded
                     changed = True
@@ -2057,7 +2105,10 @@ class CompatibilityStreamState:
             self._finish_terminal()
             response = result.get("response")
             if isinstance(response, Mapping):
-                decoded_output, output_changed = self.plan._decode_items(response.get("output"))
+                decoded_output, output_changed = self.plan._decode_items(
+                    response.get("output"),
+                    reject_omitted_response=True,
+                )
                 if output_changed:
                     response = _copy_mapping(response)
                     response["output"] = decoded_output
@@ -2134,6 +2185,12 @@ class CompatibilityStreamState:
                         "unknown_alias",
                         surface="stream",
                     )
+            elif self.plan._omitted_response_entry_for_item(item) is not None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unsupported_hosted_lifecycle",
+                    surface="stream",
+                )
             elif _hosted_kind_for_item_type(item.get("type")) is not None or (
                 isinstance(item.get("type"), str)
                 and item.get("type").endswith("_call")
@@ -2257,6 +2314,12 @@ class CompatibilityStreamState:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                     self.plan._validate_native_item(item, native_entry)
                     return result
+                if self.plan._omitted_response_entry_for_item(item) is not None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unsupported_hosted_lifecycle",
+                        surface="stream",
+                    )
                 if _hosted_kind_for_item_type(item.get("type")) is not None or (
                     isinstance(item.get("type"), str)
                     and item.get("type").endswith("_call")

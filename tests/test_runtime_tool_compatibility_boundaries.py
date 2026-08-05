@@ -846,6 +846,65 @@ def test_optional_unknown_selected_provider_hosted_history_omits_without_call_id
     assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
 
 
+def test_omitted_unknown_call_output_fails_closed_in_body_and_sse_boundaries():
+    declaration = {"type": "vendor_extension", "executor": "codex_client"}
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="omitted-unknown-call-output",
+    )
+    output_item = {
+        "type": "vendor_extension_call_output",
+        "id": "extension-output-item",
+        "output": {"opaque": True},
+    }
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [output_item]})
+
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.added", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.done", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [output_item]}}
+        )
+
+
+def test_omitted_known_hosted_call_output_fails_closed_in_body_and_sse_boundaries():
+    plan = build_tool_compatibility_plan(
+        [{"type": "web_search"}],
+        selected_protocol="chat_tools",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="omitted-known-hosted-call-output",
+    )
+    output_item = {
+        "type": "web_search_call_output",
+        "id": "search-output-item",
+        "output": {"opaque": True},
+    }
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [output_item]})
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.added", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.done", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [output_item]}}
+        )
+
+
 def test_unknown_selected_provider_lifecycle_remains_omitted_without_full_contract():
     declaration = {"type": "vendor_extension", "executor": "selected_provider"}
     protocol = ProtocolCapabilities.responses_structured(
