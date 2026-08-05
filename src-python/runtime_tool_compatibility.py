@@ -416,6 +416,25 @@ class RequestScopedToolAliasRegistry:
     def record_for_call(self, call_id: Any) -> AliasRecord | None:
         return self._calls.get(call_id) if isinstance(call_id, str) else None
 
+    def new_attempt(self) -> "RequestScopedToolAliasRegistry":
+        """Copy immutable alias ownership while starting a fresh call ledger.
+
+        Alias allocation and declaration ownership are request-scoped and must
+        remain stable across permitted upstream retries.  Call ownership is
+        stream-attempt scoped, however: a provider may legitimately reuse a
+        call id after a transport failure, so a retry cannot inherit ``_calls``
+        from the failed attempt.
+        """
+        attempt = object.__new__(RequestScopedToolAliasRegistry)
+        attempt._token = self._token
+        attempt._native_names = self._native_names
+        attempt._max_length = self._max_length
+        attempt._max_attempts = self._max_attempts
+        attempt._aliases = dict(self._aliases)
+        attempt._by_declaration = dict(self._by_declaration)
+        attempt._calls = {}
+        return attempt
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCompatibilityEntry:
@@ -985,6 +1004,18 @@ class ToolCompatibilityPlan:
 
     def new_stream(self) -> "CompatibilityStreamState":
         return CompatibilityStreamState(self)
+
+    def new_attempt(self) -> "ToolCompatibilityPlan":
+        """Return an attempt-local plan with stable aliases and fresh calls."""
+        return ToolCompatibilityPlan(
+            selected_protocol=self.selected_protocol,
+            capabilities=self.capabilities,
+            entries=self.entries,
+            registry=self.registry.new_attempt(),
+            diagnostics=self.diagnostics,
+            tool_choice=self.tool_choice,
+            provider_hosted_kinds=self.provider_hosted_kinds,
+        )
 
     def with_final_declarations(
         self,

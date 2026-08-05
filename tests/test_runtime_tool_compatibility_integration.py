@@ -212,6 +212,199 @@ def test_sse_inverse_uses_the_same_request_plan_and_rejects_unknown_alias():
         )
 
 
+def _runtime_attempt_context() -> tuple[dict, str]:
+    context: dict = {}
+    request_payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request(
+                [{
+                    "type": "namespace",
+                    "name": "vendor",
+                    "tools": [{"type": "function", "name": "run", "parameters": {}}],
+                }]
+            ),
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+    return context, request_payload["tools"][0]["name"]
+
+
+def _send_runtime_sse_event(context: dict, event: dict) -> bytes:
+    return codex_proxy.compatible_sse_line(
+        b"data: " + json.dumps(event).encode("utf-8") + b"\n",
+        "custom_endpoint",
+        event_context=context,
+    )
+
+
+def test_retry_attempt_generation_accepts_a_second_terminal_responses_stream():
+    context, _alias = _runtime_attempt_context()
+    context["_runtime_tool_compatibility_attempt_generation"] = 1
+
+    _send_runtime_sse_event(
+        context,
+        {"type": "response.created", "response": {"id": "first"}},
+    )
+    first_terminal = _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.completed",
+            "response": {"id": "first", "status": "completed", "output": []},
+        },
+    )
+    assert first_terminal
+
+    # The first terminal is the lifecycle-final response that permits a retry.
+    context["_runtime_tool_compatibility_attempt_generation"] = 2
+    _send_runtime_sse_event(
+        context,
+        {"type": "response.created", "response": {"id": "second"}},
+    )
+    second_terminal = _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.completed",
+            "response": {"id": "second", "status": "completed", "output": []},
+        },
+    )
+    assert second_terminal
+
+
+def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_stream():
+    context, alias = _runtime_attempt_context()
+    context["_runtime_tool_compatibility_attempt_generation"] = 1
+    first_item = {
+        "type": "function_call",
+        "id": "item-reused",
+        "call_id": "call-reused",
+        "name": alias,
+        "arguments": "",
+    }
+    _send_runtime_sse_event(
+        context,
+        {"type": "response.output_item.added", "item": first_item},
+    )
+    _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-reused",
+            "call_id": "call-reused",
+            "delta": "{",
+        },
+    )
+
+    # Simulate transport failure after a partial added/delta.  A permitted
+    # retry reuses the provider's call/item identities from the fresh attempt.
+    context["_runtime_tool_compatibility_attempt_generation"] = 2
+    second_item = {**first_item, "arguments": ""}
+    _send_runtime_sse_event(
+        context,
+        {"type": "response.output_item.added", "item": second_item},
+    )
+    _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-reused",
+            "call_id": "call-reused",
+            "delta": "{}",
+        },
+    )
+    _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "item-reused",
+            "call_id": "call-reused",
+            "arguments": "{}",
+        },
+    )
+    _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.output_item.done",
+            "item": {**first_item, "arguments": "{}"},
+        },
+    )
+    terminal = _send_runtime_sse_event(
+        context,
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "second",
+                "status": "completed",
+                "output": [{**first_item, "arguments": "{}"}],
+            },
+        },
+    )
+    assert terminal
+
+
+def test_required_tool_restriction_diagnostics_keep_generated_aliases_private(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        codex_proxy,
+        "write_proxy_event",
+        lambda name, **fields: events.append((name, fields)),
+    )
+    prompt = """
+Use the real subagent-driven-development skill.
+
+Execution constraints:
+1. The coordinator may read the plan once with node_repl.
+2. Spawn exactly one implementer, wait for it, close it, then spawn exactly one spec reviewer, wait for it, close it, then spawn exactly one code-quality reviewer, wait for it, and close it.
+"""
+    context = {"request_id": "req-diagnostics", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
+    with monkeypatch.context() as patches:
+        # Keep both declarations on the synthetic surface so the required-tool
+        # restriction itself (rather than coordinator filtering) is exercised.
+        patches.setattr(codex_proxy, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
+        patches.setattr(codex_proxy, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
+        patches.setattr(
+            codex_proxy,
+            "_runtime_alias_for_namespace_child",
+            lambda *args, **kwargs: "__codexhub_ns_generated_1",
+        )
+        transformed = codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "custom-model",
+                    "input": [{"type": "message", "role": "user", "content": prompt}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "__codexhub_ns_generated_1",
+                            "parameters": {},
+                        },
+                        {"type": "function", "name": "other", "parameters": {}},
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "custom_endpoint",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context=context,
+        )
+
+    restricted = [fields for name, fields in events if name == "required_tool_tools_restricted"]
+    assert restricted
+    fields = restricted[-1]
+    assert set(fields) == {
+        "tool_choice_required",
+        "required_tool_family",
+        "required_tool_disposition",
+    }
+    assert fields["tool_choice_required"] is True
+    assert fields["required_tool_family"] in {"namespace", "plain_function", "unknown"}
+    assert "__codexhub_" not in json.dumps(fields)
+    assert json.loads(transformed)["tool_choice"]["type"] == "function"
+
+
 def test_changing_only_model_slug_does_not_change_compatibility_dispositions():
     tools = [
         {

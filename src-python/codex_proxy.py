@@ -5928,6 +5928,11 @@ def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
 
 _RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
 _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY = "_runtime_tool_compatibility_stream"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = "_runtime_tool_compatibility_attempt_generation"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY = "_runtime_tool_compatibility_attempt_plan"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY = (
+    "_runtime_tool_compatibility_attempt_plan_generation"
+)
 _RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE = "tool_compatibility_capability_manifest"
 
 
@@ -6088,6 +6093,8 @@ def _prepare_runtime_tool_compatibility(
         _raise_runtime_tool_compatibility_error(exc)
     event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan
     event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY, None)
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY, None)
     write_proxy_event(
         "runtime_tool_compatibility_planned",
         counts=plan.diagnostics.as_dict()["counts"],
@@ -6115,6 +6122,99 @@ def _runtime_tool_compatibility_plan(
 ) -> RuntimeToolCompatibilityPlan | None:
     value = (event_context or {}).get(_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY)
     return value if isinstance(value, RuntimeToolCompatibilityPlan) else None
+
+
+def _runtime_tool_compatibility_plan_for_attempt(
+    event_context: Mapping[str, Any] | None,
+) -> RuntimeToolCompatibilityPlan | None:
+    """Resolve the immutable request plan into the current relay attempt.
+
+    The request plan owns stable aliases and declaration classification.  Each
+    permitted upstream retry receives a shallow plan copy with a fresh call
+    ownership ledger; no route or provider selection is performed here.
+    """
+    request_plan = _runtime_tool_compatibility_plan(event_context)
+    if request_plan is None or not isinstance(event_context, dict):
+        return request_plan
+    generation = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY)
+    if generation is None:
+        return request_plan
+    attempt_plan = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY)
+    planned_generation = event_context.get(
+        _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY
+    )
+    if (
+        not isinstance(attempt_plan, RuntimeToolCompatibilityPlan)
+        or planned_generation != generation
+        or attempt_plan is request_plan
+    ):
+        attempt_plan = request_plan.new_attempt()
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY] = attempt_plan
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY] = generation
+        event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
+    return attempt_plan
+
+
+def _runtime_tool_compatibility_stream_for_attempt(
+    event_context: Mapping[str, Any] | None,
+) -> tuple[RuntimeToolCompatibilityPlan | None, Any | None]:
+    """Return the attempt-local stream ledger shared by both relay surfaces."""
+    plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
+    if plan is None or not isinstance(event_context, dict):
+        return plan, None
+    stream = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY)
+    if stream is None or getattr(stream, "plan", None) is not plan:
+        stream = plan.new_stream()
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream
+    return plan, stream
+
+
+def _runtime_required_tool_diagnostics(
+    plan: RuntimeToolCompatibilityPlan | None,
+    tool_choice_name: Any,
+) -> tuple[str, str]:
+    """Return bounded family/disposition fields for required-tool telemetry."""
+    if plan is None or not isinstance(tool_choice_name, str):
+        return "unknown", "unknown"
+
+    record = plan.registry.record_for_alias(tool_choice_name)
+    if record is not None:
+        family = record.family
+        disposition = next(
+            (
+                entry.disposition
+                for entry in plan.entries
+                if entry.declaration_index == record.declaration_index
+            ),
+            "unknown",
+        )
+    else:
+        matches = [
+            entry for entry in plan.entries if entry.original_name == tool_choice_name
+        ]
+        if len(matches) != 1:
+            return "unknown", "unknown"
+        family = matches[0].family
+        disposition = matches[0].disposition
+
+    bounded_families = {
+        "plain_function",
+        "namespace",
+        "custom_freeform",
+        "tool_search",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    }
+    bounded_dispositions = {
+        "native",
+        "adapt",
+        "omit",
+        "required-but-unavailable",
+    }
+    return (
+        family if family in bounded_families else "unknown",
+        disposition if disposition in bounded_dispositions else "unknown",
+    )
 
 
 def _runtime_alias_matches_namespace(
@@ -10970,12 +11070,15 @@ def compatible_request_body(
                         include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
                     )
             if semantic_repair_enabled and _restrict_tools_to_required_tool(payload, required_tool_choice_name):
-                _write_adapter_event(
-                    event_context,
+                required_tool_family, required_tool_disposition = _runtime_required_tool_diagnostics(
+                    runtime_tool_plan,
+                    required_tool_choice_name,
+                )
+                write_proxy_event(
                     "required_tool_tools_restricted",
-                    upstream=upstream_name,
-                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-                    tool_name=required_tool_choice_name,
+                    tool_choice_required=True,
+                    required_tool_family=required_tool_family,
+                    required_tool_disposition=required_tool_disposition,
                 )
                 changed = True
             if semantic_repair_enabled and _set_required_subagent_tool_choice(
@@ -11762,7 +11865,7 @@ def compatible_response_body(
     collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = False
-    runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+    runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
     if runtime_tool_plan is not None:
         try:
             decoded_payload = runtime_tool_plan.decode_payload(payload)
@@ -11847,12 +11950,10 @@ def compatible_sse_line(
     collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
 
-    runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
-    if runtime_tool_plan is not None and isinstance(event_context, dict):
-        stream_state = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY)
-        if stream_state is None:
-            stream_state = runtime_tool_plan.new_stream()
-            event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream_state
+    runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
+        event_context
+    )
+    if runtime_tool_plan is not None and stream_state is not None:
         try:
             decoded_events = stream_state.decode_events_for_event(payload)
         except RuntimeToolCompatibilityError as exc:
@@ -17985,6 +18086,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             open_attempt_budget = (
                 primary_route_attempt.retry.new_open_attempt_budget()
             )
+            runtime_tool_compatibility_attempt_generation = 0
             for route_attempt in route_plan.attempts:
                 active_route_attempt = route_attempt
                 upstream_format = route_attempt.selected_upstream_format
@@ -18012,6 +18114,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 lifecycle_final_retry_reason: str | None = None
                 try:
                     while relay_attempt <= max_relay_attempts:
+                        runtime_tool_compatibility_attempt_generation += 1
+                        if isinstance(adapter_event_context, dict):
+                            adapter_event_context[
+                                _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
+                            ] = runtime_tool_compatibility_attempt_generation
                         seam = _handler_downstream_stream_commit(self)
                         if seam is not None:
                             seam.set_upstream_format(upstream_format)
@@ -21768,16 +21875,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                 else:
                     events = _chat_stream_chunks_to_response_events(chunks)
-                    runtime_tool_plan = _runtime_tool_compatibility_plan(compatibility_event_context)
-                    if runtime_tool_plan is not None and isinstance(compatibility_event_context, dict):
-                        runtime_tool_stream = compatibility_event_context.get(
-                            _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY
+                    runtime_tool_plan, runtime_tool_stream = (
+                        _runtime_tool_compatibility_stream_for_attempt(
+                            compatibility_event_context
                         )
-                        if runtime_tool_stream is None:
-                            runtime_tool_stream = runtime_tool_plan.new_stream()
-                            compatibility_event_context[
-                                _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY
-                            ] = runtime_tool_stream
+                    )
+                    if runtime_tool_plan is not None and runtime_tool_stream is not None:
                         decoded_events: list[Mapping[str, Any]] = []
                         try:
                             for event in events:
