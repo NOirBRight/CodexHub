@@ -2407,6 +2407,29 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     write_proxy_event(event, **payload)
 
 
+def _raise_collaboration_boundary_error(
+    event_context: Mapping[str, Any] | None,
+    *,
+    classification: str,
+    message: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    _write_adapter_event(
+        event_context,
+        "collaboration_boundary_rejected",
+        classification=classification,
+    )
+    error = UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            COLLABORATION_BOUNDARY_ERROR_CODE,
+            message,
+        )
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
 def _resolve_collaboration_boundary(
     payload: Any,
     event_context: Mapping[str, Any] | None,
@@ -2414,80 +2437,84 @@ def _resolve_collaboration_boundary(
     try:
         payload_protocol = _classify_collaboration_payload(payload)
         metadata_protocol = None
-        if isinstance(event_context, Mapping) and "multi_agent_version" in event_context:
+        if isinstance(event_context, Mapping):
+            metadata = {
+                key: event_context[key]
+                for key in (
+                    "collaboration_protocol",
+                    "multi_agent_version",
+                    "metadata",
+                    "model_metadata",
+                    "capabilities",
+                    "features",
+                )
+                if key in event_context
+            }
+        else:
+            metadata = {}
+        if metadata:
             metadata_protocol = _classify_collaboration_payload(
-                {"metadata": {"multi_agent_version": event_context.get("multi_agent_version")}}
+                {"metadata": metadata}
             )
     except _CollaborationBoundaryError as exc:
-        _write_adapter_event(
+        _raise_collaboration_boundary_error(
             event_context,
-            "collaboration_boundary_rejected",
             classification=exc.classification,
+            message="Collaboration protocol boundary is malformed or ambiguous.",
+            cause=exc,
         )
-        raise UpstreamProtocolTranslationError(
-            UnsupportedProtocolTranslationError(
-                COLLABORATION_BOUNDARY_ERROR_CODE,
-                "Collaboration protocol boundary is malformed or ambiguous.",
-            )
-        ) from exc
     selected_protocol = None
     metadata_conflict = False
     if isinstance(event_context, Mapping):
         selected_protocol = event_context.get("collaboration_protocol")
-        if selected_protocol in {None, "", "unclassified"}:
-            selected_protocol = None
-        elif selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}:
-            _write_adapter_event(
+        if (
+            selected_protocol is not None
+            and selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}
+        ):
+            _raise_collaboration_boundary_error(
                 event_context,
-                "collaboration_boundary_rejected",
                 classification="unknown_state",
-            )
-            raise UpstreamProtocolTranslationError(
-                UnsupportedProtocolTranslationError(
-                    COLLABORATION_BOUNDARY_ERROR_CODE,
-                    "Collaboration protocol selection is unknown.",
-                )
+                message="Collaboration protocol selection is unknown.",
             )
         if selected_protocol is None:
             selected_protocol = metadata_protocol
         elif metadata_protocol is not None and selected_protocol != metadata_protocol:
             metadata_conflict = True
     if metadata_conflict:
-        _write_adapter_event(
+        _raise_collaboration_boundary_error(
             event_context,
-            "collaboration_boundary_rejected",
             classification="conflicting_selection",
-        )
-        raise UpstreamProtocolTranslationError(
-            UnsupportedProtocolTranslationError(
-                COLLABORATION_BOUNDARY_ERROR_CODE,
-                "Collaboration protocol metadata conflicts with the selected protocol.",
-            )
+            message="Collaboration protocol metadata conflicts with the selected protocol.",
         )
     if (
         selected_protocol is not None
         and payload_protocol is not None
         and selected_protocol != payload_protocol
     ):
-        _write_adapter_event(
+        _raise_collaboration_boundary_error(
             event_context,
-            "collaboration_boundary_rejected",
             classification="conflicting_selection",
-        )
-        raise UpstreamProtocolTranslationError(
-            UnsupportedProtocolTranslationError(
-                COLLABORATION_BOUNDARY_ERROR_CODE,
-                "Collaboration protocol selection conflicts with the request.",
-            )
+            message="Collaboration protocol selection conflicts with the request.",
         )
     protocol = payload_protocol or selected_protocol
-    if isinstance(event_context, dict):
-        event_context["collaboration_protocol"] = protocol or "unclassified"
+    if isinstance(event_context, dict) and protocol is not None:
+        event_context["collaboration_protocol"] = protocol
     return protocol
 
 
 def _is_collaboration_v2_context(event_context: Mapping[str, Any] | None) -> bool:
     return (event_context or {}).get("collaboration_protocol") == _COLLABORATION_V2
+
+
+def _collaboration_context_with_protocol(
+    event_context: Mapping[str, Any] | None,
+    protocol: str | None,
+) -> Mapping[str, Any] | None:
+    if protocol is None or isinstance(event_context, dict):
+        return event_context
+    context = dict(event_context or {})
+    context["collaboration_protocol"] = protocol
+    return context
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
@@ -11337,6 +11364,8 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = _hide_reasoning_text(payload)
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
@@ -11409,6 +11438,9 @@ def compatible_sse_line(
         payload = json.loads(payload_bytes.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
+
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
 
     if _is_reasoning_text_stream_event(payload):
         return b""

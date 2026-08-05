@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -129,7 +130,7 @@ def test_v2_response_does_not_apply_v1_alias_repair() -> None:
             {
                 "type": "function_call",
                 "namespace": "collaboration",
-                "name": "multi_agent_v1__spawn_agent",
+                "name": "spawn_agent",
                 "call_id": "call_v2_alias",
                 "arguments": "{\"task_name\":\"worker-task\"}",
             }
@@ -143,6 +144,45 @@ def test_v2_response_does_not_apply_v1_alias_repair() -> None:
     )
 
     assert json.loads(transformed) == body
+
+
+def test_v2_response_with_a_v1_alias_fails_closed() -> None:
+    body = {
+        "id": "resp_v2_mixed",
+        "output": [
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "multi_agent_v1__spawn_agent",
+                "call_id": "call_v2_mixed",
+                "arguments": "{\"task_name\":\"worker-task\"}",
+            }
+        ],
+    }
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+        codex_proxy.compatible_response_body(
+            json.dumps(body).encode(),
+            "ollama_cloud",
+            event_context={"collaboration_protocol": COLLABORATION_V2},
+        )
+
+    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_direct_v2_response_and_sse_resolve_boundary_before_repairs() -> None:
+    body = {
+        "id": "resp_v2_direct",
+        "output": [_v2_spawn_call()],
+    }
+    transformed = codex_proxy.compatible_response_body(
+        json.dumps(body).encode(),
+        "ollama_cloud",
+    )
+    assert json.loads(transformed) == body
+
+    line = b"data: " + json.dumps(_v2_spawn_call(), separators=(",", ":")).encode() + b"\n\n"
+    assert codex_proxy.compatible_sse_line(line, "ollama_cloud") == line
 
 
 def test_selected_v2_metadata_skips_v1_injection_without_a_call_marker() -> None:
@@ -187,6 +227,76 @@ def test_selected_v2_model_metadata_in_context_skips_v1_injection() -> None:
     assert "multi_agent_v1__spawn_agent" not in {
         tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)
     }
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        ({"collaboration_protocol": "collaboration_v1"}, COLLABORATION_V1),
+        ({"collaboration_protocol": "collaboration_v2"}, COLLABORATION_V2),
+        ({"metadata": {"multi_agent_version": "v2"}}, COLLABORATION_V2),
+        ({"features": {"multi_agent_version": "v2"}}, COLLABORATION_V2),
+    ],
+)
+def test_context_feature_selection_is_table_driven(
+    selection: dict[str, object],
+    expected: str,
+) -> None:
+    context = {"repair_policy": REPAIR_CODEX_SUBAGENT, **selection}
+    body = {"model": "glm-5.2", "input": "continue"}
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == expected
+    if expected == COLLABORATION_V2:
+        payload = json.loads(transformed)
+        assert "multi_agent_v1__spawn_agent" not in {
+            tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)
+        }
+
+
+def test_unknown_context_state_fails_closed() -> None:
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+        codex_proxy.compatible_request_body(
+            json.dumps({"model": "glm-5.2", "input": "continue"}).encode(),
+            _upstream(),
+            event_context={"collaboration_protocol": "unclassified"},
+        )
+
+    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_boundary_rejection_diagnostic_is_bounded_and_does_not_include_payload() -> None:
+    context = {"request_id": "safe-request", "repair_policy": REPAIR_CODEX_SUBAGENT}
+    body = {
+        "model": "glm-5.2",
+        "input": [
+            {
+                **_v1_spawn_call(),
+                "arguments": {"message": "SECRET_PROMPT", "task_path": "SECRET_TASK"},
+            },
+            _v2_spawn_call(),
+        ],
+    }
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
+            codex_proxy.compatible_request_body(
+                json.dumps(body).encode(),
+                _upstream(),
+                event_context=context,
+            )
+
+    event = next(call for call in write_event.call_args_list if call.args[0] == "collaboration_boundary_rejected")
+    fields = event.kwargs
+    assert fields["classification"] == "mixed_v1_v2"
+    assert "SECRET_PROMPT" not in repr(fields)
+    assert "SECRET_TASK" not in repr(fields)
+    assert "call_v1_spawn" not in repr(fields)
 
 
 def test_payload_and_selected_v2_metadata_conflict_fails_closed() -> None:

@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from codex_semantic_adapter import COLLABORATION_V2
 
 ASSIST_MODES = {"strict", "guided", "assisted"}
 REPAIR_CODEX_SUBAGENT = "codex_subagent_repair"
@@ -53,7 +54,7 @@ def _raw_provider_probe(context: Mapping[str, Any] | None) -> bool:
 
 
 def _collaboration_v2(context: Mapping[str, Any] | None) -> bool:
-    return bool(context and context.get("collaboration_protocol") == "collaboration_v2")
+    return bool(context and context.get("collaboration_protocol") == COLLABORATION_V2)
 
 
 def _subagent_repair_policy_enabled(context: Mapping[str, Any] | None) -> bool:
