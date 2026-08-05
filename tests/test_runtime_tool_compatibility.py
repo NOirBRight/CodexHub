@@ -391,7 +391,7 @@ def test_omitted_declarations_remove_their_call_and_result_history_pairs() -> No
             {"type": "custom_tool_call_output", "call_id": "call_custom", "output": "custom"},
             {"type": "tool_search_call", "call_id": "call_search", "arguments": {"query": "x"}},
             {"type": "tool_search_output", "call_id": "call_search", "execution": "client", "tools": []},
-            {"type": "web_search_call", "call_id": "call_web", "status": "completed"},
+            {"type": "web_search_call", "id": "web-item", "call_id": "call_web", "status": "completed"},
             {"type": "message", "role": "user", "content": "keep"},
         ],
     }

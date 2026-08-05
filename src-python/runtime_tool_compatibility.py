@@ -43,6 +43,15 @@ _KNOWN_HOSTED_TYPES = frozenset(
         "local_shell",
     }
 )
+# Only these hosted tools have a complete, bounded Responses lifecycle we can
+# validate.  A provider capability fact alone is not enough to make a hosted
+# kind native: without this map we would have to guess its event names/order.
+_HOSTED_EVENT_STAGES = {
+    "web_search": ("web_search_call", ("in_progress", "searching", "completed")),
+    "web_search_preview": ("web_search_call", ("in_progress", "searching", "completed")),
+    "file_search": ("file_search_call", ("in_progress", "searching", "completed")),
+    "code_interpreter": ("code_interpreter_call", ("in_progress", "interpreting", "completed")),
+}
 _V1_NAMES = frozenset(
     {"spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent"}
 )
@@ -727,9 +736,11 @@ def build_tool_compatibility_plan(
                 reason = "client_tool_search_lifecycle_unavailable"
         elif family == SELECTED_PROVIDER_HOSTED:
             kind = declaration.get("type")
+            has_static_contract = _hosted_event_spec_for_declaration_kind(kind) is not None
             if (
                 valid
                 and isinstance(kind, str)
+                and has_static_contract
                 and kind in hosted.supported_kinds
                 and kind in capabilities.hosted_lifecycles
             ):
@@ -853,8 +864,54 @@ def _hosted_kind_for_item_type(item_type: Any) -> str | None:
     return kind if kind in _KNOWN_HOSTED_TYPES else None
 
 
+def _hosted_event_spec_for_declaration_kind(kind: Any) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(kind, str):
+        return None
+    return _HOSTED_EVENT_STAGES.get(kind)
+
+
+def _hosted_event_spec_for_item_type(item_type: Any) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(item_type, str):
+        return None
+    for event_kind, stages in _HOSTED_EVENT_STAGES.values():
+        if item_type in {event_kind, f"{event_kind}_output"}:
+            return event_kind, stages
+    return None
+
+
+def _hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
+    if not isinstance(item_type, str):
+        return None
+    for event_kind, _stages in _HOSTED_EVENT_STAGES.values():
+        if item_type == event_kind:
+            return event_kind, False
+        if item_type == f"{event_kind}_output":
+            return event_kind, True
+    for hosted_kind in _KNOWN_HOSTED_TYPES:
+        if item_type == f"{hosted_kind}_call":
+            return hosted_kind, False
+        if item_type == f"{hosted_kind}_call_output":
+            return hosted_kind, True
+    return None
+
+
+def _hosted_event_spec(event_type: Any) -> tuple[str, str, tuple[str, ...]] | None:
+    if not isinstance(event_type, str) or not event_type.startswith("response."):
+        return None
+    suffix = event_type[len("response.") :]
+    event_kind, separator, stage = suffix.rpartition(".")
+    if not separator:
+        return None
+    for mapped_event_kind, stages in _HOSTED_EVENT_STAGES.values():
+        if event_kind == mapped_event_kind and stage in stages:
+            return event_kind, stage, stages
+    return None
+
+
 def _is_unsupported_hosted_stream_event(event_type: Any) -> bool:
     if not isinstance(event_type, str) or not event_type.startswith("response."):
+        return False
+    if _hosted_event_spec(event_type) is not None:
         return False
     suffix = event_type[len("response.") :]
     # These are the Responses protocol's ordinary function/custom/tool-search
@@ -972,7 +1029,10 @@ class ToolCompatibilityPlan:
             elif family == SELECTED_PROVIDER_HOSTED:
                 # Provider capability facts are intentionally not inferred for
                 # declarations added after the request plan was built.
-                if declaration.get("type") in self.capabilities.hosted_lifecycles:
+                if (
+                    _hosted_event_spec_for_declaration_kind(declaration.get("type")) is not None
+                    and declaration.get("type") in self.capabilities.hosted_lifecycles
+                ):
                     disposition, reason = NATIVE, "selected_provider_hosted_lifecycle"
             elif family == UNKNOWN_FUTURE_KIND:
                 reason = "unknown_lifecycle_contract_unavailable"
@@ -1163,6 +1223,14 @@ class ToolCompatibilityPlan:
             for entry in self.entries
         )
 
+    def _has_adapted_name_conflict(self, name: Any, expected_family: str) -> bool:
+        return isinstance(name, str) and any(
+            entry.disposition == ADAPT
+            and entry.family != expected_family
+            and entry.original_name == name
+            for entry in self.entries
+        )
+
     def _alias_for(self, entry: ToolCompatibilityEntry, *, child_name: str | None = None) -> str | None:
         if entry.family == NAMESPACE:
             if child_name not in entry.child_names and isinstance(child_name, str):
@@ -1345,6 +1413,29 @@ class ToolCompatibilityPlan:
 
     def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
+        hosted_item_key = _hosted_history_item_key(item_type)
+        if hosted_item_key is not None:
+            hosted_item_kind, _is_output = hosted_item_key
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family == SELECTED_PROVIDER_HOSTED
+                and entry.disposition == OMIT
+                and (
+                    (
+                        (
+                            declaration_spec := _hosted_event_spec_for_declaration_kind(
+                                entry.declaration.get("type")
+                            )
+                        ) is not None
+                        and declaration_spec[0] == hosted_item_kind
+                    )
+                    or entry.declaration.get("type") == hosted_item_kind
+                )
+            ]
+            if len(matches) > 1:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="history")
+            return matches[0] if matches else None
         if item_type in {"function_call", "custom_tool_call"}:
             entry = self._entry_for_name(
                 item.get("name"),
@@ -1387,11 +1478,61 @@ class ToolCompatibilityPlan:
         if isinstance(raw_input, list):
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
+            omitted_hosted_ids: dict[str, str] = {}
+            omitted_hosted_outputs: list[tuple[str, str]] = []
+            for item in raw_input:
+                if not isinstance(item, Mapping):
+                    continue
+                omitted_entry = self._omitted_history_entry(item)
+                hosted_item_key = _hosted_history_item_key(item.get("type"))
+                if (
+                    omitted_entry is None
+                    or omitted_entry.family != SELECTED_PROVIDER_HOSTED
+                    or hosted_item_key is None
+                ):
+                    continue
+                item_id = _item_identity(item)
+                if item_id is None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_item_identity",
+                        surface="history",
+                    )
+                hosted_item_kind, is_output = hosted_item_key
+                if not is_output:
+                    previous_kind = omitted_hosted_ids.get(item_id)
+                    if previous_kind is not None:
+                        classification = (
+                            "duplicate_item_identity"
+                            if previous_kind == hosted_item_kind
+                            else "ambiguous_native_identity"
+                        )
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            classification,
+                            surface="history",
+                        )
+                    omitted_hosted_ids[item_id] = hosted_item_kind
+                else:
+                    omitted_hosted_outputs.append((item_id, hosted_item_kind))
+            for item_id, hosted_item_kind in omitted_hosted_outputs:
+                root_kind = omitted_hosted_ids.get(item_id)
+                if root_kind != hosted_item_kind:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="history",
+                    )
             omitted_call_items = [
                 item
                 for item in raw_input
                 if isinstance(item, Mapping)
                 and self._omitted_history_entry(item) is not None
+                and not (
+                    self._omitted_history_entry(item).family == SELECTED_PROVIDER_HOSTED
+                    if self._omitted_history_entry(item) is not None
+                    else False
+                )
                 and (
                     item.get("type") in {"function_call", "custom_tool_call", "tool_search_call"}
                     or (isinstance(item.get("type"), str) and item.get("type").endswith("_call"))
@@ -1429,11 +1570,24 @@ class ToolCompatibilityPlan:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="history")
             for item in raw_input:
                 if isinstance(item, Mapping) and (
-                    self._omitted_history_entry(item) is not None
+                    (
+                        self._omitted_history_entry(item) is not None
+                        and self._omitted_history_entry(item).family != SELECTED_PROVIDER_HOSTED
+                    )
                     or item.get("call_id") in omitted_call_ids
                 ):
                     changed = True
                     continue
+                if isinstance(item, Mapping):
+                    omitted_entry = self._omitted_history_entry(item)
+                    hosted_item_key = _hosted_history_item_key(item.get("type"))
+                    if (
+                        omitted_entry is not None
+                        and omitted_entry.family == SELECTED_PROVIDER_HOSTED
+                        and hosted_item_key is not None
+                    ):
+                        changed = True
+                        continue
                 encoded, item_changed = self._encode_item(item, call_aliases)
                 encoded_input.append(encoded)
                 changed = changed or item_changed
@@ -1508,14 +1662,18 @@ class ToolCompatibilityPlan:
                 if entry.family == TOOL_SEARCH and entry.disposition == NATIVE
             ]
             return matches[0] if len(matches) == 1 else None
-        hosted_kind = _hosted_kind_for_item_type(item_type)
-        if hosted_kind is not None:
+        hosted_item_spec = _hosted_event_spec_for_item_type(item_type)
+        if hosted_item_spec is not None and item_type == hosted_item_spec[0]:
+            hosted_event_kind, _stages = hosted_item_spec
             matches = [
                 entry
                 for entry in self.entries
                 if entry.family == SELECTED_PROVIDER_HOSTED
                 and entry.disposition == NATIVE
-                and entry.declaration.get("type") == hosted_kind
+                and (
+                    declaration_spec := _hosted_event_spec_for_declaration_kind(entry.declaration.get("type"))
+                ) is not None
+                and declaration_spec[0] == hosted_event_kind
             ]
             if len(matches) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
@@ -1570,8 +1728,8 @@ class ToolCompatibilityPlan:
             if item_type == "tool_search_call" and item.get("execution") not in {None, "client"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface="history")
         elif entry.family == SELECTED_PROVIDER_HOSTED:
-            hosted_kind = entry.declaration.get("type")
-            if item_type != f"{hosted_kind}_call":
+            hosted_spec = _hosted_event_spec_for_declaration_kind(entry.declaration.get("type"))
+            if hosted_spec is None or item_type != hosted_spec[0]:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
             if _item_identity(item) is None:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="history")
@@ -1616,6 +1774,8 @@ class ToolCompatibilityPlan:
                         self._validate_native_item(item, native_entry)
                         decoded, item_changed = item, False
                     elif self.registry.looks_like_alias(item.get("name")):
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
+                    elif self._has_adapted_name_conflict(item.get("name"), PLAIN_FUNCTION):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                     elif self.has_adaptations and (
                         self._entry_for_name(
@@ -1720,6 +1880,13 @@ class _BufferedCustomStreamItem:
     native_input: str | None = None
 
 
+@dataclass(slots=True)
+class _HostedStreamState:
+    event_kind: str
+    stages: tuple[str, ...]
+    next_stage: int = 0
+
+
 class CompatibilityStreamState:
     """Assemble one adapted Responses SSE lifecycle before inverse mapping."""
 
@@ -1731,6 +1898,7 @@ class CompatibilityStreamState:
         self._native_pending: dict[str, tuple[str | None, str]] = {}
         self._native_done: set[str] = set()
         self._native_delta_done: set[str] = set()
+        self._hosted_pending: dict[str, _HostedStreamState] = {}
         self._buffered_custom: dict[str, _BufferedCustomStreamItem] = {}
         self._terminal = False
 
@@ -1777,6 +1945,8 @@ class CompatibilityStreamState:
                 item.get("namespace"),
                 item_type=item.get("type"),
             )
+            if record is None and self.plan._has_adapted_name_conflict(item.get("name"), PLAIN_FUNCTION):
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="stream")
             if record is None and self.plan.has_adaptations and isinstance(item.get("name"), str) and (
                 entry is None or entry.disposition == ADAPT
             ):
@@ -1785,6 +1955,35 @@ class CompatibilityStreamState:
         if self.plan.registry.looks_like_alias(item.get("name")):
             raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="stream")
         return _copy_mapping(item), None, False
+
+    def _decode_hosted_event(
+        self,
+        event: Mapping[str, Any],
+        event_spec: tuple[str, str, tuple[str, ...]],
+    ) -> dict[str, Any]:
+        event_kind, stage, _stages = event_spec
+        item_id = self._native_item_id_for_event(event)
+        pending = self._hosted_pending.get(item_id) if item_id is not None else None
+        if pending is None or pending.event_kind != event_kind:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_stream_identity",
+                surface="stream",
+            )
+        if item_id in self._native_done:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_item_identity",
+                surface="stream",
+            )
+        if pending.next_stage >= len(pending.stages) or pending.stages[pending.next_stage] != stage:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "invalid_hosted_lifecycle",
+                surface="stream",
+            )
+        pending.next_stage += 1
+        return _copy_mapping(event)
 
     def _finish_terminal(self) -> None:
         if self._terminal:
@@ -1813,6 +2012,9 @@ class CompatibilityStreamState:
                 "unsupported_hosted_lifecycle",
                 surface="stream",
             )
+        hosted_event_spec = _hosted_event_spec(event_type)
+        if hosted_event_spec is not None:
+            return self._decode_hosted_event(result, hosted_event_spec)
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
             self._finish_terminal()
             response = result.get("response")
@@ -1856,6 +2058,19 @@ class CompatibilityStreamState:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                     self._seen_item_ids.add(item_id)
                     self._native_pending[item_id] = (None, native_entry.family)
+                    hosted_spec = _hosted_event_spec_for_declaration_kind(
+                        native_entry.declaration.get("type")
+                    )
+                    if hosted_spec is None:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "unsupported_hosted_lifecycle",
+                            surface="stream",
+                        )
+                    self._hosted_pending[item_id] = _HostedStreamState(
+                        event_kind=hosted_spec[0],
+                        stages=hosted_spec[1],
+                    )
                     result["item"] = decoded_item
                     return result
                 if not isinstance(call_id, str) or not call_id:
@@ -1984,6 +2199,13 @@ class CompatibilityStreamState:
                         hosted_entry = self._native_entry_for_item(item)
                         if hosted_entry is None or hosted_entry.family != SELECTED_PROVIDER_HOSTED:
                             raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+                        hosted_state = self._hosted_pending.get(native_item_id)
+                        if hosted_state is None or hosted_state.next_stage != len(hosted_state.stages):
+                            raise ToolCompatibilityError(
+                                "tool_compatibility_boundary",
+                                "incomplete_hosted_lifecycle",
+                                surface="stream",
+                            )
                         self.plan._validate_native_item(item, hosted_entry, require_completed=True)
                     elif native_pending[1] != TOOL_SEARCH and native_item_id not in self._native_delta_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")

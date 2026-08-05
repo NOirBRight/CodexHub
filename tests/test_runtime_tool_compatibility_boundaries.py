@@ -624,6 +624,15 @@ def test_native_hosted_sse_tracks_added_done_and_terminal_identity():
     terminal = {"type": "response.completed", "response": {"id": "response"}}
     state = CompatibilityStreamState(_native_hosted_plan())
     state.decode_events_for_event(added())
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.in_progress", "item_id": "search-item"}
+    )
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.searching", "item_id": "search-item"}
+    )
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.completed", "item_id": "search-item"}
+    )
     state.decode_events_for_event(done)
     state.decode_events_for_event(terminal)
 
@@ -650,4 +659,169 @@ def test_native_hosted_sse_tracks_added_done_and_terminal_identity():
     with pytest.raises(ToolCompatibilityError):
         unsupported_delta.decode_events_for_event(
             {"type": "response.web_search_call.delta", "item_id": "search-item", "delta": "opaque"}
+        )
+
+
+def test_native_hosted_sse_accepts_only_the_exact_web_search_stage_sequence():
+    state = CompatibilityStreamState(_native_hosted_plan())
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "web_search_call", "id": "search-item", "status": "in_progress"},
+        }
+    )
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.in_progress", "item_id": "search-item"}
+    )
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.searching", "item_id": "search-item"}
+    )
+    state.decode_events_for_event(
+        {"type": "response.web_search_call.completed", "item_id": "search-item"}
+    )
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "web_search_call", "id": "search-item", "status": "completed"},
+        }
+    )
+    state.decode_events_for_event({"type": "response.completed", "response": {"id": "response"}})
+
+    out_of_order = CompatibilityStreamState(_native_hosted_plan())
+    out_of_order.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "web_search_call", "id": "search-item", "status": "in_progress"},
+        }
+    )
+    with pytest.raises(ToolCompatibilityError):
+        out_of_order.decode_events_for_event(
+            {"type": "response.web_search_call.searching", "item_id": "search-item"}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        out_of_order.decode_events_for_event(
+            {"type": "response.web_search_call.in_progress", "item_id": "other-item"}
+        )
+
+
+def test_hosted_kinds_without_a_static_event_contract_are_not_native():
+    plan = build_tool_compatibility_plan(
+        [{"type": "computer_use_preview"}],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={"computer_use_preview": True},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(
+            hosted_lifecycles=frozenset({"computer_use_preview"}),
+        ),
+        request_token="unmapped-hosted-kind",
+    )
+    assert plan.entries[0].disposition == "omit"
+
+    with pytest.raises(Exception):
+        build_tool_compatibility_plan(
+            [{"type": "computer_use_preview"}],
+            selected_protocol="responses_structured",
+            provider_hosted_capabilities={"computer_use_preview": True},
+            protocol_capabilities=ProtocolCapabilities.responses_structured(
+                hosted_lifecycles=frozenset({"computer_use_preview"}),
+            ),
+            required=True,
+            request_token="required-unmapped-hosted-kind",
+        )
+
+
+def test_optional_unsupported_hosted_history_omits_item_and_same_kind_output_by_item_id():
+    plan = build_tool_compatibility_plan(
+        [{"type": "web_search"}],
+        selected_protocol="chat_tools",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="omitted-hosted-history",
+    )
+    encoded = plan.encode_payload(
+        {
+            "tools": [{"type": "web_search"}],
+            "input": [
+                {"type": "web_search_call", "id": "search-item", "status": "completed"},
+                {"type": "web_search_call_output", "id": "search-item", "output": "ignored"},
+                {"type": "message", "role": "user", "content": "keep"},
+            ],
+        }
+    )
+    assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload(
+            {
+                "input": [{"type": "web_search_call", "status": "completed"}],
+            }
+        )
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload(
+            {
+                "input": [
+                    {"type": "web_search_call", "id": "duplicate", "status": "completed"},
+                    {"type": "web_search_call", "id": "duplicate", "status": "completed"},
+                ],
+            }
+        )
+
+
+def test_optional_unmapped_hosted_history_omits_item_and_same_kind_output_by_item_id():
+    plan = build_tool_compatibility_plan(
+        [{"type": "computer_use_preview"}],
+        selected_protocol="chat_tools",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="omitted-unmapped-hosted-history",
+    )
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {"type": "computer_use_preview_call", "id": "computer-item", "status": "completed"},
+                {
+                    "type": "computer_use_preview_call_output",
+                    "id": "computer-item",
+                    "output": {"ignored": True},
+                },
+                {"type": "message", "role": "user", "content": "keep"},
+            ],
+        }
+    )
+    assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+
+def test_adapted_custom_original_name_cannot_be_used_as_plain_function_call():
+    plan = build_tool_compatibility_plan(
+        [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="adapted-custom-original-name",
+    )
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "paint",
+                        "call_id": "plain-call",
+                        "arguments": "{}",
+                    }
+                ]
+            }
+        )
+
+    state = CompatibilityStreamState(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "plain-item",
+                    "name": "paint",
+                    "call_id": "plain-call",
+                    "arguments": "",
+                },
+            }
         )
