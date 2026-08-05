@@ -1360,6 +1360,37 @@ def test_native_hosted_sse_accepts_only_the_exact_web_search_stage_sequence():
     )
     state.decode_events_for_event({"type": "response.completed", "response": {"id": "response"}})
 
+
+@pytest.mark.parametrize(
+    "nested_item",
+    [
+        {"id": "search-item"},
+        {"id": "search-item", "type": "file_search_call"},
+        {"id": "search-item", "type": "web_search_call", "name": "other"},
+    ],
+    ids=["missing-wire-type", "wrong-wire-type", "wrong-wire-name"],
+)
+def test_native_hosted_sse_rejects_nested_item_wire_identity_mismatch(nested_item):
+    state = CompatibilityStreamState(_native_hosted_plan())
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "web_search_call", "id": "search-item", "status": "in_progress"},
+        }
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.web_search_call.in_progress",
+                "item_id": "search-item",
+                "item": nested_item,
+            }
+        )
+
+    assert exc_info.value.classification == "ambiguous_native_identity"
+    assert exc_info.value.surface == "stream"
+
     out_of_order = CompatibilityStreamState(_native_hosted_plan())
     out_of_order.decode_events_for_event(
         {

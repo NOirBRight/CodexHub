@@ -2760,6 +2760,24 @@ class CompatibilityStreamState:
                 "missing_stream_identity",
                 surface="stream",
             )
+        # Hosted stage events normally carry only ``item_id``.  If a provider
+        # includes a nested item, however, its wire identity is part of the
+        # lifecycle contract and must remain bound to the exact item observed
+        # at ``output_item.added``.  Do not let a matching id borrow another
+        # hosted kind or declaration.
+        if "item" in event:
+            nested_item = event.get("item")
+            expected_wire = self._native_wire_identities.get(item_id)
+            if (
+                not isinstance(nested_item, Mapping)
+                or expected_wire is None
+                or self._native_wire_identity(nested_item) != expected_wire
+            ):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_native_identity",
+                    surface="stream",
+                )
         if item_id in self._native_done:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
