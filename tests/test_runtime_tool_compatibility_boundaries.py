@@ -961,6 +961,152 @@ def test_native_custom_history_survives_omitted_unknown_custom_tool_type():
     assert plan.encode_payload({"input": history})["input"] == history
 
 
+def test_unknown_custom_tool_history_is_omitted_despite_reserved_standard_item_spelling():
+    plan = build_tool_compatibility_plan(
+        [
+            {
+                "type": "custom_tool",
+                "name": "vendor_custom",
+                "executor": "selected_provider",
+            }
+        ],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="unknown-custom-tool-history",
+    )
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "unknown-item",
+                    "call_id": "unknown-call",
+                    "name": "vendor_custom",
+                    "input": "opaque",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "unknown-output",
+                    "call_id": "unknown-call",
+                    "output": "opaque",
+                },
+                {"type": "message", "role": "user", "content": "keep"},
+            ]
+        }
+    )
+
+    assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+
+def test_native_and_unknown_custom_tool_history_pairs_use_call_ownership():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            {
+                "type": "custom_tool",
+                "name": "vendor_custom",
+                "executor": "selected_provider",
+            },
+        ],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="native-unknown-custom-tool-history",
+    )
+    native_pair = [
+        {
+            "type": "custom_tool_call",
+            "id": "native-item",
+            "call_id": "native-call",
+            "name": "paint",
+            "input": "native",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "native-output",
+            "call_id": "native-call",
+            "output": "native",
+        },
+    ]
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                *native_pair,
+                {
+                    "type": "custom_tool_call",
+                    "id": "unknown-item",
+                    "call_id": "unknown-call",
+                    "name": "vendor_custom",
+                    "input": "unknown",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "unknown-output",
+                    "call_id": "unknown-call",
+                    "output": "unknown",
+                },
+                {"type": "message", "role": "user", "content": "keep"},
+            ]
+        }
+    )
+
+    assert encoded["input"] == [
+        *native_pair,
+        {"type": "message", "role": "user", "content": "keep"},
+    ]
+
+
+def test_registered_namespace_call_cannot_claim_unknown_custom_tool_output_boundaries():
+    declarations = [
+        _namespace("vendor", child="run"),
+        {
+            "type": "custom_tool",
+            "name": "vendor_custom",
+            "executor": "selected_provider",
+        },
+    ]
+    plan = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="registered-namespace-custom-output-collision",
+    )
+    alias = plan.entries[0].aliases[0]
+    plan.decode_payload(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "namespace-item",
+                    "call_id": "shared-call",
+                    "name": alias,
+                    "arguments": "{}",
+                }
+            ]
+        }
+    )
+    output_item = {
+        "type": "custom_tool_call_output",
+        "id": "unknown-output",
+        "call_id": "shared-call",
+        "output": "opaque",
+    }
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [output_item]})
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.added", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.done", "item": output_item}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [output_item]}}
+        )
+
+
 @pytest.mark.parametrize(
     ("declaration", "items"),
     [

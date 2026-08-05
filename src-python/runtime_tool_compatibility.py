@@ -1494,7 +1494,64 @@ class ToolCompatibilityPlan:
             return kind if kind else None
         return None
 
-    def _standard_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+    def _unknown_entry_for_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        surface: str,
+    ) -> ToolCompatibilityEntry | None:
+        unknown_kind = self._unknown_response_item_kind(item.get("type"))
+        if unknown_kind is None:
+            return None
+        matches = [
+            entry
+            for entry in self.entries
+            if entry.family == UNKNOWN_FUTURE_KIND
+            and entry.disposition in {NATIVE, OMIT}
+            and entry.declaration.get("type") == unknown_kind
+        ]
+        item_name = item.get("name")
+        if isinstance(item_name, str):
+            named_matches = [
+                entry for entry in matches if entry.declaration.get("name") == item_name
+            ]
+            if named_matches:
+                matches = named_matches
+            elif any(isinstance(entry.declaration.get("name"), str) for entry in matches):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface=surface,
+                )
+        if len(matches) > 1:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface=surface,
+            )
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
+        if entry.family in {PLAIN_FUNCTION, NAMESPACE}:
+            return "function_call_output"
+        if entry.family == CUSTOM_FREEFORM:
+            return "custom_tool_call_output"
+        if entry.family == TOOL_SEARCH:
+            return "tool_search_output"
+        if entry.family == UNKNOWN_FUTURE_KIND:
+            declaration_type = entry.declaration.get("type")
+            if isinstance(declaration_type, str):
+                return f"{declaration_type}_call_output"
+        return None
+
+    def _standard_entry_for_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        owner: ToolCompatibilityEntry | None = None,
+        surface: str = "response",
+    ) -> ToolCompatibilityEntry | None:
         """Resolve a standard Responses item before hosted/unknown matching.
 
         A provider-specific declaration such as ``custom_tool`` shares the
@@ -1523,9 +1580,17 @@ class ToolCompatibilityPlan:
             return native or (matches[0] if matches else None)
 
         if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
+            if owner is not None:
+                if item_type != self._history_output_type_for_entry(owner):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface=surface,
+                    )
+                return owner
             record = self.registry.record_for_call(item.get("call_id"))
             if record is not None:
-                return next(
+                entry = next(
                     (
                         entry
                         for entry in self.entries
@@ -1533,6 +1598,23 @@ class ToolCompatibilityPlan:
                     ),
                     None,
                 )
+                # Registry records describe adapter wire calls.  Both the
+                # namespace and custom adapters emit a function lifecycle;
+                # a differently typed output cannot borrow that call_id.
+                expected_output_type = (
+                    "function_call_output"
+                    if record.family in {NAMESPACE, CUSTOM_FREEFORM}
+                    else None
+                )
+                if item_type != expected_output_type:
+                    if self._unknown_entry_for_item(item, surface=surface) is not None:
+                        return None
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface=surface,
+                    )
+                return entry
             if item_type == "function_call_output":
                 families = {PLAIN_FUNCTION, NAMESPACE}
             elif item_type == "custom_tool_call_output":
@@ -1544,6 +1626,12 @@ class ToolCompatibilityPlan:
                 for entry in self.entries
                 if entry.family in families and entry.disposition in {NATIVE, OMIT}
             ]
+            if matches and self._unknown_entry_for_item(item, surface=surface) is not None:
+                # Without a call owner, the output spelling alone cannot
+                # distinguish a standard lifecycle from an exact unknown kind
+                # that uses the same prefix.  Let the unknown OMIT matcher
+                # reject it instead of silently claiming it as native.
+                return None
             native = next((entry for entry in matches if entry.disposition == NATIVE), None)
             return native or (matches[0] if matches else None)
         return None
@@ -1564,23 +1652,17 @@ class ToolCompatibilityPlan:
             if len(matches) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="response")
             return matches[0] if matches and matches[0].disposition == OMIT else None
-        unknown_kind = self._unknown_response_item_kind(item.get("type"))
-        if unknown_kind is None:
-            return None
-        matches = [
-            entry
-            for entry in self.entries
-            if entry.family == UNKNOWN_FUTURE_KIND
-            and entry.disposition in {NATIVE, OMIT}
-            and entry.declaration.get("type") == unknown_kind
-        ]
-        if len(matches) > 1:
-            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="response")
-        return matches[0] if matches and matches[0].disposition == OMIT else None
+        unknown_entry = self._unknown_entry_for_item(item, surface="response")
+        return unknown_entry if unknown_entry is not None and unknown_entry.disposition == OMIT else None
 
-    def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+    def _omitted_history_entry(
+        self,
+        item: Mapping[str, Any],
+        *,
+        owner: ToolCompatibilityEntry | None = None,
+    ) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
-        standard_entry = self._standard_entry_for_item(item)
+        standard_entry = self._standard_entry_for_item(item, owner=owner, surface="history")
         if standard_entry is not None:
             return standard_entry if standard_entry.disposition == OMIT else None
         hosted_item_key = self._hosted_history_item_key(item_type)
@@ -1597,6 +1679,9 @@ class ToolCompatibilityPlan:
             if matches and matches[0].disposition == OMIT:
                 return matches[0]
             return None
+        unknown_entry = self._unknown_entry_for_item(item, surface="history")
+        if unknown_entry is not None:
+            return unknown_entry if unknown_entry.disposition == OMIT else None
         if item_type in {"function_call", "custom_tool_call"}:
             entry = self._entry_for_name(
                 item.get("name"),
@@ -1639,11 +1724,38 @@ class ToolCompatibilityPlan:
         if isinstance(raw_input, list):
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
+            history_call_owners: dict[str, ToolCompatibilityEntry] = {}
+            for item in raw_input:
+                if not isinstance(item, Mapping) or item.get("type") not in {
+                    "function_call",
+                    "custom_tool_call",
+                    "tool_search_call",
+                }:
+                    continue
+                owner = self._standard_entry_for_item(item, surface="history")
+                if owner is None:
+                    owner = self._unknown_entry_for_item(item, surface="history")
+                call_id = item.get("call_id")
+                if owner is not None and isinstance(call_id, str) and call_id:
+                    history_call_owners[call_id] = owner
+
+            def omitted_history_entry(item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+                owner = None
+                if item.get("type") in {
+                    "function_call_output",
+                    "custom_tool_call_output",
+                    "tool_search_output",
+                }:
+                    call_id = item.get("call_id")
+                    if isinstance(call_id, str):
+                        owner = history_call_owners.get(call_id)
+                return self._omitted_history_entry(item, owner=owner)
+
             omitted_hosted_ids: dict[str, tuple[str, bool, bool]] = {}
             for item in raw_input:
                 if not isinstance(item, Mapping):
                     continue
-                omitted_entry = self._omitted_history_entry(item)
+                omitted_entry = omitted_history_entry(item)
                 hosted_item_key = self._hosted_history_item_key(item.get("type"))
                 if (
                     omitted_entry is None
@@ -1681,10 +1793,10 @@ class ToolCompatibilityPlan:
                 item
                 for item in raw_input
                 if isinstance(item, Mapping)
-                and self._omitted_history_entry(item) is not None
+                and omitted_history_entry(item) is not None
                 and not (
                     self._hosted_history_item_key(item.get("type")) is not None
-                    if self._omitted_history_entry(item) is not None
+                    if omitted_history_entry(item) is not None
                     else False
                 )
                 and (
@@ -1708,7 +1820,7 @@ class ToolCompatibilityPlan:
                     item.get("type") in {"function_call", "custom_tool_call", "tool_search_call"}
                     or (isinstance(item.get("type"), str) and item.get("type").endswith("_call"))
                 )
-                and self._omitted_history_entry(item) is None
+                and omitted_history_entry(item) is None
                 and isinstance(item.get("call_id"), str)
             }
             if omitted_call_ids.intersection(retained_call_ids):
@@ -1720,12 +1832,12 @@ class ToolCompatibilityPlan:
                     call_id = item.get("call_id")
                     if not isinstance(call_id, str) or not call_id:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="history")
-                    if self._omitted_history_entry(item) is not None and call_id not in omitted_call_ids:
+                    if omitted_history_entry(item) is not None and call_id not in omitted_call_ids:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="history")
             for item in raw_input:
                 if isinstance(item, Mapping) and (
                     (
-                        self._omitted_history_entry(item) is not None
+                        omitted_history_entry(item) is not None
                         and self._hosted_history_item_key(item.get("type")) is None
                     )
                     or item.get("call_id") in omitted_call_ids
@@ -1733,7 +1845,7 @@ class ToolCompatibilityPlan:
                     changed = True
                     continue
                 if isinstance(item, Mapping):
-                    omitted_entry = self._omitted_history_entry(item)
+                    omitted_entry = omitted_history_entry(item)
                     hosted_item_key = self._hosted_history_item_key(item.get("type"))
                     if (
                         omitted_entry is not None
