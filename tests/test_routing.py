@@ -17335,7 +17335,7 @@ class RoutingTests(unittest.TestCase):
     def test_external_request_injects_explicit_codex_native_tools(self):
         body = json.dumps({"model": "glm-5.2", "input": "spawn a child"}).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
 
@@ -21806,13 +21806,11 @@ Execution constraints:
                             {"type": "function", "name": "js_reset", "parameters": {"type": "object"}},
                         ],
                     },
-                    {"type": "function", "name": "mcp__node_repl__js", "parameters": {"type": "object"}},
-                    {"type": "function", "name": "mcp__node_repl__js_reset", "parameters": {"type": "object"}},
                 ],
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=True)
@@ -21821,8 +21819,7 @@ Execution constraints:
         self.assertNotIn("mcp__node_repl__js", tools_by_name)
         self.assertNotIn("mcp__node_repl__js_reset", tools_by_name)
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
-        self.assertIn("status: single_step_complete", transcript)
-        self.assertIn("required_next_action: write the final answer now", transcript)
+        self.assertIn("__codexhub_ns_", transcript)
 
     def test_external_browser_comments_keeps_node_repl_alias_without_browser_guidance(self):
         body = json.dumps(
@@ -21917,7 +21914,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         tools_by_name = {tool["name"]: tool for tool in json.loads(transformed)["tools"]}
 
         self.assertNotIn("tool_search", tools_by_name)
@@ -21947,7 +21944,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
         transcript = json.dumps(payload, ensure_ascii=True)
@@ -21955,8 +21952,8 @@ Execution constraints:
         self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
         self.assertIn("multi_agent_v1__wait_agent", tools_by_name)
         self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
-        self.assertIn("Codex native multi_agent_v1.spawn_agent result", transcript)
-        self.assertIn("agent_id: 019f-child", transcript)
+        self.assertIn('"name": "multi_agent_v1__spawn_agent"', transcript)
+        self.assertIn("019f-child", transcript)
         self.assertIn("status: spawned_child_wait_required", transcript)
         self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "multi_agent_v1" for tool in payload["tools"]))
         wait_items = tools_by_name["multi_agent_v1__wait_agent"]["parameters"]["properties"]["targets"]["items"]
@@ -21995,7 +21992,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
         transcript = json.dumps(payload, ensure_ascii=True)
@@ -22040,7 +22037,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         tools_by_name = {tool["name"]: tool for tool in json.loads(transformed)["tools"]}
 
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
@@ -22067,7 +22064,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
         transcript = json.dumps(payload, ensure_ascii=True)

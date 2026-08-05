@@ -10994,7 +10994,10 @@ def compatible_request_body(
                 and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
             )
         ]
-        finalized_plan = runtime_tool_plan.with_final_declarations(final_declarations)
+        finalized_plan = runtime_tool_plan.with_final_declarations(
+            final_declarations,
+            tool_choice=payload.get("tool_choice"),
+        )
         if finalized_plan is not runtime_tool_plan and isinstance(event_context, dict):
             runtime_tool_plan = finalized_plan
             event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan

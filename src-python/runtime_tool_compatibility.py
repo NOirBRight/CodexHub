@@ -472,10 +472,7 @@ def classify_declaration(declaration: Mapping[str, Any]) -> str:
         return CUSTOM_FREEFORM
     if item_type == "tool_search":
         return TOOL_SEARCH
-    if (
-        isinstance(item_type, str)
-        and (item_type in _KNOWN_HOSTED_TYPES or declaration.get("executor") == "selected_provider")
-    ):
+    if isinstance(item_type, str) and item_type in _KNOWN_HOSTED_TYPES:
         return SELECTED_PROVIDER_HOSTED
     return UNKNOWN_FUTURE_KIND
 
@@ -849,6 +846,35 @@ def _item_identity(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _hosted_kind_for_item_type(item_type: Any) -> str | None:
+    if not isinstance(item_type, str) or not item_type.endswith("_call"):
+        return None
+    kind = item_type[: -len("_call")]
+    return kind if kind in _KNOWN_HOSTED_TYPES else None
+
+
+def _is_unsupported_hosted_stream_event(event_type: Any) -> bool:
+    if not isinstance(event_type, str) or not event_type.startswith("response."):
+        return False
+    suffix = event_type[len("response.") :]
+    # These are the Responses protocol's ordinary function/custom/tool-search
+    # lifecycles.  They are handled by the request-scoped stream ledger below;
+    # the ``*_call`` spelling alone is not enough to classify an event as a
+    # provider-hosted lifecycle.
+    if suffix.startswith(
+        (
+            "function_call_arguments.",
+            "custom_tool_call_input.",
+            "tool_search_call.",
+        )
+    ):
+        return False
+    # Any remaining ``<kind>_call.<event>`` is either a known hosted kind or an
+    # unknown provider-specific hosted lifecycle.  Neither can be safely
+    # passed through without an explicit lifecycle contract.
+    return "_call." in suffix
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCompatibilityPlan:
     selected_protocol: str
@@ -872,10 +898,16 @@ class ToolCompatibilityPlan:
     def new_stream(self) -> "CompatibilityStreamState":
         return CompatibilityStreamState(self)
 
-    def with_final_declarations(self, declarations: Iterable[Mapping[str, Any]]) -> "ToolCompatibilityPlan":
+    def with_final_declarations(
+        self,
+        declarations: Iterable[Mapping[str, Any]],
+        *,
+        tool_choice: Any = None,
+    ) -> "ToolCompatibilityPlan":
         """Add model-visible native declarations while preserving request aliases."""
         final = list(declarations)
         entries = list(self.entries)
+        effective_tool_choice = self.tool_choice if tool_choice is None else tool_choice
         native_names: set[str] = set()
         for declaration in final:
             if not isinstance(declaration, Mapping):
@@ -894,14 +926,68 @@ class ToolCompatibilityPlan:
                 continue
             if not _declaration_valid_for_family(declaration, family):
                 continue
+            is_required = _required_by_rule(
+                declaration,
+                len(entries),
+                required=None,
+                tool_choice=effective_tool_choice,
+            )
+            disposition = OMIT
+            reason = "lifecycle_unavailable"
+            aliases: list[str] = []
+            if family == PLAIN_FUNCTION:
+                if self.capabilities.function_lifecycle:
+                    disposition, reason = NATIVE, "native_function_lifecycle"
+            elif family == NAMESPACE:
+                namespace, children, version, _valid = _namespace_details(declaration)
+                if self.capabilities.namespace_lifecycle:
+                    disposition, reason = NATIVE, "native_namespace_lifecycle"
+                elif self.capabilities.function_lifecycle and self.capabilities.accepts_namespace_adapter:
+                    disposition, reason = ADAPT, "namespace_function_adapter"
+                    aliases = [
+                        self.registry.allocate_namespace(
+                            declaration_index=len(entries),
+                            namespace=str(namespace),
+                            child_index=child_index,
+                            child_name=str(child.get("name")),
+                            version=version,
+                        )
+                        for child_index, child in enumerate(children)
+                    ]
+            elif family == CUSTOM_FREEFORM:
+                if self.capabilities.custom_lifecycle:
+                    disposition, reason = NATIVE, "native_custom_lifecycle"
+                elif self.capabilities.function_lifecycle and self.capabilities.accepts_custom_adapter:
+                    disposition, reason = ADAPT, "custom_function_envelope"
+                    aliases = [
+                        self.registry.allocate_custom(
+                            declaration_index=len(entries),
+                            original_name=str(_name_of(declaration)),
+                            version=None,
+                        )
+                    ]
+            elif family == TOOL_SEARCH:
+                if self.capabilities.tool_search_lifecycle:
+                    disposition, reason = NATIVE, "native_client_tool_search"
+            elif family == SELECTED_PROVIDER_HOSTED:
+                # Provider capability facts are intentionally not inferred for
+                # declarations added after the request plan was built.
+                if declaration.get("type") in self.capabilities.hosted_lifecycles:
+                    disposition, reason = NATIVE, "selected_provider_hosted_lifecycle"
+            elif family == UNKNOWN_FUTURE_KIND:
+                reason = "unknown_lifecycle_contract_unavailable"
+            if disposition == OMIT and is_required:
+                disposition = REQUIRED_BUT_UNAVAILABLE
+                reason = "required_unavailable"
             entries.append(
                 ToolCompatibilityEntry(
                     declaration_index=len(entries),
                     family=family,
-                    disposition=NATIVE,
-                    required=False,
+                    disposition=disposition,
+                    required=is_required,
                     declaration=_freeze(_copy_mapping(declaration)),
-                    reason="native_gateway_declaration",
+                    reason=reason,
+                    aliases=tuple(aliases),
                     namespace=_namespace_details(declaration)[0] if family == NAMESPACE else None,
                     version=_namespace_details(declaration)[2] if family == NAMESPACE else None,
                     child_names=tuple(
@@ -911,6 +997,26 @@ class ToolCompatibilityPlan:
                     ) if family == NAMESPACE else (),
                 )
             )
+        # ``_set_required_subagent_tool_choice`` may already have translated a
+        # namespace child to this request's generated alias.  That alias is a
+        # valid choice even though it is not the original declaration spelling
+        # present in ``final``.  Unknown aliases remain fail-closed.
+        choice_name = (
+            effective_tool_choice
+            if isinstance(effective_tool_choice, str)
+            else effective_tool_choice.get("name")
+            if isinstance(effective_tool_choice, Mapping)
+            else None
+        )
+        choice_is_known_alias = self.registry.record_for_alias(choice_name) is not None
+        if _has_explicit_named_tool_choice(effective_tool_choice) and not choice_is_known_alias and not any(
+            _tool_choice_matches_declaration(declaration, effective_tool_choice)
+            for declaration in final
+            if isinstance(declaration, Mapping)
+        ):
+            raise RequiredToolUnavailableError()
+        if any(entry.disposition == REQUIRED_BUT_UNAVAILABLE for entry in entries):
+            raise RequiredToolUnavailableError()
         alias_remap = self.registry.reserve_native_names(native_names)
         if alias_remap:
             entries = [
@@ -946,9 +1052,31 @@ class ToolCompatibilityPlan:
         occurrence[key] = offset + 1
         return matching[offset] if offset < len(matching) else None
 
-    def _entry_for_name(self, name: Any, namespace: Any = None) -> ToolCompatibilityEntry | None:
+    @staticmethod
+    def _family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
+        if item_type == "function_call":
+            return NAMESPACE if namespace is not None else PLAIN_FUNCTION
+        if item_type == "custom_tool_call":
+            return CUSTOM_FREEFORM
+        if item_type in {"tool_search_call", "tool_search_output"}:
+            return TOOL_SEARCH
+        if isinstance(item_type, str) and item_type.endswith("_call"):
+            kind = item_type[: -len("_call")]
+            if kind in _KNOWN_HOSTED_TYPES:
+                return SELECTED_PROVIDER_HOSTED
+        return None
+
+    def _entry_for_name(
+        self,
+        name: Any,
+        namespace: Any = None,
+        *,
+        expected_family: str | None = None,
+        item_type: Any = None,
+    ) -> ToolCompatibilityEntry | None:
         if not isinstance(name, str):
             return None
+        expected_family = expected_family or self._family_for_item_type(item_type, namespace)
         matches: list[ToolCompatibilityEntry] = []
         if namespace is not None:
             matches = [
@@ -964,11 +1092,7 @@ class ToolCompatibilityPlan:
             # particular a native plain function) and only accept the
             # explicit flattened ``namespace__child`` spelling for an
             # adapted namespace call.
-            matches = [
-                entry
-                for entry in self.entries
-                if entry.family != NAMESPACE and entry.original_name == name
-            ]
+            matches = [entry for entry in self.entries if entry.family != NAMESPACE and entry.original_name == name]
             if not matches:
                 matches = [
                     entry
@@ -976,11 +1100,32 @@ class ToolCompatibilityPlan:
                     if entry.family == NAMESPACE
                     and any(name == f"{entry.namespace}__{child}" for child in entry.child_names)
                 ]
+        if expected_family is not None:
+            filtered = [entry for entry in matches if entry.family == expected_family]
+            if (
+                not filtered
+                and expected_family == PLAIN_FUNCTION
+                and namespace is None
+                and any(entry.family == NAMESPACE for entry in matches)
+            ):
+                expected_family = NAMESPACE
+                filtered = [entry for entry in matches if entry.family == NAMESPACE]
+            matches = filtered
+        if len(matches) > 1 and (expected_family is not None or item_type is not None):
+            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
         return matches[0] if len(matches) == 1 else None
 
-    def _entries_for_name(self, name: Any, namespace: Any = None) -> list[ToolCompatibilityEntry]:
+    def _entries_for_name(
+        self,
+        name: Any,
+        namespace: Any = None,
+        *,
+        expected_family: str | None = None,
+        item_type: Any = None,
+    ) -> list[ToolCompatibilityEntry]:
         if not isinstance(name, str):
             return []
+        expected_family = expected_family or self._family_for_item_type(item_type, namespace)
         matches: list[ToolCompatibilityEntry] = []
         for entry in self.entries:
             if entry.family == NAMESPACE:
@@ -995,6 +1140,19 @@ class ToolCompatibilityPlan:
             elif entry.original_name == name:
                 if namespace is None:
                     matches.append(entry)
+        if expected_family is not None:
+            filtered = [entry for entry in matches if entry.family == expected_family]
+            if (
+                not filtered
+                and expected_family == PLAIN_FUNCTION
+                and namespace is None
+                and any(entry.family == NAMESPACE for entry in matches)
+            ):
+                expected_family = NAMESPACE
+                filtered = [entry for entry in matches if entry.family == NAMESPACE]
+            matches = filtered
+        if len(matches) > 1 and (expected_family is not None or item_type is not None):
+            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
         return matches
 
     def _has_unqualified_adapted_child(self, name: Any) -> bool:
@@ -1142,7 +1300,7 @@ class ToolCompatibilityPlan:
         item_type = item.get("type")
         name = item.get("name")
         namespace = item.get("namespace")
-        entry = self._entry_for_name(name, namespace)
+        entry = self._entry_for_name(name, namespace, item_type=item_type)
         if item_type == "function_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry, child_name=name)
             if alias is None:
@@ -1188,7 +1346,11 @@ class ToolCompatibilityPlan:
     def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
         if item_type in {"function_call", "custom_tool_call"}:
-            entry = self._entry_for_name(item.get("name"), item.get("namespace"))
+            entry = self._entry_for_name(
+                item.get("name"),
+                item.get("namespace"),
+                item_type=item_type,
+            )
             return entry if entry is not None and entry.disposition == OMIT else None
         if item_type in {"tool_search_call", "tool_search_output"}:
             return next(
@@ -1331,7 +1493,11 @@ class ToolCompatibilityPlan:
     def _native_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
         if item_type in {"function_call", "custom_tool_call"}:
-            entry = self._entry_for_name(item.get("name"), item.get("namespace"))
+            entry = self._entry_for_name(
+                item.get("name"),
+                item.get("namespace"),
+                item_type=item_type,
+            )
             if entry is not None and entry.disposition == NATIVE:
                 return entry
             return None
@@ -1342,6 +1508,18 @@ class ToolCompatibilityPlan:
                 if entry.family == TOOL_SEARCH and entry.disposition == NATIVE
             ]
             return matches[0] if len(matches) == 1 else None
+        hosted_kind = _hosted_kind_for_item_type(item_type)
+        if hosted_kind is not None:
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family == SELECTED_PROVIDER_HOSTED
+                and entry.disposition == NATIVE
+                and entry.declaration.get("type") == hosted_kind
+            ]
+            if len(matches) > 1:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
+            return matches[0] if matches else None
         return None
 
     def _has_native_structural_family(self) -> bool:
@@ -1352,7 +1530,12 @@ class ToolCompatibilityPlan:
         )
 
     @staticmethod
-    def _validate_native_item(item: Mapping[str, Any], entry: ToolCompatibilityEntry) -> None:
+    def _validate_native_item(
+        item: Mapping[str, Any],
+        entry: ToolCompatibilityEntry,
+        *,
+        require_completed: bool = False,
+    ) -> None:
         if entry.version is not None:
             _validate_version_fields(
                 item,
@@ -1386,6 +1569,14 @@ class ToolCompatibilityPlan:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
             if item_type == "tool_search_call" and item.get("execution") not in {None, "client"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface="history")
+        elif entry.family == SELECTED_PROVIDER_HOSTED:
+            hosted_kind = entry.declaration.get("type")
+            if item_type != f"{hosted_kind}_call":
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+            if _item_identity(item) is None:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="history")
+            if require_completed and item.get("status") not in {None, "completed"}:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_hosted_lifecycle", surface="history")
 
     def _decode_items(self, items: Any) -> tuple[Any, bool]:
         if not isinstance(items, list):
@@ -1427,7 +1618,11 @@ class ToolCompatibilityPlan:
                     elif self.registry.looks_like_alias(item.get("name")):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                     elif self.has_adaptations and (
-                        self._entry_for_name(item.get("name"), item.get("namespace")) is not None
+                        self._entry_for_name(
+                            item.get("name"),
+                            item.get("namespace"),
+                            item_type=item_type,
+                        ) is not None
                         or (
                             item.get("namespace") is None
                             and self._has_unqualified_adapted_child(item.get("name"))
@@ -1442,7 +1637,11 @@ class ToolCompatibilityPlan:
                     self._validate_native_item(item, native_entry)
                     decoded, item_changed = item, False
                 elif self.has_adaptations and (
-                    self._entry_for_name(item.get("name"), item.get("namespace")) is not None
+                    self._entry_for_name(
+                        item.get("name"),
+                        item.get("namespace"),
+                        item_type=item_type,
+                    ) is not None
                     or (
                         item.get("namespace") is None
                         and self._has_unqualified_adapted_child(item.get("name"))
@@ -1451,6 +1650,14 @@ class ToolCompatibilityPlan:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                 else:
                     decoded, item_changed = item, False
+            elif _hosted_kind_for_item_type(item_type) is not None:
+                native_entry = self._native_entry_for_item(item)
+                if native_entry is None:
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="history")
+                self._validate_native_item(item, native_entry, require_completed=True)
+                decoded, item_changed = item, False
+            elif isinstance(item_type, str) and item_type.endswith("_call"):
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="history")
             elif item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
                 if not isinstance(call_id, str) or not call_id:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="history")
@@ -1565,17 +1772,13 @@ class CompatibilityStreamState:
                         "unknown_alias",
                         surface="stream",
                     )
-            if (
-                record is None
-                and self.plan.has_adaptations
-                and isinstance(item.get("name"), str)
-                and (
-                    self.plan._entry_for_name(item.get("name"), item.get("namespace")) is None
-                    or (
-                        self.plan._entry_for_name(item.get("name"), item.get("namespace")) is not None
-                        and self.plan._entry_for_name(item.get("name"), item.get("namespace")).disposition == ADAPT
-                    )
-                )
+            entry = self.plan._entry_for_name(
+                item.get("name"),
+                item.get("namespace"),
+                item_type=item.get("type"),
+            )
+            if record is None and self.plan.has_adaptations and isinstance(item.get("name"), str) and (
+                entry is None or entry.disposition == ADAPT
             ):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="stream")
             return decoded, record, changed
@@ -1589,7 +1792,10 @@ class CompatibilityStreamState:
         incomplete = [pending for pending in self._pending.values() if not pending.item_done]
         native_incomplete = any(
             item_id not in self._native_done
-            or (family != TOOL_SEARCH and item_id not in self._native_delta_done)
+            or (
+                family not in {TOOL_SEARCH, SELECTED_PROVIDER_HOSTED}
+                and item_id not in self._native_delta_done
+            )
             for item_id, (_call_id, family) in self._native_pending.items()
         )
         if incomplete or native_incomplete:
@@ -1601,6 +1807,12 @@ class CompatibilityStreamState:
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
         result = _copy_mapping(event)
         event_type = result.get("type")
+        if _is_unsupported_hosted_stream_event(event_type):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unsupported_hosted_lifecycle",
+                surface="stream",
+            )
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
             self._finish_terminal()
             response = result.get("response")
@@ -1638,6 +1850,14 @@ class CompatibilityStreamState:
                 call_id = item.get("call_id")
                 if item_id is None:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="stream")
+                if native_entry.family == SELECTED_PROVIDER_HOSTED:
+                    self.plan._validate_native_item(item, native_entry)
+                    if item_id in self._seen_item_ids:
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
+                    self._seen_item_ids.add(item_id)
+                    self._native_pending[item_id] = (None, native_entry.family)
+                    result["item"] = decoded_item
+                    return result
                 if not isinstance(call_id, str) or not call_id:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="stream")
                 self.plan._validate_native_item(item, native_entry)
@@ -1649,6 +1869,29 @@ class CompatibilityStreamState:
                 self._seen_call_ids.add(call_id)
                 self._native_pending[item_id] = (call_id, native_entry.family)
                 result["item"] = decoded_item
+            elif self.plan.has_adaptations and item.get("type") in {"function_call", "custom_tool_call"}:
+                adapted_entry = self.plan._entry_for_name(
+                    item.get("name"),
+                    item.get("namespace"),
+                    item_type=item.get("type"),
+                )
+                if adapted_entry is not None and adapted_entry.disposition == ADAPT:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unknown_alias",
+                        surface="stream",
+                    )
+            elif _hosted_kind_for_item_type(item.get("type")) is not None or (
+                isinstance(item.get("type"), str)
+                and item.get("type").endswith("_call")
+                and item.get("type")
+                not in {"function_call", "custom_tool_call", "tool_search_call"}
+            ):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unsupported_hosted_lifecycle",
+                    surface="stream",
+                )
             return result
         if event_type in {"response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
             item_id = self._item_id(result)
@@ -1737,12 +1980,30 @@ class CompatibilityStreamState:
                     call_id = item.get("call_id")
                     if call_id != native_pending[0]:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
-                    if native_pending[1] != TOOL_SEARCH and native_item_id not in self._native_delta_done:
+                    if native_pending[1] == SELECTED_PROVIDER_HOSTED:
+                        hosted_entry = self._native_entry_for_item(item)
+                        if hosted_entry is None or hosted_entry.family != SELECTED_PROVIDER_HOSTED:
+                            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+                        self.plan._validate_native_item(item, hosted_entry, require_completed=True)
+                    elif native_pending[1] != TOOL_SEARCH and native_item_id not in self._native_delta_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                     if native_item_id in self._native_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                     self._native_done.add(native_item_id)
                     return result
+                native_entry = self._native_entry_for_item(item)
+                if native_entry is not None:
+                    if native_entry.family == SELECTED_PROVIDER_HOSTED:
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
+                    self.plan._validate_native_item(item, native_entry)
+                    return result
+                if _hosted_kind_for_item_type(item.get("type")) is not None or (
+                    isinstance(item.get("type"), str)
+                    and item.get("type").endswith("_call")
+                    and item.get("type")
+                    not in {"function_call", "custom_tool_call", "tool_search_call"}
+                ):
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="stream")
                 if native_item_id is not None and self.plan.has_adaptations:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                 return result

@@ -6,8 +6,13 @@ import json
 import pytest
 
 from runtime_tool_compatibility import (
+    ADAPT,
     CompatibilityStreamState,
+    CUSTOM_FREEFORM,
+    NATIVE,
+    PLAIN_FUNCTION,
     ProtocolCapabilities,
+    SELECTED_PROVIDER_HOSTED,
     ToolCompatibilityError,
     build_tool_compatibility_plan,
 )
@@ -36,6 +41,18 @@ def _native_plan(declaration: dict):
         selected_protocol="responses_structured",
         protocol_capabilities=ProtocolCapabilities.responses_structured(),
         request_token="native-boundary",
+    )
+
+
+def _native_hosted_plan():
+    return build_tool_compatibility_plan(
+        [{"type": "web_search"}],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={"web_search": True},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(
+            hosted_lifecycles=frozenset({"web_search"}),
+        ),
+        request_token="native-hosted-boundary",
     )
 
 
@@ -441,4 +458,196 @@ def test_native_custom_sse_done_requires_string_input_and_matching_call_identity
                 "call_id": "different-call",
                 "input": "opaque",
             }
+        )
+
+
+def test_custom_and_plain_same_name_resolve_history_by_item_family():
+    declarations = [
+        {"type": "function", "name": "paint"},
+        {"type": "custom", "name": "paint", "format": {"type": "text"}},
+    ]
+    plan = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="custom-plain-collision",
+    )
+    encoded = plan.encode_payload(
+        {
+            "tools": declarations,
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "name": "paint",
+                    "call_id": "custom-call",
+                    "input": "opaque",
+                },
+                {
+                    "type": "function_call",
+                    "name": "paint",
+                    "call_id": "plain-call",
+                    "arguments": "{}",
+                },
+            ],
+        }
+    )
+    assert encoded["input"][0]["type"] == "function_call"
+    assert encoded["input"][0]["name"].startswith("__codexhub_custom_")
+    assert encoded["input"][1]["type"] == "function_call"
+    assert encoded["input"][1]["name"] == "paint"
+
+
+def test_adapted_custom_same_name_rejects_native_custom_body_and_sse():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "function", "name": "paint"},
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+        ],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="adapted-custom-native-collision",
+    )
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {
+                "output": [
+                    {
+                        "type": "custom_tool_call",
+                        "name": "paint",
+                        "call_id": "native-custom-call",
+                        "id": "native-custom-item",
+                        "input": "opaque",
+                    }
+                ]
+            }
+        )
+
+    state = CompatibilityStreamState(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "custom_tool_call",
+                    "name": "paint",
+                    "call_id": "native-custom-call",
+                    "id": "native-custom-item",
+                },
+            }
+        )
+
+
+def test_duplicate_custom_names_have_unique_aliases_but_native_history_is_ambiguous():
+    declarations = [
+        {"type": "custom", "name": "paint", "format": {"type": "text"}},
+        {"type": "custom", "name": "paint", "format": {"type": "text"}},
+    ]
+    adapted = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="duplicate-custom-adapted",
+    )
+    assert adapted.entries[0].aliases[0] != adapted.entries[1].aliases[0]
+    with pytest.raises(ToolCompatibilityError):
+        adapted.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "custom_tool_call",
+                        "name": "paint",
+                        "call_id": "custom-call",
+                        "input": "opaque",
+                    }
+                ]
+            }
+        )
+
+    native = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="duplicate-custom-native",
+    )
+    with pytest.raises(ToolCompatibilityError):
+        native.decode_payload(
+            {
+                "output": [
+                    {
+                        "type": "custom_tool_call",
+                        "name": "paint",
+                        "call_id": "custom-call",
+                        "id": "custom-item",
+                        "input": "opaque",
+                    }
+                ]
+            }
+        )
+
+
+def test_unknown_selected_provider_kind_is_omitted_even_with_explicit_facts():
+    plan = build_tool_compatibility_plan(
+        [{"type": "vendor_search", "executor": "selected_provider"}],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={"vendor_search": True},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(
+            hosted_lifecycles=frozenset({"vendor_search"}),
+        ),
+        request_token="unknown-hosted-kind",
+    )
+    assert plan.entries[0].family != SELECTED_PROVIDER_HOSTED
+    assert plan.entries[0].disposition == "omit"
+
+
+def test_native_hosted_body_requires_completed_item_identity():
+    plan = _native_hosted_plan()
+    valid = {"type": "web_search_call", "id": "search-item", "status": "completed"}
+    assert plan.decode_payload({"output": [valid]})["output"] == [valid]
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [{"type": "web_search_call", "status": "completed"}]})
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [valid, dict(valid)]})
+
+
+def test_native_hosted_sse_tracks_added_done_and_terminal_identity():
+    def added(item_id: str = "search-item"):
+        return {
+            "type": "response.output_item.added",
+            "item": {"type": "web_search_call", "id": item_id, "status": "in_progress"},
+        }
+
+    done = {
+        "type": "response.output_item.done",
+        "item": {"type": "web_search_call", "id": "search-item", "status": "completed"},
+    }
+    terminal = {"type": "response.completed", "response": {"id": "response"}}
+    state = CompatibilityStreamState(_native_hosted_plan())
+    state.decode_events_for_event(added())
+    state.decode_events_for_event(done)
+    state.decode_events_for_event(terminal)
+
+    missing = CompatibilityStreamState(_native_hosted_plan())
+    with pytest.raises(ToolCompatibilityError):
+        missing.decode_events_for_event(added(item_id=""))
+
+    mismatched = CompatibilityStreamState(_native_hosted_plan())
+    mismatched.decode_events_for_event(added())
+    with pytest.raises(ToolCompatibilityError):
+        mismatched.decode_events_for_event(
+            {
+                "type": "response.output_item.done",
+                "item": {"type": "web_search_call", "id": "other-item", "status": "completed"},
+            }
+        )
+
+    incomplete = CompatibilityStreamState(_native_hosted_plan())
+    incomplete.decode_events_for_event(added())
+    with pytest.raises(ToolCompatibilityError):
+        incomplete.decode_events_for_event(terminal)
+
+    unsupported_delta = CompatibilityStreamState(_native_hosted_plan())
+    with pytest.raises(ToolCompatibilityError):
+        unsupported_delta.decode_events_for_event(
+            {"type": "response.web_search_call.delta", "item_id": "search-item", "delta": "opaque"}
         )

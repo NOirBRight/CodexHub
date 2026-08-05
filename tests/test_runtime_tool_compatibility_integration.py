@@ -526,3 +526,29 @@ def test_named_namespace_choice_requires_exact_child_identity():
             inject_codex_tools=False,
         )
     assert caught.value.cause.code == "tool_compatibility_required_unavailable"
+
+
+def test_text_compat_does_not_expose_injected_codex_functions():
+    body = json.dumps(
+        {
+            "model": "third-party-model",
+            "input": "spawn a child",
+        }
+    ).encode("utf-8")
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "text_compat",
+                "tool_surface_strategy": "eager",
+            },
+            event_context={"request_id": "text-compat-injection"},
+            inject_codex_tools=True,
+        )
+    )
+
+    assert not any(
+        isinstance(tool, dict) and tool.get("type") == "function"
+        for tool in payload.get("tools", [])
+    )
