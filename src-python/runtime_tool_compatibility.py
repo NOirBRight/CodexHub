@@ -852,6 +852,16 @@ def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> No
 
 
 def _item_identity(item: Mapping[str, Any]) -> str | None:
+    item_id = item.get("item_id")
+    plain_id = item.get("id")
+    if (
+        isinstance(item_id, str)
+        and item_id
+        and isinstance(plain_id, str)
+        and plain_id
+        and item_id != plain_id
+    ):
+        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
     for key in ("item_id", "id"):
         value = item.get(key)
         if isinstance(value, str) and value:
@@ -864,6 +874,15 @@ def _hosted_kind_for_item_type(item_type: Any) -> str | None:
         return None
     kind = item_type[: -len("_call")]
     return kind if kind in _KNOWN_HOSTED_TYPES else None
+
+
+def _hosted_output_kind_for_item_type(item_type: Any) -> str | None:
+    if not isinstance(item_type, str):
+        return None
+    for event_kind, _stages in _HOSTED_EVENT_STAGES.values():
+        if item_type == f"{event_kind}_output":
+            return event_kind
+    return None
 
 
 def _hosted_event_spec_for_declaration_kind(kind: Any) -> tuple[str, tuple[str, ...]] | None:
@@ -1391,6 +1410,12 @@ class ToolCompatibilityPlan:
         item_type = item.get("type")
         name = item.get("name")
         namespace = item.get("namespace")
+        if item_type in {"tool_search_call", "tool_search_output"}:
+            native_entry = self._native_entry_for_item(item)
+            if native_entry is not None:
+                self._validate_native_item(item, native_entry)
+        if _hosted_output_kind_for_item_type(item_type) is not None:
+            raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="history")
         entry = self._entry_for_name(name, namespace, item_type=item_type)
         if item_type == "function_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry, child_name=name)
@@ -1752,7 +1777,7 @@ class ToolCompatibilityPlan:
                 "ambiguous_call_identity",
                 surface=surface,
             )
-        if owner.disposition == ADAPT and call_index is not None and item_index < call_index:
+        if surface == "response" and call_index is not None and item_index < call_index:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
                 "ambiguous_call_identity",
@@ -2252,7 +2277,7 @@ class ToolCompatibilityPlan:
         elif entry.family == TOOL_SEARCH:
             if item_type not in {"tool_search_call", "tool_search_output"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
-            if item_type == "tool_search_call" and item.get("execution") not in {None, "client"}:
+            if item.get("execution") != "client":
                 raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface="history")
         elif entry.family == SELECTED_PROVIDER_HOSTED:
             hosted_spec = _hosted_event_spec_for_declaration_kind(entry.declaration.get("type"))
@@ -2400,6 +2425,20 @@ class ToolCompatibilityPlan:
                 else:
                     self._reject_unknown_standard_item(item, surface=surface)
                     decoded, item_changed = item, False
+            elif item_type == "tool_search_call":
+                native_entry = self._native_entry_for_item(item)
+                if native_entry is not None:
+                    self._validate_native_item(item, native_entry)
+                    decoded, item_changed = item, False
+                elif self._omitted_response_entry_for_item(item, owner=owner) is not None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unsupported_hosted_lifecycle",
+                        surface=surface,
+                    )
+                else:
+                    self._reject_unknown_standard_item(item, surface=surface)
+                    decoded, item_changed = item, False
             elif _hosted_kind_for_item_type(item_type) is not None:
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is None:
@@ -2419,8 +2458,16 @@ class ToolCompatibilityPlan:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_call_identity", surface="history")
                 if item_type == "tool_search_output":
                     native_entry = self._native_entry_for_item(item)
-                    if native_entry is None and self.has_adaptations and not self._has_native_structural_family():
+                    if native_entry is not None:
+                        self._validate_native_item(item, native_entry)
+                    elif self.has_adaptations and not self._has_native_structural_family():
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_call_identity", surface="history")
+            elif _hosted_output_kind_for_item_type(item_type) is not None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unsupported_hosted_lifecycle",
+                    surface=surface,
+                )
             else:
                 decoded, item_changed = item, False
                 if self.registry.looks_like_alias(item.get("name")):
@@ -3254,6 +3301,9 @@ class CompatibilityStreamState:
         item_id = self._item_id(value)
         pending = self._buffered_custom.get(item_id) if item_id else None
         if event_type == "response.function_call_arguments.delta" and pending is not None:
+            supplied_call_id = value.get("call_id")
+            if supplied_call_id is not None and supplied_call_id != pending.call_id:
+                raise self._stream_error("ambiguous_call_identity")
             delta = value.get("delta")
             if not isinstance(delta, str) or pending.arguments_done_event is not None:
                 raise self._stream_error("malformed_stream_delta")
@@ -3261,6 +3311,9 @@ class CompatibilityStreamState:
             return []
 
         if event_type == "response.function_call_arguments.done" and pending is not None:
+            supplied_call_id = value.get("call_id")
+            if supplied_call_id is not None and supplied_call_id != pending.call_id:
+                raise self._stream_error("ambiguous_call_identity")
             if pending.arguments_done_event is not None:
                 raise self._stream_error("duplicate_stream_done")
             arguments = value.get("arguments")

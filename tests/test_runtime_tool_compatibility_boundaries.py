@@ -623,6 +623,79 @@ def test_arguments_done_must_match_received_delta_fragments(adapted):
         )
 
 
+def test_native_tool_search_body_and_history_preserve_exact_client_execution_marker():
+    plan = _native_plan({"type": "tool_search", "execution": "client"})
+    call = {"type": "tool_search_call", "id": "search-item", "call_id": "search-call", "execution": "client", "arguments": {"query": "x"}}
+    output = {"type": "tool_search_output", "id": "search-output", "call_id": "search-call", "execution": "client", "tools": []}
+    assert plan.decode_payload({"output": [call, output]})["output"] == [call, output]
+    assert plan.encode_payload({"input": [call, output]})["input"] == [call, output]
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "tool_search_call", "id": "search-item", "call_id": "search-call", "arguments": {"query": "x"}},
+        {"type": "tool_search_output", "id": "search-output", "call_id": "search-call", "tools": []},
+        {"type": "tool_search_output", "id": "search-output", "call_id": "search-call", "execution": "provider", "tools": []},
+    ],
+    ids=["missing-call-marker", "missing-output-marker", "wrong-output-marker"],
+)
+def test_native_tool_search_requires_exact_client_execution_marker(item):
+    plan = _native_plan({"type": "tool_search", "execution": "client"})
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [item]})
+
+
+def test_native_response_output_before_call_fails_closed():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    call = {"type": "function_call", "id": "call-item", "call_id": "call", "name": "keep", "arguments": "{}"}
+    output = {"type": "function_call_output", "id": "call-output", "call_id": "call", "output": "done"}
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [output, call]})
+
+
+def test_buffered_custom_delta_and_done_require_bound_call_id():
+    plan = build_tool_compatibility_plan(
+        [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="custom-call-id-boundary",
+    )
+    alias = plan.entries[0].aliases[0]
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event(
+        {"type": "response.output_item.added", "item": {"type": "function_call", "id": "item", "call_id": "call", "name": alias, "arguments": ""}}
+    )
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.function_call_arguments.delta", "item_id": "item", "call_id": "evil", "delta": "{}"}
+        )
+
+
+def test_conflicting_item_id_and_id_fail_closed():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {"output": [{"type": "function_call", "item_id": "item", "id": "evil", "call_id": "call", "name": "keep", "arguments": "{}"}]}
+        )
+
+
+def test_invented_hosted_output_shape_fails_closed():
+    plan = _native_hosted_plan()
+    invented = {"type": "web_search_call_output", "id": "output", "output": {"evil": True}}
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [invented]})
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {
+                "output": [
+                    {"type": "web_search_call", "id": "call", "status": "completed"},
+                    invented,
+                ]
+            }
+        )
+
+
 @pytest.mark.parametrize("output_type", ["function_call_output", "vendor_extension_call_output"])
 def test_sse_output_before_adapted_call_fails_closed(output_type):
     plan = _adapted_namespace_plan()
