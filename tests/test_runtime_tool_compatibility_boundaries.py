@@ -365,6 +365,23 @@ def test_response_output_before_adapted_call_fails_closed_without_partial_reorde
         )
 
 
+def test_adapted_stream_allows_ordinary_message_output_item_done():
+    """Non-tool assistant output has no compatibility owner to reconcile."""
+    plan = _adapted_namespace_plan()
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "id": "msg-ordinary",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "OK"}],
+        },
+    }
+
+    state = CompatibilityStreamState(plan)
+    assert state.decode_events_for_event(event) == [event]
+
+
 @pytest.mark.parametrize("call_id", [None, ""], ids=["missing", "empty"])
 def test_encode_history_rejects_retained_call_without_call_identity(call_id):
     plan = _native_plan({"type": "function", "name": "keep"})

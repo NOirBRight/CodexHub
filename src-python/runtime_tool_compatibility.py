@@ -3801,7 +3801,21 @@ class CompatibilityStreamState:
                     not in {"function_call", "custom_tool_call", "tool_search_call"}
                 ):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="stream")
-                if native_item_id is not None and self.plan.has_adaptations:
+                # A Responses stream can contain ordinary assistant messages
+                # (and other non-tool output items) alongside adapted tool
+                # lifecycles.  Their ``output_item.done`` event is complete
+                # on its own and has no runtime-tool owner to reconcile.
+                # Only reject an otherwise-unowned item when it is a
+                # tool-shaped lifecycle that could cross the compatibility
+                # boundary ambiguously.
+                if native_item_id is not None and self.plan.has_adaptations and (
+                    isinstance(item.get("type"), str)
+                    and (
+                        item.get("type") in {"function_call", "custom_tool_call", "tool_search_call"}
+                        or item.get("type").endswith("_call")
+                        or item.get("type").endswith("_call_output")
+                    )
+                ):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                 return result
             pending = self._pending_for(item)
