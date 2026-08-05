@@ -3318,6 +3318,8 @@ class CompatibilityStreamState:
             record = self.plan.registry.record_for_alias(item.get("name"))
             if record is None or record.family != CUSTOM_FREEFORM:
                 return [self.decode_event(value)]
+            if item.get("type") != "function_call":
+                raise self._stream_error("ambiguous_call_identity")
             item_id = self._item_id(item)
             call_id = item.get("call_id")
             if (

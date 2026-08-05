@@ -672,6 +672,34 @@ def test_buffered_custom_delta_and_done_require_bound_call_id():
         )
 
 
+@pytest.mark.parametrize("item_type", ["custom_tool_call", "message"], ids=["custom-wire-family", "other-wire-family"])
+def test_buffered_custom_added_requires_function_call_wire_type(item_type):
+    plan = build_tool_compatibility_plan(
+        [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="custom-added-wire-family",
+    )
+    alias = plan.entries[0].aliases[0]
+    state = CompatibilityStreamState(plan)
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": item_type,
+                    "id": "item",
+                    "call_id": "call",
+                    "name": alias,
+                    "arguments": "",
+                },
+            }
+        )
+
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+
 def test_conflicting_item_id_and_id_fail_closed():
     plan = _native_plan({"type": "function", "name": "keep"})
     with pytest.raises(ToolCompatibilityError):
