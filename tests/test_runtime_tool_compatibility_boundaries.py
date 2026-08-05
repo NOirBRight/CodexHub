@@ -786,6 +786,40 @@ def test_native_plain_stream_accepts_exact_flattened_namespace_wire_identity():
     )
 
 
+def test_native_flattened_item_done_can_complete_arguments_without_separate_done_event():
+    plan = _native_plan({"type": "function", "name": "multi_agent_v1__spawn_agent"})
+    state = CompatibilityStreamState(plan)
+    item = {
+        "type": "function_call",
+        "namespace": "multi_agent_v1",
+        "name": "spawn_agent",
+        "id": "flattened-item",
+        "call_id": "flattened-call",
+        "arguments": "",
+    }
+    state.decode_events_for_event({"type": "response.output_item.added", "item": item})
+    completed = {**item, "arguments": "{}"}
+    state.decode_events_for_event({"type": "response.output_item.done", "item": completed})
+    state.decode_events_for_event(
+        {"type": "response.completed", "response": {"output": [completed]}}
+    )
+
+
+def test_legacy_flattened_worker_selector_item_done_keeps_no_added_passthrough():
+    plan = _native_plan({"type": "function", "name": "multi_agent_v1__spawn_agent"})
+    item = {
+        "type": "function_call",
+        "namespace": "multi_agent_v1",
+        "name": "spawn_agent",
+        "id": "selector-item",
+        "call_id": "selector-call",
+        "arguments": "{}",
+    }
+    CompatibilityStreamState(plan).decode_events_for_event(
+        {"type": "response.output_item.done", "item": item}
+    )
+
+
 def test_native_plain_tool_search_wrapper_keeps_no_added_terminal_path():
     plan = _native_plan({"type": "function", "name": "tool_search"})
     state = CompatibilityStreamState(plan)

@@ -2688,6 +2688,55 @@ class CompatibilityStreamState:
     def _opaque_payload(value: Any) -> tuple[str, Any]:
         return ("opaque_input", _freeze(value))
 
+    def _complete_native_arguments_from_item(
+        self,
+        item_id: str,
+        item: Mapping[str, Any],
+        entry: ToolCompatibilityEntry,
+    ) -> None:
+        """Accept a complete native item when its separate ``done`` event is omitted."""
+        if entry.family == CUSTOM_FREEFORM:
+            arguments = item.get("input")
+            if not isinstance(arguments, str):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream_delta",
+                    surface="stream",
+                )
+            fragments = self._native_fragments.get(item_id, [])
+            if fragments and "".join(fragments) != arguments:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream_delta",
+                    surface="stream",
+                )
+            payload_item = {"type": "custom_tool_call", "input": arguments}
+        else:
+            arguments = item.get("arguments")
+            if not isinstance(arguments, str):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream_delta",
+                    surface="stream",
+                )
+            fragments = self._native_fragments.get(item_id, [])
+            if fragments and "".join(fragments) != arguments:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream_delta",
+                    surface="stream",
+                )
+            payload_item = {"type": "function_call", "arguments": arguments}
+        payload = self._semantic_wire_payload(payload_item, entry)
+        if item_id in self._wire_payloads and self._wire_payloads[item_id] != payload:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        self._wire_payloads[item_id] = payload
+        self._native_delta_done.add(item_id)
+
     def _native_item_id_for_event(self, value: Mapping[str, Any]) -> str | None:
         item = value.get("item")
         nested_item_id = self._item_id(item) if isinstance(item, Mapping) else None
@@ -3361,13 +3410,6 @@ class CompatibilityStreamState:
                         "incomplete_stream_delta",
                         surface="stream",
                     )
-                fragments = opaque.fragments
-                if fragments and "".join(fragments) != arguments:
-                    raise ToolCompatibilityError(
-                        "tool_compatibility_boundary",
-                        "incomplete_stream_delta",
-                        surface="stream",
-                    )
                 opaque.arguments_done = True
                 self._wire_payloads[item_id] = self._opaque_payload(arguments)
                 return result
@@ -3490,7 +3532,11 @@ class CompatibilityStreamState:
                             )
                         self.plan._validate_native_item(item, hosted_entry, require_completed=True)
                     elif expected_entry.family != TOOL_SEARCH and native_item_id not in self._native_delta_done:
-                        raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+                        self._complete_native_arguments_from_item(
+                            native_item_id,
+                            item,
+                            expected_entry,
+                        )
                     if native_item_id in self._native_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                     payload = self._semantic_wire_payload(item, expected_entry)
@@ -3508,6 +3554,20 @@ class CompatibilityStreamState:
                         and item.get("name") == "tool_search"
                         and item.get("namespace") is None
                     ):
+                        self.plan._validate_native_item(item, native_entry)
+                        return result
+                    if (
+                        native_entry.family == PLAIN_FUNCTION
+                        and native_entry.original_name == "multi_agent_v1__spawn_agent"
+                        and item.get("type") == "function_call"
+                        and item.get("namespace") == "multi_agent_v1"
+                        and item.get("name") == "spawn_agent"
+                    ):
+                        # A legacy worker-selector stream can emit this
+                        # flattened native item without an ``added`` event.
+                        # Keep this one compatibility passthrough narrow; a
+                        # plain unqualified native call still requires an
+                        # established stream owner.
                         self.plan._validate_native_item(item, native_entry)
                         return result
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
