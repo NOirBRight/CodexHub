@@ -2498,6 +2498,7 @@ class CompatibilityStreamState:
         # lifecycle is emitted.  Keep the original adapter wire identity so a
         # terminal envelope can still reconcile item/call/declaration exactly.
         self._adapter_wire_identities: dict[str, tuple[str, AliasRecord, tuple[Any, Any, Any]]] = {}
+        self._wire_payloads: dict[str, Any] = {}
         self._native_done: set[str] = set()
         self._native_delta_done: set[str] = set()
         self._hosted_pending: dict[str, _HostedStreamState] = {}
@@ -2534,6 +2535,45 @@ class CompatibilityStreamState:
     @staticmethod
     def _native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:
         return (item.get("type"), item.get("name"), item.get("namespace"))
+
+    @staticmethod
+    def _semantic_wire_payload(
+        item: Mapping[str, Any],
+        owner: ToolCompatibilityEntry | AliasRecord,
+    ) -> Any:
+        """Return parsed call data used for terminal reconciliation.
+
+        Equivalent JSON argument objects may differ in formatting or key
+        order.  Custom adapters instead compare the envelope's actual input
+        value.  Non-JSON arguments stay comparable as bounded raw strings;
+        this check does not add a new validation rule.
+        """
+        item_type = item.get("type")
+        family = owner.family
+        if family == CUSTOM_FREEFORM:
+            if item_type == "custom_tool_call":
+                return ("custom_input", _freeze(item.get("input")))
+            arguments = item.get("arguments")
+            if arguments in (None, ""):
+                return None
+            try:
+                envelope = _json_object_exact(arguments)
+            except ToolCompatibilityError:
+                return ("custom_arguments_raw", arguments)
+            return ("custom_input", _freeze(envelope.get(CUSTOM_INPUT_KEY)))
+        if item_type == "function_call":
+            arguments = item.get("arguments")
+            if arguments in (None, ""):
+                return None
+            if isinstance(arguments, Mapping):
+                return ("arguments", _freeze(arguments))
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except (TypeError, ValueError):
+                    return ("arguments_raw", arguments)
+                return ("arguments", _freeze(parsed))
+        return None
 
     @staticmethod
     def _is_output_item_type(item_type: Any) -> bool:
@@ -2724,6 +2764,12 @@ class CompatibilityStreamState:
                         and item.get("namespace") not in {None, adapter_pending.record.namespace}
                     ):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+                    if (
+                        item_id in self._wire_payloads
+                        and self._semantic_wire_payload(item, adapter_pending.record)
+                        != self._wire_payloads[item_id]
+                    ):
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
                     continue
                 adapter_identity = self._adapter_wire_identities.get(item_id) if item_id is not None else None
                 if adapter_identity is not None:
@@ -2740,6 +2786,12 @@ class CompatibilityStreamState:
                             "ambiguous_native_identity",
                             surface="stream",
                         )
+                    if (
+                        item_id in self._wire_payloads
+                        and self._semantic_wire_payload(item, expected_record)
+                        != self._wire_payloads[item_id]
+                    ):
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
                     terminal_record = self.plan.registry.record_for_alias(item.get("name"))
                     if terminal_record is not expected_record:
                         raise ToolCompatibilityError(
@@ -2801,6 +2853,12 @@ class CompatibilityStreamState:
                     "ambiguous_native_identity",
                     surface="stream",
                 )
+            if (
+                item_id in self._wire_payloads
+                and self._semantic_wire_payload(item, expected_entry)
+                != self._wire_payloads[item_id]
+            ):
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
             if expected_call_id is not None and item.get("call_id") != expected_call_id:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -2973,7 +3031,7 @@ class CompatibilityStreamState:
         if event_type in {"response.function_call_arguments.done", "response.custom_tool_call_input.done"}:
             item_id = self._item_id(result)
             if item_id in self._native_pending:
-                expected_call_id, _entry = self._native_pending[item_id]
+                expected_call_id, expected_entry = self._native_pending[item_id]
                 supplied_call_id = result.get("call_id")
                 if supplied_call_id is not None and supplied_call_id != expected_call_id:
                     raise ToolCompatibilityError(
@@ -2986,6 +3044,15 @@ class CompatibilityStreamState:
                 arguments = result.get("arguments", result.get("input"))
                 if not isinstance(arguments, str):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+                payload_item = (
+                    {"type": "custom_tool_call", "input": result.get("input", arguments)}
+                    if expected_entry.family == CUSTOM_FREEFORM
+                    else {"type": "function_call", "arguments": arguments}
+                )
+                payload = self._semantic_wire_payload(payload_item, expected_entry)
+                if item_id in self._wire_payloads and self._wire_payloads[item_id] != payload:
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+                self._wire_payloads[item_id] = payload
                 self._native_delta_done.add(item_id)
                 return result
             if item_id not in self._pending:
@@ -3010,6 +3077,15 @@ class CompatibilityStreamState:
                 result.pop("arguments", None)
             else:
                 result["arguments"] = arguments
+            payload_item = (
+                {"type": "custom_tool_call", "input": result.get("input")}
+                if pending.record.family == CUSTOM_FREEFORM
+                else {"type": "function_call", "arguments": arguments}
+            )
+            payload = self._semantic_wire_payload(payload_item, pending.record)
+            if item_id in self._wire_payloads and self._wire_payloads[item_id] != payload:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+            self._wire_payloads[item_id] = payload
             return result
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
             self.plan._validate_registered_item_identity(item, surface="stream")
@@ -3052,6 +3128,10 @@ class CompatibilityStreamState:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                     if native_item_id in self._native_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
+                    payload = self._semantic_wire_payload(item, expected_entry)
+                    if native_item_id in self._wire_payloads and self._wire_payloads[native_item_id] != payload:
+                        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+                    self._wire_payloads[native_item_id] = payload
                     self._native_done.add(native_item_id)
                     return result
                 native_entry = self._native_entry_for_item(item)
@@ -3086,6 +3166,10 @@ class CompatibilityStreamState:
             else:
                 decoded_item, _record, _changed = self._check_alias_in_item(item, allow_incomplete=True)
             pending.item_done = True
+            payload = self._semantic_wire_payload(item, pending.record)
+            if pending.item_id in self._wire_payloads and self._wire_payloads[pending.item_id] != payload:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
+            self._wire_payloads[pending.item_id] = payload
             result["item"] = decoded_item
             return result
         if isinstance(item, Mapping) and self.plan.registry.looks_like_alias(item.get("name")):
@@ -3224,6 +3308,7 @@ class CompatibilityStreamState:
                 pending.record,
                 pending.native_input,
             )
+            self._wire_payloads[pending.item_id] = self._semantic_wire_payload(item, pending.record)
             del self._buffered_custom[pending.item_id]
             return [added_event, delta_event, input_done_event, value]
 

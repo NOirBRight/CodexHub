@@ -558,6 +558,55 @@ def test_adapted_terminal_cannot_complete_without_pending_owner():
         )
 
 
+def test_buffered_custom_terminal_reconciles_semantic_input_not_only_identity():
+    plan = build_tool_compatibility_plan(
+        [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="custom-terminal-payload",
+    )
+    alias = plan.entries[0].aliases[0]
+    state = CompatibilityStreamState(plan)
+    added = {
+        "type": "response.output_item.added",
+        "item": {"type": "function_call", "id": "custom-item", "call_id": "custom-call", "name": alias, "arguments": ""},
+    }
+    state.decode_events_for_event(added)
+    arguments = '{"__codexhub_custom_input":"one"}'
+    state.decode_events_for_event(
+        {"type": "response.function_call_arguments.done", "item_id": "custom-item", "arguments": arguments}
+    )
+    done = {
+        "type": "response.output_item.done",
+        "item": {"type": "function_call", "id": "custom-item", "call_id": "custom-call", "name": alias, "arguments": arguments},
+    }
+    state.decode_events_for_event(done)
+
+    changed_payload = {**done["item"], "arguments": '{"__codexhub_custom_input":"two"}'}
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [changed_payload]}}
+        )
+
+
+def test_native_terminal_reconciles_semantic_arguments_not_only_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state = CompatibilityStreamState(plan)
+    first = {"type": "function_call", "id": "native-item", "call_id": "native-call", "name": "keep", "arguments": ""}
+    state.decode_events_for_event({"type": "response.output_item.added", "item": first})
+    arguments = '{"value":1}'
+    state.decode_events_for_event(
+        {"type": "response.function_call_arguments.done", "item_id": "native-item", "call_id": "native-call", "arguments": arguments}
+    )
+    state.decode_events_for_event(
+        {"type": "response.output_item.done", "item": {**first, "arguments": arguments}}
+    )
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [{**first, "arguments": '{"value":2}'}]}}
+        )
+
+
 @pytest.mark.parametrize("output_type", ["function_call_output", "vendor_extension_call_output"])
 def test_sse_output_before_adapted_call_fails_closed(output_type):
     plan = _adapted_namespace_plan()
