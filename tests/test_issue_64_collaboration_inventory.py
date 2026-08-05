@@ -222,6 +222,16 @@ def test_inventory_reconciliation_fails_closed_on_unknown_or_mutated_shape() -> 
     assert report["reconciled"] is False
     assert any("boundary_discriminator_fields_invalid" in item for item in report["mismatches"])
 
+    for field, value, code in (
+        ("pre_exposure_stage", "after_repair", "boundary_pre_exposure_stage_invalid"),
+        ("mixed_v1_v2_action", "guess", "boundary_mixed_action_invalid"),
+    ):
+        mutated = copy.deepcopy(payload)
+        mutated["boundary"][field] = value
+        report = module.reconcile_inventory(mutated, source_contract_path=SOURCE_CONTRACT)
+        assert report["reconciled"] is False
+        assert any(code in item for item in report["mismatches"])
+
 
 def test_inventory_replay_controls_are_negative() -> None:
     module = load_inventory_module()

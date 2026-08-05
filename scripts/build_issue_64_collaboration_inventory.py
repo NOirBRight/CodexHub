@@ -579,8 +579,13 @@ def validate_inventory(payload: Mapping[str, Any], source_contract_path: Path) -
         },
         "boundary_fields_invalid",
     )
+    _require(
+        boundary["pre_exposure_stage"] == "before_tool_exposure_or_semantic_repair",
+        "boundary_pre_exposure_stage_invalid",
+    )
     _require(boundary["discriminator_fields"] == ["namespace", "name"], "boundary_discriminator_fields_invalid")
     _require(boundary["unknown_action"] == "fail_closed" and boundary["ambiguous_action"] == "fail_closed", "boundary_fail_closed_invalid")
+    _require(boundary["mixed_v1_v2_action"] == "fail_closed", "boundary_mixed_action_invalid")
     markers = _exact(boundary["protocol_markers"], {V1_ID, V2_ID}, "boundary_markers_invalid")
     _require(markers[V1_ID] == {"namespace": V1_NAMESPACE, "tool_names": list(V1_TOOLS)}, "boundary_v1_marker_invalid")
     _require(markers[V2_ID] == {"namespace": V2_NAMESPACE, "tool_names": list(V2_TOOLS)}, "boundary_v2_marker_invalid")
