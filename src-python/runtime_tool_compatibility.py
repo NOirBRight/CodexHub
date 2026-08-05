@@ -1607,6 +1607,19 @@ class ToolCompatibilityPlan:
         if item.get("type") == "function_call" and self.registry.record_for_alias(item.get("name")) is not None:
             return
         if (
+            item.get("type") == "custom_tool_call"
+            and item.get("namespace") is not None
+            and any(
+                entry.family == CUSTOM_FREEFORM and entry.disposition == ADAPT
+                for entry in self.entries
+            )
+        ):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_native_identity",
+                surface=surface,
+            )
+        if (
             item.get("type") == "function_call"
             and item.get("namespace") is None
             and isinstance(item.get("name"), str)
@@ -1634,13 +1647,32 @@ class ToolCompatibilityPlan:
             item.get("type") == "function_call"
             and item.get("namespace") is not None
             and isinstance(item.get("name"), str)
-            and any(
-                entry.family == PLAIN_FUNCTION
-                and entry.original_name == f"{item.get('namespace')}__{item.get('name')}"
-                for entry in self.entries
-            )
         ):
-            return
+            flattened_name = f"{item.get('namespace')}__{item.get('name')}"
+            flattened_matches = [
+                entry
+                for entry in self.entries
+                if entry.family == PLAIN_FUNCTION
+                and entry.original_name == flattened_name
+            ]
+            if any(entry.disposition == NATIVE for entry in flattened_matches):
+                return
+            if flattened_matches:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface=surface,
+                )
+            if any(entry.family == NAMESPACE for entry in self.entries) and self._entry_for_name(
+                item.get("name"),
+                item.get("namespace"),
+                item_type=item.get("type"),
+            ) is None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface=surface,
+                )
         if not self._has_standard_contract_for_item(item):
             return
         if self._standard_entry_for_item(item, surface=surface) is None:
@@ -2198,6 +2230,12 @@ class ToolCompatibilityPlan:
                 )
             return
         if item_type == "function_call_output":
+            if record.family == CUSTOM_FREEFORM and item.get("namespace") is not None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_alias",
+                    surface=surface,
+                )
             return
         raise ToolCompatibilityError(
             "tool_compatibility_boundary",
@@ -2627,6 +2665,10 @@ class CompatibilityStreamState:
         # lifecycle is emitted.  Keep the original adapter wire identity so a
         # terminal envelope can still reconcile item/call/declaration exactly.
         self._adapter_wire_identities: dict[str, tuple[str, AliasRecord, tuple[Any, Any, Any]]] = {}
+        self._legacy_unowned_done: dict[
+            str,
+            tuple[str, ToolCompatibilityEntry, tuple[Any, Any, Any], Any],
+        ] = {}
         self._wire_payloads: dict[str, Any] = {}
         self._native_done: set[str] = set()
         self._native_delta_done: set[str] = set()
@@ -2750,6 +2792,12 @@ class CompatibilityStreamState:
         self._seen_item_ids.add(item_id)
         self._seen_call_ids.add(call_id)
         self._native_done.add(item_id)
+        self._legacy_unowned_done[item_id] = (
+            call_id,
+            entry,
+            self._native_wire_identity(item),
+            self._semantic_wire_payload(item, entry),
+        )
 
     def _complete_native_arguments_from_item(
         self,
@@ -2853,6 +2901,8 @@ class CompatibilityStreamState:
                 except (TypeError, ValueError):
                     return ("arguments_raw", arguments)
                 return ("arguments", _freeze(parsed))
+        if family == TOOL_SEARCH and item_type == "tool_search_call":
+            return ("arguments", _freeze(item.get("arguments")))
         return None
 
     @staticmethod
@@ -3054,6 +3104,35 @@ class CompatibilityStreamState:
                 seen_output_ids.add(item_id)
             pending = self._native_pending.get(item_id) if item_id is not None else None
             if pending is None:
+                legacy_done = self._legacy_unowned_done.get(item_id) if item_id is not None else None
+                if legacy_done is not None:
+                    expected_call_id, expected_entry, expected_wire, expected_payload = legacy_done
+                    if item.get("call_id") != expected_call_id:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_call_identity",
+                            surface="stream",
+                        )
+                    if self._native_wire_identity(item) != expected_wire:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    if self._native_entry_for_item(item) is not expected_entry:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    self.plan._validate_native_item(item, expected_entry)
+                    if self._semantic_wire_payload(item, expected_entry) != expected_payload:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    continue
                 adapter_pending = self._pending.get(item_id) if item_id is not None else None
                 if adapter_pending is not None:
                     if item.get("call_id") != adapter_pending.call_id:
@@ -3137,6 +3216,15 @@ class CompatibilityStreamState:
                             surface="stream",
                         )
                     continue
+                if isinstance(item.get("call_id"), str) and any(
+                    expected_call_id == item.get("call_id")
+                    for expected_call_id, _entry, _wire, _payload in self._legacy_unowned_done.values()
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
                 if isinstance(item.get("call_id"), str) and any(
                     expected_call_id == item.get("call_id")
                     for expected_call_id, _record, _wire in self._adapter_wire_identities.values()

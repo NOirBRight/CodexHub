@@ -1027,6 +1027,75 @@ def test_native_plain_owner_still_wins_over_unqualified_native_namespace_child()
     assert plan.decode_payload({"output": [item]})["output"] == [item]
 
 
+@pytest.mark.parametrize("native", [True, False], ids=["native", "adapted"])
+@pytest.mark.parametrize(
+    ("namespace", "name"),
+    [("evil", "run"), ("vendor", "evil")],
+    ids=["wrong-namespace", "wrong-child"],
+)
+@pytest.mark.parametrize("surface", ["body", "history", "stream"])
+def test_namespace_contract_rejects_inexact_namespace_owner(native, namespace, name, surface):
+    declaration = _namespace("vendor", child="run")
+    if native:
+        plan = _native_plan(declaration)
+    else:
+        plan = build_tool_compatibility_plan(
+            [declaration],
+            selected_protocol="chat_tools",
+            protocol_capabilities=ProtocolCapabilities.chat_tools(),
+            request_token="adapted-inexact-namespace-owner",
+        )
+    item = {
+        "type": "function_call",
+        "id": "namespace-item",
+        "call_id": "namespace-call",
+        "namespace": namespace,
+        "name": name,
+        "arguments": "{}",
+    }
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        if surface == "body":
+            plan.decode_payload({"output": [item]})
+        elif surface == "history":
+            plan.encode_payload({"input": [item]})
+        else:
+            CompatibilityStreamState(plan).decode_events_for_event(
+                {
+                    "type": "response.output_item.added",
+                    "item": {**item, "arguments": ""},
+                }
+            )
+
+    assert exc_info.value.classification == "unknown_native_identity"
+
+
+def test_omitted_plain_function_cannot_use_flattened_namespace_escape():
+    plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "vendor__run"}],
+        selected_protocol="none",
+        request_token="omitted-flattened-plain",
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "id": "item",
+                        "call_id": "call",
+                        "namespace": "vendor",
+                        "name": "run",
+                        "arguments": "{}",
+                    }
+                ]
+            }
+        )
+
+    assert exc_info.value.classification == "unknown_native_identity"
+
+
 @pytest.mark.parametrize(
     ("declaration", "item"),
     [
@@ -1146,6 +1215,106 @@ def test_native_tool_search_no_added_terminal_requires_client_execution_marker()
     assert exc_info.value.classification == "invalid_tool_search_execution"
 
 
+@pytest.mark.parametrize(
+    ("declaration", "done_item", "terminal_item"),
+    [
+        (
+            {"type": "function", "name": "tool_search"},
+            {
+                "type": "function_call",
+                "id": "item",
+                "call_id": "call",
+                "name": "tool_search",
+                "arguments": '{"query":"one"}',
+            },
+            {
+                "type": "function_call",
+                "id": "item",
+                "call_id": "call",
+                "name": "tool_search",
+                "arguments": '{"query":"two"}',
+            },
+        ),
+        (
+            {"type": "function", "name": "multi_agent_v1__spawn_agent"},
+            {
+                "type": "function_call",
+                "id": "item",
+                "call_id": "call",
+                "namespace": "multi_agent_v1",
+                "name": "spawn_agent",
+                "arguments": '{"task":"one"}',
+            },
+            {
+                "type": "function_call",
+                "id": "item",
+                "call_id": "call",
+                "namespace": "multi_agent_v1",
+                "name": "spawn_agent",
+                "arguments": '{"task":"two"}',
+            },
+        ),
+        (
+            {"type": "tool_search", "execution": "client"},
+            {
+                "type": "tool_search_call",
+                "id": "item",
+                "call_id": "call",
+                "execution": "client",
+                "arguments": {"query": "one"},
+            },
+            {
+                "type": "tool_search_call",
+                "id": "item",
+                "call_id": "call",
+                "execution": "client",
+                "arguments": {"query": "two"},
+            },
+        ),
+    ],
+    ids=["tool-search-wrapper", "flattened-worker-selector", "native-tool-search"],
+)
+def test_legacy_no_added_terminal_reconciles_semantic_snapshot(
+    declaration,
+    done_item,
+    terminal_item,
+):
+    state = CompatibilityStreamState(_native_plan(declaration))
+    state.decode_events_for_event(
+        {"type": "response.output_item.done", "item": done_item}
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [terminal_item]}}
+        )
+
+    assert exc_info.value.classification == "ambiguous_native_identity"
+
+
+def test_legacy_no_added_terminal_rejects_changed_call_identity():
+    declaration = {"type": "function", "name": "tool_search"}
+    item = {
+        "type": "function_call",
+        "id": "item",
+        "call_id": "call",
+        "name": "tool_search",
+        "arguments": "{}",
+    }
+    state = CompatibilityStreamState(_native_plan(declaration))
+    state.decode_events_for_event({"type": "response.output_item.done", "item": item})
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {"output": [{**item, "call_id": "evil"}]},
+            }
+        )
+
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+
 def test_buffered_custom_delta_and_done_require_bound_call_id():
     plan = build_tool_compatibility_plan(
         [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
@@ -1219,6 +1388,88 @@ def test_adapted_custom_alias_rejects_namespace_decoration(surface):
             )
 
     assert exc_info.value.classification == "unknown_alias"
+
+
+def test_adapted_custom_native_history_rejects_namespace_decoration():
+    plan = build_tool_compatibility_plan(
+        [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="custom-native-history-namespace",
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "custom_tool_call",
+                        "id": "item",
+                        "call_id": "call",
+                        "namespace": "evil",
+                        "name": "paint",
+                        "input": "opaque",
+                    }
+                ]
+            }
+        )
+
+    assert exc_info.value.classification == "unknown_native_identity"
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected_classification"),
+    [
+        ("body", "unknown_alias"),
+        ("history", "ambiguous_call_identity"),
+        ("stream", "unknown_alias"),
+    ],
+)
+def test_adapted_custom_result_rejects_namespace_decoration(surface, expected_classification):
+    declaration = {"type": "custom", "name": "paint", "format": {"type": "text"}}
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token=f"custom-result-namespace-{surface}",
+    )
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "call-item",
+                    "call_id": "call",
+                    "name": "paint",
+                    "input": "opaque",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "result-item",
+                    "call_id": "call",
+                    "output": "done",
+                },
+            ]
+        }
+    )["input"]
+    call_item, result_item = encoded
+    result_item = {**result_item, "namespace": "evil"}
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        if surface == "body":
+            plan.decode_payload({"output": [call_item, result_item]})
+        elif surface == "history":
+            plan.decode_payload({"history": [call_item, result_item]})
+        else:
+            state = CompatibilityStreamState(plan)
+            state.decode_event(
+                {"type": "response.output_item.added", "item": call_item}
+            )
+            state.decode_event(
+                {"type": "response.output_item.added", "item": result_item}
+            )
+
+    assert exc_info.value.classification == expected_classification
 
 
 def test_buffered_adapted_custom_added_rejects_namespace_decoration():
