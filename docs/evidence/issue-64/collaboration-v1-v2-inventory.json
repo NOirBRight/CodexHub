@@ -8,11 +8,34 @@
       "downgrade_v2_to_v1"
     ],
     "owner": "codex_client",
+    "protocol_shape_decisions": {
+      "collaboration_v1": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "required_when_selected_protocol_lacks_namespace",
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface"
+      },
+      "collaboration_v2": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
+        "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
+        "official_cli_capture_status": "not_observed",
+        "preserved_fields": [
+          "task_path",
+          "continuation_id",
+          "task_name",
+          "fork_turns"
+        ],
+        "shape_kind": "accepted_structural_contract"
+      }
+    },
     "requirements": [
       "namespace_to_function",
       "injective_request_scoped_aliases",
       "preserve_task_path_identity",
+      "preserve_continuation_id_and_fork_turns",
       "preserve_call_result_history_links",
+      "preserve_inverse_declaration_call_result_history_mapping",
       "assemble_stream_before_validation",
       "reject_unknown_or_ambiguous_boundary",
       "keep_v1_and_v2_isolated"
@@ -71,7 +94,7 @@
     "basis": "accepted_issue_62_source_contract_and_repository_evidence",
     "source_contract": {
       "file": "codex-0.146-source-contract.json",
-      "sha256": "a23365c255e5230604241800170ca1d0a283650f7a89c540f92f9ce68512727e"
+      "sha256": "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c"
     }
   },
   "protocols": [
@@ -87,29 +110,25 @@
           "resume_agent": {
             "optional": [],
             "required": [
-              "target",
-              "message"
+              "id"
             ]
           },
           "send_input": {
             "optional": [
-              "interrupt"
+              "interrupt",
+              "message"
             ],
             "required": [
-              "target",
-              "message"
+              "target"
             ]
           },
           "spawn_agent": {
             "optional": [
-              "agent_type",
-              "model",
-              "reasoning",
-              "nickname",
-              "fork_context"
+              "fork_context",
+              "message"
             ],
             "required": [
-              "message"
+              "agent_type"
             ]
           },
           "wait_agent": {
@@ -136,6 +155,7 @@
         "wire_type": "function_call"
       },
       "declaration": {
+        "child_wire_type": "function",
         "discriminator": {
           "namespace": "multi_agent_v1",
           "tool_field": "name"
@@ -143,7 +163,7 @@
         "fields": [
           "type",
           "name",
-          "parameters"
+          "tools"
         ],
         "flattened_name_prefixes": [
           "multi_agent_v1__",
@@ -156,7 +176,7 @@
           "close_agent",
           "resume_agent"
         ],
-        "wire_type": "function"
+        "wire_type": "namespace"
       },
       "executor": "codex_client",
       "history": {
@@ -229,6 +249,11 @@
         },
         "result_identity": "agent_id",
         "wire_type": "function_call_output"
+      },
+      "shape_provenance": {
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface",
+        "source": "src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS"
       },
       "status": "legacy_structural_contract",
       "stream": {
@@ -415,6 +440,11 @@
         ],
         "result_identity": "task_path",
         "wire_type": "function_call_output"
+      },
+      "shape_provenance": {
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "accepted_structural_contract",
+        "source": "accepted_issue_62_source_contract_and_repository_evidence"
       },
       "status": "stable_surface_not_lifecycle_qualified",
       "stream": {

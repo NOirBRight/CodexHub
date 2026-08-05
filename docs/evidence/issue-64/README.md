@@ -16,7 +16,8 @@ The inventory is bound to the accepted Issue #62 source contract:
 - `capture_status=not_observed`
 - source-contract `qualification_status=unqualified`
 
-The source-contract file is retained by name and SHA-256 in the JSON artifact.
+The source-contract file is retained by name and canonical-LF SHA-256 in the
+JSON artifact (`6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c`).
 This is source/repository evidence only: no CLI request, credentials, raw
 capture, prompt, call ID, item ID, or token is retained here. A historical
 0.144 trace, if encountered elsewhere, must remain labeled 0.144 and must not
@@ -46,16 +47,18 @@ fields fail closed; they are not guessed or repaired.
 
 ## V1 shape (`multi_agent_v1`)
 
-V1 declarations are a `function` with `name` and `parameters`. Calls are
-`function_call` items carrying `namespace`, `name`, `item_id`, `call_id`, and
-`arguments`; results are `function_call_output` items linked by `call_id` and
-`item_id`.
+The V1 entry records the current CodexHub compatibility surface from
+`src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS`: a `namespace` with
+child `function` tools. It is not an official raw CLI capture; the official
+CLI 0.146 V1 shape remains `not_observed`. Calls are `function_call` items
+carrying `namespace`, `name`, `item_id`, `call_id`, and `arguments`; results are
+`function_call_output` items linked by `call_id` and `item_id`.
 
-The V1 spawn call requires `message` and may carry `agent_type`, `model`,
-`reasoning`, `nickname`, or `fork_context`. `send_input` requires `target` and
-`message` (with optional `interrupt`); `wait_agent` requires `targets` (with
-optional `timeout_ms`); `close_agent` requires `target`; and `resume_agent`
-requires `target` and `message`.
+The compatibility-surface spawn call requires `agent_type` and may carry
+`fork_context` or `message`. `send_input` requires `target` and may carry
+`message` or `interrupt`; `wait_agent` requires `targets` (with optional
+`timeout_ms`); `close_agent` requires `target`; and `resume_agent` requires
+`id`.
 
 V1 results identify the child with `agent_id`. The result fields are
 tool-specific: spawn returns `agent_id`/`nickname`, wait returns
@@ -67,7 +70,9 @@ tool-specific: spawn returns `agent_id`/`nickname`, wait returns
 
 ## V2 shape (`collaboration`)
 
-V2 declarations are a `namespace` with child `function` tools. Calls use the
+V2 is an accepted structural contract, not a live capture; its official CLI
+capture status is `not_observed`. V2 declarations are a `namespace` with child
+`function` tools. Calls use the
 same Responses `function_call` envelope (`namespace`, child `name`,
 `item_id`, `call_id`, and `arguments`), and results use
 `function_call_output` linked by `call_id` and `item_id`.
@@ -105,10 +110,15 @@ The Codex client owns execution for both V1 and V2 (`owner=codex_client`,
 `executor=codex_client`). The Gateway is not an executor, scheduler, result
 forger, or V2-to-V1 downgrade path.
 
-The JSON records requirements only for follow-up issues #198 and #58:
+The JSON records requirements only for follow-up issues #198 and #58. The V2
+namespace may pass natively when the selected protocol supports namespaces;
+otherwise a generic namespace-to-function Adapter is optional for V2 and must
+remain reversible. The current V1 compatibility namespace similarly requires
+that Adapter only when the selected protocol lacks namespace support.
 
 - map a namespace child to an injective, request-scoped function alias;
-- preserve `task_path` and all call/result/history links;
+- preserve `task_path`, `continuation_id`, `task_name`, and `fork_turns`;
+- preserve inverse declaration/call/result/history mappings;
 - assemble streamed arguments before validation;
 - reject unknown or ambiguous boundaries; and
 - keep V1 and V2 repair paths isolated.

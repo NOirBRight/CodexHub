@@ -50,6 +50,7 @@ def test_inventory_covers_bounded_v1_and_v2_shapes() -> None:
             "owner",
             "executor",
             "status",
+            "shape_provenance",
             "declaration",
             "call",
             "result",
@@ -68,6 +69,13 @@ def test_inventory_covers_bounded_v1_and_v2_shapes() -> None:
 
     v1 = protocols["collaboration_v1"]
     assert v1["namespace"] == "multi_agent_v1"
+    assert v1["shape_provenance"] == {
+        "shape_kind": "current_gateway_compatibility_surface",
+        "source": "src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS",
+        "official_cli_capture_status": "not_observed",
+    }
+    assert v1["declaration"]["wire_type"] == "namespace"
+    assert v1["declaration"]["child_wire_type"] == "function"
     assert v1["declaration"]["tool_names"] == [
         "spawn_agent",
         "send_input",
@@ -76,11 +84,24 @@ def test_inventory_covers_bounded_v1_and_v2_shapes() -> None:
         "resume_agent",
     ]
     assert v1["history"]["continuation_identity"] == "agent_id"
+    assert v1["call"]["argument_fields"]["spawn_agent"] == {
+        "required": ["agent_type"],
+        "optional": ["fork_context", "message"],
+    }
+    assert v1["call"]["argument_fields"]["resume_agent"] == {
+        "required": ["id"],
+        "optional": [],
+    }
     assert "task_path" in v1["isolation"]["forbidden_v2_fields"]
     assert "fork_turns" in v1["isolation"]["forbidden_v2_fields"]
 
     v2 = protocols["collaboration_v2"]
     assert v2["namespace"] == "collaboration"
+    assert v2["shape_provenance"] == {
+        "shape_kind": "accepted_structural_contract",
+        "source": "accepted_issue_62_source_contract_and_repository_evidence",
+        "official_cli_capture_status": "not_observed",
+    }
     assert v2["declaration"]["tool_names"] == [
         "spawn_agent",
         "send_message",
@@ -105,11 +126,28 @@ def test_boundary_requires_exact_namespace_and_tool_discriminator() -> None:
 
     assert module.classify_boundary({"namespace": "multi_agent_v1", "name": "spawn_agent"}) == "collaboration_v1"
     assert module.classify_boundary({"namespace": "collaboration", "name": "followup_task"}) == "collaboration_v2"
+    assert module.classify_boundary({
+        "type": "function_call",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "item_id": "<opaque>",
+        "call_id": "<opaque>",
+        "arguments": {"task_name": "<opaque>", "message": "<redacted>"},
+    }) == "collaboration_v2"
 
     for value, code in (
         ({"name": "spawn_agent"}, "boundary_discriminator_missing"),
         ({"namespace": "unknown", "name": "spawn_agent"}, "boundary_namespace_unknown"),
         ({"namespace": "collaboration", "name": "unknown_tool"}, "boundary_tool_unknown"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "arguments": "{}"}, "boundary_arguments_invalid"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "arguments": []}, "boundary_arguments_invalid"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "arguments": None}, "boundary_arguments_invalid"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "tool_name": "wait_agent"}, "boundary_discriminator_conflict"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "unexpected": True}, "boundary_fields_unknown"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "arguments": {"random": True}}, "boundary_arguments_unknown"),
+        ({"namespace": "collaboration", "name": "wait_agent", "arguments": {"random": True}}, "boundary_arguments_unknown"),
+        ({"namespace": "multi_agent_v1", "name": "spawn_agent", "tools": []}, "boundary_v1_v2_field_mixed"),
+        ({"namespace": "collaboration", "name": "spawn_agent", "parameters": {}}, "boundary_v1_v2_field_mixed"),
     ):
         with pytest.raises(module.InventoryValidationError, match=code):
             module.classify_boundary(value)
@@ -143,6 +181,16 @@ def test_inventory_declares_adapter_requirements_without_implementing_lifecycle(
     assert "namespace_to_function" in requirements["requirements"]
     assert "injective_request_scoped_aliases" in requirements["requirements"]
     assert "preserve_task_path_identity" in requirements["requirements"]
+    assert "preserve_continuation_id_and_fork_turns" in requirements["requirements"]
+    assert "preserve_inverse_declaration_call_result_history_mapping" in requirements["requirements"]
+    assert requirements["protocol_shape_decisions"]["collaboration_v2"] == {
+        "shape_kind": "accepted_structural_contract",
+        "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
+        "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
+        "official_cli_capture_status": "not_observed",
+        "inverse_mapping": "request_scoped_and_lossless",
+        "preserved_fields": ["task_path", "continuation_id", "task_name", "fork_turns"],
+    }
     assert "execute_tools" in requirements["forbidden_gateway_actions"]
     assert "schedule_agents" in requirements["forbidden_gateway_actions"]
     assert "forge_results" in requirements["forbidden_gateway_actions"]
@@ -184,3 +232,74 @@ def test_inventory_replay_controls_are_negative() -> None:
         report = module.reconcile_inventory(replay, source_contract_path=SOURCE_CONTRACT)
         assert report["reconciled"] is False, case
         assert report["mismatches"], case
+
+
+def test_source_contract_validator_rejects_provenance_and_family_mutations() -> None:
+    module = load_inventory_module()
+    source = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+
+    for key, value, code in (
+        ("schema_version", 2, "source_contract_schema_invalid"),
+        ("qualification_status", "observed", "source_contract_qualification_invalid"),
+    ):
+        mutated = copy.deepcopy(source)
+        mutated[key] = value
+        with pytest.raises(module.InventoryValidationError, match=code):
+            module._validate_source_contract(mutated)
+
+    mutated = copy.deepcopy(source)
+    mutated["runtime_wire_surface"]["declaration_family_order"] = ["namespace"]
+    with pytest.raises(module.InventoryValidationError, match="source_contract_family_order_invalid"):
+        module._validate_source_contract(mutated)
+
+    mutated = copy.deepcopy(source)
+    mutated["runtime_wire_surface"]["declaration_families"][0]["observed"] = True
+    with pytest.raises(module.InventoryValidationError, match="source_contract_families_invalid"):
+        module._validate_source_contract(mutated)
+
+    mutated = copy.deepcopy(source)
+    mutated["runtime_wire_surface"]["response_shape"]["terminal_events"] = ["response.completed"]
+    with pytest.raises(module.InventoryValidationError, match="source_contract_surface_digest_invalid"):
+        module._validate_source_contract(mutated)
+
+
+def test_source_contract_digest_normalizes_lf_and_crlf(tmp_path: Path) -> None:
+    module = load_inventory_module()
+    canonical = SOURCE_CONTRACT.read_bytes().replace(b"\r\n", b"\n")
+    lf_path = tmp_path / "source-lf.json"
+    crlf_path = tmp_path / "source-crlf.json"
+    lf_path.write_bytes(canonical)
+    crlf_path.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    assert module._sha256_file(lf_path) == module._sha256_file(crlf_path)
+    assert module._sha256_file(lf_path) == module.EXPECTED_SOURCE_CONTRACT_SHA256
+
+    mutated = copy.deepcopy(json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8")))
+    mutated["qualification_status"] = "observed"
+    mutated_path = tmp_path / "codex-0.146-source-contract.json"
+    mutated_path.write_text(json.dumps(mutated), encoding="utf-8", newline="\n")
+    with pytest.raises(module.InventoryValidationError, match="source_contract_qualification_invalid"):
+        module._build_inventory(mutated_path)
+
+    reformatted_path = tmp_path / "reformatted-source-contract.json"
+    reformatted_path.write_text(json.dumps(json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))), encoding="utf-8", newline="\n")
+    with pytest.raises(module.InventoryValidationError, match="source_contract_digest_invalid"):
+        module._build_inventory(reformatted_path)
+
+
+def test_nested_protocol_schema_mutations_fail_closed() -> None:
+    module = load_inventory_module()
+    payload = json.loads(INVENTORY.read_text(encoding="utf-8"))
+
+    mutations = (
+        ("stream_terminal_events", lambda value: value["protocols"][0]["stream"].__setitem__("terminal_events", [])),
+        ("call_wire_type", lambda value: value["protocols"][0]["call"].__setitem__("wire_type", "unknown")),
+        ("declaration_discriminator", lambda value: value["protocols"][0]["declaration"].__setitem__("discriminator", {"namespace": "wrong", "tool_field": "name"})),
+        ("history_identity_fields", lambda value: value["protocols"][1]["history"].__setitem__("identity_fields", ["task_path"])),
+    )
+    for case, mutate in mutations:
+        replay = copy.deepcopy(payload)
+        mutate(replay)
+        report = module.reconcile_inventory(replay, source_contract_path=SOURCE_CONTRACT)
+        assert report["reconciled"] is False, case
+        assert any("protocol_schema_invalid" in item for item in report["mismatches"]), case
