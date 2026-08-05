@@ -797,6 +797,35 @@ def test_optional_hosted_history_omits_same_type_call_and_result_with_distinct_i
     assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        [
+            {"type": "web_search_call", "id": "same-item", "status": "completed"},
+            {"type": "web_search_call_output", "id": "same-item", "output": "ignored"},
+            {"type": "web_search_call_output", "id": "same-item", "output": "duplicate"},
+        ],
+        [
+            {"type": "web_search_call_output", "id": "same-item", "output": "ignored"},
+            {"type": "web_search_call", "id": "same-item", "status": "completed"},
+            {"type": "web_search_call", "id": "same-item", "status": "duplicate"},
+        ],
+    ],
+    ids=["root-output-output", "output-root-root"],
+)
+def test_omitted_hosted_history_rejects_reused_pair_identity(items):
+    plan = build_tool_compatibility_plan(
+        [{"type": "web_search"}],
+        selected_protocol="chat_tools",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="omitted-hosted-reused-pair",
+    )
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": items})
+    assert exc_info.value.classification == "duplicate_item_identity"
+
+
 def test_optional_unknown_selected_provider_hosted_history_omits_without_call_id():
     plan = build_tool_compatibility_plan(
         [{"type": "vendor_search", "executor": "selected_provider"}],
@@ -814,6 +843,64 @@ def test_optional_unknown_selected_provider_hosted_history_omits_without_call_id
         }
     )
     assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+
+def test_native_unknown_lifecycle_is_not_misclassified_as_hosted_in_body_and_stream():
+    declaration = {"type": "vendor_extension", "executor": "codex_client"}
+    capabilities = ProtocolCapabilities.responses_structured(
+        unknown_lifecycles=frozenset({"vendor_extension"}),
+    )
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="responses_structured",
+        protocol_capabilities=capabilities,
+        request_token="native-unknown-lifecycle",
+    )
+    item = {
+        "type": "vendor_extension_call",
+        "id": "extension-item",
+        "payload": {"opaque": True},
+    }
+    assert plan.entries[0].disposition == NATIVE
+    assert plan.decode_payload({"output": [item]})["output"] == [item]
+
+    state = CompatibilityStreamState(plan)
+    added = {"type": "response.output_item.added", "item": item}
+    assert state.decode_events_for_event(added) == [added]
+    delta = {
+        "type": "response.vendor_extension_call.delta",
+        "item_id": "extension-item",
+        "opaque": "fragment",
+    }
+    assert state.decode_events_for_event(delta) == [delta]
+    done = {"type": "response.output_item.done", "item": item}
+    assert state.decode_events_for_event(done) == [done]
+    terminal = {"type": "response.completed", "response": {"id": "extension-response"}}
+    assert state.decode_events_for_event(terminal) == [terminal]
+
+
+def test_unknown_selected_provider_lifecycle_requires_provider_hosted_fact():
+    declaration = {"type": "vendor_extension", "executor": "selected_provider"}
+    protocol = ProtocolCapabilities.responses_structured(
+        unknown_lifecycles=frozenset({"vendor_extension"}),
+    )
+    without_provider_fact = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={},
+        protocol_capabilities=protocol,
+        request_token="unknown-hosted-no-provider-fact",
+    )
+    assert without_provider_fact.entries[0].disposition == OMIT
+
+    with_provider_fact = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={"vendor_extension": True},
+        protocol_capabilities=protocol,
+        request_token="unknown-hosted-with-provider-fact",
+    )
+    assert with_provider_fact.entries[0].disposition == NATIVE
 
 
 def test_with_final_declarations_does_not_expose_hosted_without_provider_fact():

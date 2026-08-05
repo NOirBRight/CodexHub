@@ -749,7 +749,13 @@ def build_tool_compatibility_plan(
                 reason = "selected_provider_hosted_lifecycle_unavailable"
         else:
             kind = declaration.get("type")
-            if valid and isinstance(kind, str) and kind in capabilities.unknown_lifecycles:
+            provider_hosted = declaration.get("executor") == "selected_provider"
+            if (
+                valid
+                and isinstance(kind, str)
+                and kind in capabilities.unknown_lifecycles
+                and (not provider_hosted or kind in hosted.supported_kinds)
+            ):
                 disposition, reason = NATIVE, "explicit_unknown_lifecycle"
             else:
                 reason = "unknown_lifecycle_contract_unavailable"
@@ -1523,7 +1529,7 @@ class ToolCompatibilityPlan:
         if isinstance(raw_input, list):
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
-            omitted_hosted_ids: dict[str, tuple[str, bool]] = {}
+            omitted_hosted_ids: dict[str, tuple[str, bool, bool]] = {}
             for item in raw_input:
                 if not isinstance(item, Mapping):
                     continue
@@ -1544,22 +1550,23 @@ class ToolCompatibilityPlan:
                 hosted_item_kind, is_output = hosted_item_key
                 previous = omitted_hosted_ids.get(item_id)
                 if previous is not None:
-                    previous_kind, previous_is_output = previous
+                    previous_kind, previous_is_output, pair_consumed = previous
                     if previous_kind != hosted_item_kind:
                         classification = "ambiguous_native_identity"
-                    elif previous_is_output == is_output:
+                    elif pair_consumed or previous_is_output == is_output:
                         classification = "duplicate_item_identity"
                     else:
                         # Some hosted protocols use one item id for call/result
                         # pairs; others use distinct ids.  Both are valid when
                         # the hosted kind is already uniquely omitted.
+                        omitted_hosted_ids[item_id] = (hosted_item_kind, is_output, True)
                         continue
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
                         classification,
                         surface="history",
                     )
-                omitted_hosted_ids[item_id] = (hosted_item_kind, is_output)
+                omitted_hosted_ids[item_id] = (hosted_item_kind, is_output, False)
             omitted_call_items = [
                 item
                 for item in raw_input
@@ -1698,6 +1705,9 @@ class ToolCompatibilityPlan:
                 if entry.family == TOOL_SEARCH and entry.disposition == NATIVE
             ]
             return matches[0] if len(matches) == 1 else None
+        unknown_entry = self._native_unknown_entry_for_item(item)
+        if unknown_entry is not None:
+            return unknown_entry
         hosted_item_spec = _hosted_event_spec_for_item_type(item_type)
         if hosted_item_spec is not None and item_type == hosted_item_spec[0]:
             hosted_event_kind, _stages = hosted_item_spec
@@ -1715,6 +1725,48 @@ class ToolCompatibilityPlan:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
             return matches[0] if matches else None
         return None
+
+    @staticmethod
+    def _unknown_item_kind(item_type: Any) -> str | None:
+        if not isinstance(item_type, str):
+            return None
+        if item_type.endswith("_call_output"):
+            kind = item_type[: -len("_call_output")]
+            return kind if kind else None
+        if item_type.endswith("_call"):
+            kind = item_type[: -len("_call")]
+            return kind if kind else None
+        return None
+
+    def _native_unknown_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+        kind = self._unknown_item_kind(item.get("type"))
+        if kind is None:
+            return None
+        matches = [
+            entry
+            for entry in self.entries
+            if entry.family == UNKNOWN_FUTURE_KIND
+            and entry.disposition == NATIVE
+            and entry.declaration.get("type") == kind
+        ]
+        if len(matches) > 1:
+            raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
+        return matches[0] if matches else None
+
+    def _is_native_unknown_stream_event(self, event_type: Any) -> bool:
+        if not isinstance(event_type, str) or not event_type.startswith("response."):
+            return False
+        suffix = event_type[len("response.") :]
+        call_type, separator, _stage = suffix.partition(".")
+        if not separator or not call_type.endswith("_call"):
+            return False
+        kind = call_type[: -len("_call")]
+        return any(
+            entry.family == UNKNOWN_FUTURE_KIND
+            and entry.disposition == NATIVE
+            and entry.declaration.get("type") == kind
+            for entry in self.entries
+        )
 
     def _has_native_structural_family(self) -> bool:
         return any(
@@ -1763,6 +1815,11 @@ class ToolCompatibilityPlan:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
             if item_type == "tool_search_call" and item.get("execution") not in {None, "client"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface="history")
+        elif entry.family == UNKNOWN_FUTURE_KIND:
+            if ToolCompatibilityPlan._unknown_item_kind(item_type) != entry.declaration.get("type"):
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+            if _item_identity(item) is None:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="history")
         elif entry.family == SELECTED_PROVIDER_HOSTED:
             hosted_spec = _hosted_event_spec_for_declaration_kind(entry.declaration.get("type"))
             if hosted_spec is None or item_type != hosted_spec[0]:
@@ -1846,6 +1903,9 @@ class ToolCompatibilityPlan:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                 else:
                     decoded, item_changed = item, False
+            elif (native_unknown_entry := self._native_unknown_entry_for_item(item)) is not None:
+                self._validate_native_item(item, native_unknown_entry)
+                decoded, item_changed = item, False
             elif _hosted_kind_for_item_type(item_type) is not None:
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is None:
@@ -2021,6 +2081,13 @@ class CompatibilityStreamState:
         pending.next_stage += 1
         return _copy_mapping(event)
 
+    def _is_pending_native_unknown_event(self, event: Mapping[str, Any]) -> bool:
+        if not self.plan._is_native_unknown_stream_event(event.get("type")):
+            return False
+        item_id = self._native_item_id_for_event(event)
+        pending = self._native_pending.get(item_id) if item_id is not None else None
+        return pending is not None and pending[1] == UNKNOWN_FUTURE_KIND
+
     def _finish_terminal(self) -> None:
         if self._terminal:
             raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_terminal", surface="stream")
@@ -2028,7 +2095,7 @@ class CompatibilityStreamState:
         native_incomplete = any(
             item_id not in self._native_done
             or (
-                family not in {TOOL_SEARCH, SELECTED_PROVIDER_HOSTED}
+                family not in {TOOL_SEARCH, SELECTED_PROVIDER_HOSTED, UNKNOWN_FUTURE_KIND}
                 and item_id not in self._native_delta_done
             )
             for item_id, (_call_id, family) in self._native_pending.items()
@@ -2042,7 +2109,7 @@ class CompatibilityStreamState:
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
         result = _copy_mapping(event)
         event_type = result.get("type")
-        if _is_unsupported_hosted_stream_event(event_type):
+        if _is_unsupported_hosted_stream_event(event_type) and not self._is_pending_native_unknown_event(result):
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
                 "unsupported_hosted_lifecycle",
@@ -2109,15 +2176,16 @@ class CompatibilityStreamState:
                     )
                     result["item"] = decoded_item
                     return result
-                if not isinstance(call_id, str) or not call_id:
+                if native_entry.family != UNKNOWN_FUTURE_KIND and (not isinstance(call_id, str) or not call_id):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="stream")
                 self.plan._validate_native_item(item, native_entry)
                 if item_id in self._seen_item_ids:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
-                if call_id in self._seen_call_ids:
+                if isinstance(call_id, str) and call_id in self._seen_call_ids:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_call_identity", surface="stream")
                 self._seen_item_ids.add(item_id)
-                self._seen_call_ids.add(call_id)
+                if isinstance(call_id, str):
+                    self._seen_call_ids.add(call_id)
                 self._native_pending[item_id] = (call_id, native_entry.family)
                 result["item"] = decoded_item
             elif self.plan.has_adaptations and item.get("type") in {"function_call", "custom_tool_call"}:
@@ -2243,7 +2311,7 @@ class CompatibilityStreamState:
                                 surface="stream",
                             )
                         self.plan._validate_native_item(item, hosted_entry, require_completed=True)
-                    elif native_pending[1] != TOOL_SEARCH and native_item_id not in self._native_delta_done:
+                    elif native_pending[1] not in {TOOL_SEARCH, UNKNOWN_FUTURE_KIND} and native_item_id not in self._native_delta_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                     if native_item_id in self._native_done:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
