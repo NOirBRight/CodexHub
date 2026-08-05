@@ -905,6 +905,112 @@ def test_omitted_known_hosted_call_output_fails_closed_in_body_and_sse_boundarie
         )
 
 
+def test_native_custom_wins_over_omitted_unknown_custom_tool_type_in_body_and_terminal():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            {"type": "custom_tool", "executor": "codex_client"},
+        ],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="native-custom-omitted-unknown-collision",
+    )
+    item = {
+        "type": "custom_tool_call",
+        "id": "custom-item",
+        "call_id": "custom-call",
+        "name": "paint",
+        "input": "opaque",
+    }
+    assert plan.decode_payload({"output": [item]})["output"] == [item]
+    assert CompatibilityStreamState(plan).decode_events_for_event(
+        {"type": "response.output_item.added", "item": item}
+    )
+    assert CompatibilityStreamState(plan).decode_events_for_event(
+        {"type": "response.completed", "response": {"output": [item]}}
+    )
+
+
+def test_native_custom_history_survives_omitted_unknown_custom_tool_type():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            {"type": "custom_tool", "executor": "selected_provider"},
+        ],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="native-custom-omitted-unknown-history-collision",
+    )
+    history = [
+        {
+            "type": "custom_tool_call",
+            "id": "custom-item",
+            "call_id": "custom-call",
+            "name": "paint",
+            "input": "opaque",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "custom-output",
+            "call_id": "custom-call",
+            "output": "opaque",
+        },
+        {"type": "message", "role": "user", "content": "keep"},
+    ]
+
+    assert plan.encode_payload({"input": history})["input"] == history
+
+
+@pytest.mark.parametrize(
+    ("declaration", "items"),
+    [
+        (
+            {"type": "function", "name": "plain"},
+            [
+                {"type": "function_call", "id": "plain-item", "call_id": "plain-call", "name": "plain"},
+                {"type": "function_call_output", "id": "plain-output", "call_id": "plain-call", "output": "opaque"},
+            ],
+        ),
+        (
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            [
+                {"type": "custom_tool_call", "id": "custom-item", "call_id": "custom-call", "name": "paint", "input": "opaque"},
+                {"type": "custom_tool_call_output", "id": "custom-output", "call_id": "custom-call", "output": "opaque"},
+            ],
+        ),
+        (
+            {"type": "tool_search", "execution": "client"},
+            [
+                {"type": "tool_search_call", "id": "search-item", "call_id": "search-call", "execution": "client"},
+                {"type": "tool_search_output", "id": "search-output", "call_id": "search-call", "execution": "client", "tools": []},
+            ],
+        ),
+    ],
+    ids=["plain", "custom", "tool-search"],
+)
+def test_omitted_standard_call_and_output_fail_closed_in_body_and_sse(declaration, items):
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="none",
+        request_token="omitted-standard-response-item",
+    )
+    for item in items:
+        with pytest.raises(ToolCompatibilityError):
+            plan.decode_payload({"output": [item]})
+        with pytest.raises(ToolCompatibilityError):
+            CompatibilityStreamState(plan).decode_events_for_event(
+                {"type": "response.output_item.added", "item": item}
+            )
+        with pytest.raises(ToolCompatibilityError):
+            CompatibilityStreamState(plan).decode_events_for_event(
+                {"type": "response.output_item.done", "item": item}
+            )
+        with pytest.raises(ToolCompatibilityError):
+            CompatibilityStreamState(plan).decode_events_for_event(
+                {"type": "response.completed", "response": {"output": [item]}}
+            )
+
+
 def test_unknown_selected_provider_lifecycle_remains_omitted_without_full_contract():
     declaration = {"type": "vendor_extension", "executor": "selected_provider"}
     protocol = ProtocolCapabilities.responses_structured(

@@ -1451,6 +1451,22 @@ class ToolCompatibilityPlan:
         return None
 
     def _hosted_history_item_key(self, item_type: Any) -> tuple[str, bool] | None:
+        # Standard Responses tool lifecycles are resolved by their declaration
+        # family (and, for adapted calls, the request-scoped alias registry).
+        # Never reinterpret them as a provider-hosted ``<kind>_call`` merely
+        # because an unrelated unknown declaration happens to use the same
+        # prefix (for example ``custom_tool``).  Keeping this guard at the
+        # plan-level entry point is important for request-history filtering as
+        # well as response decoding.
+        if item_type in {
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "tool_search_call",
+            "tool_search_output",
+        }:
+            return None
         key = _hosted_history_item_key(item_type)
         if key is not None or not isinstance(item_type, str):
             return key
@@ -1478,7 +1494,64 @@ class ToolCompatibilityPlan:
             return kind if kind else None
         return None
 
+    def _standard_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+        """Resolve a standard Responses item before hosted/unknown matching.
+
+        A provider-specific declaration such as ``custom_tool`` shares the
+        ``custom_tool_call`` prefix with the standard custom lifecycle.  The
+        standard declaration (or request-scoped adapted call identity) must
+        therefore win before the generic hosted matcher is consulted.  For
+        output items the wire shape has no tool name, so prefer a native
+        standard family when one exists and otherwise retain an omitted
+        standard family as the fail-closed result.
+        """
+        item_type = item.get("type")
+        if item_type in {"function_call", "custom_tool_call"}:
+            return self._entry_for_name(
+                item.get("name"),
+                item.get("namespace"),
+                item_type=item_type,
+            )
+
+        if item_type == "tool_search_call":
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family == TOOL_SEARCH and entry.disposition in {NATIVE, ADAPT, OMIT}
+            ]
+            native = next((entry for entry in matches if entry.disposition == NATIVE), None)
+            return native or (matches[0] if matches else None)
+
+        if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
+            record = self.registry.record_for_call(item.get("call_id"))
+            if record is not None:
+                return next(
+                    (
+                        entry
+                        for entry in self.entries
+                        if entry.declaration_index == record.declaration_index
+                    ),
+                    None,
+                )
+            if item_type == "function_call_output":
+                families = {PLAIN_FUNCTION, NAMESPACE}
+            elif item_type == "custom_tool_call_output":
+                families = {CUSTOM_FREEFORM}
+            else:
+                families = {TOOL_SEARCH}
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family in families and entry.disposition in {NATIVE, OMIT}
+            ]
+            native = next((entry for entry in matches if entry.disposition == NATIVE), None)
+            return native or (matches[0] if matches else None)
+        return None
+
     def _omitted_response_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
+        standard_entry = self._standard_entry_for_item(item)
+        if standard_entry is not None:
+            return standard_entry if standard_entry.disposition == OMIT else None
         hosted_item_key = self._hosted_history_item_key(item.get("type"))
         if hosted_item_key is not None:
             hosted_item_kind, _is_output = hosted_item_key
@@ -1507,6 +1580,9 @@ class ToolCompatibilityPlan:
 
     def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
+        standard_entry = self._standard_entry_for_item(item)
+        if standard_entry is not None:
+            return standard_entry if standard_entry.disposition == OMIT else None
         hosted_item_key = self._hosted_history_item_key(item_type)
         if hosted_item_key is not None:
             hosted_item_kind, _is_output = hosted_item_key
