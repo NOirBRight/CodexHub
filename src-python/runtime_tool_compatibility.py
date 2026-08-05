@@ -2559,6 +2559,20 @@ class CompatibilityStreamState:
 
     @staticmethod
     def _item_id(value: Mapping[str, Any]) -> str | None:
+        item_id = value.get("item_id")
+        plain_id = value.get("id")
+        if (
+            isinstance(item_id, str)
+            and item_id
+            and isinstance(plain_id, str)
+            and plain_id
+            and item_id != plain_id
+        ):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
         for key in ("item_id", "id"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate:
@@ -2576,9 +2590,15 @@ class CompatibilityStreamState:
 
     def _native_item_id_for_event(self, value: Mapping[str, Any]) -> str | None:
         item = value.get("item")
-        if isinstance(item, Mapping):
-            return self._item_id(item)
-        return self._item_id(value)
+        nested_item_id = self._item_id(item) if isinstance(item, Mapping) else None
+        event_item_id = self._item_id(value)
+        if nested_item_id and event_item_id and nested_item_id != event_item_id:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        return nested_item_id or event_item_id
 
     @staticmethod
     def _native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:

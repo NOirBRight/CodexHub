@@ -680,6 +680,63 @@ def test_conflicting_item_id_and_id_fail_closed():
         )
 
 
+def test_conflicting_stream_item_id_and_id_fail_closed():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item",
+                "call_id": "call",
+                "name": "keep",
+                "arguments": "",
+            },
+        }
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "item",
+                "id": "evil",
+                "call_id": "call",
+                "delta": "{}",
+            }
+        )
+
+    assert exc_info.value.classification == "ambiguous_native_identity"
+    assert exc_info.value.surface == "stream"
+
+
+def test_conflicting_nested_and_top_level_stream_identity_fails_closed():
+    state = CompatibilityStreamState(_native_hosted_plan())
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "web_search_call",
+                "id": "search-item",
+                "status": "in_progress",
+            },
+        }
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.web_search_call.in_progress",
+                "item_id": "evil",
+                "item": {"id": "search-item"},
+            }
+        )
+
+    assert exc_info.value.classification == "ambiguous_native_identity"
+    assert exc_info.value.surface == "stream"
+
+
 def test_invented_hosted_output_shape_fails_closed():
     plan = _native_hosted_plan()
     invented = {"type": "web_search_call_output", "id": "output", "output": {"evil": True}}
