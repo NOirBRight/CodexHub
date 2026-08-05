@@ -26137,6 +26137,156 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
 
         self.assertEqual(fake.wfile.writes, [])
 
+    def test_do_post_resets_runtime_tool_stream_for_lifecycle_final_retry(self):
+        body = json.dumps(
+            {
+                "model": "volc/glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Spawn exactly one child agent, wait, close, final.",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn",
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": json.dumps(
+                            {"agent_type": "general", "message": "return child-ok"}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn",
+                        "output": json.dumps({"agent_id": "child-1"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_wait",
+                        "name": "multi_agent_v1__wait_agent",
+                        "arguments": json.dumps(
+                            {"targets": ["child-1"], "timeout_ms": 60000}
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_wait",
+                        "output": json.dumps(
+                            {"timed_out": False, "status": {"child-1": {"completed": "ok"}}}
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_close",
+                        "name": "multi_agent_v1__close_agent",
+                        "arguments": json.dumps({"target": "child-1"}),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_close",
+                        "output": json.dumps({"previous_status": {}}),
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "runner",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "stream": True,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/responses",
+            body,
+            headers={"X-Codex-Client-Id": "codex-app"},
+        )
+        first_response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp-first"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp-first","status":"completed","output":[]}}\n\n',
+                b"",
+            ]
+        )
+        call_item = {
+            "id": "item-reused",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call-reused",
+            "name": "runner",
+            "arguments": '{"value":"ok"}',
+        }
+        second_response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp-second"}}\n\n',
+                (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.output_item.added",
+                            "item": {**call_item, "status": "in_progress", "arguments": ""},
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                (
+                    b"data: "
+                    + json.dumps(
+                        {"type": "response.output_item.done", "item": call_item},
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-second",
+                                "status": "completed",
+                                "output": [call_item],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                b"",
+            ]
+        )
+        upstream = {
+            **self.external_model,
+            "name": "volcengine",
+            "auth": "api_key",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+        }
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=upstream),
+            patch(
+                "codex_proxy.urlopen",
+                side_effect=[first_response, second_response],
+            ) as mock_urlopen,
+            patch("codex_proxy._model_access_path_idempotency_guaranteed", return_value=True),
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation"),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(fake.status, 200)
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b'"type":"response.completed"', downstream)
+        self.assertIn(b"call-reused", downstream)
+        serialized_events = json.dumps(
+            [call.kwargs for call in self.write_proxy_event.call_args_list]
+        )
+        self.assertNotIn("stream_after_terminal", serialized_events)
+        self.assertNotIn("duplicate_item_identity", serialized_events)
+
     def test_external_provider_reasoning_only_completed_sse_is_retryable_as_empty_output(self):
         fake = FakeHandler()
         response = FakeSseResponse(
