@@ -2687,8 +2687,7 @@ class CompatibilityStreamState:
         output = response.get("output")
         required_native_ids = {
             item_id
-            for item_id, (_call_id, entry) in self._native_pending.items()
-            if entry.family != SELECTED_PROVIDER_HOSTED
+            for item_id in self._native_pending
         }
         required_adapter_ids = set(self._pending) | set(self._adapter_wire_identities)
         if output is None:
