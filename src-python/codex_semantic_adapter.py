@@ -22,6 +22,188 @@ MULTI_AGENT_TOOL_NAMES = {
     "resume_agent",
 }
 
+COLLABORATION_V1 = "collaboration_v1"
+COLLABORATION_V2 = "collaboration_v2"
+COLLABORATION_V1_NAMESPACE = "multi_agent_v1"
+COLLABORATION_V2_NAMESPACE = "collaboration"
+COLLABORATION_V1_TOOL_NAMES = frozenset(
+    {"spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent"}
+)
+COLLABORATION_V2_TOOL_NAMES = frozenset(
+    {"spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"}
+)
+COLLABORATION_V1_ONLY_FIELDS = frozenset({"agent_id", "fork_context"})
+COLLABORATION_V2_ONLY_FIELDS = frozenset({"task_name", "task_path", "fork_turns", "continuation_id"})
+COLLABORATION_PROTOCOL_METADATA_KEYS = frozenset(
+    {"collaboration_protocol", "multi_agent_version"}
+)
+
+
+class CollaborationBoundaryError(ValueError):
+    """A malformed or ambiguous Collaboration boundary that must fail closed."""
+
+    def __init__(self, classification: str):
+        self.classification = classification
+        super().__init__(classification)
+
+
+def _collaboration_alias_protocol(name: Any) -> str | None:
+    if not isinstance(name, str):
+        return None
+    for prefix in (
+        "multi_agent_v1__",
+        "multi_agent_v1.",
+        "multi_agent_v1",
+        "mcp__multi_agent_v1__",
+        "mcp__multi_agent_v1.",
+    ):
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix) :]
+        if suffix in COLLABORATION_V1_TOOL_NAMES:
+            return COLLABORATION_V1
+    return None
+
+
+def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: str | None) -> str | None:
+    namespace = value.get("namespace")
+    name = value.get("name")
+    tool_name = value.get("tool_name")
+    item_type = value.get("type")
+    if "name" in value and "tool_name" in value and name != tool_name:
+        raise CollaborationBoundaryError("discriminator_conflict")
+    if name is None:
+        name = tool_name
+
+    declaration = item_type == "namespace" and name in {
+        COLLABORATION_V1_NAMESPACE,
+        COLLABORATION_V2_NAMESPACE,
+    }
+    if namespace is None and declaration:
+        namespace = name
+        name = None
+    elif namespace is None:
+        namespace = inherited_namespace
+
+    if namespace is None:
+        alias_protocol = _collaboration_alias_protocol(name)
+        if alias_protocol is not None:
+            return alias_protocol
+        if name in (COLLABORATION_V1_TOOL_NAMES | COLLABORATION_V2_TOOL_NAMES):
+            raise CollaborationBoundaryError("missing_namespace")
+        return None
+
+    if namespace == COLLABORATION_V1_NAMESPACE:
+        if declaration and name is None:
+            return COLLABORATION_V1
+        if name is None:
+            raise CollaborationBoundaryError("missing_namespace")
+        if "tools" in value and item_type != "namespace":
+            raise CollaborationBoundaryError("mixed_v1_v2")
+        if name in COLLABORATION_V2_TOOL_NAMES and name not in COLLABORATION_V1_TOOL_NAMES:
+            raise CollaborationBoundaryError("mixed_v1_v2")
+        if name in COLLABORATION_V1_TOOL_NAMES or _collaboration_alias_protocol(name) == COLLABORATION_V1:
+            return COLLABORATION_V1
+        raise CollaborationBoundaryError("unknown_v1_tool")
+
+    if namespace == COLLABORATION_V2_NAMESPACE:
+        if declaration and name is None:
+            return COLLABORATION_V2
+        if name is None:
+            raise CollaborationBoundaryError("missing_namespace")
+        if "parameters" in value and item_type != "namespace":
+            raise CollaborationBoundaryError("mixed_v1_v2")
+        if name in COLLABORATION_V1_TOOL_NAMES and name not in COLLABORATION_V2_TOOL_NAMES:
+            raise CollaborationBoundaryError("mixed_v1_v2")
+        if name in COLLABORATION_V2_TOOL_NAMES:
+            return COLLABORATION_V2
+        if _collaboration_alias_protocol(name) == COLLABORATION_V1:
+            raise CollaborationBoundaryError("mixed_v1_v2")
+        raise CollaborationBoundaryError("unknown_v2_tool")
+
+    if name in (COLLABORATION_V1_TOOL_NAMES | COLLABORATION_V2_TOOL_NAMES) or _collaboration_alias_protocol(name):
+        raise CollaborationBoundaryError("unknown_namespace")
+    return None
+
+
+def _metadata_protocol(value: Mapping[str, Any]) -> str | None:
+    """Resolve an explicit model/feature selection marker when present."""
+
+    candidates: list[Any] = [value]
+    for key in ("metadata", "model_metadata", "capabilities", "features"):
+        nested = value.get(key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    protocols: set[str] = set()
+    for candidate in candidates:
+        for key in COLLABORATION_PROTOCOL_METADATA_KEYS:
+            if key not in candidate:
+                continue
+            marker = candidate.get(key)
+            if marker is None:
+                continue
+            if key == "multi_agent_version":
+                marker = {
+                    "v1": COLLABORATION_V1,
+                    "v2": COLLABORATION_V2,
+                }.get(marker)
+            elif marker in {"v1", "v2"}:
+                marker = f"collaboration_{marker}"
+            if marker not in {COLLABORATION_V1, COLLABORATION_V2}:
+                raise CollaborationBoundaryError("unknown_state")
+            protocols.add(marker)
+    if len(protocols) > 1:
+        raise CollaborationBoundaryError("mixed_v1_v2")
+    return next(iter(protocols), None)
+
+
+def classify_collaboration_payload(value: Any) -> str | None:
+    """Resolve the V1/V2 boundary before semantic repair or tool injection.
+
+    Unrelated tools are ignored.  Any known Collaboration marker with a
+    missing, conflicting, or unknown protocol fails closed.  The return value
+    is one protocol family or ``None`` when the payload contains no marker.
+    """
+
+    protocols: set[str] = set()
+
+    def visit(item: Any, inherited_namespace: str | None = None) -> None:
+        if isinstance(item, Mapping):
+            metadata_protocol = _metadata_protocol(item)
+            if metadata_protocol is not None:
+                protocols.add(metadata_protocol)
+            protocol = _classify_collaboration_item(item, inherited_namespace)
+            if protocol is not None:
+                protocols.add(protocol)
+                arguments = item.get("arguments")
+                fields = set(arguments) if isinstance(arguments, Mapping) else set()
+                fields.update(key for key in item if key in (COLLABORATION_V1_ONLY_FIELDS | COLLABORATION_V2_ONLY_FIELDS))
+                if protocol == COLLABORATION_V1 and fields & COLLABORATION_V2_ONLY_FIELDS:
+                    raise CollaborationBoundaryError("mixed_v1_v2")
+                if protocol == COLLABORATION_V2 and fields & COLLABORATION_V1_ONLY_FIELDS:
+                    raise CollaborationBoundaryError("mixed_v1_v2")
+
+            child_namespace = None
+            if item.get("type") == "namespace" and item.get("name") in {
+                COLLABORATION_V1_NAMESPACE,
+                COLLABORATION_V2_NAMESPACE,
+            }:
+                child_namespace = item["name"]
+            for key, child in item.items():
+                if key == "tools" and child_namespace is not None:
+                    visit(child, child_namespace)
+                elif key not in {"arguments", "parameters", "properties"}:
+                    visit(child)
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child, inherited_namespace)
+
+    visit(value)
+    if len(protocols) > 1:
+        raise CollaborationBoundaryError("mixed_v1_v2")
+    return next(iter(protocols), None)
+
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
 WORKER_AGENT_TYPE = "worker"
 BINDING_ACCEPTED = "accepted"

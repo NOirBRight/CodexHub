@@ -16,6 +16,8 @@ def subagent_assist_mode() -> str:
 
 
 def guidance_enabled(context: Mapping[str, Any] | None) -> bool:
+    if _collaboration_v2(context):
+        return False
     if not _subagent_repair_policy_enabled(context):
         return False
     if _raw_provider_probe(context):
@@ -24,6 +26,8 @@ def guidance_enabled(context: Mapping[str, Any] | None) -> bool:
 
 
 def semantic_repair_enabled(context: Mapping[str, Any] | None) -> bool:
+    if _collaboration_v2(context):
+        return False
     if not _subagent_repair_policy_enabled(context):
         return False
     if _raw_provider_probe(context):
@@ -46,6 +50,10 @@ def _has_known_tool_and_arguments(action: Mapping[str, Any]) -> bool:
 
 def _raw_provider_probe(context: Mapping[str, Any] | None) -> bool:
     return bool(context and context.get("raw_provider_probe"))
+
+
+def _collaboration_v2(context: Mapping[str, Any] | None) -> bool:
+    return bool(context and context.get("collaboration_protocol") == "collaboration_v2")
 
 
 def _subagent_repair_policy_enabled(context: Mapping[str, Any] | None) -> bool:
