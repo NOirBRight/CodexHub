@@ -82,6 +82,10 @@ from protocol_translation import (
 
 from codex_semantic_adapter import (
     BINDING_ACCEPTED as _BINDING_ACCEPTED,
+    COLLABORATION_V1 as _COLLABORATION_V1,
+    COLLABORATION_V2 as _COLLABORATION_V2,
+    CollaborationBoundaryError as _CollaborationBoundaryError,
+    classify_collaboration_payload as _classify_collaboration_payload,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
@@ -648,6 +652,7 @@ TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
 NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
+COLLABORATION_BOUNDARY_ERROR_CODE = "invalid_collaboration_boundary"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -2400,6 +2405,116 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
+
+
+def _raise_collaboration_boundary_error(
+    event_context: Mapping[str, Any] | None,
+    *,
+    classification: str,
+    message: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    _write_adapter_event(
+        event_context,
+        "collaboration_boundary_rejected",
+        classification=classification,
+    )
+    error = UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            COLLABORATION_BOUNDARY_ERROR_CODE,
+            message,
+        )
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _resolve_collaboration_boundary(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> str | None:
+    try:
+        payload_protocol = _classify_collaboration_payload(payload)
+        metadata_protocol = None
+        if isinstance(event_context, Mapping):
+            metadata = {
+                key: event_context[key]
+                for key in (
+                    "collaboration_protocol",
+                    "multi_agent_version",
+                    "metadata",
+                    "model_metadata",
+                    "capabilities",
+                    "features",
+                )
+                if key in event_context
+            }
+        else:
+            metadata = {}
+        if metadata:
+            metadata_protocol = _classify_collaboration_payload(
+                {"metadata": metadata}
+            )
+    except _CollaborationBoundaryError as exc:
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification=exc.classification,
+            message="Collaboration protocol boundary is malformed or ambiguous.",
+            cause=exc,
+        )
+    selected_protocol = None
+    metadata_conflict = False
+    if isinstance(event_context, Mapping):
+        selected_protocol = event_context.get("collaboration_protocol")
+        if (
+            selected_protocol is not None
+            and selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}
+        ):
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="unknown_state",
+                message="Collaboration protocol selection is unknown.",
+            )
+        if selected_protocol is None:
+            selected_protocol = metadata_protocol
+        elif metadata_protocol is not None and selected_protocol != metadata_protocol:
+            metadata_conflict = True
+    if metadata_conflict:
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification="conflicting_selection",
+            message="Collaboration protocol metadata conflicts with the selected protocol.",
+        )
+    if (
+        selected_protocol is not None
+        and payload_protocol is not None
+        and selected_protocol != payload_protocol
+    ):
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification="conflicting_selection",
+            message="Collaboration protocol selection conflicts with the request.",
+        )
+    protocol = payload_protocol or selected_protocol
+    if isinstance(event_context, dict) and protocol is not None:
+        event_context["collaboration_protocol"] = protocol
+    return protocol
+
+
+def _is_collaboration_v2_context(event_context: Mapping[str, Any] | None) -> bool:
+    return (event_context or {}).get("collaboration_protocol") == _COLLABORATION_V2
+
+
+def _collaboration_context_with_protocol(
+    event_context: Mapping[str, Any] | None,
+    protocol: str | None,
+) -> Mapping[str, Any] | None:
+    if protocol is None or isinstance(event_context, dict):
+        return event_context
+    context = dict(event_context or {})
+    context["collaboration_protocol"] = protocol
+    return context
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
@@ -7020,6 +7135,8 @@ def _apply_external_worker_response_contract(
     validate_selectors: bool = True,
     attach_sidecars: bool = True,
 ) -> tuple[Any, bool]:
+    if _is_collaboration_v2_context(event_context):
+        return value, False
     if validate_selectors:
         _validate_external_worker_selectors(value, event_context, surface=surface)
     if attach_sidecars:
@@ -7126,12 +7243,17 @@ def _validate_worker_binding_history(
         )
 
 
-def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
+def _normalize_third_party_tool_call(
+    value: Any,
+    event_context: Mapping[str, Any] | None = None,
+) -> tuple[Any, bool]:
+    if _is_collaboration_v2_context(event_context):
+        return value, False
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _normalize_third_party_tool_call(item)
+            replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
@@ -7217,7 +7339,7 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
             changed = True
 
     for key, item in list(rewritten.items()):
-        replacement, item_changed = _normalize_third_party_tool_call(item)
+        replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
         if item_changed:
             rewritten[key] = replacement
             changed = True
@@ -8431,7 +8553,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if _is_raw_provider_probe_context(context):
+    if _is_raw_provider_probe_context(context) or _is_collaboration_v2_context(context):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -8560,7 +8682,11 @@ def _suppress_coordinator_forbidden_tool_calls(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if bool(context.get("subagent_worker_context")) or _is_raw_provider_probe_context(context):
+    if (
+        bool(context.get("subagent_worker_context"))
+        or _is_raw_provider_probe_context(context)
+        or _is_collaboration_v2_context(context)
+    ):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -8684,7 +8810,7 @@ def _suppress_worker_multi_agent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    if not bool((event_context or {}).get("subagent_worker_context")):
+    if _is_collaboration_v2_context(event_context) or not bool((event_context or {}).get("subagent_worker_context")):
         return value, False
     if isinstance(event_context, dict):
         suppressed = event_context.setdefault("_worker_suppressed_multi_agent_item_ids", set())
@@ -9928,6 +10054,8 @@ def compatible_request_body(
     if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
         if _sanitize_official_reasoning_items(payload):
@@ -9977,11 +10105,12 @@ def compatible_request_body(
         if validated_tool_surface_strategy is not None
         else _external_tool_surface_strategy(upstream)
     )
+    collaboration_v2 = collaboration_protocol == _COLLABORATION_V2
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
-    if not raw_provider_probe:
+    if not raw_provider_probe and not collaboration_v2:
         _validate_worker_binding_history(payload)
     bounded_tool_search_terminal_calls = (
         {}
@@ -10007,7 +10136,7 @@ def compatible_request_body(
                 status=TOOL_SEARCH_UNAVAILABLE_STATUS,
             )
         changed = True
-    if raw_provider_probe:
+    if raw_provider_probe or collaboration_v2:
         pass
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
@@ -10033,6 +10162,7 @@ def compatible_request_body(
     input_items = payload.get("input")
     subagent_worker_context = (
         not raw_provider_probe
+        and not collaboration_v2
         and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         and is_worker_subagent_request(input_items)
     )
@@ -10042,12 +10172,14 @@ def compatible_request_body(
     # Worker subagents retain their established restricted surface.
     include_tool_search = (
         tool_surface_strategy == "deferred_core"
+        and not collaboration_v2
         and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
         if (
             not raw_provider_probe
+            and not collaboration_v2
             and not subagent_worker_context
             and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         )
@@ -10059,7 +10191,9 @@ def compatible_request_body(
         or subagent_state.next_action == "send_input"
     )
     node_repl_single_step_complete = (
-        not raw_provider_probe and _has_completed_single_step_node_repl_context(input_items)
+        not raw_provider_probe
+        and not collaboration_v2
+        and _has_completed_single_step_node_repl_context(input_items)
     )
     subagent_workflow_plan_read_complete = (
         not raw_provider_probe
@@ -10092,6 +10226,18 @@ def compatible_request_body(
         include_send_input = False
         state_hint = None
     elif subagent_worker_context:
+        open_agent_ids = []
+        wait_agent_ids = []
+        close_agent_ids = []
+        closed_agent_ids = []
+        lifecycle_complete = False
+        include_spawn_agent = False
+        include_wait_agent = False
+        include_close_agent = False
+        include_resume_agent = False
+        include_send_input = False
+        state_hint = None
+    elif collaboration_v2:
         open_agent_ids = []
         wait_agent_ids = []
         close_agent_ids = []
@@ -10317,7 +10463,7 @@ def compatible_request_body(
     ):
         changed = True
     allow_codex_tools = tool_protocol != "none"
-    if inject_codex_tools and allow_codex_tools and not raw_provider_probe:
+    if inject_codex_tools and allow_codex_tools and not raw_provider_probe and not collaboration_v2:
         if lifecycle_complete:
             if _hide_tools_for_completed_subagent_lifecycle(payload):
                 _write_adapter_event(
@@ -11218,6 +11364,8 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = _hide_reasoning_text(payload)
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
@@ -11227,7 +11375,7 @@ def compatible_response_body(
         surface="body",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -11291,6 +11439,9 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+
     if _is_reasoning_text_stream_event(payload):
         return b""
 
@@ -11301,7 +11452,7 @@ def compatible_sse_line(
         surface="sse",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -20412,7 +20563,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             sse_mutation_policy
                             != MutationPolicy.TRANSPARENT
                         ):
-                            event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _normalize_third_party_tool_call(event, compatibility_event_context)
                             event, _ = _suppress_bounded_tool_search_calls(
                                 event,
                                 compatibility_event_context,
@@ -20420,7 +20571,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if event is None:
                                 continue
                             event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, compatibility_event_context)
                         event_type = event.get("type")
                         if isinstance(event_type, str) and event_type:
                             if not self._write_sse_event(event_type, event):
@@ -21203,7 +21354,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         events,
                         event_context=compatibility_event_context,
                     )
-                    events, _ = _normalize_third_party_tool_call(events)
+                    events, _ = _normalize_third_party_tool_call(events, compatibility_event_context)
                     events, _ = _suppress_bounded_tool_search_calls(
                         events,
                         compatibility_event_context,
