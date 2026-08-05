@@ -1608,6 +1608,30 @@ class ToolCompatibilityPlan:
             return
         if (
             item.get("type") == "function_call"
+            and item.get("namespace") is None
+            and isinstance(item.get("name"), str)
+        ):
+            name = item.get("name")
+            has_native_plain_owner = any(
+                entry.family == PLAIN_FUNCTION
+                and entry.disposition == NATIVE
+                and entry.original_name == name
+                for entry in self.entries
+            )
+            has_native_namespace_owner = any(
+                entry.family == NAMESPACE
+                and entry.disposition == NATIVE
+                and name in entry.child_names
+                for entry in self.entries
+            )
+            if has_native_namespace_owner and not has_native_plain_owner:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface=surface,
+                )
+        if (
+            item.get("type") == "function_call"
             and item.get("namespace") is not None
             and isinstance(item.get("name"), str)
             and any(
@@ -2125,6 +2149,8 @@ class ToolCompatibilityPlan:
             return result, None, False
         _validate_version_fields(result, record)
         if record.family == NAMESPACE and result.get("namespace") not in {None, record.namespace}:
+            raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="response")
+        if record.family == CUSTOM_FREEFORM and result.get("namespace") is not None:
             raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="response")
         call_id = result.get("call_id")
         if isinstance(call_id, str) and call_id:
@@ -2688,6 +2714,43 @@ class CompatibilityStreamState:
     def _opaque_payload(value: Any) -> tuple[str, Any]:
         return ("opaque_input", _freeze(value))
 
+    def _record_legacy_unowned_native_done(
+        self,
+        item: Mapping[str, Any],
+        entry: ToolCompatibilityEntry,
+    ) -> None:
+        """Record one complete legacy item that legitimately omits ``added``."""
+        item_id = self._item_id(item)
+        if item_id is None:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_item_identity",
+                surface="stream",
+            )
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_call_identity",
+                surface="stream",
+            )
+        if item_id in self._seen_item_ids or item_id in self._native_done:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_item_identity",
+                surface="stream",
+            )
+        if call_id in self._seen_call_ids:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_call_identity",
+                surface="stream",
+            )
+        self.plan._validate_native_item(item, entry)
+        self._seen_item_ids.add(item_id)
+        self._seen_call_ids.add(call_id)
+        self._native_done.add(item_id)
+
     def _complete_native_arguments_from_item(
         self,
         item_id: str,
@@ -3130,6 +3193,8 @@ class CompatibilityStreamState:
                     "ambiguous_native_identity",
                     surface="stream",
                 )
+            if expected_entry.family == TOOL_SEARCH:
+                self.plan._validate_native_item(item, expected_entry)
             if self._native_wire_identities.get(item_id) != self._native_wire_identity(item):
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -3307,7 +3372,13 @@ class CompatibilityStreamState:
         if event_type in {"response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
             item_id = self._item_id(result)
             if item_id in self._native_pending:
-                expected_call_id, _entry = self._native_pending[item_id]
+                expected_call_id, expected_entry = self._native_pending[item_id]
+                if expected_entry.family == TOOL_SEARCH:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unsupported_hosted_lifecycle",
+                        surface="stream",
+                    )
                 supplied_call_id = result.get("call_id")
                 if supplied_call_id is not None and supplied_call_id != expected_call_id:
                     raise ToolCompatibilityError(
@@ -3362,6 +3433,12 @@ class CompatibilityStreamState:
             item_id = self._item_id(result)
             if item_id in self._native_pending:
                 expected_call_id, expected_entry = self._native_pending[item_id]
+                if expected_entry.family == TOOL_SEARCH:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unsupported_hosted_lifecycle",
+                        surface="stream",
+                    )
                 supplied_call_id = result.get("call_id")
                 if supplied_call_id is not None and supplied_call_id != expected_call_id:
                     raise ToolCompatibilityError(
@@ -3405,6 +3482,13 @@ class CompatibilityStreamState:
                     )
                 arguments = result.get("arguments", result.get("input"))
                 if not isinstance(arguments, str):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "incomplete_stream_delta",
+                        surface="stream",
+                    )
+                fragments = "".join(opaque.fragments)
+                if fragments and not arguments.startswith(fragments):
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
                         "incomplete_stream_delta",
@@ -3531,6 +3615,8 @@ class CompatibilityStreamState:
                                 surface="stream",
                             )
                         self.plan._validate_native_item(item, hosted_entry, require_completed=True)
+                    elif expected_entry.family == TOOL_SEARCH:
+                        self.plan._validate_native_item(item, expected_entry)
                     elif expected_entry.family != TOOL_SEARCH and native_item_id not in self._native_delta_done:
                         self._complete_native_arguments_from_item(
                             native_item_id,
@@ -3548,13 +3634,19 @@ class CompatibilityStreamState:
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is not None:
                     if (
+                        native_entry.family == TOOL_SEARCH
+                        and item.get("type") == "tool_search_call"
+                    ):
+                        self._record_legacy_unowned_native_done(item, native_entry)
+                        return result
+                    if (
                         native_entry.family == PLAIN_FUNCTION
                         and native_entry.original_name == "tool_search"
                         and item.get("type") == "function_call"
                         and item.get("name") == "tool_search"
                         and item.get("namespace") is None
                     ):
-                        self.plan._validate_native_item(item, native_entry)
+                        self._record_legacy_unowned_native_done(item, native_entry)
                         return result
                     if (
                         native_entry.family == PLAIN_FUNCTION
@@ -3568,7 +3660,7 @@ class CompatibilityStreamState:
                         # Keep this one compatibility passthrough narrow; a
                         # plain unqualified native call still requires an
                         # established stream owner.
-                        self.plan._validate_native_item(item, native_entry)
+                        self._record_legacy_unowned_native_done(item, native_entry)
                         return result
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                 if item.get("type") == "custom_tool_call":
@@ -3594,6 +3686,16 @@ class CompatibilityStreamState:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                 return result
             pending = self._pending_for(item)
+            if (
+                pending.record.family == CUSTOM_FREEFORM
+                and self._native_wire_identity(item)
+                != self._adapter_wire_identities[pending.item_id][2]
+            ):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_native_identity",
+                    surface="stream",
+                )
             if item.get("call_id") != pending.call_id:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
             if pending.item_done:
@@ -3669,6 +3771,7 @@ class CompatibilityStreamState:
                 or item_id in self._seen_item_ids
                 or call_id in self._seen_call_ids
                 or item.get("arguments") not in {None, ""}
+                or item.get("namespace") is not None
             ):
                 raise self._stream_error("invalid_custom_stream_identity")
             self._seen_item_ids.add(item_id)
@@ -3727,6 +3830,12 @@ class CompatibilityStreamState:
             pending = self._buffered_custom.get(done_item_id) if done_item_id else None
             if pending is None:
                 return [self.decode_event(value)]
+            expected_wire = self._adapter_wire_identities.get(pending.item_id)
+            if (
+                expected_wire is None
+                or self._native_wire_identity(item) != expected_wire[2]
+            ):
+                raise self._stream_error("ambiguous_native_identity")
             if (
                 pending.arguments_done_event is None
                 or pending.native_input is None
