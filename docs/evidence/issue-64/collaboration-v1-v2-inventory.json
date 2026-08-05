@@ -1,0 +1,485 @@
+{
+  "adapter_requirements": {
+    "adaptation_owner": "codexhub_gateway",
+    "forbidden_gateway_actions": [
+      "execute_tools",
+      "schedule_agents",
+      "forge_results",
+      "downgrade_v2_to_v1"
+    ],
+    "owner": "codex_client",
+    "protocol_shape_decisions": {
+      "collaboration_v1": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "required_when_selected_protocol_lacks_namespace",
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface"
+      },
+      "collaboration_v2": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
+        "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
+        "official_cli_capture_status": "not_observed",
+        "preserved_fields": [
+          "task_path",
+          "continuation_id",
+          "task_name",
+          "fork_turns"
+        ],
+        "shape_kind": "accepted_structural_contract"
+      }
+    },
+    "requirements": [
+      "namespace_to_function",
+      "injective_request_scoped_aliases",
+      "preserve_task_path_identity",
+      "preserve_continuation_id_and_fork_turns",
+      "preserve_call_result_history_links",
+      "preserve_inverse_declaration_call_result_history_mapping",
+      "assemble_stream_before_validation",
+      "reject_unknown_or_ambiguous_boundary",
+      "keep_v1_and_v2_isolated"
+    ],
+    "scope": "requirements_only_for_198_and_58"
+  },
+  "artifact_kind": "collaboration_v1_v2_inventory",
+  "boundary": {
+    "ambiguous_action": "fail_closed",
+    "discriminator_fields": [
+      "namespace",
+      "name"
+    ],
+    "flattened_name_policy": "not_decidable_without_namespace",
+    "mixed_v1_v2_action": "fail_closed",
+    "pre_exposure_stage": "before_tool_exposure_or_semantic_repair",
+    "protocol_markers": {
+      "collaboration_v1": {
+        "namespace": "multi_agent_v1",
+        "tool_names": [
+          "spawn_agent",
+          "send_input",
+          "wait_agent",
+          "close_agent",
+          "resume_agent"
+        ]
+      },
+      "collaboration_v2": {
+        "namespace": "collaboration",
+        "tool_names": [
+          "spawn_agent",
+          "send_message",
+          "followup_task",
+          "wait_agent",
+          "interrupt_agent",
+          "list_agents"
+        ]
+      }
+    },
+    "unknown_action": "fail_closed"
+  },
+  "candidate_identity": {
+    "cli_version": "0.146.0",
+    "source_capture_status": "not_observed",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "source_commit_status": "published_attested",
+    "source_contract_file": "codex-0.146-source-contract.json",
+    "source_tag": "rust-v0.146.0"
+  },
+  "deferred_qualification": [
+    "full_spawn_message_followup_wait_interrupt_list_lifecycle",
+    "restart_and_cold_root_resume",
+    "cross_home_topology_and_history"
+  ],
+  "evidence_binding": {
+    "basis": "accepted_issue_62_source_contract_and_repository_evidence",
+    "source_contract": {
+      "file": "codex-0.146-source-contract.json",
+      "sha256": "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c"
+    }
+  },
+  "protocols": [
+    {
+      "call": {
+        "argument_fields": {
+          "close_agent": {
+            "optional": [],
+            "required": [
+              "target"
+            ]
+          },
+          "resume_agent": {
+            "optional": [],
+            "required": [
+              "id"
+            ]
+          },
+          "send_input": {
+            "optional": [
+              "interrupt",
+              "message"
+            ],
+            "required": [
+              "target"
+            ]
+          },
+          "spawn_agent": {
+            "optional": [
+              "fork_context",
+              "message"
+            ],
+            "required": [
+              "agent_type"
+            ]
+          },
+          "wait_agent": {
+            "optional": [
+              "timeout_ms"
+            ],
+            "required": [
+              "targets"
+            ]
+          }
+        },
+        "fields": [
+          "type",
+          "namespace",
+          "name",
+          "item_id",
+          "call_id",
+          "arguments"
+        ],
+        "identity_fields": [
+          "call_id",
+          "item_id"
+        ],
+        "wire_type": "function_call"
+      },
+      "declaration": {
+        "child_wire_type": "function",
+        "discriminator": {
+          "namespace": "multi_agent_v1",
+          "tool_field": "name"
+        },
+        "fields": [
+          "type",
+          "name",
+          "tools"
+        ],
+        "flattened_name_prefixes": [
+          "multi_agent_v1__",
+          "multi_agent_v1."
+        ],
+        "tool_names": [
+          "spawn_agent",
+          "send_input",
+          "wait_agent",
+          "close_agent",
+          "resume_agent"
+        ],
+        "wire_type": "namespace"
+      },
+      "executor": "codex_client",
+      "history": {
+        "continuation_identity": "agent_id",
+        "identity_fields": [
+          "agent_id",
+          "call_id",
+          "call_item_id",
+          "output_item_id"
+        ],
+        "items": [
+          "function_call",
+          "function_call_output"
+        ],
+        "transcript_markers": [
+          "Previous real Codex native multi_agent_v1.<tool> call transcript",
+          "Codex native multi_agent_v1.<tool> result"
+        ]
+      },
+      "id": "collaboration_v1",
+      "isolation": {
+        "forbidden_v2_fields": [
+          "continuation_id",
+          "fork_turns",
+          "task_name",
+          "task_path"
+        ],
+        "forbidden_v2_semantics": [
+          "task_path_continuation",
+          "fork_turns"
+        ],
+        "forbidden_v2_tools": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message"
+        ]
+      },
+      "namespace": "multi_agent_v1",
+      "owner": "codex_client",
+      "result": {
+        "fields": [
+          "type",
+          "call_id",
+          "item_id",
+          "output"
+        ],
+        "identity_fields": [
+          "call_id",
+          "item_id"
+        ],
+        "result_fields_by_tool": {
+          "close_agent": [
+            "previous_status"
+          ],
+          "resume_agent": [
+            "status"
+          ],
+          "send_input": [
+            "status"
+          ],
+          "spawn_agent": [
+            "agent_id",
+            "nickname"
+          ],
+          "wait_agent": [
+            "timed_out",
+            "status"
+          ]
+        },
+        "result_identity": "agent_id",
+        "wire_type": "function_call_output"
+      },
+      "shape_provenance": {
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface",
+        "source": "src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS"
+      },
+      "status": "legacy_structural_contract",
+      "stream": {
+        "error_event": "response.failed",
+        "event_order": [
+          "response.output_item.added",
+          "response.function_call_arguments.delta",
+          "response.function_call_arguments.done",
+          "response.output_item.done"
+        ],
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
+      },
+      "terminal_error": {
+        "error_event": "response.failed",
+        "error_fields": [
+          "id",
+          "status",
+          "error"
+        ],
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
+      }
+    },
+    {
+      "call": {
+        "argument_fields": {
+          "followup_task": {
+            "optional": [],
+            "required": [
+              "target",
+              "message"
+            ]
+          },
+          "interrupt_agent": {
+            "optional": [],
+            "required": [
+              "target"
+            ]
+          },
+          "list_agents": {
+            "optional": [
+              "path_prefix"
+            ],
+            "required": []
+          },
+          "send_message": {
+            "optional": [],
+            "required": [
+              "target",
+              "message"
+            ]
+          },
+          "spawn_agent": {
+            "optional": [
+              "fork_turns",
+              "agent_type",
+              "model",
+              "reasoning_effort"
+            ],
+            "required": [
+              "task_name",
+              "message"
+            ]
+          },
+          "wait_agent": {
+            "optional": [
+              "timeout_ms"
+            ],
+            "required": []
+          }
+        },
+        "fields": [
+          "type",
+          "namespace",
+          "name",
+          "item_id",
+          "call_id",
+          "arguments"
+        ],
+        "fork_turns": {
+          "field": "fork_turns",
+          "values": [
+            "all",
+            "none",
+            "positive_decimal_string"
+          ]
+        },
+        "identity_fields": [
+          "call_id",
+          "item_id",
+          "task_path",
+          "continuation_id"
+        ],
+        "wire_type": "function_call"
+      },
+      "declaration": {
+        "child_wire_type": "function",
+        "discriminator": {
+          "namespace": "collaboration",
+          "tool_field": "name"
+        },
+        "fields": [
+          "type",
+          "name",
+          "tools"
+        ],
+        "tool_names": [
+          "spawn_agent",
+          "send_message",
+          "followup_task",
+          "wait_agent",
+          "interrupt_agent",
+          "list_agents"
+        ],
+        "wire_type": "namespace"
+      },
+      "executor": "codex_client",
+      "history": {
+        "continuation_fields": [
+          "task_path",
+          "continuation_id",
+          "task_name",
+          "fork_turns"
+        ],
+        "continuation_identity": "task_path",
+        "identity_fields": [
+          "task_path",
+          "continuation_id",
+          "call_id",
+          "call_item_id",
+          "output_item_id"
+        ],
+        "inherited_prefix": "deferred_qualification",
+        "items": [
+          "function_call",
+          "function_call_output"
+        ],
+        "pagination": "deferred_qualification"
+      },
+      "id": "collaboration_v2",
+      "isolation": {
+        "forbidden_v1_fields": [
+          "agent_id",
+          "fork_context"
+        ],
+        "forbidden_v1_semantics": [
+          "agent_id_close_resume",
+          "fork_context"
+        ],
+        "forbidden_v1_tools": [
+          "close_agent",
+          "resume_agent",
+          "send_input"
+        ]
+      },
+      "namespace": "collaboration",
+      "owner": "codex_client",
+      "result": {
+        "fields": [
+          "type",
+          "call_id",
+          "item_id",
+          "output"
+        ],
+        "identity_fields": [
+          "call_id",
+          "item_id",
+          "task_path",
+          "continuation_id"
+        ],
+        "result_fields": [
+          "task_path",
+          "continuation_id",
+          "status"
+        ],
+        "result_identity": "task_path",
+        "wire_type": "function_call_output"
+      },
+      "shape_provenance": {
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "accepted_structural_contract",
+        "source": "accepted_issue_62_source_contract_and_repository_evidence"
+      },
+      "status": "stable_surface_not_lifecycle_qualified",
+      "stream": {
+        "call_semantics": "namespace_child_function_uses_function_call_lifecycle",
+        "error_event": "response.failed",
+        "event_order": [
+          "response.output_item.added",
+          "response.function_call_arguments.delta",
+          "response.function_call_arguments.done",
+          "response.output_item.done"
+        ],
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
+      },
+      "terminal_error": {
+        "error_event": "response.failed",
+        "error_fields": [
+          "id",
+          "status",
+          "error"
+        ],
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
+      }
+    }
+  ],
+  "qualification_status": "structural_boundary_only",
+  "schema": "codexhub.issue64.collaboration-v1-v2.v1",
+  "verification_scope": "structural_contract_only"
+}
