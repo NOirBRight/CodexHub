@@ -10,6 +10,7 @@ from runtime_tool_compatibility import (
     CompatibilityStreamState,
     CUSTOM_FREEFORM,
     NATIVE,
+    OMIT,
     PLAIN_FUNCTION,
     ProtocolCapabilities,
     SELECTED_PROVIDER_HOSTED,
@@ -764,6 +765,121 @@ def test_optional_unsupported_hosted_history_omits_item_and_same_kind_output_by_
                 ],
             }
         )
+
+
+def test_optional_hosted_history_omits_same_type_call_and_result_with_distinct_item_ids():
+    plan = build_tool_compatibility_plan(
+        [{"type": "web_search"}],
+        selected_protocol="chat_tools",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="omitted-hosted-distinct-item-ids",
+    )
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "web_search_call",
+                    "item_id": "item_call_hosted_001",
+                    "status": "completed",
+                    "action": {"query": "ignored"},
+                },
+                {
+                    "type": "web_search_call",
+                    "item_id": "item_output_hosted_001",
+                    "status": "completed",
+                    "provider_scope": "selected_provider_only",
+                },
+                {"type": "message", "role": "user", "content": "keep"},
+            ],
+        }
+    )
+    assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+
+def test_optional_unknown_selected_provider_hosted_history_omits_without_call_id():
+    plan = build_tool_compatibility_plan(
+        [{"type": "vendor_search", "executor": "selected_provider"}],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="omitted-unknown-hosted-history",
+    )
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {"type": "vendor_search_call", "item_id": "vendor-item", "status": "completed"},
+                {"type": "message", "role": "user", "content": "keep"},
+            ],
+        }
+    )
+    assert encoded["input"] == [{"type": "message", "role": "user", "content": "keep"}]
+
+
+def test_with_final_declarations_does_not_expose_hosted_without_provider_fact():
+    plan = build_tool_compatibility_plan(
+        [],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(
+            hosted_lifecycles=frozenset({"web_search"}),
+        ),
+        request_token="final-hosted-provider-fact-required",
+    )
+    final = plan.with_final_declarations(
+        [{"type": "web_search", "executor": "selected_provider"}]
+    )
+    assert final.entries[0].disposition == OMIT
+
+
+def test_shared_hosted_event_kind_with_native_and_omitted_entries_fails_closed():
+    plan = build_tool_compatibility_plan(
+        [{"type": "web_search"}, {"type": "web_search_preview"}],
+        selected_protocol="responses_structured",
+        provider_hosted_capabilities={"web_search": True},
+        protocol_capabilities=ProtocolCapabilities.responses_structured(
+            hosted_lifecycles=frozenset({"web_search"}),
+        ),
+        request_token="mixed-shared-hosted-kind",
+    )
+    assert [entry.disposition for entry in plan.entries] == [NATIVE, OMIT]
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload(
+            {
+                "input": [
+                    {"type": "web_search_call", "id": "shared-item", "status": "completed"},
+                ],
+            }
+        )
+    assert exc_info.value.classification == "ambiguous_native_identity"
+
+
+def test_native_plain_wins_over_adapted_custom_with_same_original_name_in_body_and_stream():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "function", "name": "paint", "parameters": {"type": "object"}},
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+        ],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="native-plain-adapted-custom-same-name",
+    )
+    body_item = {
+        "type": "function_call",
+        "name": "paint",
+        "call_id": "plain-call",
+        "item_id": "plain-item",
+        "arguments": "{}",
+    }
+    assert plan.decode_payload({"output": [body_item]})["output"] == [body_item]
+
+    state = CompatibilityStreamState(plan)
+    added = {
+        "type": "response.output_item.added",
+        "item": dict(body_item, arguments=""),
+    }
+    assert state.decode_events_for_event(added) == [added]
 
 
 def test_optional_unmapped_hosted_history_omits_item_and_same_kind_output_by_item_id():

@@ -791,6 +791,7 @@ def build_tool_compatibility_plan(
         registry=registry,
         diagnostics=diagnostics,
         tool_choice=_freeze(tool_choice),
+        provider_hosted_kinds=hosted.supported_kinds,
     )
 
 
@@ -882,6 +883,15 @@ def _hosted_event_spec_for_item_type(item_type: Any) -> tuple[str, tuple[str, ..
 def _hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
     if not isinstance(item_type, str):
         return None
+    if item_type in {
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "tool_search_call",
+        "tool_search_output",
+    }:
+        return None
     for event_kind, _stages in _HOSTED_EVENT_STAGES.values():
         if item_type == event_kind:
             return event_kind, False
@@ -940,6 +950,7 @@ class ToolCompatibilityPlan:
     registry: RequestScopedToolAliasRegistry = field(repr=False, compare=False)
     diagnostics: CompatibilityDiagnostics
     tool_choice: Any = None
+    provider_hosted_kinds: frozenset[str] = frozenset()
 
     @property
     def aliases(self) -> tuple[str, ...]:
@@ -1031,6 +1042,7 @@ class ToolCompatibilityPlan:
                 # declarations added after the request plan was built.
                 if (
                     _hosted_event_spec_for_declaration_kind(declaration.get("type")) is not None
+                    and declaration.get("type") in self.provider_hosted_kinds
                     and declaration.get("type") in self.capabilities.hosted_lifecycles
                 ):
                     disposition, reason = NATIVE, "selected_provider_hosted_lifecycle"
@@ -1103,6 +1115,7 @@ class ToolCompatibilityPlan:
             registry=self.registry,
             diagnostics=CompatibilityDiagnostics.from_entries(entries),
             tool_choice=self.tool_choice,
+            provider_hosted_kinds=self.provider_hosted_kinds,
         )
 
     def _entry_for_declaration(self, declaration: Mapping[str, Any], occurrence: dict[tuple[Any, ...], int]) -> ToolCompatibilityEntry | None:
@@ -1224,7 +1237,16 @@ class ToolCompatibilityPlan:
         )
 
     def _has_adapted_name_conflict(self, name: Any, expected_family: str) -> bool:
-        return isinstance(name, str) and any(
+        if not isinstance(name, str):
+            return False
+        if any(
+            entry.disposition == NATIVE
+            and entry.family == expected_family
+            and entry.original_name == name
+            for entry in self.entries
+        ):
+            return False
+        return any(
             entry.disposition == ADAPT
             and entry.family != expected_family
             and entry.original_name == name
@@ -1411,31 +1433,54 @@ class ToolCompatibilityPlan:
             return item, False
         return item, False
 
+    @staticmethod
+    def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
+        declaration_type = entry.declaration.get("type")
+        if entry.family == SELECTED_PROVIDER_HOSTED:
+            declaration_spec = _hosted_event_spec_for_declaration_kind(declaration_type)
+            if declaration_spec is not None:
+                return declaration_spec[0]
+            return declaration_type if isinstance(declaration_type, str) else None
+        if (
+            entry.family == UNKNOWN_FUTURE_KIND
+            and entry.declaration.get("executor") == "selected_provider"
+            and isinstance(declaration_type, str)
+        ):
+            return declaration_type
+        return None
+
+    def _hosted_history_item_key(self, item_type: Any) -> tuple[str, bool] | None:
+        key = _hosted_history_item_key(item_type)
+        if key is not None or not isinstance(item_type, str):
+            return key
+        for entry in self.entries:
+            if entry.disposition not in {NATIVE, OMIT}:
+                continue
+            hosted_kind = self._hosted_entry_item_kind(entry)
+            if hosted_kind is None:
+                continue
+            if item_type == f"{hosted_kind}_call":
+                return hosted_kind, False
+            if item_type == f"{hosted_kind}_call_output":
+                return hosted_kind, True
+        return None
+
     def _omitted_history_entry(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         item_type = item.get("type")
-        hosted_item_key = _hosted_history_item_key(item_type)
+        hosted_item_key = self._hosted_history_item_key(item_type)
         if hosted_item_key is not None:
             hosted_item_kind, _is_output = hosted_item_key
             matches = [
                 entry
                 for entry in self.entries
-                if entry.family == SELECTED_PROVIDER_HOSTED
-                and entry.disposition == OMIT
-                and (
-                    (
-                        (
-                            declaration_spec := _hosted_event_spec_for_declaration_kind(
-                                entry.declaration.get("type")
-                            )
-                        ) is not None
-                        and declaration_spec[0] == hosted_item_kind
-                    )
-                    or entry.declaration.get("type") == hosted_item_kind
-                )
+                if entry.disposition in {NATIVE, OMIT}
+                and self._hosted_entry_item_kind(entry) == hosted_item_kind
             ]
             if len(matches) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="history")
-            return matches[0] if matches else None
+            if matches and matches[0].disposition == OMIT:
+                return matches[0]
+            return None
         if item_type in {"function_call", "custom_tool_call"}:
             entry = self._entry_for_name(
                 item.get("name"),
@@ -1478,16 +1523,14 @@ class ToolCompatibilityPlan:
         if isinstance(raw_input, list):
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
-            omitted_hosted_ids: dict[str, str] = {}
-            omitted_hosted_outputs: list[tuple[str, str]] = []
+            omitted_hosted_ids: dict[str, tuple[str, bool]] = {}
             for item in raw_input:
                 if not isinstance(item, Mapping):
                     continue
                 omitted_entry = self._omitted_history_entry(item)
-                hosted_item_key = _hosted_history_item_key(item.get("type"))
+                hosted_item_key = self._hosted_history_item_key(item.get("type"))
                 if (
                     omitted_entry is None
-                    or omitted_entry.family != SELECTED_PROVIDER_HOSTED
                     or hosted_item_key is None
                 ):
                     continue
@@ -1499,37 +1542,31 @@ class ToolCompatibilityPlan:
                         surface="history",
                     )
                 hosted_item_kind, is_output = hosted_item_key
-                if not is_output:
-                    previous_kind = omitted_hosted_ids.get(item_id)
-                    if previous_kind is not None:
-                        classification = (
-                            "duplicate_item_identity"
-                            if previous_kind == hosted_item_kind
-                            else "ambiguous_native_identity"
-                        )
-                        raise ToolCompatibilityError(
-                            "tool_compatibility_boundary",
-                            classification,
-                            surface="history",
-                        )
-                    omitted_hosted_ids[item_id] = hosted_item_kind
-                else:
-                    omitted_hosted_outputs.append((item_id, hosted_item_kind))
-            for item_id, hosted_item_kind in omitted_hosted_outputs:
-                root_kind = omitted_hosted_ids.get(item_id)
-                if root_kind != hosted_item_kind:
+                previous = omitted_hosted_ids.get(item_id)
+                if previous is not None:
+                    previous_kind, previous_is_output = previous
+                    if previous_kind != hosted_item_kind:
+                        classification = "ambiguous_native_identity"
+                    elif previous_is_output == is_output:
+                        classification = "duplicate_item_identity"
+                    else:
+                        # Some hosted protocols use one item id for call/result
+                        # pairs; others use distinct ids.  Both are valid when
+                        # the hosted kind is already uniquely omitted.
+                        continue
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
-                        "ambiguous_native_identity",
+                        classification,
                         surface="history",
                     )
+                omitted_hosted_ids[item_id] = (hosted_item_kind, is_output)
             omitted_call_items = [
                 item
                 for item in raw_input
                 if isinstance(item, Mapping)
                 and self._omitted_history_entry(item) is not None
                 and not (
-                    self._omitted_history_entry(item).family == SELECTED_PROVIDER_HOSTED
+                    self._hosted_history_item_key(item.get("type")) is not None
                     if self._omitted_history_entry(item) is not None
                     else False
                 )
@@ -1572,7 +1609,7 @@ class ToolCompatibilityPlan:
                 if isinstance(item, Mapping) and (
                     (
                         self._omitted_history_entry(item) is not None
-                        and self._omitted_history_entry(item).family != SELECTED_PROVIDER_HOSTED
+                        and self._hosted_history_item_key(item.get("type")) is None
                     )
                     or item.get("call_id") in omitted_call_ids
                 ):
@@ -1580,10 +1617,9 @@ class ToolCompatibilityPlan:
                     continue
                 if isinstance(item, Mapping):
                     omitted_entry = self._omitted_history_entry(item)
-                    hosted_item_key = _hosted_history_item_key(item.get("type"))
+                    hosted_item_key = self._hosted_history_item_key(item.get("type"))
                     if (
                         omitted_entry is not None
-                        and omitted_entry.family == SELECTED_PROVIDER_HOSTED
                         and hosted_item_key is not None
                     ):
                         changed = True
