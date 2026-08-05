@@ -456,6 +456,142 @@ def test_native_stream_terminal_output_must_match_pending_item_identity(terminal
         )
 
 
+def _complete_adapted_stream(plan) -> tuple[CompatibilityStreamState, dict]:
+    alias = plan.entries[0].aliases[0]
+    item = {
+        "type": "function_call",
+        "id": "adapted-item",
+        "call_id": "adapted-call",
+        "name": alias,
+        "arguments": "",
+    }
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event({"type": "response.output_item.added", "item": item})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "adapted-item",
+            "call_id": "adapted-call",
+            "arguments": '{"__codexhub_custom_input":"opaque"}'
+            if plan.entries[0].family == CUSTOM_FREEFORM
+            else "{}",
+        }
+    )
+    done = {
+        **item,
+        "arguments": '{"__codexhub_custom_input":"opaque"}'
+        if plan.entries[0].family == CUSTOM_FREEFORM
+        else "{}",
+    }
+    state.decode_events_for_event({"type": "response.output_item.done", "item": done})
+    return state, done
+
+
+def test_native_terminal_matches_exact_declaration_not_only_family():
+    plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "one"}, {"type": "function", "name": "two"}],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="native-exact-terminal-owner",
+    )
+    state = CompatibilityStreamState(plan)
+    first = {"type": "function_call", "id": "native-item", "call_id": "native-call", "name": "one", "arguments": ""}
+    state.decode_events_for_event({"type": "response.output_item.added", "item": first})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "native-item",
+            "call_id": "native-call",
+            "arguments": "{}",
+        }
+    )
+    state.decode_events_for_event(
+        {"type": "response.output_item.done", "item": {**first, "arguments": "{}"}}
+    )
+
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "native-item",
+                            "call_id": "native-call",
+                            "name": "two",
+                            "arguments": "{}",
+                        }
+                    ]
+                },
+            }
+        )
+
+
+def test_native_terminal_cannot_complete_without_pending_native_owner():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state, _item = _complete_native_stream(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": []}}
+        )
+
+
+def test_adapted_terminal_item_id_must_match_pending_owner():
+    plan = _adapted_namespace_plan()
+    state, done = _complete_adapted_stream(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {"output": [{**done, "id": "different-item"}]},
+            }
+        )
+
+
+def test_adapted_terminal_cannot_complete_without_pending_owner():
+    plan = _adapted_namespace_plan()
+    state, _done = _complete_adapted_stream(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": []}}
+        )
+
+
+@pytest.mark.parametrize("output_type", ["function_call_output", "vendor_extension_call_output"])
+def test_sse_output_before_adapted_call_fails_closed(output_type):
+    plan = _adapted_namespace_plan()
+    state = CompatibilityStreamState(plan)
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": output_type, "id": "output-first", "call_id": "call"},
+            }
+        )
+
+
+def test_history_retained_call_cannot_be_borrowed_by_unknown_output_family():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    history = [
+        {"type": "function_call", "id": "call-item", "name": "keep", "call_id": "call", "arguments": "{}"},
+        {"type": "vendor_extension_call_output", "id": "output", "call_id": "call", "output": "opaque"},
+    ]
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload({"input": history})
+
+
+def test_encode_history_rejects_duplicate_tool_search_outputs_by_call_id():
+    plan = _native_plan({"type": "tool_search", "execution": "client"})
+    history = [
+        {"type": "tool_search_call", "id": "search-call", "call_id": "search", "arguments": {"query": "x"}},
+        {"type": "tool_search_output", "id": "search-output-1", "call_id": "search", "tools": []},
+        {"type": "tool_search_output", "id": "search-output-2", "call_id": "search", "tools": []},
+    ]
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload({"input": history})
+
+
 @pytest.mark.parametrize(
     "event",
     [
