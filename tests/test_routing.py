@@ -14319,6 +14319,227 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["output"][0]["call_id"], "call_spawn")
         self.assertEqual(payload["output"][0]["name"], "spawn_agent")
 
+    def test_chat_sse_to_responses_relay_inverse_maps_runtime_namespace_and_custom_tools(self):
+        context = {}
+        declarations = [
+            {
+                "type": "namespace",
+                "name": "vendor",
+                "tools": [{"type": "function", "name": "run", "parameters": {}}],
+            },
+            {"type": "custom", "name": "editor", "format": {"type": "text"}},
+        ]
+        request_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "custom-model",
+                        "input": [{"type": "message", "role": "user", "content": "use tools"}],
+                        "tools": declarations,
+                    }
+                ).encode("utf-8"),
+                {
+                    "name": "custom-endpoint",
+                    "upstream_format": "chat_completions",
+                    "tool_protocol": "chat_tools",
+                },
+                event_context=context,
+                inject_codex_tools=False,
+            )
+        )
+        namespace_alias, custom_alias = [tool["name"] for tool in request_payload["tools"]]
+        custom_arguments = json.dumps({"__codexhub_custom_input": "opaque"})
+        chunks = [
+            {
+                "id": "chatcmpl_runtime_tools",
+                "object": "chat.completion.chunk",
+                "model": "custom-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_namespace",
+                                    "type": "function",
+                                    "function": {"name": namespace_alias, "arguments": "{}"},
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call_custom",
+                                    "type": "function",
+                                    "function": {"name": custom_alias, "arguments": custom_arguments},
+                                },
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_runtime_tools",
+                "object": "chat.completion.chunk",
+                "model": "custom-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n\n", b""]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "custom-endpoint",
+            relay_fixture=RELAY_GATEWAY,
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=context,
+        )
+
+        emitted = []
+        for write in handler.wfile.writes:
+            for frame in write.split(b"\n\n"):
+                if frame.startswith(b"data: {"):
+                    emitted.append(json.loads(frame.decode("utf-8").removeprefix("data: ")))
+        assert status == 200
+        assert not any(
+            namespace_alias in json.dumps(event) or custom_alias in json.dumps(event)
+            for event in emitted
+        )
+        completed = next(event for event in emitted if event.get("type") == "response.completed")
+        completed_items = completed["response"]["output"]
+        namespace_item = next(item for item in completed_items if item.get("call_id") == "call_namespace")
+        custom_item = next(item for item in completed_items if item.get("call_id") == "call_custom")
+        assert namespace_item["namespace"] == "vendor"
+        assert namespace_item["name"] == "run"
+        assert custom_item["type"] == "custom_tool_call"
+        assert custom_item["name"] == "editor"
+        assert custom_item["input"] == "opaque"
+
+    def test_responses_sse_relay_inverse_maps_terminal_nested_output_with_same_runtime_plan(self):
+        context = {}
+        declarations = [
+            {
+                "type": "namespace",
+                "name": "vendor",
+                "tools": [{"type": "function", "name": "run", "parameters": {}}],
+            },
+            {"type": "custom", "name": "editor", "format": {"type": "text"}},
+        ]
+        request_payload = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "custom-model",
+                        "input": [{"type": "message", "role": "user", "content": "use tools"}],
+                        "tools": declarations,
+                    }
+                ).encode("utf-8"),
+                {
+                    "name": "custom-endpoint",
+                    "upstream_format": "responses",
+                    "tool_protocol": "chat_tools",
+                },
+                event_context=context,
+                inject_codex_tools=False,
+            )
+        )
+        namespace_alias, custom_alias = [tool["name"] for tool in request_payload["tools"]]
+        custom_arguments = json.dumps({"__codexhub_custom_input": "opaque"})
+        namespace_item = {
+            "id": "item_namespace",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_namespace",
+            "name": namespace_alias,
+            "arguments": "{}",
+        }
+        custom_item = {
+            "id": "item_custom",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_custom",
+            "name": custom_alias,
+            "arguments": custom_arguments,
+        }
+        events = [
+            {
+                "type": "response.created",
+                "response": {"id": "resp_runtime_tools", "object": "response", "status": "in_progress", "output": []},
+            },
+            {
+                "type": "response.output_item.added",
+                "item": {**namespace_item, "status": "in_progress", "arguments": ""},
+            },
+            {"type": "response.function_call_arguments.done", "item_id": "item_namespace", "arguments": "{}"},
+            {"type": "response.output_item.done", "item": namespace_item},
+            {
+                "type": "response.output_item.added",
+                "item": {**custom_item, "status": "in_progress", "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "item_custom",
+                "delta": custom_arguments,
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "item_custom",
+                "arguments": custom_arguments,
+            },
+            {"type": "response.output_item.done", "item": custom_item},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_runtime_tools",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [namespace_item, custom_item],
+                },
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(event)}\n\n".encode("utf-8") for event in events] + [b""]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "custom-endpoint",
+            relay_fixture=RELAY_GATEWAY,
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=context,
+        )
+
+        emitted = []
+        for write in handler.wfile.writes:
+            for frame in write.split(b"\n\n"):
+                if frame.startswith(b"data: {"):
+                    emitted.append(json.loads(frame.decode("utf-8").removeprefix("data: ")))
+        assert status == 200
+        assert not any(
+            namespace_alias in json.dumps(event) or custom_alias in json.dumps(event)
+            for event in emitted
+        )
+        completed = next(event for event in emitted if event.get("type") == "response.completed")
+        completed_items = completed["response"]["output"]
+        namespace_item = next(item for item in completed_items if item.get("call_id") == "call_namespace")
+        custom_item = next(item for item in completed_items if item.get("call_id") == "call_custom")
+        assert namespace_item["namespace"] == "vendor"
+        assert namespace_item["name"] == "run"
+        assert custom_item["type"] == "custom_tool_call"
+        assert custom_item["name"] == "editor"
+        assert custom_item["input"] == "opaque"
+
     def test_glm_apply_patch_retry_loop_body_adapts_to_custom_freeform_call(self):
         fixture = _load_glm_apply_patch_retry_fixture()
         converted = codex_proxy._chat_completion_to_response_body(
@@ -18364,7 +18585,8 @@ Execution constraints:
         transcript = json.dumps(payload, ensure_ascii=False)
 
         self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
-        self.assertIn("mcp__node_repl__js", tools_by_name)
+        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
+        self.assertEqual(len(node_repl_aliases), 1)
         self.assertNotIn("multi_agent_v1__wait_agent", tools_by_name)
         self.assertNotIn("multi_agent_v1__close_agent", tools_by_name)
         self.assertNotIn("mcp__codex_apps__local_tool_gateway___read_file", tools_by_name)
@@ -18374,7 +18596,7 @@ Execution constraints:
         self.assertIn("await import", transcript)
         self.assertEqual(
             payload["tool_choice"],
-            {"type": "function", "name": "mcp__node_repl__js"},
+            {"type": "function", "name": node_repl_aliases[0]},
         )
 
     def test_chat_tools_level_one_lifecycle_prompt_ignores_system_workflow_skill_examples(self):
@@ -19170,12 +19392,13 @@ Execution constraints:
         transcript = json.dumps(payload, ensure_ascii=False)
 
         self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
-        self.assertIn("mcp__node_repl__js", tools_by_name)
+        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
+        self.assertEqual(len(node_repl_aliases), 1)
         self.assertFalse(event_context["subagent_spawn_allowed"])
         self.assertIn("status: workflow_plan_read_required", transcript)
         self.assertEqual(
             payload["tool_choice"],
-            {"type": "function", "name": "mcp__node_repl__js"},
+            {"type": "function", "name": node_repl_aliases[0]},
         )
 
     def test_chat_tools_workflow_after_plan_read_hides_node_repl_and_other_mcp_tools(self):
@@ -21388,24 +21611,22 @@ Execution constraints:
         events = [
             call.kwargs
             for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "external_tool_surface_prepared"
+            if call.args and call.args[0] == "runtime_tool_compatibility_planned"
         ]
         self.assertEqual(
             events,
             [
                 {
-                    "tool_surface_strategy": "eager",
-                    "namespace_declaration_count": 1,
-                    "eager_tool_count": 2,
-                    "retained_core_count": 2,
-                    "deferred_tool_count": 0,
+                    "counts": [
+                        {"family": "namespace", "disposition": "adapt", "count": 2},
+                        {"family": "plain_function", "disposition": "native", "count": 1},
+                    ]
                 },
                 {
-                    "tool_surface_strategy": "deferred_core",
-                    "namespace_declaration_count": 1,
-                    "eager_tool_count": 0,
-                    "retained_core_count": 2,
-                    "deferred_tool_count": 2,
+                    "counts": [
+                        {"family": "namespace", "disposition": "adapt", "count": 2},
+                        {"family": "plain_function", "disposition": "native", "count": 1},
+                    ]
                 },
             ],
         )
@@ -21515,8 +21736,8 @@ Execution constraints:
 
         self.assertFalse(any(tool.get("type") == "namespace" and tool.get("name") == "mcp__node_repl" for tool in payload["tools"]))
         self.assertNotIn("tool_search", tools_by_name)
-        self.assertIn("mcp__node_repl__js", tools_by_name)
-        self.assertIn("mcp__node_repl__js_reset", tools_by_name)
+        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
+        self.assertEqual(len(node_repl_aliases), 2)
         self.assertIn("multi_agent_v1__spawn_agent", tools_by_name)
 
     def test_external_request_adds_node_repl_single_step_completion_guidance(self):
@@ -21629,8 +21850,9 @@ Execution constraints:
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
 
         self.assertNotIn("tool_search", tools_by_name)
-        self.assertIn("mcp__node_repl__js", tools_by_name)
-        self.assertIn("mcp__node_repl__js", transcript)
+        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
+        self.assertEqual(len(node_repl_aliases), 1)
+        self.assertIn(node_repl_aliases[0], transcript)
         self.assertNotIn("browser:control-in-app-browser", transcript)
 
     def test_external_browser_context_keeps_node_repl_tools_after_result(self):
@@ -21670,8 +21892,8 @@ Execution constraints:
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=True)
 
-        self.assertIn("mcp__node_repl__js", tools_by_name)
-        self.assertIn("mcp__node_repl__js_reset", tools_by_name)
+        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
+        self.assertEqual(len(node_repl_aliases), 2)
         self.assertNotIn("browser:control-in-app-browser", transcript)
         self.assertNotIn("status: single_step_complete", transcript)
 
@@ -26428,6 +26650,114 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         event_names = [call.args[0] for call in self.write_proxy_event.call_args_list if call.args]
         self.assertIn("downstream_stream_closed", event_names)
         self.assertNotIn("upstream_stream_incomplete", event_names)
+
+    def test_synthetic_terminal_decodes_buffered_custom_adapter_events_before_bookkeeping(self):
+        event_context = {}
+        request_body = json.dumps(
+            {
+                "model": "custom-model",
+                "input": [{"type": "message", "role": "user", "content": "Use editor."}],
+                "tools": [{"type": "custom", "name": "editor", "format": {"type": "text"}}],
+            }
+        ).encode("utf-8")
+        request_payload = json.loads(
+            compatible_request_body(
+                request_body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context=event_context,
+                inject_codex_tools=False,
+            )
+        )
+        custom_alias = request_payload["tools"][0]["name"]
+        custom_input = '{"__codexhub_custom_input":"opaque"}'
+        call_item = {
+            "type": "function_call",
+            "id": "item_custom",
+            "call_id": "call_custom",
+            "name": custom_alias,
+            "arguments": custom_input,
+        }
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_custom","model":"custom-model"}}\n\n',
+                (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.output_item.added",
+                            "item": {
+                                "type": "function_call",
+                                "id": "item_custom",
+                                "call_id": "call_custom",
+                                "name": custom_alias,
+                                "arguments": "",
+                            },
+                        }
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "item_custom",
+                            "delta": custom_input,
+                        }
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                (
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "item_id": "item_custom",
+                            "arguments": custom_input,
+                        }
+                    ).encode("utf-8")
+                    + b"\n\n"
+                ),
+                b"data: "
+                + json.dumps({"type": "response.output_item.done", "item": call_item}).encode("utf-8")
+                + b"\n\n",
+                b"",
+            ]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req_custom_synthetic_terminal",
+            model="custom-model",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=event_context,
+            lifecycle_final_retry_enabled=False,
+        )
+
+        emitted = [
+            json.loads(line.removeprefix(b"data: ").strip())
+            for line in b"".join(handler.wfile.writes).splitlines()
+            if line.startswith(b"data: {")
+        ]
+        completed = next(event for event in emitted if event.get("type") == "response.completed")
+        completed_item = completed["response"]["output"][0]
+        self.assertEqual(status, 200)
+        self.assertEqual(completed_item["type"], "custom_tool_call")
+        self.assertEqual(completed_item["name"], "editor")
+        self.assertEqual(completed_item["input"], "opaque")
+        self.assertNotIn("__codexhub_custom_", json.dumps(completed))
+        self.assertNotIn("__codexhub_custom_input", json.dumps(completed))
+        self.assertNotIn('"arguments"', json.dumps(completed_item))
 
     def test_image_proxy_progress_callback_false_aborts_with_downstream_closed_error(self):
         payload = {

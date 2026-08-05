@@ -79,6 +79,12 @@ from protocol_translation import (
     responses_tool_choice_to_chat_tool_choice,
     responses_tools_to_chat_tools,
 )
+from runtime_tool_compatibility import (
+    ProtocolCapabilities as RuntimeProtocolCapabilities,
+    ToolCompatibilityError as RuntimeToolCompatibilityError,
+    ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
+    build_tool_compatibility_plan,
+)
 
 from codex_semantic_adapter import (
     BINDING_ACCEPTED as _BINDING_ACCEPTED,
@@ -3780,6 +3786,23 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _parse_sse_json_payloads(blob: bytes) -> list[dict[str, Any]]:
+    """Parse every JSON data frame emitted for one upstream SSE line.
+
+    Runtime compatibility adapters can buffer one upstream function lifecycle
+    and emit several native Responses events as a single byte string.  Relay
+    bookkeeping must inspect each emitted frame rather than treating that
+    byte string as one JSON payload.
+    """
+
+    return [
+        payload
+        for line in blob.splitlines(keepends=True)
+        for payload in [_parse_sse_json_payload(line)]
+        if payload is not None
+    ]
+
+
 class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
@@ -5902,6 +5925,189 @@ def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
     )
 
 
+_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
+_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY = "_runtime_tool_compatibility_stream"
+
+
+def _runtime_tool_protocol_capabilities(
+    tool_protocol: str,
+    upstream: Mapping[str, Any],
+) -> RuntimeProtocolCapabilities:
+    supplied = upstream.get("tool_protocol_capabilities")
+    if isinstance(supplied, Mapping):
+        # A capability manifest is authoritative only for predicates it
+        # explicitly states.  In particular, a Responses endpoint without
+        # lifecycle facts is not evidence of native namespace/custom/search
+        # support; retain the conservative plain-function + adapter baseline.
+        baseline_protocol = "chat_tools" if tool_protocol in {"responses_structured", "text_compat"} else tool_protocol
+        return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, supplied)
+    if tool_protocol in {"responses_structured", "text_compat"}:
+        return RuntimeProtocolCapabilities.chat_tools()
+    if tool_protocol == "chat_tools":
+        return RuntimeProtocolCapabilities.chat_tools()
+    return RuntimeProtocolCapabilities()
+
+
+def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError) -> NoReturn:
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(error.code, str(error))
+    ) from error
+
+
+def _prepare_runtime_tool_compatibility(
+    payload: dict[str, Any],
+    upstream: Mapping[str, Any],
+    tool_protocol: str,
+    event_context: dict[str, Any],
+    native_responses_tool_codec: str | None = None,
+) -> bool:
+    tools = payload.get("tools")
+    declarations = tools if isinstance(tools, list) else []
+    codec = (
+        native_responses_tool_codec
+        if native_responses_tool_codec is not None
+        else _external_native_responses_tool_codec(upstream)
+    )
+    if tool_protocol == "responses_structured" and codec == "strict_apply_patch":
+        apply_patch_tools = [
+            tool
+            for tool in declarations
+            if isinstance(tool, Mapping) and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+        ]
+        if len(apply_patch_tools) > 1:
+            _raise_native_responses_tool_contract_error(
+                event_context,
+                codec=codec,
+                reason="duplicate_declaration",
+                count=len(apply_patch_tools),
+            )
+        if apply_patch_tools:
+            apply_patch_tool = apply_patch_tools[0]
+            if apply_patch_tool.get("type") != "custom":
+                _raise_native_responses_tool_contract_error(
+                    event_context,
+                    codec=codec,
+                    reason="declaration_not_custom",
+                )
+            _validate_strict_apply_patch_custom_tool(
+                apply_patch_tool,
+                event_context,
+                codec=codec,
+            )
+    planned_declarations = [
+        declaration
+        for declaration in declarations
+        if not (
+            isinstance(declaration, Mapping)
+            and declaration.get("name") == APPLY_PATCH_FUNCTION_NAME
+            and (
+                codec == "strict_apply_patch"
+                or not isinstance(declaration.get("format"), Mapping)
+            )
+        )
+    ]
+    try:
+        plan = build_tool_compatibility_plan(
+            planned_declarations,
+            selected_protocol=tool_protocol,
+            provider_hosted_capabilities=upstream.get("hosted_tool_capabilities"),
+            tool_choice=payload.get("tool_choice"),
+            protocol_capabilities=_runtime_tool_protocol_capabilities(tool_protocol, upstream),
+            request_token=uuid.uuid4().hex,
+        )
+    except RuntimeToolCompatibilityError as exc:
+        write_proxy_event(
+            "runtime_tool_compatibility_rejected",
+            classification=exc.classification,
+            surface=exc.surface,
+        )
+        _raise_runtime_tool_compatibility_error(exc)
+    event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
+    write_proxy_event(
+        "runtime_tool_compatibility_planned",
+        counts=plan.diagnostics.as_dict()["counts"],
+    )
+    return False
+
+
+def _apply_runtime_tool_compatibility_plan(
+    payload: dict[str, Any],
+    plan: RuntimeToolCompatibilityPlan,
+) -> bool:
+    try:
+        encoded = plan.encode_payload(payload)
+    except RuntimeToolCompatibilityError as exc:
+        _raise_runtime_tool_compatibility_error(exc)
+    if encoded == payload:
+        return False
+    payload.clear()
+    payload.update(encoded)
+    return True
+
+
+def _runtime_tool_compatibility_plan(
+    event_context: Mapping[str, Any] | None,
+) -> RuntimeToolCompatibilityPlan | None:
+    value = (event_context or {}).get(_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY)
+    return value if isinstance(value, RuntimeToolCompatibilityPlan) else None
+
+
+def _runtime_alias_matches_namespace(
+    plan: RuntimeToolCompatibilityPlan | None,
+    tool: Any,
+    namespace: str,
+) -> bool:
+    if plan is None or not isinstance(tool, Mapping):
+        return False
+    record = plan.registry.record_for_alias(_tool_schema_name(tool))
+    return record is not None and record.namespace == namespace
+
+
+def _runtime_alias_for_namespace_child(
+    plan: RuntimeToolCompatibilityPlan | None,
+    namespace: str,
+    child_name: str,
+) -> str | None:
+    if plan is None:
+        return None
+    for alias in plan.aliases:
+        record = plan.registry.record_for_alias(alias)
+        if record is not None and record.namespace == namespace and record.child_name == child_name:
+            return alias
+    return None
+
+
+def _runtime_plan_has_native_plain_function(
+    plan: RuntimeToolCompatibilityPlan | None,
+    item: Mapping[str, Any],
+) -> bool:
+    name = item.get("name")
+    return bool(
+        plan is not None
+        and isinstance(name, str)
+        and any(
+            entry.family == "plain_function"
+            and entry.disposition == "native"
+            and entry.original_name == name
+            for entry in plan.entries
+        )
+    )
+
+
+def _rewrite_generated_guidance_tool_name(value: Any, original: str, alias: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(original, alias)
+    if isinstance(value, list):
+        return [_rewrite_generated_guidance_tool_name(item, original, alias) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            key: _rewrite_generated_guidance_tool_name(item, original, alias)
+            for key, item in value.items()
+        }
+    return value
+
+
 STRICT_APPLY_PATCH_EXAMPLE = """*** Begin Patch
 *** Update File: example.txt
 @@
@@ -6150,6 +6356,7 @@ def _rewrite_structured_tool_input_items(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None = None,
     upstream_name: str | None = None,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
 ) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -6166,6 +6373,16 @@ def _rewrite_structured_tool_input_items(
     available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
+            rewritten_items.append(item)
+            continue
+        if (
+            compatibility_plan is not None
+            and compatibility_plan.owns_wire_value(item)
+            and not _runtime_plan_has_native_plain_function(compatibility_plan, item)
+        ):
+            call_id = item.get("call_id")
+            if isinstance(call_id, str):
+                preserved_structured_call_ids.add(call_id)
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
@@ -6437,7 +6654,12 @@ def _inject_explicit_codex_tools(
     return changed
 
 
-def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_node_repl_tools: bool) -> bool:
+def _filter_tools_for_subagent_coordinator(
+    payload: dict[str, Any],
+    *,
+    include_node_repl_tools: bool,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
+) -> bool:
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return False
@@ -6445,7 +6667,14 @@ def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_n
         tool
         for tool in tools
         if _is_multi_agent_tool_schema(tool)
-        or (include_node_repl_tools and _is_node_repl_tool_schema(tool))
+        or _runtime_alias_matches_namespace(compatibility_plan, tool, "multi_agent_v1")
+        or (
+            include_node_repl_tools
+            and (
+                _is_node_repl_tool_schema(tool)
+                or _runtime_alias_matches_namespace(compatibility_plan, tool, NODE_REPL_NAMESPACE)
+            )
+        )
     ]
     if len(filtered_tools) == len(tools):
         return False
@@ -6453,7 +6682,11 @@ def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_n
     return True
 
 
-def _filter_tools_for_subagent_worker(payload: dict[str, Any]) -> bool:
+def _filter_tools_for_subagent_worker(
+    payload: dict[str, Any],
+    *,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
+) -> bool:
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return False
@@ -6462,6 +6695,14 @@ def _filter_tools_for_subagent_worker(payload: dict[str, Any]) -> bool:
         for tool in tools
         if not _is_multi_agent_tool_schema(tool)
         and not _is_mcp_or_codex_app_tool_schema(tool)
+        and not any(
+            _runtime_alias_matches_namespace(compatibility_plan, tool, namespace)
+            for namespace in (
+                NODE_REPL_NAMESPACE,
+                "multi_agent_v1",
+                "mcp__multi_agent_v1",
+            )
+        )
         and _tool_schema_name(tool) != TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
     ]
     if len(filtered_tools) == len(tools):
@@ -10136,6 +10377,19 @@ def compatible_request_body(
                 status=TOOL_SEARCH_UNAVAILABLE_STATUS,
             )
         changed = True
+    runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
+    if isinstance(event_context, dict) and not raw_provider_probe:
+        if _hoist_additional_tools_input_items(payload):
+            changed = True
+        if _prepare_runtime_tool_compatibility(
+            payload,
+            upstream,
+            tool_protocol,
+            event_context,
+            native_responses_tool_codec=native_responses_tool_codec_override,
+        ):
+            changed = True
+        runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
     if raw_provider_probe or collaboration_v2:
         pass
     else:
@@ -10145,7 +10399,12 @@ def compatible_request_body(
         if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
-            if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            if _rewrite_structured_tool_input_items(
+                payload,
+                event_context=event_context,
+                upstream_name=upstream_name,
+                compatibility_plan=runtime_tool_plan,
+            ):
                 changed = True
         elif tool_protocol == "none":
             tools = payload.get("tools")
@@ -10410,6 +10669,17 @@ def compatible_request_body(
         event_context["subagent_workflow_plan_read_complete"] = bool(subagent_workflow_plan_read_complete)
         event_context["subagent_workflow_plan_read_required"] = bool(subagent_workflow_plan_read_required)
     if guidance_enabled and state_hint is not None and isinstance(input_items, list):
+        node_repl_alias = _runtime_alias_for_namespace_child(
+            runtime_tool_plan,
+            NODE_REPL_NAMESPACE,
+            "js",
+        )
+        if node_repl_alias is not None:
+            state_hint = _rewrite_generated_guidance_tool_name(
+                state_hint,
+                "mcp__node_repl__js",
+                node_repl_alias,
+            )
         input_items.append(state_hint)
         _write_adapter_event(
             event_context,
@@ -10453,6 +10723,16 @@ def compatible_request_body(
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if (
+        (
+            runtime_tool_plan is None
+            or (
+                native_responses_tool_codec_override
+                if native_responses_tool_codec_override is not None
+                else _external_native_responses_tool_codec(upstream)
+            )
+            == "strict_apply_patch"
+        )
+        and
         tool_protocol == "responses_structured"
         and _adapt_native_responses_tool_declarations(
             payload,
@@ -10483,8 +10763,20 @@ def compatible_request_body(
             )
             # Coordinator and worker restrictions deliberately remain narrower
             # than the normal deferred-core surface.
+            runtime_plain_tool_search = bool(
+                runtime_tool_plan is not None
+                and any(
+                    entry.family == "plain_function"
+                    and entry.original_name == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+                    and entry.disposition != "omit"
+                    for entry in runtime_tool_plan.entries
+                )
+            )
             effective_include_tool_search = (
-                include_tool_search and not restrict_to_subagent_coordinator_tools
+                include_tool_search
+                and (runtime_tool_plan is None or runtime_plain_tool_search)
+                and not subagent_worker_context
+                and not restrict_to_subagent_coordinator_tools
             )
             include_node_repl_for_subagent_workflow = (
                 restrict_to_subagent_coordinator_tools
@@ -10493,7 +10785,10 @@ def compatible_request_body(
                 and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
-            if subagent_worker_context and _filter_tools_for_subagent_worker(payload):
+            if subagent_worker_context and _filter_tools_for_subagent_worker(
+                payload,
+                compatibility_plan=runtime_tool_plan,
+            ):
                 _write_adapter_event(
                     event_context,
                     "subagent_worker_tools_restricted",
@@ -10504,6 +10799,7 @@ def compatible_request_body(
             if restrict_to_subagent_coordinator_tools and _filter_tools_for_subagent_coordinator(
                 payload,
                 include_node_repl_tools=include_node_repl_for_subagent_workflow,
+                compatibility_plan=runtime_tool_plan,
             ):
                 _write_adapter_event(
                     event_context,
@@ -10546,8 +10842,13 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
-                strip_all_namespace_tools=tool_surface_strategy == "deferred_core",
-                include_flattened_namespace_tools=tool_surface_strategy == "eager",
+                strip_namespace_tools=runtime_tool_plan is None,
+                strip_all_namespace_tools=(
+                    runtime_tool_plan is None and tool_surface_strategy == "deferred_core"
+                ),
+                include_flattened_namespace_tools=(
+                    runtime_tool_plan is None and tool_surface_strategy == "eager"
+                ),
                 tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
@@ -10578,12 +10879,21 @@ def compatible_request_body(
                 changed = True
             required_tool_choice_name = None
             if subagent_state_active:
+                runtime_node_repl_alias = _runtime_alias_for_namespace_child(
+                    runtime_tool_plan,
+                    NODE_REPL_NAMESPACE,
+                    "js",
+                )
+                required_node_repl_name = runtime_node_repl_alias or "mcp__node_repl__js"
                 if (
                     subagent_workflow_plan_read_required
                     and include_node_repl_for_subagent_workflow
-                    and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
+                    and (
+                        runtime_node_repl_alias is not None
+                        or required_node_repl_name in _function_tool_names(payload.get("tools"))
+                    )
                 ):
-                    required_tool_choice_name = "mcp__node_repl__js"
+                    required_tool_choice_name = required_node_repl_name
                 else:
                     required_tool_choice_name = _required_subagent_tool_choice(
                         tool_protocol=tool_protocol,
@@ -10611,6 +10921,24 @@ def compatible_request_body(
                 upstream=upstream_name,
             ):
                 changed = True
+    if runtime_tool_plan is not None and isinstance(payload.get("tools"), list):
+        final_declarations = [
+            tool
+            for tool in payload["tools"]
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+            )
+        ]
+        finalized_plan = runtime_tool_plan.with_final_declarations(final_declarations)
+        if finalized_plan is not runtime_tool_plan and isinstance(event_context, dict):
+            runtime_tool_plan = finalized_plan
+            event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan
+    if runtime_tool_plan is not None and _apply_runtime_tool_compatibility_plan(
+        payload,
+        runtime_tool_plan,
+    ):
+        changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -11366,7 +11694,17 @@ def compatible_response_body(
 
     collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
-    changed = _hide_reasoning_text(payload)
+    changed = False
+    runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+    if runtime_tool_plan is not None:
+        try:
+            decoded_payload = runtime_tool_plan.decode_payload(payload)
+        except RuntimeToolCompatibilityError as exc:
+            _raise_runtime_tool_compatibility_error(exc)
+        if decoded_payload != payload:
+            payload = decoded_payload
+            changed = True
+    changed = _hide_reasoning_text(payload) or changed
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
     payload, _ = _apply_external_worker_response_contract(
@@ -11442,10 +11780,33 @@ def compatible_sse_line(
     collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
 
+    runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+    if runtime_tool_plan is not None and isinstance(event_context, dict):
+        stream_state = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY)
+        if stream_state is None:
+            stream_state = runtime_tool_plan.new_stream()
+            event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream_state
+        try:
+            decoded_events = stream_state.decode_events_for_event(payload)
+        except RuntimeToolCompatibilityError as exc:
+            _raise_runtime_tool_compatibility_error(exc)
+        if not decoded_events:
+            return b""
+        if len(decoded_events) > 1:
+            return b"".join(
+                _sse_json_line(event, line_ending) + line_ending
+                for event in decoded_events
+            )
+        decoded_payload = decoded_events[0]
+        runtime_tool_changed = decoded_payload != payload
+        payload = decoded_payload
+    else:
+        runtime_tool_changed = False
+
     if _is_reasoning_text_stream_event(payload):
         return b""
 
-    changed = _hide_reasoning_text(payload)
+    changed = _hide_reasoning_text(payload) or runtime_tool_changed
     payload, _ = _apply_external_worker_response_contract(
         payload,
         event_context,
@@ -21340,6 +21701,25 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                 else:
                     events = _chat_stream_chunks_to_response_events(chunks)
+                    runtime_tool_plan = _runtime_tool_compatibility_plan(compatibility_event_context)
+                    if runtime_tool_plan is not None and isinstance(compatibility_event_context, dict):
+                        runtime_tool_stream = compatibility_event_context.get(
+                            _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY
+                        )
+                        if runtime_tool_stream is None:
+                            runtime_tool_stream = runtime_tool_plan.new_stream()
+                            compatibility_event_context[
+                                _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY
+                            ] = runtime_tool_stream
+                        decoded_events: list[Mapping[str, Any]] = []
+                        try:
+                            for event in events:
+                                decoded_events.extend(
+                                    runtime_tool_stream.decode_events_for_event(event)
+                                )
+                        except RuntimeToolCompatibilityError as exc:
+                            _raise_runtime_tool_compatibility_error(exc)
+                        events = decoded_events
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
@@ -21495,14 +21875,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             upstream_name,
                             event_context=compatibility_event_context,
                         )
-                        rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
-                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
-                        if isinstance(rewritten_payload, Mapping):
-                            rewritten_events.append(rewritten_payload)
-                        terminal = bool(
-                            isinstance(rewritten_payload, Mapping)
-                            and _responses_events_have_terminal([rewritten_payload])
+                        rewritten_payloads = (
+                            _parse_sse_json_payloads(rewritten_line)
+                            if upstream_name != "official"
+                            else ([usage_payload] if isinstance(usage_payload, Mapping) else [])
                         )
+                        if rewritten_payloads:
+                            _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                            for emitted_payload in rewritten_payloads[1:]:
+                                _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
+                            rewritten_events.extend(rewritten_payloads)
+                        else:
+                            _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                        terminal = _responses_events_have_terminal(rewritten_payloads)
                         buffered_lines.append((rewritten_line, terminal))
                         if saw_terminal_event:
                             break
@@ -21890,12 +22275,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             else:
                                 line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
                     line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
-                    rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                    if isinstance(rewritten_payload, Mapping):
-                        remember_completed_tool_event(rewritten_payload)
+                    rewritten_payloads = (
+                        _parse_sse_json_payloads(line)
+                        if upstream_name != "official"
+                        else []
+                    )
+                    if rewritten_payloads:
+                        for emitted_payload in rewritten_payloads:
+                            remember_completed_tool_event(emitted_payload)
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                        for emitted_payload in rewritten_payloads[1:]:
+                            _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
                     elif isinstance(usage_payload, Mapping):
                         remember_completed_tool_event(usage_payload)
-                    _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                    else:
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, None)
 
                     if not line and upstream_name != "official":
                         pending_sse_event_metadata = []

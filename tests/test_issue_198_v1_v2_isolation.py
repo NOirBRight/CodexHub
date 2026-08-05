@@ -22,6 +22,7 @@ def _upstream() -> dict[str, object]:
         "upstream_format": "responses",
         "tool_protocol": "responses_structured",
         "tool_surface_strategy": "eager",
+        "tool_protocol_capabilities": {"namespace_lifecycle": True},
     }
 
 
