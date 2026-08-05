@@ -117,6 +117,225 @@ def test_omit_history_rejects_missing_or_conflicting_call_identity(history):
 
 
 @pytest.mark.parametrize(
+    ("declarations", "items"),
+    [
+        (
+            [{"type": "function", "name": "keep"}],
+            [
+                {"type": "function_call", "name": "keep", "call_id": "same", "arguments": "{}"},
+                {"type": "function_call", "name": "keep", "call_id": "same", "arguments": "{}"},
+            ],
+        ),
+        (
+            [
+                {"type": "function", "name": "paint"},
+                {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            ],
+            [
+                {"type": "function_call", "name": "paint", "call_id": "same", "arguments": "{}"},
+                {"type": "custom_tool_call", "name": "paint", "call_id": "same", "input": "opaque"},
+            ],
+        ),
+    ],
+    ids=["same-family", "cross-family"],
+)
+def test_encode_history_rejects_duplicate_retained_call_identity(declarations, items):
+    plan = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="duplicate-retained-call-id",
+    )
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": items})
+
+    assert exc_info.value.classification == "duplicate_call_identity"
+
+
+@pytest.mark.parametrize("retained_first", [True, False], ids=["retained-first", "omitted-first"])
+def test_encode_history_rejects_retained_and_omitted_call_identity_in_either_order(retained_first):
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "function", "name": "keep"},
+            {"type": "custom", "name": "omit", "format": {"type": "text"}},
+        ],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(accepts_custom_adapter=False),
+        request_token="retained-omitted-call-id",
+    )
+    retained = {"type": "function_call", "name": "keep", "call_id": "shared", "arguments": "{}"}
+    omitted = {"type": "custom_tool_call", "name": "omit", "call_id": "shared", "input": "opaque"}
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": [retained, omitted] if retained_first else [omitted, retained]})
+
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+
+def test_decode_rejects_bound_adapter_call_id_reused_by_another_alias_in_body_and_terminal():
+    plan = build_tool_compatibility_plan(
+        [_namespace("vendor_a", child="run"), _namespace("vendor_b", child="run")],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="bound-call-owner",
+    )
+    first_alias, second_alias = [entry.aliases[0] for entry in plan.entries]
+    first = {
+        "type": "function_call",
+        "name": first_alias,
+        "id": "item-a",
+        "call_id": "shared",
+        "arguments": "{}",
+    }
+    second = {**first, "name": second_alias, "id": "item-b"}
+
+    plan.decode_payload({"output": [first]})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.decode_payload({"output": [second]})
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event({"type": "response.output_item.added", "item": first})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "item-a",
+            "call_id": "shared",
+            "arguments": "{}",
+        }
+    )
+    state.decode_events_for_event(
+        {
+            "type": "response.output_item.done",
+            "item": first,
+        }
+    )
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {"output": [second]},
+            }
+        )
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+
+def test_registered_adapter_call_id_rejects_unknown_output_family_in_body_sse_and_terminal():
+    plan = _adapted_namespace_plan()
+    alias = plan.entries[0].aliases[0]
+    call = {
+        "type": "function_call",
+        "name": alias,
+        "id": "item-adapter",
+        "call_id": "adapter-call",
+        "arguments": "{}",
+    }
+    bad_output = {
+        "type": "vendor_extension_call_output",
+        "id": "vendor-output",
+        "call_id": "adapter-call",
+        "output": "opaque",
+    }
+
+    plan.decode_payload({"output": [call]})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.decode_payload({"output": [bad_output]})
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event({"type": "response.output_item.added", "item": call})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event({"type": "response.output_item.added", "item": bad_output})
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+    state = CompatibilityStreamState(plan)
+    state.decode_events_for_event({"type": "response.output_item.added", "item": call})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "item-adapter",
+            "call_id": "adapter-call",
+            "arguments": "{}",
+        }
+    )
+    state.decode_events_for_event({"type": "response.output_item.done", "item": call})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {"output": [bad_output]},
+            }
+        )
+    assert exc_info.value.classification == "ambiguous_call_identity"
+
+
+@pytest.mark.parametrize(
+    ("declaration", "wrong_call"),
+    [
+        (
+            {"type": "function", "name": "declared"},
+            {"type": "function_call", "name": "other", "call_id": "wrong", "arguments": "{}"},
+        ),
+        (
+            {"type": "custom", "name": "declared", "format": {"type": "text"}},
+            {"type": "custom_tool_call", "name": "other", "call_id": "wrong", "input": "opaque"},
+        ),
+    ],
+    ids=["function", "custom"],
+)
+def test_omitted_standard_wrong_name_is_rejected_across_history_body_sse_and_terminal(declaration, wrong_call):
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="none",
+        protocol_capabilities=ProtocolCapabilities(),
+        request_token="omitted-standard-wrong-name",
+    )
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload({"input": [wrong_call]})
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [wrong_call]})
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.output_item.added", "item": wrong_call}
+        )
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [wrong_call]}}
+        )
+
+
+def test_response_owner_ledger_preserves_native_custom_pair_with_omitted_unknown_custom_tool():
+    plan = build_tool_compatibility_plan(
+        [
+            {"type": "custom", "name": "paint", "format": {"type": "text"}},
+            {"type": "custom_tool", "name": "vendor_custom", "executor": "selected_provider"},
+        ],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="response-owner-ledger",
+    )
+    output = [
+        {
+            "type": "custom_tool_call",
+            "name": "paint",
+            "id": "native-item",
+            "call_id": "native-call",
+            "input": "opaque",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "native-output",
+            "call_id": "native-call",
+            "output": "native",
+        },
+    ]
+
+    assert plan.decode_payload({"output": output})["output"] == output
+
+
+@pytest.mark.parametrize(
     "event",
     [
         {

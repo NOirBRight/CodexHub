@@ -1545,6 +1545,83 @@ class ToolCompatibilityPlan:
                 return f"{declaration_type}_call_output"
         return None
 
+    def _standard_contract_families_for_item(self, item: Mapping[str, Any]) -> frozenset[str]:
+        item_type = item.get("type")
+        if item_type == "function_call":
+            return frozenset({NAMESPACE}) if item.get("namespace") is not None else frozenset({PLAIN_FUNCTION, NAMESPACE})
+        if item_type == "custom_tool_call":
+            return frozenset({CUSTOM_FREEFORM})
+        if item_type in {"tool_search_call", "tool_search_output"}:
+            return frozenset({TOOL_SEARCH})
+        return frozenset()
+
+    def _has_standard_contract_for_item(self, item: Mapping[str, Any]) -> bool:
+        families = self._standard_contract_families_for_item(item)
+        # Only an omitted standard declaration creates a representational
+        # boundary that an unknown item could bypass.  Native-only plans may
+        # still carry provider-local historical calls that are intentionally
+        # left untouched.
+        return bool(families) and any(
+            entry.family in families and entry.disposition == OMIT
+            for entry in self.entries
+        )
+
+    def _reject_unknown_standard_item(self, item: Mapping[str, Any], *, surface: str) -> None:
+        """Reject an undeclared standard lifecycle when this plan has a contract.
+
+        A standard item with a typo or a provider-local name must not bypass an
+        omitted/native declaration merely because name lookup returned no exact
+        match.  Adapter aliases remain valid function-call wire names.
+        """
+        if item.get("type") == "function_call" and self.registry.record_for_alias(item.get("name")) is not None:
+            return
+        if (
+            item.get("type") == "function_call"
+            and item.get("namespace") is not None
+            and isinstance(item.get("name"), str)
+            and any(
+                entry.family == PLAIN_FUNCTION
+                and entry.original_name == f"{item.get('namespace')}__{item.get('name')}"
+                for entry in self.entries
+            )
+        ):
+            return
+        if not self._has_standard_contract_for_item(item):
+            return
+        if self._standard_entry_for_item(item, surface=surface) is None:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_native_identity",
+                surface=surface,
+            )
+
+    def _entry_for_call_owner(
+        self,
+        item: Mapping[str, Any],
+        *,
+        surface: str,
+    ) -> ToolCompatibilityEntry | None:
+        """Resolve a call item to its request/response declaration owner."""
+        if item.get("type") not in {"function_call", "custom_tool_call", "tool_search_call"}:
+            return None
+        entry = self._native_entry_for_item(item)
+        if entry is None:
+            record = self.registry.record_for_alias(item.get("name"))
+            if record is not None:
+                entry = next(
+                    (
+                        candidate
+                        for candidate in self.entries
+                        if candidate.declaration_index == record.declaration_index
+                    ),
+                    None,
+                )
+        if entry is None:
+            entry = self._standard_entry_for_item(item, surface=surface)
+        if entry is None:
+            entry = self._unknown_entry_for_item(item, surface=surface)
+        return entry
+
     def _standard_entry_for_item(
         self,
         item: Mapping[str, Any],
@@ -1581,7 +1658,10 @@ class ToolCompatibilityPlan:
 
         if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
             if owner is not None:
-                if item_type != self._history_output_type_for_entry(owner):
+                expected_output_type = self._history_output_type_for_entry(owner)
+                if surface == "response" and owner.disposition == ADAPT and owner.family in {NAMESPACE, CUSTOM_FREEFORM}:
+                    expected_output_type = "function_call_output"
+                if item_type != expected_output_type:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
                         "ambiguous_call_identity",
@@ -1636,8 +1716,13 @@ class ToolCompatibilityPlan:
             return native or (matches[0] if matches else None)
         return None
 
-    def _omitted_response_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
-        standard_entry = self._standard_entry_for_item(item)
+    def _omitted_response_entry_for_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        owner: ToolCompatibilityEntry | None = None,
+    ) -> ToolCompatibilityEntry | None:
+        standard_entry = self._standard_entry_for_item(item, owner=owner, surface="response")
         if standard_entry is not None:
             return standard_entry if standard_entry.disposition == OMIT else None
         hosted_item_key = self._hosted_history_item_key(item.get("type"))
@@ -1688,7 +1773,11 @@ class ToolCompatibilityPlan:
                 item.get("namespace"),
                 item_type=item_type,
             )
-            return entry if entry is not None and entry.disposition == OMIT else None
+            if entry is not None and entry.disposition == OMIT:
+                return entry
+            self._reject_unknown_standard_item(item, surface="history")
+            return None
+        self._reject_unknown_standard_item(item, surface="history")
         if item_type in {"tool_search_call", "tool_search_output"}:
             return next(
                 (
@@ -1725,6 +1814,7 @@ class ToolCompatibilityPlan:
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
             history_call_owners: dict[str, ToolCompatibilityEntry] = {}
+            seen_history_call_ids: dict[str, ToolCompatibilityEntry | None] = {}
             for item in raw_input:
                 if not isinstance(item, Mapping) or item.get("type") not in {
                     "function_call",
@@ -1732,12 +1822,26 @@ class ToolCompatibilityPlan:
                     "tool_search_call",
                 }:
                     continue
-                owner = self._standard_entry_for_item(item, surface="history")
-                if owner is None:
-                    owner = self._unknown_entry_for_item(item, surface="history")
+                owner = self._entry_for_call_owner(item, surface="history")
                 call_id = item.get("call_id")
-                if owner is not None and isinstance(call_id, str) and call_id:
-                    history_call_owners[call_id] = owner
+                if isinstance(call_id, str) and call_id:
+                    if call_id in seen_history_call_ids:
+                        previous = seen_history_call_ids[call_id]
+                        classification = (
+                            "ambiguous_call_identity"
+                            if previous is not None
+                            and owner is not None
+                            and (previous.disposition == OMIT or owner.disposition == OMIT)
+                            else "duplicate_call_identity"
+                        )
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            classification,
+                            surface="history",
+                        )
+                    seen_history_call_ids[call_id] = owner
+                    if owner is not None:
+                        history_call_owners[call_id] = owner
 
             def omitted_history_entry(item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
                 owner = None
@@ -1873,7 +1977,14 @@ class ToolCompatibilityPlan:
             raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="response")
         call_id = result.get("call_id")
         if isinstance(call_id, str) and call_id:
-            if self.registry.record_for_call(call_id) is None:
+            previous = self.registry.record_for_call(call_id)
+            if previous is not None and previous.alias != record.alias:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_call_identity",
+                    surface="response",
+                )
+            if previous is None:
                 self.registry.bind_call(call_id, record.alias)
         elif not allow_incomplete:
             raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="response")
@@ -1891,6 +2002,31 @@ class ToolCompatibilityPlan:
             else:
                 result["type"] = "custom_tool_call"
         return result, record, True
+
+    def _validate_registered_item_identity(self, item: Mapping[str, Any], *, surface: str) -> None:
+        """Ensure a bound adapter call keeps its wire family and alias."""
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return
+        record = self.registry.record_for_call(call_id)
+        if record is None:
+            return
+        item_type = item.get("type")
+        if item_type == "function_call":
+            if item.get("name") != record.alias:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_call_identity",
+                    surface=surface,
+                )
+            return
+        if item_type == "function_call_output":
+            return
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "ambiguous_call_identity",
+            surface=surface,
+        )
 
     def _decode_result(self, item: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
         result = _copy_mapping(item)
@@ -2009,20 +2145,48 @@ class ToolCompatibilityPlan:
         seen_item_ids: set[str] = set()
         seen_call_ids: set[str] = set()
         seen_result_call_ids: set[str] = set()
+        response_call_owners: dict[str, ToolCompatibilityEntry] = {}
+        surface = "response" if reject_omitted_response else "history"
+        for raw_item in items:
+            if not isinstance(raw_item, Mapping):
+                continue
+            if raw_item.get("type") not in {"function_call", "custom_tool_call", "tool_search_call"}:
+                continue
+            call_id = raw_item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            owner = self._entry_for_call_owner(raw_item, surface=surface)
+            if owner is None:
+                continue
+            previous = response_call_owners.get(call_id)
+            if previous is not None:
+                classification = (
+                    "ambiguous_call_identity"
+                    if previous.disposition == OMIT or owner.disposition == OMIT
+                    else "duplicate_call_identity"
+                )
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    classification,
+                    surface=surface,
+                )
+            response_call_owners[call_id] = owner
         for raw_item in items:
             if not isinstance(raw_item, Mapping):
                 result.append(raw_item)
                 continue
             item_type = raw_item.get("type")
             item = _copy_mapping(raw_item)
-            if reject_omitted_response and self._omitted_response_entry_for_item(item) is not None:
+            call_id = item.get("call_id")
+            owner = response_call_owners.get(call_id) if isinstance(call_id, str) else None
+            self._validate_registered_item_identity(item, surface=surface)
+            if reject_omitted_response and self._omitted_response_entry_for_item(item, owner=owner) is not None:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
                     "unsupported_hosted_lifecycle",
-                    surface="response",
+                    surface=surface,
                 )
             item_id = _item_identity(item)
-            call_id = item.get("call_id")
             if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                 if not isinstance(call_id, str) or not call_id:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="history")
@@ -2061,6 +2225,7 @@ class ToolCompatibilityPlan:
                     ):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                     else:
+                        self._reject_unknown_standard_item(item, surface=surface)
                         decoded, item_changed = item, False
             elif item_type == "custom_tool_call":
                 native_entry = self._native_entry_for_item(item)
@@ -2080,6 +2245,7 @@ class ToolCompatibilityPlan:
                 ):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                 else:
+                    self._reject_unknown_standard_item(item, surface=surface)
                     decoded, item_changed = item, False
             elif _hosted_kind_for_item_type(item_type) is not None:
                 native_entry = self._native_entry_for_item(item)
@@ -2304,6 +2470,8 @@ class CompatibilityStreamState:
             return result
         item = result.get("item")
         if event_type == "response.output_item.added" and isinstance(item, Mapping):
+            self.plan._validate_registered_item_identity(item, surface="stream")
+            self.plan._reject_unknown_standard_item(item, surface="stream")
             decoded_item, record, _changed = self._check_alias_in_item(item)
             item_id = self._item_id(item)
             if record is not None:
@@ -2464,6 +2632,8 @@ class CompatibilityStreamState:
                 result["arguments"] = arguments
             return result
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
+            self.plan._validate_registered_item_identity(item, surface="stream")
+            self.plan._reject_unknown_standard_item(item, surface="stream")
             record = self.plan.registry.record_for_alias(item.get("name"))
             if record is None:
                 if self.plan.registry.looks_like_alias(item.get("name")):
@@ -2569,6 +2739,8 @@ class CompatibilityStreamState:
             return [self.decode_event(value)]
 
         if event_type == "response.output_item.added" and isinstance(item, Mapping):
+            self.plan._validate_registered_item_identity(item, surface="stream")
+            self.plan._reject_unknown_standard_item(item, surface="stream")
             record = self.plan.registry.record_for_alias(item.get("name"))
             if record is None or record.family != CUSTOM_FREEFORM:
                 return [self.decode_event(value)]
