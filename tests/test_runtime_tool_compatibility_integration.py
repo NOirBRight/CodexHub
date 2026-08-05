@@ -448,3 +448,81 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
     entries = context["_runtime_tool_compatibility_plan"].entries
     assert [entry.disposition for entry in entries] == ["native", "native", "native"]
     assert payload["tools"] == tools
+
+
+def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required_choice():
+    upstream = {
+        **_external_chat_upstream(),
+        "tool_protocol": "text_compat",
+    }
+    context: dict = {}
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request([{"type": "function", "name": "plain"}]),
+            upstream,
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+    assert payload["tools"] == []
+    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "omit"
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            _request(
+                [{"type": "function", "name": "plain"}],
+                tool_choice={"type": "function", "name": "plain"},
+            ),
+            upstream,
+            event_context={},
+            inject_codex_tools=False,
+        )
+    assert caught.value.cause.code == "tool_compatibility_required_unavailable"
+    assert "plain" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        {"max_tool_name_length": "not-an-int"},
+        {"max_alias_attempts": []},
+        {"hosted_lifecycles": 17},
+        {"unknown_lifecycles": object()},
+        {"function_lifecycle": "yes"},
+    ],
+    ids=["bad-max-length", "bad-max-attempts", "bad-hosted-iterable", "bad-unknown-type", "bad-boolean"],
+)
+def test_malformed_tool_protocol_capabilities_are_bounded_translation_errors(facts):
+    upstream = {
+        **_external_chat_upstream(),
+        "tool_protocol_capabilities": facts,
+    }
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            _request([{"type": "function", "name": "plain"}]),
+            upstream,
+            event_context={},
+            inject_codex_tools=False,
+        )
+    assert caught.value.cause.code == "tool_compatibility_capability_manifest"
+    assert "not-an-int" not in str(caught.value)
+    assert "yes" not in str(caught.value)
+
+
+def test_named_namespace_choice_requires_exact_child_identity():
+    upstream = _external_chat_upstream()
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            _request(
+                [{
+                    "type": "namespace",
+                    "name": "vendor",
+                    "tools": [{"type": "function", "name": "run"}],
+                }],
+                tool_choice={"type": "function", "name": "run"},
+            ),
+            upstream,
+            event_context={},
+            inject_codex_tools=False,
+        )
+    assert caught.value.cause.code == "tool_compatibility_required_unavailable"

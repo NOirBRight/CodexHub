@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass, replace
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -5927,25 +5928,88 @@ def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
 
 _RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
 _RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY = "_runtime_tool_compatibility_stream"
+_RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE = "tool_compatibility_capability_manifest"
+
+
+def _raise_malformed_runtime_tool_capability_manifest() -> NoReturn:
+    raise RuntimeToolCompatibilityError(
+        _RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE,
+        "malformed_capability_manifest",
+    )
+
+
+def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
+    boolean_keys = {
+        "function_lifecycle",
+        "supports_functions",
+        "namespace_lifecycle",
+        "supports_namespace",
+        "supports_namespaces",
+        "custom_lifecycle",
+        "supports_custom",
+        "supports_custom_tools",
+        "tool_search_lifecycle",
+        "supports_tool_search",
+        "accepts_namespace_adapter",
+        "namespace_adapter",
+        "accepts_custom_adapter",
+        "custom_adapter",
+    }
+    for key in boolean_keys:
+        if key in facts and type(facts[key]) is not bool:
+            _raise_malformed_runtime_tool_capability_manifest()
+
+    for key in ("hosted_lifecycles", "hosted_kinds", "unknown_lifecycles", "unknown_kinds"):
+        if key not in facts:
+            continue
+        value = facts[key]
+        if isinstance(value, str):
+            continue
+        if isinstance(value, Mapping):
+            if any(not isinstance(name, str) or type(enabled) is not bool for name, enabled in value.items()):
+                _raise_malformed_runtime_tool_capability_manifest()
+            continue
+        if isinstance(value, (bytes, bytearray)) or not isinstance(value, IterableABC):
+            _raise_malformed_runtime_tool_capability_manifest()
+        if any(not isinstance(name, str) for name in value):
+            _raise_malformed_runtime_tool_capability_manifest()
+
+    for key in ("max_tool_name_length", "max_alias_attempts"):
+        if key in facts and (type(facts[key]) is not int or facts[key] <= 0):
+            _raise_malformed_runtime_tool_capability_manifest()
 
 
 def _runtime_tool_protocol_capabilities(
     tool_protocol: str,
     upstream: Mapping[str, Any],
 ) -> RuntimeProtocolCapabilities:
-    supplied = upstream.get("tool_protocol_capabilities")
-    if isinstance(supplied, Mapping):
+    try:
+        supplied = upstream.get("tool_protocol_capabilities")
+        if supplied is not None and not isinstance(supplied, Mapping):
+            _raise_malformed_runtime_tool_capability_manifest()
+        if isinstance(supplied, Mapping):
+            _validate_runtime_tool_capability_facts(supplied)
+        facts = supplied if isinstance(supplied, Mapping) else None
         # A capability manifest is authoritative only for predicates it
-        # explicitly states.  In particular, a Responses endpoint without
-        # lifecycle facts is not evidence of native namespace/custom/search
-        # support; retain the conservative plain-function + adapter baseline.
-        baseline_protocol = "chat_tools" if tool_protocol in {"responses_structured", "text_compat"} else tool_protocol
-        return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, supplied)
-    if tool_protocol in {"responses_structured", "text_compat"}:
-        return RuntimeProtocolCapabilities.chat_tools()
-    if tool_protocol == "chat_tools":
-        return RuntimeProtocolCapabilities.chat_tools()
-    return RuntimeProtocolCapabilities()
+        # explicitly states.  Responses and chat-completions retain the
+        # conservative plain-function + adapter baseline.  Text-compatible
+        # endpoints have no native lifecycle by default; every capability
+        # must be explicit.
+        if tool_protocol == "text_compat":
+            baseline_protocol = "none"
+        elif tool_protocol == "responses_structured":
+            baseline_protocol = "chat_tools"
+        else:
+            baseline_protocol = tool_protocol
+        if facts is not None:
+            return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, facts)
+        if baseline_protocol in {"chat_tools", "chat", "chat_completions"}:
+            return RuntimeProtocolCapabilities.chat_tools()
+        return RuntimeProtocolCapabilities()
+    except RuntimeToolCompatibilityError:
+        raise
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        _raise_malformed_runtime_tool_capability_manifest()
 
 
 def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError) -> NoReturn:

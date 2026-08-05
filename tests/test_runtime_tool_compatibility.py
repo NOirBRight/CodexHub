@@ -109,7 +109,11 @@ def test_namespace_alias_round_trip_preserves_version_fields_and_ids() -> None:
                 "output": "ok",
             },
         ],
-        "tool_choice": {"type": "function", "name": "spawn_agent"},
+        "tool_choice": {
+            "type": "function",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+        },
     }
 
     encoded = plan.encode_payload(payload)
@@ -125,6 +129,113 @@ def test_namespace_alias_round_trip_preserves_version_fields_and_ids() -> None:
     assert decoded["output"][0]["name"] == "spawn_agent"
     assert decoded["output"][0]["call_id"] == "call_v2"
     assert plan.entries[0].aliases == (alias,)
+
+
+def test_native_plain_name_wins_over_unqualified_namespace_child() -> None:
+    plain = {"type": "function", "name": "run"}
+    namespace = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [{"type": "function", "name": "run"}],
+    }
+    plan = build_tool_compatibility_plan(
+        [plain, namespace],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="plain-namespace-collision",
+    )
+
+    decoded = plan.decode_payload(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "run",
+                    "call_id": "plain-call",
+                    "item_id": "plain-item",
+                    "arguments": "{}",
+                }
+            ]
+        }
+    )
+
+    assert decoded["output"][0]["name"] == "run"
+    assert "namespace" not in decoded["output"][0]
+    assert plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "vendor",
+                    "name": "run",
+                    "call_id": "namespace-call",
+                    "arguments": "{}",
+                }
+            ]
+        }
+    )["input"][0]["name"].startswith("__codexhub_ns_")
+
+
+def test_ambiguous_unqualified_namespace_child_fails_closed() -> None:
+    declarations = [
+        {
+            "type": "namespace",
+            "name": "vendor_a",
+            "tools": [{"type": "function", "name": "run"}],
+        },
+        {
+            "type": "namespace",
+            "name": "vendor_b",
+            "tools": [{"type": "function", "name": "run"}],
+        },
+    ]
+    plan = build_tool_compatibility_plan(
+        declarations,
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="ambiguous-namespace-child",
+    )
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "run",
+                        "call_id": "ambiguous-call",
+                        "item_id": "ambiguous-item",
+                        "arguments": "{}",
+                    }
+                ]
+            }
+        )
+
+
+def test_named_tool_choice_requires_an_exact_declaration_match() -> None:
+    with pytest.raises(RequiredToolUnavailableError):
+        build_tool_compatibility_plan(
+            [{
+                "type": "namespace",
+                "name": "vendor",
+                "tools": [{"type": "function", "name": "run"}],
+            }],
+            selected_protocol="chat_tools",
+            protocol_capabilities=ProtocolCapabilities.chat_tools(),
+            tool_choice={"type": "function", "name": "run"},
+            request_token="unqualified-choice",
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, [], "text"])
+def test_custom_declaration_requires_mapping_format(format_value: object) -> None:
+    with pytest.raises(ToolCompatibilityError):
+        build_tool_compatibility_plan(
+            [{"type": "custom", "name": "paint", "format": format_value}],
+            selected_protocol="chat_tools",
+            protocol_capabilities=ProtocolCapabilities.chat_tools(),
+            request_token="custom-format-boundary",
+        )
 
 
 def test_custom_adapter_uses_exact_inverse_envelopes() -> None:

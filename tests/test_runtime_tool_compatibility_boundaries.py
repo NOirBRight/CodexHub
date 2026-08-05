@@ -409,3 +409,36 @@ def test_native_tool_search_rejects_duplicate_call_identity_in_body():
     plan = _native_plan(declaration)
     with pytest.raises(ToolCompatibilityError):
         plan.decode_payload({"output": [first, second]})
+
+
+def test_native_custom_sse_done_requires_string_input_and_matching_call_identity():
+    declaration, item = _native_declaration_and_missing_body_item("custom")
+    item["call_id"] = "call"
+    plan = _native_plan(declaration)
+
+    def added_event():
+        return {"type": "response.output_item.added", "item": dict(item)}
+
+    invalid_input = CompatibilityStreamState(plan)
+    invalid_input.decode_events_for_event(added_event())
+    with pytest.raises(ToolCompatibilityError):
+        invalid_input.decode_events_for_event(
+            {
+                "type": "response.custom_tool_call_input.done",
+                "item_id": "item",
+                "call_id": "call",
+                "input": {"not": "text"},
+            }
+        )
+
+    mismatched_identity = CompatibilityStreamState(plan)
+    mismatched_identity.decode_events_for_event(added_event())
+    with pytest.raises(ToolCompatibilityError):
+        mismatched_identity.decode_events_for_event(
+            {
+                "type": "response.custom_tool_call_input.done",
+                "item_id": "item",
+                "call_id": "different-call",
+                "input": "opaque",
+            }
+        )

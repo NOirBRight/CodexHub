@@ -490,6 +490,70 @@ def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _tool_choice_matches_declaration(
+    declaration: Mapping[str, Any],
+    tool_choice: Any,
+) -> bool:
+    """Return whether an explicit choice identifies this declaration exactly."""
+    family = classify_declaration(declaration)
+    name = _name_of(declaration)
+    namespace, children, _version, _valid = _namespace_details(declaration)
+
+    if isinstance(tool_choice, str):
+        if tool_choice in {"auto", "none", "required"}:
+            return False
+        if family == NAMESPACE:
+            return tool_choice == namespace or any(
+                tool_choice == f"{namespace}__{child.get('name')}" for child in children
+            )
+        if family == TOOL_SEARCH and tool_choice == "tool_search":
+            return True
+        return tool_choice == name
+
+    if not isinstance(tool_choice, Mapping):
+        return False
+    choice_type = tool_choice.get("type")
+    choice_name = tool_choice.get("name")
+    if choice_type in (None, "function"):
+        if not isinstance(choice_name, str):
+            return False
+        if family == PLAIN_FUNCTION:
+            return choice_name == name
+        if family == NAMESPACE:
+            choice_namespace = tool_choice.get("namespace")
+            return (
+                choice_namespace == namespace and choice_name in {child.get("name") for child in children}
+            ) or (
+                choice_namespace is None
+                and any(choice_name == f"{namespace}__{child.get('name')}" for child in children)
+            )
+        return False
+    if choice_type == "namespace":
+        return family == NAMESPACE and choice_name in {None, namespace}
+    if choice_type == "custom":
+        return family == CUSTOM_FREEFORM and choice_name == name
+    if choice_type == "tool_search":
+        return family == TOOL_SEARCH
+    if isinstance(choice_type, str) and choice_type == declaration.get("type"):
+        return choice_name in {None, name}
+    return False
+
+
+def _has_explicit_named_tool_choice(tool_choice: Any) -> bool:
+    if isinstance(tool_choice, str):
+        return tool_choice not in {"auto", "none", "required"}
+    if not isinstance(tool_choice, Mapping):
+        return False
+    if isinstance(tool_choice.get("name"), str):
+        return True
+    return tool_choice.get("type") in {
+        "namespace",
+        "custom",
+        "tool_search",
+        *_KNOWN_HOSTED_TYPES,
+    }
+
+
 def _required_by_rule(
     declaration: Mapping[str, Any],
     index: int,
@@ -524,19 +588,9 @@ def _required_by_rule(
         return result
     if not isinstance(tool_choice, Mapping):
         if isinstance(tool_choice, str) and tool_choice not in {"auto", "none"}:
-            return result or tool_choice in names
+            return result or _tool_choice_matches_declaration(declaration, tool_choice)
         return result
-    choice_type = tool_choice.get("type")
-    choice_name = tool_choice.get("name")
-    if choice_type == "function" and isinstance(choice_name, str):
-        return result or choice_name in names
-    if choice_type in {"namespace", "custom", "tool_search"} and (
-        choice_name is None or choice_name in names
-    ):
-        return True
-    if isinstance(choice_type, str) and choice_type in names:
-        return True
-    return result
+    return result or _tool_choice_matches_declaration(declaration, tool_choice)
 
 
 def _protocol_capabilities(
@@ -558,7 +612,11 @@ def _declaration_valid_for_family(declaration: Mapping[str, Any], family: str) -
     if family == NAMESPACE:
         return _namespace_details(declaration)[3]
     if family == CUSTOM_FREEFORM:
-        return declaration.get("type") == "custom" and bool(_name_of(declaration)) and "format" in declaration
+        return (
+            declaration.get("type") == "custom"
+            and bool(_name_of(declaration))
+            and isinstance(declaration.get("format"), Mapping)
+        )
     if family == TOOL_SEARCH:
         return declaration.get("type") == "tool_search" and declaration.get("execution") == "client"
     if family == SELECTED_PROVIDER_HOSTED:
@@ -705,6 +763,11 @@ def build_tool_compatibility_plan(
             )
         )
 
+    if _has_explicit_named_tool_choice(tool_choice) and not any(
+        _tool_choice_matches_declaration(declaration, tool_choice)
+        for declaration in declarations
+    ):
+        raise RequiredToolUnavailableError()
     if tool_choice in ("required", True) and not any(
         entry.disposition in {NATIVE, ADAPT} for entry in preliminary
     ):
@@ -812,20 +875,7 @@ class ToolCompatibilityPlan:
     def with_final_declarations(self, declarations: Iterable[Mapping[str, Any]]) -> "ToolCompatibilityPlan":
         """Add model-visible native declarations while preserving request aliases."""
         final = list(declarations)
-        occurrence: dict[tuple[Any, ...], int] = {}
-        matched_keys: set[tuple[Any, ...]] = set()
-        for declaration in final:
-            if isinstance(declaration, Mapping):
-                key = _declaration_key(declaration)
-                existing = self._entry_for_declaration(declaration, occurrence)
-                if existing is not None:
-                    matched_keys.add((key, existing.declaration_index))
         entries = list(self.entries)
-        existing_occurrence: dict[tuple[Any, ...], int] = {}
-        for entry in self.entries:
-            existing_occurrence[_declaration_key(entry.declaration)] = existing_occurrence.get(
-                _declaration_key(entry.declaration), 0
-            ) + 1
         native_names: set[str] = set()
         for declaration in final:
             if not isinstance(declaration, Mapping):
@@ -899,24 +949,34 @@ class ToolCompatibilityPlan:
     def _entry_for_name(self, name: Any, namespace: Any = None) -> ToolCompatibilityEntry | None:
         if not isinstance(name, str):
             return None
-        for entry in self.entries:
-            if (
-                entry.family == NAMESPACE
-                and (
-                    (
-                        (namespace is None or namespace == entry.namespace)
-                        and name in entry.child_names
-                    )
-                    or (
-                        namespace is None
-                        and any(name == f"{entry.namespace}__{child}" for child in entry.child_names)
-                    )
-                )
-            ):
-                return entry
-            if entry.family != NAMESPACE and entry.original_name == name:
-                return entry
-        return None
+        matches: list[ToolCompatibilityEntry] = []
+        if namespace is not None:
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family == NAMESPACE
+                and entry.namespace == namespace
+                and name in entry.child_names
+            ]
+        else:
+            # An unqualified child name is not enough to identify an adapted
+            # namespace call.  Prefer an exact non-namespace declaration (in
+            # particular a native plain function) and only accept the
+            # explicit flattened ``namespace__child`` spelling for an
+            # adapted namespace call.
+            matches = [
+                entry
+                for entry in self.entries
+                if entry.family != NAMESPACE and entry.original_name == name
+            ]
+            if not matches:
+                matches = [
+                    entry
+                    for entry in self.entries
+                    if entry.family == NAMESPACE
+                    and any(name == f"{entry.namespace}__{child}" for child in entry.child_names)
+                ]
+        return matches[0] if len(matches) == 1 else None
 
     def _entries_for_name(self, name: Any, namespace: Any = None) -> list[ToolCompatibilityEntry]:
         if not isinstance(name, str):
@@ -926,14 +986,24 @@ class ToolCompatibilityPlan:
             if entry.family == NAMESPACE:
                 if namespace is not None and namespace != entry.namespace:
                     continue
-                if name in entry.child_names or (
-                    namespace is None
-                    and any(name == f"{entry.namespace}__{child}" for child in entry.child_names)
+                if namespace is not None and name in entry.child_names:
+                    matches.append(entry)
+                elif namespace is None and any(
+                    name == f"{entry.namespace}__{child}" for child in entry.child_names
                 ):
                     matches.append(entry)
             elif entry.original_name == name:
-                matches.append(entry)
+                if namespace is None:
+                    matches.append(entry)
         return matches
+
+    def _has_unqualified_adapted_child(self, name: Any) -> bool:
+        return isinstance(name, str) and any(
+            entry.family == NAMESPACE
+            and entry.disposition == ADAPT
+            and name in entry.child_names
+            for entry in self.entries
+        )
 
     def _alias_for(self, entry: ToolCompatibilityEntry, *, child_name: str | None = None) -> str | None:
         if entry.family == NAMESPACE:
@@ -1044,9 +1114,13 @@ class ToolCompatibilityPlan:
                 result["type"] = "function"
                 result["name"] = aliases[0]
                 return result, True
-        entry = self._entry_for_name(name)
+        entry = self._entry_for_name(name, result.get("namespace"))
         if choice_type == "function" and isinstance(name, str):
-            candidates = [candidate for candidate in self._entries_for_name(name) if candidate.disposition == ADAPT]
+            candidates = [
+                candidate
+                for candidate in self._entries_for_name(name, result.get("namespace"))
+                if candidate.disposition == ADAPT
+            ]
             if len(candidates) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_tool_choice")
         alias = (
@@ -1057,6 +1131,7 @@ class ToolCompatibilityPlan:
         if alias:
             result["name"] = alias
             result["type"] = "function"
+            result.pop("namespace", None)
             return result, True
         return result, False
 
@@ -1351,7 +1426,13 @@ class ToolCompatibilityPlan:
                         decoded, item_changed = item, False
                     elif self.registry.looks_like_alias(item.get("name")):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
-                    elif self.has_adaptations and self._entry_for_name(item.get("name"), item.get("namespace")) is not None:
+                    elif self.has_adaptations and (
+                        self._entry_for_name(item.get("name"), item.get("namespace")) is not None
+                        or (
+                            item.get("namespace") is None
+                            and self._has_unqualified_adapted_child(item.get("name"))
+                        )
+                    ):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                     else:
                         decoded, item_changed = item, False
@@ -1360,7 +1441,13 @@ class ToolCompatibilityPlan:
                 if native_entry is not None:
                     self._validate_native_item(item, native_entry)
                     decoded, item_changed = item, False
-                elif self.has_adaptations and self._entry_for_name(item.get("name"), item.get("namespace")) is not None:
+                elif self.has_adaptations and (
+                    self._entry_for_name(item.get("name"), item.get("namespace")) is not None
+                    or (
+                        item.get("namespace") is None
+                        and self._has_unqualified_adapted_child(item.get("name"))
+                    )
+                ):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
                 else:
                     decoded, item_changed = item, False
@@ -1566,6 +1653,14 @@ class CompatibilityStreamState:
         if event_type in {"response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
             item_id = self._item_id(result)
             if item_id in self._native_pending:
+                expected_call_id, _family = self._native_pending[item_id]
+                supplied_call_id = result.get("call_id")
+                if supplied_call_id is not None and supplied_call_id != expected_call_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
                 delta = result.get("delta")
                 if not isinstance(delta, str):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_delta", surface="stream")
@@ -1589,10 +1684,18 @@ class CompatibilityStreamState:
         if event_type in {"response.function_call_arguments.done", "response.custom_tool_call_input.done"}:
             item_id = self._item_id(result)
             if item_id in self._native_pending:
+                expected_call_id, _family = self._native_pending[item_id]
+                supplied_call_id = result.get("call_id")
+                if supplied_call_id is not None and supplied_call_id != expected_call_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
                 if item_id in self._native_delta_done:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_stream_done", surface="stream")
                 arguments = result.get("arguments", result.get("input"))
-                if not isinstance(arguments, str) and event_type == "response.function_call_arguments.done":
+                if not isinstance(arguments, str):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                 self._native_delta_done.add(item_id)
                 return result

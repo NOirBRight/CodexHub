@@ -21599,12 +21599,20 @@ Execution constraints:
 
         compatible_request_body(
             body,
-            {"name": "ollama_cloud", "tool_surface_strategy": "eager"},
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "eager",
+            },
             event_context={"request_id": "<sanitized-request-id>"},
         )
         compatible_request_body(
             body,
-            {"name": "ollama_cloud", "tool_surface_strategy": "deferred_core"},
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "deferred_core",
+            },
             event_context={"request_id": "<sanitized-request-id>"},
         )
 
@@ -21730,7 +21738,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
 
@@ -21844,7 +21852,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         transcript = json.dumps(payload, ensure_ascii=True)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
@@ -21887,7 +21895,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=True)
@@ -22315,7 +22323,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
@@ -22360,7 +22368,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
@@ -22418,7 +22426,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
@@ -22690,7 +22698,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
@@ -22779,7 +22787,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
@@ -22881,7 +22889,7 @@ Execution constraints:
             }
         ).encode("utf-8")
 
-        transformed = compatible_request_body(body, {"name": "ollama_cloud"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_request_body(body, {"name": "ollama_cloud", "tool_protocol": "chat_tools"}, event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
         payload = json.loads(transformed)
         tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
         transcript = json.dumps(payload, ensure_ascii=False)
