@@ -336,6 +336,127 @@ def test_response_owner_ledger_preserves_native_custom_pair_with_omitted_unknown
 
 
 @pytest.mark.parametrize(
+    "output_type",
+    ["function_call_output", "vendor_extension_call_output"],
+    ids=["adapted-output", "unknown-output"],
+)
+def test_response_output_before_adapted_call_fails_closed_without_partial_reorder(output_type):
+    plan = _adapted_namespace_plan()
+    alias = plan.entries[0].aliases[0]
+    output = {
+        "type": output_type,
+        "id": "output-first",
+        "call_id": "adapted-call",
+        "output": "opaque",
+    }
+    call = {
+        "type": "function_call",
+        "id": "call-item",
+        "call_id": "adapted-call",
+        "name": alias,
+        "arguments": "{}",
+    }
+
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload({"output": [output, call]})
+    with pytest.raises(ToolCompatibilityError):
+        CompatibilityStreamState(plan).decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [output, call]}}
+        )
+
+
+@pytest.mark.parametrize("call_id", [None, ""], ids=["missing", "empty"])
+def test_encode_history_rejects_retained_call_without_call_identity(call_id):
+    plan = _native_plan({"type": "function", "name": "keep"})
+    item = {"type": "function_call", "name": "keep", "id": "item", "arguments": "{}"}
+    if call_id is not None:
+        item["call_id"] = call_id
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": [item]})
+
+    assert exc_info.value.classification == "missing_call_identity"
+
+
+@pytest.mark.parametrize("identity_key", ["id", "item_id"], ids=["id", "item-id"])
+def test_encode_history_rejects_duplicate_item_identity_even_with_distinct_call_ids(identity_key):
+    plan = _native_plan({"type": "function", "name": "keep"})
+    first = {
+        "type": "function_call",
+        "name": "keep",
+        identity_key: "duplicate-item",
+        "call_id": "call-a",
+        "arguments": "{}",
+    }
+    second = {**first, "call_id": "call-b"}
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": [first, second]})
+
+    assert exc_info.value.classification == "duplicate_item_identity"
+
+
+def test_encode_history_rejects_duplicate_outputs_with_one_call_id():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    history = [
+        {
+            "type": "function_call",
+            "name": "keep",
+            "id": "call-item",
+            "call_id": "call-one",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "id": "output-one", "call_id": "call-one", "output": "first"},
+        {"type": "function_call_output", "id": "output-two", "call_id": "call-one", "output": "second"},
+    ]
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": history})
+
+    assert exc_info.value.classification == "duplicate_call_identity"
+
+
+def _complete_native_stream(plan, *, family: str = "plain") -> tuple[CompatibilityStreamState, dict]:
+    declaration, item = _native_declaration_and_missing_body_item(family)
+    del declaration
+    state = CompatibilityStreamState(plan)
+    if family == "plain":
+        item["name"] = "keep"
+    item = {**item, "id": "native-item", "call_id": "native-call"}
+    state.decode_events_for_event({"type": "response.output_item.added", "item": item})
+    if family != "tool_search":
+        state.decode_events_for_event(
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "native-item",
+                "call_id": "native-call",
+                "arguments": "{}",
+            }
+        )
+    state.decode_events_for_event({"type": "response.output_item.done", "item": item})
+    return state, item
+
+
+@pytest.mark.parametrize(
+    "terminal_item",
+    [
+        {"type": "function_call", "id": "other-item", "call_id": "native-call", "name": "keep", "arguments": "{}"},
+        {"type": "function_call", "id": "native-item", "call_id": "other-call", "name": "keep", "arguments": "{}"},
+        {"type": "function_call", "id": "native-item", "call_id": "native-call", "name": "other", "arguments": "{}"},
+    ],
+    ids=["different-item", "different-call", "different-family-name"],
+)
+def test_native_stream_terminal_output_must_match_pending_item_identity(terminal_item):
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state, _item = _complete_native_stream(plan)
+
+    with pytest.raises(ToolCompatibilityError):
+        state.decode_events_for_event(
+            {"type": "response.completed", "response": {"output": [terminal_item]}}
+        )
+
+
+@pytest.mark.parametrize(
     "event",
     [
         {

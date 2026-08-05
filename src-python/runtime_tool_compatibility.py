@@ -1545,6 +1545,12 @@ class ToolCompatibilityPlan:
                 return f"{declaration_type}_call_output"
         return None
 
+    def _expected_response_output_type(self, entry: ToolCompatibilityEntry) -> str | None:
+        expected = self._history_output_type_for_entry(entry)
+        if entry.disposition == ADAPT and entry.family in {NAMESPACE, CUSTOM_FREEFORM}:
+            return "function_call_output"
+        return expected
+
     def _standard_contract_families_for_item(self, item: Mapping[str, Any]) -> frozenset[str]:
         item_type = item.get("type")
         if item_type == "function_call":
@@ -1658,9 +1664,11 @@ class ToolCompatibilityPlan:
 
         if item_type in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
             if owner is not None:
-                expected_output_type = self._history_output_type_for_entry(owner)
-                if surface == "response" and owner.disposition == ADAPT and owner.family in {NAMESPACE, CUSTOM_FREEFORM}:
-                    expected_output_type = "function_call_output"
+                expected_output_type = (
+                    self._expected_response_output_type(owner)
+                    if surface == "response"
+                    else self._history_output_type_for_entry(owner)
+                )
                 if item_type != expected_output_type:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
@@ -1715,6 +1723,35 @@ class ToolCompatibilityPlan:
             native = next((entry for entry in matches if entry.disposition == NATIVE), None)
             return native or (matches[0] if matches else None)
         return None
+
+    def _validate_response_owner_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        owner: ToolCompatibilityEntry | None,
+        call_index: int | None,
+        item_index: int,
+        surface: str,
+    ) -> None:
+        """Validate output-family ownership before response decoding starts."""
+        item_type = item.get("type")
+        if not isinstance(item_type, str) or not item_type.endswith("_call_output"):
+            return
+        if owner is None:
+            return
+        expected = self._expected_response_output_type(owner)
+        if expected is not None and item_type != expected:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_call_identity",
+                surface=surface,
+            )
+        if owner.disposition == ADAPT and call_index is not None and item_index < call_index:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_call_identity",
+                surface=surface,
+            )
 
     def _omitted_response_entry_for_item(
         self,
@@ -1854,6 +1891,48 @@ class ToolCompatibilityPlan:
                     if isinstance(call_id, str):
                         owner = history_call_owners.get(call_id)
                 return self._omitted_history_entry(item, owner=owner)
+
+            seen_history_item_ids: set[str] = set()
+            seen_history_output_call_ids: set[str] = set()
+            for item in raw_input:
+                if not isinstance(item, Mapping):
+                    continue
+                item_type = item.get("type")
+                omitted_entry = omitted_history_entry(item)
+                hosted_item_key = self._hosted_history_item_key(item_type)
+                is_optional_omitted_hosted = omitted_entry is not None and hosted_item_key is not None
+                if not is_optional_omitted_hosted:
+                    item_id = _item_identity(item)
+                    if item_id is not None:
+                        if item_id in seen_history_item_ids:
+                            raise ToolCompatibilityError(
+                                "tool_compatibility_boundary",
+                                "duplicate_item_identity",
+                                surface="history",
+                            )
+                        seen_history_item_ids.add(item_id)
+                if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
+                    call_id = item.get("call_id")
+                    if omitted_entry is None and (not isinstance(call_id, str) or not call_id):
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "missing_call_identity",
+                            surface="history",
+                        )
+                if isinstance(item_type, str) and item_type.endswith("_call_output"):
+                    call_id = item.get("call_id")
+                    if (
+                        not is_optional_omitted_hosted
+                        and isinstance(call_id, str)
+                        and call_id
+                    ):
+                        if call_id in seen_history_output_call_ids:
+                            raise ToolCompatibilityError(
+                                "tool_compatibility_boundary",
+                                "duplicate_call_identity",
+                                surface="history",
+                            )
+                        seen_history_output_call_ids.add(call_id)
 
             omitted_hosted_ids: dict[str, tuple[str, bool, bool]] = {}
             for item in raw_input:
@@ -2146,8 +2225,9 @@ class ToolCompatibilityPlan:
         seen_call_ids: set[str] = set()
         seen_result_call_ids: set[str] = set()
         response_call_owners: dict[str, ToolCompatibilityEntry] = {}
+        response_call_positions: dict[str, int] = {}
         surface = "response" if reject_omitted_response else "history"
-        for raw_item in items:
+        for item_index, raw_item in enumerate(items):
             if not isinstance(raw_item, Mapping):
                 continue
             if raw_item.get("type") not in {"function_call", "custom_tool_call", "tool_search_call"}:
@@ -2171,6 +2251,30 @@ class ToolCompatibilityPlan:
                     surface=surface,
                 )
             response_call_owners[call_id] = owner
+            response_call_positions[call_id] = item_index
+        response_output_call_ids: set[str] = set()
+        for item_index, raw_item in enumerate(items):
+            if not isinstance(raw_item, Mapping):
+                continue
+            call_id = raw_item.get("call_id")
+            item_type = raw_item.get("type")
+            if isinstance(item_type, str) and item_type.endswith("_call_output"):
+                if isinstance(call_id, str) and call_id:
+                    if call_id in response_output_call_ids:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "duplicate_call_identity",
+                            surface=surface,
+                        )
+                    response_output_call_ids.add(call_id)
+                owner = response_call_owners.get(call_id) if isinstance(call_id, str) else None
+                self._validate_response_owner_item(
+                    raw_item,
+                    owner=owner,
+                    call_index=response_call_positions.get(call_id) if isinstance(call_id, str) else None,
+                    item_index=item_index,
+                    surface=surface,
+                )
         for raw_item in items:
             if not isinstance(raw_item, Mapping):
                 result.append(raw_item)
@@ -2441,6 +2545,41 @@ class CompatibilityStreamState:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
 
+    def _validate_terminal_native_output(self, response: Mapping[str, Any]) -> None:
+        output = response.get("output")
+        if not isinstance(output, list) or not self._native_pending:
+            return
+        for item in output:
+            if not isinstance(item, Mapping):
+                continue
+            item_id = _item_identity(item)
+            pending = self._native_pending.get(item_id) if item_id is not None else None
+            native_entry = self._native_entry_for_item(item)
+            if pending is None:
+                # Adapter output is accounted for by the request-scoped alias
+                # ledger; any other native-shaped item must match a stream
+                # owner before it can appear in the terminal envelope.
+                if native_entry is not None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                continue
+            expected_call_id, expected_family = pending
+            if native_entry is None or native_entry.family != expected_family:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_native_identity",
+                    surface="stream",
+                )
+            if expected_call_id is not None and item.get("call_id") != expected_call_id:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_call_identity",
+                    surface="stream",
+                )
+
     def decode_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(event, Mapping):
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
@@ -2456,8 +2595,10 @@ class CompatibilityStreamState:
         if hosted_event_spec is not None:
             return self._decode_hosted_event(result, hosted_event_spec)
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
-            self._finish_terminal()
             response = result.get("response")
+            if isinstance(response, Mapping):
+                self._validate_terminal_native_output(response)
+            self._finish_terminal()
             if isinstance(response, Mapping):
                 decoded_output, output_changed = self.plan._decode_items(
                     response.get("output"),
