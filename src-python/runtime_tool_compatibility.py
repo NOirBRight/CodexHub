@@ -2206,6 +2206,30 @@ class ToolCompatibilityPlan:
             )
             if entry is not None and entry.disposition == NATIVE:
                 return entry
+            # A native plain declaration can be surfaced by providers using
+            # the explicit namespace/child shape that normally belongs to a
+            # native namespace declaration.  Resolve only the exact,
+            # injective ``namespace__child`` spelling; arbitrary namespace
+            # decoration must remain an unknown identity.
+            if item_type == "function_call":
+                namespace = item.get("namespace")
+                child_name = item.get("name")
+                if isinstance(namespace, str) and namespace and isinstance(child_name, str) and child_name:
+                    flattened_name = f"{namespace}__{child_name}"
+                    flattened_matches = [
+                        candidate
+                        for candidate in self.entries
+                        if candidate.family == PLAIN_FUNCTION
+                        and candidate.disposition == NATIVE
+                        and candidate.original_name == flattened_name
+                    ]
+                    if len(flattened_matches) > 1:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                        )
+                    if flattened_matches:
+                        return flattened_matches[0]
             return None
         if item_type in {"tool_search_call", "tool_search_output"}:
             matches = [
@@ -2262,7 +2286,16 @@ class ToolCompatibilityPlan:
             )
         item_type = item.get("type")
         if entry.family == PLAIN_FUNCTION:
-            if item_type != "function_call" or item.get("name") != entry.original_name:
+            namespace = item.get("namespace")
+            plain_shape = namespace is None and item.get("name") == entry.original_name
+            flattened_shape = (
+                isinstance(namespace, str)
+                and namespace
+                and isinstance(item.get("name"), str)
+                and item.get("name")
+                and f"{namespace}__{item.get('name')}" == entry.original_name
+            )
+            if item_type != "function_call" or not (plain_shape or flattened_shape):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
         elif entry.family == NAMESPACE:
             if (
@@ -2521,6 +2554,25 @@ class _BufferedCustomStreamItem:
 
 
 @dataclass(slots=True)
+class _OpaqueStreamItem:
+    """Track a provider-local custom call without claiming a declaration.
+
+    Some upstream Responses streams still expose the legacy ``custom_tool_call``
+    lifecycle even when the request did not declare a structured custom tool.
+    The wire item itself is the only owner available in that case.  Keep that
+    owner opaque, but apply the same identity and terminal checks as declared
+    calls.
+    """
+
+    item_id: str
+    call_id: str
+    wire_identity: tuple[Any, Any, Any]
+    fragments: list[str] = field(default_factory=list)
+    arguments_done: bool = False
+    item_done: bool = False
+
+
+@dataclass(slots=True)
 class _HostedStreamState:
     event_kind: str
     stages: tuple[str, ...]
@@ -2555,6 +2607,10 @@ class CompatibilityStreamState:
         self._native_fragments: dict[str, list[str]] = {}
         self._hosted_pending: dict[str, _HostedStreamState] = {}
         self._buffered_custom: dict[str, _BufferedCustomStreamItem] = {}
+        # Provider-local custom calls have no declaration/alias owner.  Keep
+        # an opaque stream owner once ``output_item.added`` establishes it so
+        # later deltas and terminal events cannot borrow an arbitrary id.
+        self._opaque_pending: dict[str, _OpaqueStreamItem] = {}
         self._terminal = False
 
     @property
@@ -2591,6 +2647,46 @@ class CompatibilityStreamState:
 
     def _native_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
         return self.plan._native_entry_for_item(item)
+
+    def _record_opaque_added(self, item: Mapping[str, Any]) -> _OpaqueStreamItem | None:
+        """Record an undeclared legacy custom call established by ``added``."""
+        if item.get("type") != "custom_tool_call":
+            return None
+        item_id = self._item_id(item)
+        call_id = item.get("call_id")
+        if item_id is None or not isinstance(call_id, str) or not call_id:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_stream_identity",
+                surface="stream",
+            )
+        if item_id in self._seen_item_ids or item_id in self._opaque_pending:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_item_identity",
+                surface="stream",
+            )
+        if call_id in self._seen_call_ids or any(
+            opaque.call_id == call_id for opaque in self._opaque_pending.values()
+        ):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_call_identity",
+                surface="stream",
+            )
+        opaque = _OpaqueStreamItem(
+            item_id=item_id,
+            call_id=call_id,
+            wire_identity=self._native_wire_identity(item),
+        )
+        self._seen_item_ids.add(item_id)
+        self._seen_call_ids.add(call_id)
+        self._opaque_pending[item_id] = opaque
+        return opaque
+
+    @staticmethod
+    def _opaque_payload(value: Any) -> tuple[str, Any]:
+        return ("opaque_input", _freeze(value))
 
     def _native_item_id_for_event(self, value: Mapping[str, Any]) -> str | None:
         item = value.get("item")
@@ -2809,7 +2905,11 @@ class CompatibilityStreamState:
             )
             for item_id, (_call_id, entry) in self._native_pending.items()
         )
-        if incomplete or native_incomplete:
+        opaque_incomplete = any(
+            not opaque.arguments_done or not opaque.item_done
+            for opaque in self._opaque_pending.values()
+        )
+        if incomplete or native_incomplete or opaque_incomplete:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
 
@@ -2888,6 +2988,41 @@ class CompatibilityStreamState:
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
                             surface="stream",
+                    )
+                    continue
+                opaque = self._opaque_pending.get(item_id) if item_id is not None else None
+                if opaque is not None:
+                    if item.get("call_id") != opaque.call_id:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_call_identity",
+                            surface="stream",
+                        )
+                    if self._native_wire_identity(item) != opaque.wire_identity:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    if "input" in item:
+                        terminal_input = item.get("input")
+                    elif "arguments" in item:
+                        terminal_input = item.get("arguments")
+                    else:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "incomplete_stream_delta",
+                            surface="stream",
+                        )
+                    payload = self._opaque_payload(terminal_input)
+                    if (
+                        item_id in self._wire_payloads
+                        and self._wire_payloads[item_id] != payload
+                    ):
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
                         )
                     continue
                 if isinstance(item.get("call_id"), str) and any(
@@ -2913,6 +3048,15 @@ class CompatibilityStreamState:
                     # binding is still sufficient to verify the terminal
                     # alias, so let the exact match through.
                     continue
+                if isinstance(item.get("call_id"), str) and any(
+                    opaque.call_id == item.get("call_id")
+                    for opaque in self._opaque_pending.values()
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
                 # Adapter output is accounted for by the request-scoped alias
                 # ledger; any other native-shaped item must match a stream
                 # owner before it can appear in the terminal envelope.
@@ -3058,7 +3202,30 @@ class CompatibilityStreamState:
                 self._native_pending[item_id] = (call_id, native_entry)
                 self._native_wire_identities[item_id] = self._native_wire_identity(item)
                 result["item"] = decoded_item
-            elif self.plan.has_adaptations and item.get("type") in {"function_call", "custom_tool_call"}:
+            elif item.get("type") == "custom_tool_call":
+                if self.plan._omitted_response_entry_for_item(item) is not None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unsupported_hosted_lifecycle",
+                        surface="stream",
+                    )
+                adapted_entry = (
+                    self.plan._entry_for_name(
+                        item.get("name"),
+                        item.get("namespace"),
+                        item_type=item.get("type"),
+                    )
+                    if self.plan.has_adaptations
+                    else None
+                )
+                if adapted_entry is not None and adapted_entry.disposition == ADAPT:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unknown_alias",
+                        surface="stream",
+                    )
+                self._record_opaque_added(item)
+            elif self.plan.has_adaptations and item.get("type") == "function_call":
                 adapted_entry = self.plan._entry_for_name(
                     item.get("name"),
                     item.get("namespace"),
@@ -3106,6 +3273,30 @@ class CompatibilityStreamState:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_stream_done", surface="stream")
                 self._native_fragments.setdefault(item_id, []).append(delta)
                 return result
+            opaque = self._opaque_pending.get(item_id) if item_id is not None else None
+            if opaque is not None:
+                supplied_call_id = result.get("call_id")
+                if supplied_call_id is not None and supplied_call_id != opaque.call_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
+                if opaque.arguments_done or opaque.item_done:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_stream_done",
+                        surface="stream",
+                    )
+                delta = result.get("delta")
+                if not isinstance(delta, str):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "malformed_stream_delta",
+                        surface="stream",
+                    )
+                opaque.fragments.append(delta)
+                return result
             if item_id not in self._pending:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
             pending = self._pending_for(result)
@@ -3147,6 +3338,38 @@ class CompatibilityStreamState:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
                 self._wire_payloads[item_id] = payload
                 self._native_delta_done.add(item_id)
+                return result
+            opaque = self._opaque_pending.get(item_id) if item_id is not None else None
+            if opaque is not None:
+                supplied_call_id = result.get("call_id")
+                if supplied_call_id is not None and supplied_call_id != opaque.call_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_call_identity",
+                        surface="stream",
+                    )
+                if opaque.arguments_done:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_stream_done",
+                        surface="stream",
+                    )
+                arguments = result.get("arguments", result.get("input"))
+                if not isinstance(arguments, str):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "incomplete_stream_delta",
+                        surface="stream",
+                    )
+                fragments = opaque.fragments
+                if fragments and "".join(fragments) != arguments:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "incomplete_stream_delta",
+                        surface="stream",
+                    )
+                opaque.arguments_done = True
+                self._wire_payloads[item_id] = self._opaque_payload(arguments)
                 return result
             if item_id not in self._pending:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
@@ -3193,6 +3416,55 @@ class CompatibilityStreamState:
                         surface="stream",
                     )
                 native_item_id = self._item_id(item)
+                opaque = self._opaque_pending.get(native_item_id) if native_item_id else None
+                if opaque is not None:
+                    if item.get("call_id") != opaque.call_id:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_call_identity",
+                            surface="stream",
+                        )
+                    if self._native_wire_identity(item) != opaque.wire_identity:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    if not opaque.arguments_done:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "incomplete_stream_delta",
+                            surface="stream",
+                        )
+                    if opaque.item_done:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "duplicate_item_identity",
+                            surface="stream",
+                        )
+                    if "input" in item:
+                        terminal_input = item.get("input")
+                    elif "arguments" in item:
+                        terminal_input = item.get("arguments")
+                    else:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "incomplete_stream_delta",
+                            surface="stream",
+                        )
+                    payload = self._opaque_payload(terminal_input)
+                    if (
+                        native_item_id in self._wire_payloads
+                        and self._wire_payloads[native_item_id] != payload
+                    ):
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                    opaque.item_done = True
+                    self._wire_payloads[native_item_id] = payload
+                    return result
                 native_pending = self._native_pending.get(native_item_id) if native_item_id else None
                 if native_pending is not None:
                     call_id = item.get("call_id")
@@ -3229,7 +3501,22 @@ class CompatibilityStreamState:
                     return result
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is not None:
+                    if (
+                        native_entry.family == PLAIN_FUNCTION
+                        and native_entry.original_name == "tool_search"
+                        and item.get("type") == "function_call"
+                        and item.get("name") == "tool_search"
+                        and item.get("namespace") is None
+                    ):
+                        self.plan._validate_native_item(item, native_entry)
+                        return result
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
+                if item.get("type") == "custom_tool_call":
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_stream_identity",
+                        surface="stream",
+                    )
                 if self.plan._omitted_response_entry_for_item(item) is not None:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",

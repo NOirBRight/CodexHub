@@ -686,6 +686,119 @@ def test_native_stream_requires_added_owner_before_terminal_item_event(event):
     assert exc_info.value.classification == "missing_stream_identity"
 
 
+def test_unknown_custom_stream_owner_preserves_legacy_apply_patch_lifecycle():
+    plan = _native_plan({"type": "function", "name": "shell_command"})
+    state = CompatibilityStreamState(plan)
+    added_item = {
+        "type": "custom_tool_call",
+        "id": "patch-item",
+        "call_id": "patch-call",
+        "name": "apply_patch",
+        "input": "",
+    }
+    input_text = "*** Begin Patch\n*** End Patch\n"
+
+    assert state.decode_events_for_event(
+        {"type": "response.output_item.added", "item": added_item}
+    )[0]["item"] == added_item
+    assert state.decode_events_for_event(
+        {
+            "type": "response.custom_tool_call_input.delta",
+            "item_id": "patch-item",
+            "call_id": "patch-call",
+            "delta": input_text,
+        }
+    )[0]["delta"] == input_text
+    assert state.decode_events_for_event(
+        {
+            "type": "response.custom_tool_call_input.done",
+            "item_id": "patch-item",
+            "call_id": "patch-call",
+            "input": input_text,
+        }
+    )[0]["input"] == input_text
+    done_item = {**added_item, "input": input_text}
+    assert state.decode_events_for_event(
+        {"type": "response.output_item.done", "item": done_item}
+    )[0]["item"] == done_item
+    state.decode_events_for_event(
+        {"type": "response.completed", "response": {"output": []}}
+    )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "response.custom_tool_call_input.delta",
+            "item_id": "orphan-item",
+            "call_id": "orphan-call",
+            "delta": "opaque",
+        },
+        {
+            "type": "response.custom_tool_call_input.done",
+            "item_id": "orphan-item",
+            "call_id": "orphan-call",
+            "input": "opaque",
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "custom_tool_call",
+                "id": "orphan-item",
+                "call_id": "orphan-call",
+                "name": "apply_patch",
+                "input": "opaque",
+            },
+        },
+    ],
+    ids=["delta", "arguments-done", "item-done"],
+)
+def test_unknown_custom_stream_requires_added_owner(event):
+    plan = _native_plan({"type": "function", "name": "shell_command"})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        CompatibilityStreamState(plan).decode_events_for_event(event)
+    assert exc_info.value.classification == "missing_stream_identity"
+
+
+def test_native_plain_stream_accepts_exact_flattened_namespace_wire_identity():
+    plan = _native_plan({"type": "function", "name": "multi_agent_v1__spawn_agent"})
+    state = CompatibilityStreamState(plan)
+    item = {
+        "type": "function_call",
+        "namespace": "multi_agent_v1",
+        "name": "spawn_agent",
+        "id": "flattened-item",
+        "call_id": "flattened-call",
+        "arguments": "",
+    }
+    state.decode_events_for_event({"type": "response.output_item.added", "item": item})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "flattened-item",
+            "call_id": "flattened-call",
+            "arguments": "{}",
+        }
+    )
+    state.decode_events_for_event(
+        {"type": "response.output_item.done", "item": {**item, "arguments": "{}"}}
+    )
+
+
+def test_native_plain_tool_search_wrapper_keeps_no_added_terminal_path():
+    plan = _native_plan({"type": "function", "name": "tool_search"})
+    state = CompatibilityStreamState(plan)
+    item = {
+        "type": "function_call",
+        "name": "tool_search",
+        "id": "tool-search-item",
+        "call_id": "tool-search-call",
+        "arguments": "",
+    }
+    state.decode_events_for_event({"type": "response.output_item.done", "item": item})
+
+
 def test_buffered_custom_delta_and_done_require_bound_call_id():
     plan = build_tool_compatibility_plan(
         [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
