@@ -3107,9 +3107,7 @@ class CompatibilityStreamState:
                 self._native_fragments.setdefault(item_id, []).append(delta)
                 return result
             if item_id not in self._pending:
-                if self.plan.has_adaptations:
-                    raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
-                return result
+                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
             pending = self._pending_for(result)
             if isinstance(result.get("call_id"), str) and result.get("call_id") != pending.call_id:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
@@ -3151,9 +3149,7 @@ class CompatibilityStreamState:
                 self._native_delta_done.add(item_id)
                 return result
             if item_id not in self._pending:
-                if self.plan.has_adaptations:
-                    raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
-                return result
+                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
             pending = self._pending_for(result)
             if isinstance(result.get("call_id"), str) and result.get("call_id") != pending.call_id:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
@@ -3233,10 +3229,7 @@ class CompatibilityStreamState:
                     return result
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is not None:
-                    if native_entry.family == SELECTED_PROVIDER_HOSTED:
-                        raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
-                    self.plan._validate_native_item(item, native_entry)
-                    return result
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
                 if self.plan._omitted_response_entry_for_item(item) is not None:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",

@@ -654,6 +654,38 @@ def test_native_response_output_before_call_fails_closed():
         plan.decode_payload({"output": [output, call]})
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "orphan-item",
+            "call_id": "orphan-call",
+            "arguments": "{}",
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "orphan-item",
+                "call_id": "orphan-call",
+                "name": "keep",
+                "arguments": "{}",
+            },
+        },
+    ],
+    ids=["arguments-done", "output-item-done"],
+)
+def test_native_stream_requires_added_owner_before_terminal_item_event(event):
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state = CompatibilityStreamState(plan)
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_events_for_event(event)
+
+    assert exc_info.value.classification == "missing_stream_identity"
+
+
 def test_buffered_custom_delta_and_done_require_bound_call_id():
     plan = build_tool_compatibility_plan(
         [{"type": "custom", "name": "paint", "format": {"type": "text"}}],
