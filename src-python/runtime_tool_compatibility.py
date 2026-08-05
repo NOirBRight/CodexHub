@@ -2530,6 +2530,10 @@ class _HostedStreamState:
 class CompatibilityStreamState:
     """Assemble one adapted Responses SSE lifecycle before inverse mapping."""
 
+    _TERMINAL_EVENT_TYPES = frozenset(
+        {"response.completed", "response.incomplete", "response.failed"}
+    )
+
     def __init__(self, plan: ToolCompatibilityPlan) -> None:
         self.plan = plan
         self._pending: dict[str, _PendingStreamItem] = {}
@@ -2960,6 +2964,7 @@ class CompatibilityStreamState:
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
         result = _copy_mapping(event)
         event_type = result.get("type")
+        self._reject_after_terminal(event_type)
         if _is_unsupported_hosted_stream_event(event_type):
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
@@ -3277,6 +3282,10 @@ class CompatibilityStreamState:
             surface="stream",
         )
 
+    def _reject_after_terminal(self, event_type: Any) -> None:
+        if self._terminal and event_type not in self._TERMINAL_EVENT_TYPES:
+            raise self._stream_error("stream_after_terminal")
+
     @staticmethod
     def _native_custom_item(
         item: Mapping[str, Any],
@@ -3295,6 +3304,7 @@ class CompatibilityStreamState:
             raise self._stream_error("malformed_stream_event")
         value = _copy_mapping(event)
         event_type = value.get("type")
+        self._reject_after_terminal(event_type)
         item = value.get("item")
 
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:

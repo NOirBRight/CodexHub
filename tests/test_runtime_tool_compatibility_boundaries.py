@@ -2031,3 +2031,48 @@ def test_adapted_custom_original_name_cannot_be_used_as_plain_function_call():
                 },
             }
         )
+
+
+def test_stream_rejects_lifecycle_events_after_terminal_but_keeps_terminal_marker_guard():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    state = CompatibilityStreamState(plan)
+    added = {
+        "type": "function_call",
+        "id": "native-item",
+        "call_id": "native-call",
+        "name": "keep",
+        "arguments": "",
+    }
+    state.decode_events_for_event({"type": "response.output_item.added", "item": added})
+    state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "native-item",
+            "call_id": "native-call",
+            "arguments": "{}",
+        }
+    )
+    completed_item = {**added, "arguments": "{}"}
+    state.decode_events_for_event({"type": "response.output_item.done", "item": completed_item})
+    terminal = {"type": "response.completed", "response": {"output": [completed_item]}}
+    state.decode_events_for_event(terminal)
+
+    for event in (
+        {
+            "type": "response.output_item.added",
+            "item": {**added, "id": "late-item", "call_id": "late-call", "arguments": ""},
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "native-item",
+            "call_id": "native-call",
+            "delta": "late",
+        },
+    ):
+        with pytest.raises(ToolCompatibilityError) as exc_info:
+            state.decode_events_for_event(event)
+        assert exc_info.value.classification == "stream_after_terminal"
+
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        state.decode_event(terminal)
+    assert exc_info.value.classification == "duplicate_terminal"
