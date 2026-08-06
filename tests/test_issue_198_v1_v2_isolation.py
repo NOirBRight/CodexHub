@@ -377,6 +377,7 @@ def test_model_switch_v2_history_to_v1_current_surface_is_allowed() -> None:
     ))
 
     assert context["collaboration_protocol"] == COLLABORATION_V1
+    assert payload["model"] == body["model"]
     assert payload["input"][0]["namespace"] == "collaboration"
     assert payload["tools"][0]["name"] == "multi_agent_v1"
 
@@ -398,6 +399,7 @@ def test_model_switch_v1_history_to_v2_current_surface_is_allowed() -> None:
     ))
 
     assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert payload["model"] == body["model"]
     assert payload["input"][0]["namespace"] == "multi_agent_v1"
     assert payload["tools"][0]["name"] == "collaboration"
 
