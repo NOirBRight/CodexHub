@@ -1,5 +1,19 @@
 {
   "capture_kind": "sanitized_bounded_read_only_audit",
+  "provenance": {
+    "capture_status": "not_observed",
+    "cli_version": "0.146.0",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_source_commit_status": "published_attested",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
+    "historical_capture": {
+      "captured_at": "2026-07-12T14:57:55+08:00",
+      "cli_version": "0.144.0-alpha.4",
+      "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
+    }
+  },
   "gate_classification": {
     "choice_controls": "observed",
     "clean_cold_start_current_binding": "live_control_required",
@@ -349,6 +363,62 @@
         }
       ]
     },
+    "declaration_families": [
+      {
+        "family": "plain_function",
+        "runtime_type": "function",
+        "wire_declaration_type": "function",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "custom_freeform",
+        "runtime_type": "custom",
+        "wire_declaration_type": "custom",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "namespace",
+        "runtime_type": "namespace",
+        "wire_declaration_type": "namespace",
+        "observed": true,
+        "observation": "observed",
+        "executor": "codex_client",
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      {
+        "family": "client_executed_tool_discovery",
+        "runtime_type": "tool_search",
+        "wire_declaration_type": "tool_search",
+        "observed": true,
+        "observation": "observed_client_execution",
+        "executor": "codex_client",
+        "loss_boundary": "discovery request/result stays client-executed"
+      },
+      {
+        "family": "selected_provider_hosted",
+        "runtime_type": "web_search",
+        "wire_declaration_type": "web_search",
+        "observed": false,
+        "observation": "not_observed_selected_provider_only",
+        "executor": "selected_provider",
+        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly"
+      },
+      {
+        "family": "unknown_future_kind",
+        "runtime_type": "unknown",
+        "wire_declaration_type": "<unknown>",
+        "observed": false,
+        "observation": "opaque_sentinel_only",
+        "executor": "unknown",
+        "loss_boundary": "retain tag and opaque payload; do not normalize"
+      }
+    ],
     "top_level_field_presence": [
       "client_metadata",
       "include",

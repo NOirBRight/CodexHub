@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "fixture_kind": "codex_cli_source_contract",
+  "capture_status": "not_observed",
+  "qualification_status": "unqualified",
+  "captured_at": null,
+  "provenance": {
+    "cli_version": "0.146.0",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "cli_source_tag": "rust-v0.146.0",
+    "cli_source_commit_status": "published_attested",
+    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82"
+  },
+  "runtime_wire_surface": {
+    "source": "Codex CLI 0.146.0 ToolSpec and ResponseItem source contract",
+    "declaration_family_order": [
+      "plain_function",
+      "custom_freeform",
+      "namespace",
+      "client_executed_tool_discovery",
+      "selected_provider_hosted",
+      "unknown_future_kind"
+    ],
+    "declaration_families": [
+      {"family": "plain_function", "runtime_type": "function", "wire_declaration_type": "function", "observed": false, "observation": "not_observed_source_contract_only", "executor": "codex_client", "loss_boundary": "preserve declaration and inverse call/result/history IDs"},
+      {"family": "custom_freeform", "runtime_type": "custom", "wire_declaration_type": "custom", "observed": false, "observation": "not_observed_source_contract_only", "executor": "codex_client", "loss_boundary": "preserve declaration and inverse call/result/history IDs"},
+      {"family": "namespace", "runtime_type": "namespace", "wire_declaration_type": "namespace", "observed": false, "observation": "not_observed_source_contract_only", "executor": "codex_client", "loss_boundary": "preserve declaration and inverse call/result/history IDs"},
+      {"family": "client_executed_tool_discovery", "runtime_type": "tool_search", "wire_declaration_type": "tool_search", "observed": false, "observation": "not_observed_source_contract_only", "executor": "codex_client", "loss_boundary": "discovery request/result stays client-executed"},
+      {"family": "selected_provider_hosted", "runtime_type": "web_search", "wire_declaration_type": "web_search", "observed": false, "observation": "not_observed_selected_provider_control_required", "executor": "selected_provider", "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly"},
+      {"family": "unknown_future_kind", "runtime_type": "unknown", "wire_declaration_type": "<unknown>", "observed": false, "observation": "opaque_sentinel_only", "executor": "unknown", "loss_boundary": "retain tag and opaque payload; do not normalize"}
+    ],
+    "request_shape": {
+      "protocol": "responses",
+      "streaming_fields": [
+        "model",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "stream_options",
+        "include",
+        "service_tier",
+        "prompt_cache_key",
+        "text",
+        "client_metadata"
+      ],
+      "representative": {
+        "model": "gpt-5.6-sol",
+        "input": "<redacted>",
+        "tools": "<redacted>",
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "stream": true,
+        "store": false
+      },
+      "non_streaming_control": {
+        "stream": false,
+        "response_body": "<redacted>",
+        "captured": false,
+        "status": "unqualified"
+      }
+    },
+    "response_shape": {
+      "response_item_types": [
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        "web_search_call",
+        "local_shell_call",
+        "compaction",
+        "context_compaction",
+        "unknown"
+      ],
+      "stream_event_order": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.function_call_arguments.done",
+        "response.custom_tool_call_input.done",
+        "response.output_item.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.completed"
+      ],
+      "terminal_events": [
+        "response.completed",
+        "response.incomplete",
+        "response.failed"
+      ],
+      "error_shape": {
+        "event": "response.failed",
+        "response": {"id": "response_error_001", "status": "failed", "error": "<redacted>"},
+        "classification": "unqualified"
+      }
+    },
+    "declaration_family_examples": {
+      "plain_function": {
+        "declaration": {"type": "function", "name": "function_alpha", "parameters": "<redacted>"},
+        "call": {"type": "function_call", "item_id": "item_call_function_001", "call_id": "call_function_001", "arguments": "<redacted>"},
+        "result": {"type": "function_call_output", "item_id": "item_output_function_001", "call_id": "call_function_001", "output": "<redacted>"},
+        "history": {"call_id": "call_function_001", "call_item_id": "item_call_function_001", "output_item_id": "item_output_function_001"},
+        "streaming": {"added": "response.output_item.added", "delta": "response.function_call_arguments.delta", "arguments_done": "response.function_call_arguments.done", "done": "response.output_item.done", "terminal": "response.completed", "event_order": ["response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      "custom_freeform": {
+        "declaration": {"type": "custom", "name": "custom_alpha", "format": "<redacted>"},
+        "call": {"type": "custom_tool_call", "item_id": "item_call_custom_001", "call_id": "call_custom_001", "input": "<redacted>"},
+        "result": {"type": "custom_tool_call_output", "item_id": "item_output_custom_001", "call_id": "call_custom_001", "output": "<redacted>"},
+        "history": {"call_id": "call_custom_001", "call_item_id": "item_call_custom_001", "output_item_id": "item_output_custom_001"},
+        "streaming": {"added": "response.output_item.added", "delta": "response.custom_tool_call_input.delta", "input_done": "response.custom_tool_call_input.done", "done": "response.output_item.done", "terminal": "response.completed", "event_order": ["response.output_item.added", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done", "response.output_item.done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      "namespace": {
+        "declaration": {"type": "namespace", "name": "namespace_alpha", "tools": [{"type": "function", "name": "function_beta", "parameters": "<redacted>"}]},
+        "call": {"type": "function_call", "item_id": "item_call_namespace_001", "call_id": "call_namespace_001", "namespace": "namespace_alpha", "arguments": "<redacted>"},
+        "result": {"type": "function_call_output", "item_id": "item_output_namespace_001", "call_id": "call_namespace_001", "output": "<redacted>"},
+        "history": {"call_id": "call_namespace_001", "call_item_id": "item_call_namespace_001", "output_item_id": "item_output_namespace_001", "namespace": "namespace_alpha"},
+        "streaming": {"added": "response.output_item.added", "delta": "response.function_call_arguments.delta", "arguments_done": "response.function_call_arguments.done", "done": "response.output_item.done", "terminal": "response.completed", "event_order": ["response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "preserve declaration and inverse call/result/history IDs"
+      },
+      "client_executed_tool_discovery": {
+        "declaration": {"type": "tool_search", "execution": "client", "parameters": "<redacted>"},
+        "call": {"type": "tool_search_call", "item_id": "item_call_search_001", "call_id": "call_search_001", "execution": "client", "arguments": "<redacted>"},
+        "result": {"type": "tool_search_output", "item_id": "item_output_search_001", "call_id": "call_search_001", "execution": "client", "tools": "<redacted>"},
+        "history": {"call_id": "call_search_001", "call_item_id": "item_call_search_001", "output_item_id": "item_output_search_001", "executor": "codex_client"},
+        "streaming": {"added": null, "delta": null, "done": "response.output_item.done", "terminal": "response.completed", "event_order": ["response.output_item.done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "discovery request/result stays client-executed"
+      },
+      "selected_provider_hosted": {
+        "declaration": {"type": "web_search", "executor": "selected_provider", "provider_scope": "selected_provider_only"},
+        "call": {"type": "web_search_call", "item_id": "item_call_hosted_001", "status": "<redacted>", "action": "<redacted>"},
+        "result": {"type": "web_search_call", "item_id": "item_output_hosted_001", "status": "<redacted>", "provider_scope": "selected_provider_only"},
+        "history": {"call_id": null, "call_item_id": "item_call_hosted_001", "output_item_id": "item_output_hosted_001", "executor": "selected_provider", "cross_provider_proxy": "forbidden"},
+        "streaming": {"added": "response.output_item.added", "delta": "<provider-defined>", "done": "response.output_item.done", "terminal": "response.completed", "event_order": ["response.output_item.added", "<provider-defined>", "response.output_item.done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
+        "observed": false,
+        "status": "selected_provider_control_required",
+        "provider_scope": "selected_provider_only",
+        "cross_provider_proxy": "forbidden"
+      },
+      "unknown_future_kind": {
+        "declaration": {"type": "unknown", "tag": "unknown", "opaque_payload": "<redacted>"},
+        "call": {"type": "unknown", "tag": "unknown", "opaque_payload": "<redacted>"},
+        "result": {"type": "unknown", "tag": "unknown", "opaque_payload": "<redacted>"},
+        "history": {"call_id": null, "call_item_id": null, "output_item_id": null, "loss_rule": "retain opaque sentinel"},
+        "streaming": {"added": "unknown.future_event", "delta": "unknown.future_delta", "done": "unknown.future_done", "terminal": "response.completed", "event_order": ["unknown.future_event", "unknown.future_delta", "unknown.future_done", "response.completed"]},
+        "terminal": {"event": "response.completed", "classification": "not_observed"},
+        "error": {"event": "response.failed", "classification": "unqualified"},
+        "loss_boundary": "retain tag and opaque payload; do not normalize",
+        "observed": false,
+        "status": "opaque_sentinel_only"
+      }
+    }
+  }
+}

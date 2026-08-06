@@ -5,5 +5,6 @@ if defined CODEXHUB_E2E_VERSION_PROBE (
 )
 echo(%*| findstr /C:"-a never" >nul && exit /b 21
 echo(%*| findstr /C:"--skip-git-repo-check" >nul || exit /b 22
+echo(%*| findstr /C:"features.apps=false" >nul || exit /b 23
 call "%~dp0fake-client-real-contract.cmd" %*
 exit /b %errorlevel%

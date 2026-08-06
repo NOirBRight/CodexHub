@@ -1,4 +1,5 @@
 param(
+    [string]$SourceContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codex-0.146-source-contract.json'),
     [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
     [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
     [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
@@ -11,12 +12,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($path in @($TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
+foreach ($path in @($SourceContractPath, $TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Evidence file not found: $path"
     }
 }
 
+$sourceContract = Get-Content -Raw -LiteralPath $SourceContractPath | ConvertFrom-Json
 $trace = Get-Content -Raw -LiteralPath $TracePath | ConvertFrom-Json
 $wire = Get-Content -Raw -LiteralPath $WireFixturePath | ConvertFrom-Json
 $audit = Get-Content -Raw -LiteralPath $AuditPath | ConvertFrom-Json
@@ -26,6 +28,331 @@ $mismatches = [System.Collections.Generic.List[string]]::new()
 function Add-Mismatch {
     param([string]$Message)
     $script:mismatches.Add($Message)
+}
+
+$expectedFamilySchemas = @(
+    @{ Name = 'plain_function'; RuntimeType = 'function'; WireType = 'function'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'function'; CallType = 'function_call'; ResultType = 'function_call_output'; DeclarationRequired = @('name', 'parameters'); CallRequired = @('item_id', 'call_id', 'arguments'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id') },
+    @{ Name = 'custom_freeform'; RuntimeType = 'custom'; WireType = 'custom'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'custom'; CallType = 'custom_tool_call'; ResultType = 'custom_tool_call_output'; DeclarationRequired = @('name', 'format'); CallRequired = @('item_id', 'call_id', 'input'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id') },
+    @{ Name = 'namespace'; RuntimeType = 'namespace'; WireType = 'namespace'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'preserve declaration and inverse call/result/history IDs'; DeclarationType = 'namespace'; CallType = 'function_call'; ResultType = 'function_call_output'; DeclarationRequired = @('name', 'tools'); CallRequired = @('item_id', 'call_id', 'namespace', 'arguments'); ResultRequired = @('item_id', 'call_id', 'output'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'namespace') },
+    @{ Name = 'client_executed_tool_discovery'; RuntimeType = 'tool_search'; WireType = 'tool_search'; Executor = 'codex_client'; Observation = 'not_observed_source_contract_only'; LossBoundary = 'discovery request/result stays client-executed'; DeclarationType = 'tool_search'; CallType = 'tool_search_call'; ResultType = 'tool_search_output'; DeclarationRequired = @('execution', 'parameters'); CallRequired = @('item_id', 'call_id', 'execution', 'arguments'); ResultRequired = @('item_id', 'call_id', 'execution', 'tools'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'executor') },
+    @{ Name = 'selected_provider_hosted'; RuntimeType = 'web_search'; WireType = 'web_search'; Executor = 'selected_provider'; Observation = 'not_observed_selected_provider_control_required'; LossBoundary = 'optional unsupported hosted capability is omitted; required capability fails visibly'; DeclarationType = 'web_search'; CallType = 'web_search_call'; ResultType = 'web_search_call'; DeclarationRequired = @('executor', 'provider_scope'); CallRequired = @('item_id', 'status', 'action'); ResultRequired = @('item_id', 'status', 'provider_scope'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'executor', 'cross_provider_proxy') },
+    @{ Name = 'unknown_future_kind'; RuntimeType = 'unknown'; WireType = '<unknown>'; Executor = 'unknown'; Observation = 'opaque_sentinel_only'; LossBoundary = 'retain tag and opaque payload; do not normalize'; DeclarationType = 'unknown'; CallType = 'unknown'; ResultType = 'unknown'; DeclarationRequired = @('tag', 'opaque_payload'); CallRequired = @('tag', 'opaque_payload'); ResultRequired = @('tag', 'opaque_payload'); HistoryRequired = @('call_id', 'call_item_id', 'output_item_id', 'loss_rule') }
+)
+$sourceContractSchemaValid = $true
+$sourceContractFamilies = @($sourceContract.runtime_wire_surface.declaration_families)
+$sourceContractExamples = $sourceContract.runtime_wire_surface.declaration_family_examples
+
+function Test-ExactPropertySet {
+    param(
+        [object]$Value,
+        [string[]]$Expected
+    )
+
+    if ($null -eq $Value) {
+        return $false
+    }
+    $actual = @($Value.PSObject.Properties.Name)
+    foreach ($name in $Expected) {
+        if ($actual -notcontains $name) {
+            return $false
+        }
+    }
+    foreach ($name in $actual) {
+        if ($Expected -notcontains $name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+if (-not (Test-ExactPropertySet -Value $sourceContract -Expected @(
+            'schema_version', 'fixture_kind', 'capture_status',
+            'qualification_status', 'captured_at', 'provenance',
+            'runtime_wire_surface'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.provenance -Expected @(
+            'cli_version', 'source_commit', 'cli_source_tag',
+            'cli_source_commit_status', 'cli_binary_sha256', 'candidate_revision'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface -Expected @(
+            'source', 'declaration_family_order', 'declaration_families',
+            'request_shape', 'response_shape', 'declaration_family_examples'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape -Expected @(
+            'protocol', 'streaming_fields', 'representative', 'non_streaming_control'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape.representative -Expected @(
+            'model', 'input', 'tools', 'tool_choice', 'parallel_tool_calls', 'stream', 'store'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.request_shape.non_streaming_control -Expected @(
+            'stream', 'response_body', 'captured', 'status'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+$expectedRequestStreamingFields = @(
+    'model', 'instructions', 'input', 'tools', 'tool_choice',
+    'parallel_tool_calls', 'reasoning', 'store', 'stream', 'stream_options',
+    'include', 'service_tier', 'prompt_cache_key', 'text', 'client_metadata'
+)
+if (
+    $sourceContract.runtime_wire_surface.request_shape.protocol -ne 'responses' -or
+    ($sourceContract.runtime_wire_surface.request_shape.streaming_fields -join '|') -ne ($expectedRequestStreamingFields -join '|')
+) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.request_shape.representative.model -ne 'gpt-5.6-sol' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.input -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.tools -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.tool_choice -ne 'auto' -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.parallel_tool_calls -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.stream -ne $true -or
+    $sourceContract.runtime_wire_surface.request_shape.representative.store -ne $false
+) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.stream -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.response_body -ne '<redacted>' -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.captured -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.status -ne 'unqualified'
+) {
+    $sourceContractSchemaValid = $false
+}
+$expectedResponseItemTypes = @(
+    'message', 'reasoning', 'function_call', 'function_call_output',
+    'custom_tool_call', 'custom_tool_call_output', 'tool_search_call',
+    'tool_search_output', 'web_search_call', 'local_shell_call',
+    'compaction', 'context_compaction', 'unknown'
+)
+$expectedResponseStreamEventOrder = @(
+    'response.created', 'response.in_progress', 'response.output_item.added',
+    'response.output_text.delta', 'response.function_call_arguments.delta',
+    'response.custom_tool_call_input.delta', 'response.function_call_arguments.done',
+    'response.custom_tool_call_input.done', 'response.output_item.done',
+    'response.reasoning_summary_part.added', 'response.reasoning_summary_text.delta',
+    'response.reasoning_summary_text.done', 'response.completed'
+)
+$expectedResponseTerminalEvents = @('response.completed', 'response.incomplete', 'response.failed')
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape -Expected @(
+            'response_item_types', 'stream_event_order', 'terminal_events', 'error_shape'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape.error_shape -Expected @(
+            'event', 'response', 'classification'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContract.runtime_wire_surface.response_shape.error_shape.response -Expected @(
+            'id', 'status', 'error'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.response_item_types -join '|') -ne ($expectedResponseItemTypes -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.stream_event_order -join '|') -ne ($expectedResponseStreamEventOrder -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (($sourceContract.runtime_wire_surface.response_shape.terminal_events -join '|') -ne ($expectedResponseTerminalEvents -join '|')) {
+    $sourceContractSchemaValid = $false
+}
+if (
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.event -ne 'response.failed' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.classification -ne 'unqualified' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.id -ne 'response_error_001' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.status -ne 'failed' -or
+    $sourceContract.runtime_wire_surface.response_shape.error_shape.response.error -ne '<redacted>'
+) {
+    $sourceContractSchemaValid = $false
+}
+if (-not (Test-ExactPropertySet -Value $sourceContractExamples -Expected @(
+            'plain_function', 'custom_freeform', 'namespace',
+            'client_executed_tool_discovery', 'selected_provider_hosted',
+            'unknown_future_kind'
+        ))) {
+    $sourceContractSchemaValid = $false
+}
+$nullableByFamily = @{
+    selected_provider_hosted = @{ history = @('call_id') }
+    unknown_future_kind = @{ history = @('call_id', 'call_item_id', 'output_item_id') }
+}
+$nonEmptyStringFields = @('name', 'namespace', 'executor', 'execution', 'provider_scope', 'cross_provider_proxy', 'tag', 'loss_rule', 'item_id', 'call_id', 'call_item_id', 'output_item_id')
+$expectedSseSchemas = @{
+    plain_function = @{ Added = 'response.output_item.added'; Delta = 'response.function_call_arguments.delta'; DoneField = 'arguments_done'; Done = 'response.function_call_arguments.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.function_call_arguments.delta', 'response.function_call_arguments.done', 'response.output_item.done', 'response.completed') }
+    custom_freeform = @{ Added = 'response.output_item.added'; Delta = 'response.custom_tool_call_input.delta'; DoneField = 'input_done'; Done = 'response.custom_tool_call_input.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.custom_tool_call_input.delta', 'response.custom_tool_call_input.done', 'response.output_item.done', 'response.completed') }
+    namespace = @{ Added = 'response.output_item.added'; Delta = 'response.function_call_arguments.delta'; DoneField = 'arguments_done'; Done = 'response.function_call_arguments.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', 'response.function_call_arguments.delta', 'response.function_call_arguments.done', 'response.output_item.done', 'response.completed') }
+    client_executed_tool_discovery = @{ Added = $null; Delta = $null; DoneField = 'done'; Done = 'response.output_item.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.done', 'response.completed') }
+    selected_provider_hosted = @{ Added = 'response.output_item.added'; Delta = '<provider-defined>'; DoneField = 'done'; Done = 'response.output_item.done'; ItemDone = 'response.output_item.done'; Terminal = 'response.completed'; Order = @('response.output_item.added', '<provider-defined>', 'response.output_item.done', 'response.completed') }
+    unknown_future_kind = @{ Added = 'unknown.future_event'; Delta = 'unknown.future_delta'; DoneField = 'done'; Done = 'unknown.future_done'; ItemDone = 'unknown.future_done'; Terminal = 'response.completed'; Order = @('unknown.future_event', 'unknown.future_delta', 'unknown.future_done', 'response.completed') }
+}
+$redactedStructuralFields = @('parameters', 'arguments', 'input', 'output', 'format', 'action', 'status', 'tools', 'opaque_payload')
+$nonEmptyStructuralFields = @('name', 'namespace', 'executor', 'execution', 'provider_scope', 'cross_provider_proxy', 'tag', 'loss_rule', 'item_id', 'call_id', 'call_item_id', 'output_item_id')
+foreach ($expected in $expectedFamilySchemas) {
+    $family = @($sourceContractFamilies | Where-Object { $_.family -eq $expected.Name }) | Select-Object -First 1
+    $exampleProperty = if ($null -ne $sourceContractExamples) { $sourceContractExamples.PSObject.Properties[$expected.Name] } else { $null }
+    $example = if ($null -ne $exampleProperty) { $exampleProperty.Value } else { $null }
+    if ($null -eq $family -or $null -eq $example -or
+        $family.runtime_type -ne $expected.RuntimeType -or
+        $family.wire_declaration_type -ne $expected.WireType -or
+        $family.executor -ne $expected.Executor -or
+        $family.observation -ne $expected.Observation -or
+        $family.loss_boundary -ne $expected.LossBoundary) {
+        $sourceContractSchemaValid = $false
+        continue
+    }
+    if (-not (Test-ExactPropertySet -Value $family -Expected @(
+                'family', 'runtime_type', 'wire_declaration_type', 'observed',
+                'observation', 'executor', 'loss_boundary'
+            ))) {
+        $sourceContractSchemaValid = $false
+    }
+    $expectedExampleFields = @(
+        'declaration', 'call', 'result', 'history', 'streaming',
+        'terminal', 'error', 'loss_boundary'
+    )
+    if ($expected.Name -eq 'selected_provider_hosted') {
+        $expectedExampleFields += @('observed', 'status', 'provider_scope', 'cross_provider_proxy')
+    } elseif ($expected.Name -eq 'unknown_future_kind') {
+        $expectedExampleFields += @('observed', 'status')
+    }
+    if (-not (Test-ExactPropertySet -Value $example -Expected $expectedExampleFields)) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($expected.Name -eq 'selected_provider_hosted' -and
+        ($example.observed -ne $false -or
+         $example.status -ne 'selected_provider_control_required' -or
+         $example.provider_scope -ne 'selected_provider_only' -or
+         $example.cross_provider_proxy -ne 'forbidden')) {
+        $sourceContractSchemaValid = $false
+    } elseif ($expected.Name -eq 'unknown_future_kind' -and
+        ($example.observed -ne $false -or $example.status -ne 'opaque_sentinel_only')) {
+        $sourceContractSchemaValid = $false
+    }
+    $sections = @(
+        @{ Name = 'declaration'; Type = $expected.DeclarationType; Required = $expected.DeclarationRequired },
+        @{ Name = 'call'; Type = $expected.CallType; Required = $expected.CallRequired },
+        @{ Name = 'result'; Type = $expected.ResultType; Required = $expected.ResultRequired },
+        @{ Name = 'history'; Type = $null; Required = $expected.HistoryRequired }
+    )
+    foreach ($sectionSpec in $sections) {
+        $sectionProperty = $example.PSObject.Properties[$sectionSpec.Name]
+        $section = if ($null -ne $sectionProperty) { $sectionProperty.Value } else { $null }
+        if ($null -eq $section -or ($null -ne $sectionSpec.Type -and $section.type -ne $sectionSpec.Type)) {
+            $sourceContractSchemaValid = $false
+            continue
+        }
+        $expectedSectionFields = @($sectionSpec.Required)
+        if ($null -ne $sectionSpec.Type) {
+            $expectedSectionFields += 'type'
+        }
+        if (-not (Test-ExactPropertySet -Value $section -Expected $expectedSectionFields)) {
+            $sourceContractSchemaValid = $false
+        }
+        foreach ($required in $sectionSpec.Required) {
+            $requiredProperty = $section.PSObject.Properties[$required]
+            $nullableFields = @()
+            if ($nullableByFamily.ContainsKey($expected.Name) -and $nullableByFamily[$expected.Name].ContainsKey($sectionSpec.Name)) {
+                $nullableFields = @($nullableByFamily[$expected.Name][$sectionSpec.Name])
+            }
+            if ($null -eq $requiredProperty -or
+                ($required -in $nonEmptyStringFields -and
+                    $required -notin $nullableFields -and
+                    ($null -eq $requiredProperty.Value -or
+                        $requiredProperty.Value -isnot [string] -or
+                        [string]::IsNullOrEmpty($requiredProperty.Value)))) {
+                $sourceContractSchemaValid = $false
+            }
+        }
+        foreach ($property in $section.PSObject.Properties) {
+            if ($property.Name -eq 'type' -or $property.Name -in $nonEmptyStructuralFields) {
+                continue
+            }
+            if ($property.Name -eq 'tools' -and $expected.Name -eq 'namespace' -and $sectionSpec.Name -eq 'declaration') {
+                if ($property.Value -isnot [array] -or @($property.Value).Count -eq 0) {
+                    $sourceContractSchemaValid = $false
+                    continue
+                }
+                foreach ($nested in @($property.Value)) {
+                    if (-not (Test-ExactPropertySet -Value $nested -Expected @('type', 'name', 'parameters')) -or
+                        $nested.type -ne 'function' -or
+                        $nested.name -isnot [string] -or [string]::IsNullOrEmpty($nested.name) -or
+                        $nested.parameters -ne '<redacted>') {
+                        $sourceContractSchemaValid = $false
+                    }
+                }
+                continue
+            }
+            if ($property.Name -in $redactedStructuralFields -and $property.Value -ne '<redacted>') {
+                $sourceContractSchemaValid = $false
+            } elseif ($property.Value -isnot [string]) {
+                $sourceContractSchemaValid = $false
+            }
+        }
+    }
+    if ($expected.Name -eq 'client_executed_tool_discovery' -and
+        ($example.declaration.execution -ne 'client' -or
+         $example.call.execution -ne 'client' -or
+         $example.result.execution -ne 'client' -or
+         $example.history.executor -ne 'codex_client')) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($expected.Name -eq 'selected_provider_hosted' -and
+        ($example.declaration.executor -ne 'selected_provider' -or
+         $example.declaration.provider_scope -ne 'selected_provider_only' -or
+         $example.result.provider_scope -ne 'selected_provider_only' -or
+         $example.history.executor -ne 'selected_provider' -or
+         $example.history.cross_provider_proxy -ne 'forbidden')) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($expected.Name -eq 'unknown_future_kind' -and
+        ($example.declaration.tag -ne 'unknown' -or
+         $example.call.tag -ne 'unknown' -or
+         $example.result.tag -ne 'unknown' -or
+         $example.history.call_id -ne $null -or
+         $example.history.call_item_id -ne $null -or
+         $example.history.output_item_id -ne $null -or
+         $example.history.loss_rule -ne 'retain opaque sentinel')) {
+        $sourceContractSchemaValid = $false
+    }
+    if (-not (Test-ExactPropertySet -Value $example.terminal -Expected @('event', 'classification')) -or
+        $example.terminal.event -ne 'response.completed' -or
+        $example.terminal.classification -notin @('not_observed', 'unqualified') -or
+        -not (Test-ExactPropertySet -Value $example.error -Expected @('event', 'classification')) -or
+        $example.error.event -ne 'response.failed' -or
+        $example.error.classification -notin @('not_observed', 'unqualified') -or
+        $example.loss_boundary -isnot [string] -or [string]::IsNullOrEmpty($example.loss_boundary)) {
+        $sourceContractSchemaValid = $false
+    }
+    $sseSchema = $expectedSseSchemas[$expected.Name]
+    $streamProperty = $example.PSObject.Properties['streaming']
+    $stream = if ($null -ne $streamProperty) { $streamProperty.Value } else { $null }
+    $doneProperty = if ($null -ne $stream) { $stream.PSObject.Properties[$sseSchema.DoneField] } else { $null }
+    $expectedStreamFields = @('added', 'delta', 'done', 'terminal', 'event_order', $sseSchema.DoneField) | Select-Object -Unique
+    if (-not (Test-ExactPropertySet -Value $stream -Expected $expectedStreamFields)) {
+        $sourceContractSchemaValid = $false
+    }
+    if ($null -eq $stream -or
+        $stream.added -ne $sseSchema.Added -or
+        $stream.delta -ne $sseSchema.Delta -or
+        $stream.terminal -ne $sseSchema.Terminal -or
+        $stream.done -ne $sseSchema.ItemDone -or
+        $null -eq $doneProperty -or
+        $doneProperty.Value -ne $sseSchema.Done -or
+        (($stream.event_order -join '|') -ne ($sseSchema.Order -join '|'))) {
+        $sourceContractSchemaValid = $false
+    }
 }
 
 # Rebuild the inventory from the bound evidence and compare it with the
@@ -39,6 +366,7 @@ if ($null -eq $python) {
 } else {
     try {
         $generatorOutput = & $python.Source $inventoryGenerator `
+            --source-contract $SourceContractPath `
             --trace $TracePath `
             --wire-fixture $WireFixturePath `
             --audit $AuditPath `
@@ -405,7 +733,11 @@ foreach ($link in $callLinks) {
 
 $streamUnknown = @($wire.response.streaming.events | Where-Object { $_.tag -eq 'unknown' })
 $nonStreamingUnknown = @($wire.response.non_streaming.response_items | Where-Object { $_.tag -eq 'unknown' })
-$unknownTaggedSourceCount = Get-UnknownTaggedSourceCount -Value $wire
+$responseUnknownSource = [PSCustomObject]@{
+    streaming = $wire.response.streaming
+    non_streaming = $wire.response.non_streaming
+}
+$unknownTaggedSourceCount = Get-UnknownTaggedSourceCount -Value $responseUnknownSource
 if (
     $inventory.identity_control.unknown_tagged_source_count -le 0 -or
     $inventory.identity_control.unknown_tagged_source_count -ne $unknownTaggedSourceCount
@@ -619,7 +951,7 @@ foreach ($scope in $allRequiredScopes) {
 if (
     $inventory.artifact_kind -ne 'runtime_wire_inventory' -or
     $inventory.schema_version -ne 1 -or
-    $inventory.cli_version_floor -ne '0.145.0'
+    $inventory.cli_version_floor -ne '0.146.0'
 ) {
     Add-Mismatch 'inventory artifact identity or CLI version floor is invalid'
 }
@@ -655,16 +987,70 @@ foreach ($field in @('catalog_snapshot_sha256','evidence_manifest_sha256')) {
         Add-Mismatch "inventory candidate $field is not a lowercase 64-character SHA-256"
     }
 }
-if (
-    [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
-    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id)
-) {
-    Add-Mismatch 'candidate trace/wire capture identity is missing'
+if ([string]$inventoryCandidate.candidate_revision -notmatch '^[0-9a-f]{40}$') {
+    Add-Mismatch 'inventory candidate revision is not a lowercase 40-character SHA-1'
+}
+if ([string]$inventoryCandidate.cli_binary_sha256 -notmatch '^[0-9a-f]{64}$') {
+    Add-Mismatch 'inventory candidate CLI binary SHA-256 is invalid'
+}
+if ([string]$inventoryCandidate.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb') {
+    Add-Mismatch 'inventory candidate CLI binary SHA-256 is not the retained Codex 0.146.0 binary'
+}
+if ([string]$inventoryCandidate.cli_source_commit_status -notin @('published_attested','not_published_by_registry')) {
+    Add-Mismatch 'inventory candidate CLI source commit status is invalid'
+}
+if ([string]::IsNullOrWhiteSpace([string]$inventoryCandidate.cli_source_tag)) {
+    Add-Mismatch 'inventory candidate CLI source tag is missing or blank'
 }
 if (
-    $inventoryCandidate.cli_version -ne $trace.source.cli_version -or
-    $inventoryCandidate.source_commit -ne $trace.planner_gates.source_commit -or
-    $inventoryCandidate.codex_source_commit -ne $trace.planner_gates.source_commit -or
+    $sourceContract.schema_version -ne 1 -or
+    $sourceContract.fixture_kind -ne 'codex_cli_source_contract' -or
+    $sourceContract.capture_status -ne 'not_observed' -or
+    $sourceContract.qualification_status -ne 'unqualified' -or
+    $null -ne $sourceContract.captured_at -or
+    $sourceContract.provenance.cli_version -ne '0.146.0' -or
+    $sourceContract.provenance.source_commit -ne 'e363b08c9175ac1cbe5893615dd2cb9ddf95043b' -or
+    $sourceContract.provenance.cli_source_tag -ne 'rust-v0.146.0' -or
+    $sourceContract.provenance.cli_source_commit_status -ne 'published_attested' -or
+    $sourceContract.provenance.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb' -or
+    $sourceContract.provenance.candidate_revision -ne 'accab8ff6eb4d6ebd93cda84585fb5f6cb89da82' -or
+    -not $sourceContractSchemaValid -or
+    $sourceContract.runtime_wire_surface.declaration_families.Count -ne 6 -or
+    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observed -ne $false }).Count -ne 0 -or
+    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observation -notin @('not_observed_source_contract_only', 'not_observed_selected_provider_control_required', 'opaque_sentinel_only') }).Count -ne 0 -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.captured -ne $false -or
+    $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.status -ne 'unqualified' -or
+    [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
+    [string]::IsNullOrWhiteSpace([string]$wire.provenance.capture_id) -or
+    $trace.captured_at -ne '2026-07-12T14:57:55+08:00' -or
+    $wire.provenance.captured_at -ne '2026-07-12T14:57:55+08:00'
+) {
+    Add-Mismatch 'source contract or historical trace/wire provenance is invalid'
+}
+if (
+    $trace.source.cli_version -ne '0.144.0-alpha.4' -or
+    $trace.planner_gates.source_commit -ne '9e552e9d15ba52bed7077d5357f3e18e330f8f38' -or
+    $trace.captured_at -ne '2026-07-12T14:57:55+08:00' -or
+    $wire.provenance.cli_version -ne $trace.source.cli_version -or
+    $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
+    $wire.provenance.captured_at -ne $trace.captured_at -or
+    $inventoryCandidate.cli_version -ne $sourceContract.provenance.cli_version -or
+    $inventoryCandidate.source_commit -ne $sourceContract.provenance.source_commit -or
+    $inventoryCandidate.codex_source_commit -ne $sourceContract.provenance.source_commit -or
+    $inventoryCandidate.candidate_revision -ne $sourceContract.provenance.candidate_revision -or
+    $inventoryCandidate.cli_binary_sha256 -ne $sourceContract.provenance.cli_binary_sha256 -or
+    $inventoryCandidate.cli_source_commit_status -ne $sourceContract.provenance.cli_source_commit_status -or
+    $inventoryCandidate.cli_source_tag -ne $sourceContract.provenance.cli_source_tag -or
+    $audit.provenance.capture_status -ne 'not_observed' -or
+    $audit.provenance.cli_version -ne $sourceContract.provenance.cli_version -or
+    $audit.provenance.source_commit -ne $sourceContract.provenance.source_commit -or
+    $audit.provenance.candidate_revision -ne $sourceContract.provenance.candidate_revision -or
+    $audit.provenance.cli_binary_sha256 -ne $sourceContract.provenance.cli_binary_sha256 -or
+    $audit.provenance.cli_source_commit_status -ne $sourceContract.provenance.cli_source_commit_status -or
+    $audit.provenance.cli_source_tag -ne $sourceContract.provenance.cli_source_tag -or
+    $audit.provenance.historical_capture.captured_at -ne $trace.captured_at -or
+    $audit.provenance.historical_capture.cli_version -ne $trace.source.cli_version -or
+    $audit.provenance.historical_capture.source_commit -ne $trace.planner_gates.source_commit -or
     $inventoryCandidate.route_upstream -ne $wire.route.upstream_route -or
     $inventoryCandidate.inbound_format -ne $wire.route.inbound_format -or
     $inventoryCandidate.upstream_format -ne $wire.route.upstream_format -or
@@ -687,8 +1073,6 @@ if (
     $wire.route.catalog_snapshot_sha256 -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.sha256 -or
     $wire.route.catalog_model_entry_id -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_id -or
     $wire.route.catalog_model_supports_search_tool -ne $trace.planner_gates.catalog_source.read_only_snapshot_validation.model_entry_supports_search_tool -or
-    $wire.provenance.cli_version -ne $trace.source.cli_version -or
-    $wire.provenance.source_commit -ne $trace.planner_gates.source_commit -or
     $wire.provenance.capture_id -ne $trace.source.capture_id -or
     $wire.pre_gateway.model -ne $trace.source.model -or
     $wire.post_gateway.model -ne $trace.source.model
@@ -696,6 +1080,7 @@ if (
     Add-Mismatch 'inventory candidate identity does not bind to the exact trace and wire candidate route'
 }
 $evidenceBindings = @{
+    source_contract = $SourceContractPath
     trace = $TracePath
     wire_fixture = $WireFixturePath
     audit = $AuditPath
@@ -712,7 +1097,7 @@ foreach ($name in $evidenceBindings.Keys) {
         Add-Mismatch "inventory evidence binding $name hash does not match the input artifact"
     }
 }
-$manifestParts = foreach ($name in @('audit','trace','wire_fixture')) {
+$manifestParts = foreach ($name in @('audit','source_contract','trace','wire_fixture')) {
     $binding = $inventory.evidence_binding.$name
     '{0}:{1}:{2}' -f $name, $binding.file, $binding.sha256
 }
@@ -816,6 +1201,9 @@ $qualification = $inventory.qualification
 if (-not $qualification -or $qualification.candidate_version_status -notin @('eligible','legacy_below_floor')) {
     Add-Mismatch 'inventory qualification candidate version status is invalid'
 }
+if ($qualification.PSObject.Properties.Name -contains 'ready_for_beta1') {
+    Add-Mismatch 'inventory qualification ready_for_beta1 is stale; use ready_for_beta2'
+}
 $blockingScopes = @(
     $coreEvidence.Keys + $requiredLiveControlScopes + $requiredChoiceScope |
         Sort-Object -Unique
@@ -889,8 +1277,8 @@ if ((($qualification.blocking_gates | Sort-Object) -join '|') -ne (($observedBlo
     Add-Mismatch 'inventory qualification blocking_gates does not match trace/audit'
 }
 $expectedReady = $expectedCandidateEligible -and $observedBlockingScopes.Count -eq 0 -and $observedBlockingGates.Count -eq 0
-if ([bool]$qualification.ready_for_beta1 -ne $expectedReady) {
-    Add-Mismatch 'inventory qualification ready_for_beta1 is inconsistent with evidence blockers'
+if ([bool]$qualification.ready_for_beta2 -ne $expectedReady) {
+    Add-Mismatch 'inventory qualification ready_for_beta2 is inconsistent with evidence blockers'
 }
 $advancedScopes = @('code_mode','tool_search','collaboration_v2','chat_conversion')
 foreach ($scope in $advancedScopes) {

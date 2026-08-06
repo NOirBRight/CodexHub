@@ -35,9 +35,10 @@ language full suite. A `fast` isolated UI or pure-logic change still runs the
 narrow compile/test command that proves its acceptance, but does not duplicate
 the repository's complete language suite locally.
 
-After review fixes, run affected targeted checks and rely on CI. Repeat a local
-full suite only when the delta crosses a new row of this matrix. Do not rerun a
-full suite merely because a reviewer re-read the same candidate.
+After review fixes, rerun the affected targeted checks on the reviewed exact
+SHA. For `standard` and `strict` work, run the relevant local full suite once
+on that candidate. Do not rerun a full suite merely because a reviewer re-read
+the same candidate.
 
 ## Manual and runtime evidence
 
@@ -51,22 +52,22 @@ hypothesis or materially changed environment.
 changed Python, TypeScript/TSX, or Rust source is in its scan scope; findings do
 not block PR, merge, or release under the current policy.
 
-## CI authority
+## Local verification authority
 
-GitHub Actions always creates the classifier and `CI / gate` for every PR to
-`dev` or `main`. The immutable classifier selects the applicable formal jobs
-(Python core, synthetic real-client contract, frontend build and UI contract,
-Rust tests for both flavors, Rust clippy, release flavor contract, and the
-safe_file Linux compile/lint/tests). Unknown paths, planner/workflow changes,
-path-read failures, and non-PR events fail closed to the full matrix. Routine
-checks run on fresh GitHub-hosted Windows and Linux runners. Because the
-repository is public, fork PR code is allowed to run only on those disposable
-hosted VMs; it never receives access to a persistent developer or self-hosted
-machine. True real-client Desktop/CLI evidence remains a local release-
-operator procedure.
-Local risk selection reduces duplicate work; it does not weaken CI. When CI is
-unavailable and a merge must proceed, reproduce the full fallback in
-`docs/agents/ci.md`.
+GitHub Actions CI is disabled for CodexHub. There is no required status check
+and no Hosted runner result can approve a merge or release. The former
+classifier and Hosted matrix are retained as historical reference only.
+The authoritative sequence for every candidate is:
+
+1. implement on an isolated worker branch;
+2. review the exact candidate SHA (Spec/Quality as required by the Issue);
+3. run the local focused and affected full suites selected below;
+4. run any Issue-required CLI, Desktop, or provider manual check;
+5. record the local result before merge, tag, or release.
+
+Unknown paths, planner/workflow changes, and release candidates should fail
+closed to the complete local matrix. True real-client Desktop/CLI evidence
+remains a local release-operator procedure.
 
 ### Python checks
 
@@ -79,14 +80,12 @@ suite is only invoked when its contract surface actually changed:
 - **`Synthetic real-client contract`** is selected for the real-client E2E
   dependency surface and runs `tests/test_real_client_e2e.py` in full.
 
-Non-PR events (`push`, `workflow_dispatch`, the weekly full-validation
-`schedule`, release/full-validation, and unknown events) fail closed and run
-the full matrix. The unified planner lives at
+The unified planner lives at
 `scripts/ci/ci_change_plan.py`; the existing Python partition planner remains
 the source of the core/synthetic partition definitions used by local fallback
-and is tested by `tests/test_ci_python_plan.py`. The Hosted workflow keeps
-those same stable pytest arguments after the unified planner selects the job.
-Collection completeness is verified by
+and is tested by `tests/test_ci_python_plan.py`. Use the same stable pytest
+arguments locally when the corresponding boundary is selected. Collection
+completeness is verified by
 `python scripts/ci/check_python_test_partitions.py`.
 
 Existing active work migrates incrementally: retain already completed full

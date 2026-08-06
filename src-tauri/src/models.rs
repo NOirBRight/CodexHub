@@ -634,7 +634,10 @@ fn wait_for_native_model_cache_publication(
 fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(cache_path).ok()?;
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
-    payload.get("models")?.as_array()?;
+    let models = payload.get("models")?.as_array()?;
+    if models.is_empty() || models.iter().any(|item| !item.is_object()) {
+        return None;
+    }
     // Detailed freshness, identity, and comp_hash authority remains in
     // catalog_sync.py.  This seam only proves that a stable JSON cache was
     // atomically published; the caller separately requires it to differ from
@@ -2970,6 +2973,102 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn app_server_model_list_accepts_models_and_bare_array_response_shapes() {
+        let root = temp_root("app-server-response-shapes");
+        let script = root.join("fake-codex-app-server.py");
+        fs::write(
+            &script,
+            r#"import json
+import os
+import sys
+import time
+
+model = {
+    "id": "gpt-5.6-terra",
+    "model": "gpt-5.6-terra",
+    "visibility": "list",
+    "hidden": False,
+    "context_window": 272000,
+    "effective_context_window_percent": 95,
+}
+if os.environ["MODEL_LIST_SHAPE"] == "models":
+    result = {"models": [model]}
+else:
+    result = [model]
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") != 2:
+        continue
+    print(json.dumps({"id": 2, "result": result}), flush=True)
+    time.sleep(2)
+"#,
+        )
+        .unwrap();
+
+        for shape in ["models", "array"] {
+            let cache_path = root
+                .join(format!("{shape}-codex-home"))
+                .join("models_cache.json");
+            fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+            let mut command = std::process::Command::new(super::find_python());
+            command
+                .arg(&script)
+                .env("MODEL_LIST_SHAPE", shape);
+
+            let result = super::read_codex_app_server_model_list_with_cache_path(
+                command,
+                Duration::from_secs(2),
+                &cache_path,
+                Duration::from_millis(100),
+            )
+            .expect("model/list response shape should be accepted");
+            let model = json!({
+                "id": "gpt-5.6-terra",
+                "model": "gpt-5.6-terra",
+                "visibility": "list",
+                "hidden": false,
+                "context_window": 272000,
+                "effective_context_window_percent": 95
+            });
+            let expected = if shape == "models" {
+                json!({"models": [model]})
+            } else {
+                json!([model])
+            };
+            assert_eq!(result, expected);
+            assert!(!cache_path.is_file());
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn readable_native_model_cache_rejects_malformed_model_entries() {
+        let root = temp_root("malformed-native-model-cache");
+        let cache_path = root.join("models_cache.json");
+        let cases = [
+            ("invalid-json", "{not-json", false),
+            ("missing-models", "{}", false),
+            ("empty-models", r#"{"models":[]}"#, false),
+            ("null-model", r#"{"models":[null]}"#, false),
+            ("string-model", r#"{"models":["gpt-5.6-terra"]}"#, false),
+            ("object-model", r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#, true),
+        ];
+
+        for (name, payload, expected_readable) in cases {
+            fs::write(&cache_path, payload).unwrap();
+            assert_eq!(
+                super::readable_native_model_cache(&cache_path).is_some(),
+                expected_readable,
+                "unexpected native cache readability for {name}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn app_server_model_list_accepts_valid_response_without_native_cache_publication() {
         let root = temp_root("app-server-missing-cache");
         let cache_path = root.join("codex-home").join("models_cache.json");
@@ -2978,11 +3077,17 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
+        // A Windows test binary can take more than 500 ms to start under a
+        // loaded workspace. Keep this helper-only response budget bounded
+        // well below the production 20 s native-cache grace: if the code
+        // regresses into waiting for cache publication despite complete
+        // context metadata, the 5 s cache grace below outlasts the 4 s
+        // elapsed bound and keeps that wait observable.
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(2),
             &cache_path,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
         )
         .expect("valid model/list response must not require native cache publication");
 
@@ -3000,7 +3105,7 @@ for line in sys.stdin:
             })
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(4),
             "model/list handling must remain bounded without native cache publication"
         );
         assert!(!cache_path.is_file());
