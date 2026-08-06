@@ -8,6 +8,7 @@ Date: 2026-08-06
 - Issue108 gate-fix SHA: `d9c25b4` (exact scoped review; no release tag).
 - Active-call harness SHA: `959b40d` (test-only synthetic evidence; no release tag).
 - Active-call isolation hardening SHA: `8602858` (test-only; no release tag).
+- Active-call cleanup sanitization SHA: `2639a0c` (test-only; no release tag).
 - Base: `48efb0a` (`v0.1.8-beta.2`).
 - Whole-branch review: clean. The final-fix scoped re-review addressed the request-history validation finding. No Critical or Important findings remain.
 - The Issue108 replay fix received an exact-SHA scoped review with no Critical or Important findings.
@@ -25,8 +26,8 @@ Date: 2026-08-06
   the repository's Python 3.13 interpreter instead of an ambient Python 3.11
   that cannot parse the repository's type-parameter syntax.
 - Active-call harness unit tests: **4 passed**; the combined focused run was
-  **36 passed**.
-- Full Python core gate (`--ignore=tests/test_real_client_e2e.py`): **2133
+  **37 passed**.
+- Full Python core gate (`--ignore=tests/test_real_client_e2e.py`): **2137
   passed, 1 skipped, 467 subtests passed**.
 - The catalog fixture fixes only isolate the owner-key/HMAC setup and do not
   weaken production signature validation.
