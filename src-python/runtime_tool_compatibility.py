@@ -2615,7 +2615,6 @@ class ToolCompatibilityPlan:
 
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = _copy_mapping(payload)
-        changed = False
         for key in ("output", "input", "history"):
             if key in result:
                 decoded, item_changed = self._decode_items(
@@ -2624,7 +2623,6 @@ class ToolCompatibilityPlan:
                 )
                 if item_changed:
                     result[key] = decoded
-                    changed = True
         return result
 
     def encode_history(self, items: Iterable[Mapping[str, Any]]) -> list[Any]:
