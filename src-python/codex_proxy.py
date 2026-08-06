@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass, replace
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -79,9 +80,19 @@ from protocol_translation import (
     responses_tool_choice_to_chat_tool_choice,
     responses_tools_to_chat_tools,
 )
+from runtime_tool_compatibility import (
+    ProtocolCapabilities as RuntimeProtocolCapabilities,
+    ToolCompatibilityError as RuntimeToolCompatibilityError,
+    ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
+    build_tool_compatibility_plan,
+)
 
 from codex_semantic_adapter import (
     BINDING_ACCEPTED as _BINDING_ACCEPTED,
+    COLLABORATION_V1 as _COLLABORATION_V1,
+    COLLABORATION_V2 as _COLLABORATION_V2,
+    CollaborationBoundaryError as _CollaborationBoundaryError,
+    classify_collaboration_payload as _classify_collaboration_payload,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
@@ -648,6 +659,7 @@ TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
 NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
+COLLABORATION_BOUNDARY_ERROR_CODE = "invalid_collaboration_boundary"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -2402,6 +2414,116 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     write_proxy_event(event, **payload)
 
 
+def _raise_collaboration_boundary_error(
+    event_context: Mapping[str, Any] | None,
+    *,
+    classification: str,
+    message: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    _write_adapter_event(
+        event_context,
+        "collaboration_boundary_rejected",
+        classification=classification,
+    )
+    error = UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            COLLABORATION_BOUNDARY_ERROR_CODE,
+            message,
+        )
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _resolve_collaboration_boundary(
+    payload: Any,
+    event_context: Mapping[str, Any] | None,
+) -> str | None:
+    try:
+        payload_protocol = _classify_collaboration_payload(payload)
+        metadata_protocol = None
+        if isinstance(event_context, Mapping):
+            metadata = {
+                key: event_context[key]
+                for key in (
+                    "collaboration_protocol",
+                    "multi_agent_version",
+                    "metadata",
+                    "model_metadata",
+                    "capabilities",
+                    "features",
+                )
+                if key in event_context
+            }
+        else:
+            metadata = {}
+        if metadata:
+            metadata_protocol = _classify_collaboration_payload(
+                {"metadata": metadata}
+            )
+    except _CollaborationBoundaryError as exc:
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification=exc.classification,
+            message="Collaboration protocol boundary is malformed or ambiguous.",
+            cause=exc,
+        )
+    selected_protocol = None
+    metadata_conflict = False
+    if isinstance(event_context, Mapping):
+        selected_protocol = event_context.get("collaboration_protocol")
+        if (
+            selected_protocol is not None
+            and selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}
+        ):
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="unknown_state",
+                message="Collaboration protocol selection is unknown.",
+            )
+        if selected_protocol is None:
+            selected_protocol = metadata_protocol
+        elif metadata_protocol is not None and selected_protocol != metadata_protocol:
+            metadata_conflict = True
+    if metadata_conflict:
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification="conflicting_selection",
+            message="Collaboration protocol metadata conflicts with the selected protocol.",
+        )
+    if (
+        selected_protocol is not None
+        and payload_protocol is not None
+        and selected_protocol != payload_protocol
+    ):
+        _raise_collaboration_boundary_error(
+            event_context,
+            classification="conflicting_selection",
+            message="Collaboration protocol selection conflicts with the request.",
+        )
+    protocol = payload_protocol or selected_protocol
+    if isinstance(event_context, dict) and protocol is not None:
+        event_context["collaboration_protocol"] = protocol
+    return protocol
+
+
+def _is_collaboration_v2_context(event_context: Mapping[str, Any] | None) -> bool:
+    return (event_context or {}).get("collaboration_protocol") == _COLLABORATION_V2
+
+
+def _collaboration_context_with_protocol(
+    event_context: Mapping[str, Any] | None,
+    protocol: str | None,
+) -> Mapping[str, Any] | None:
+    if protocol is None or isinstance(event_context, dict):
+        return event_context
+    context = dict(event_context or {})
+    context["collaboration_protocol"] = protocol
+    return context
+
+
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
     payload = _public_event_context(context)
     existing = payload.get("request_kind")
@@ -3663,6 +3785,23 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _parse_sse_json_payloads(blob: bytes) -> list[dict[str, Any]]:
+    """Parse every JSON data frame emitted for one upstream SSE line.
+
+    Runtime compatibility adapters can buffer one upstream function lifecycle
+    and emit several native Responses events as a single byte string.  Relay
+    bookkeeping must inspect each emitted frame rather than treating that
+    byte string as one JSON payload.
+    """
+
+    return [
+        payload
+        for line in blob.splitlines(keepends=True)
+        for payload in [_parse_sse_json_payload(line)]
+        if payload is not None
+    ]
 
 
 class UpstreamSseSemanticError(ValueError):
@@ -5787,6 +5926,352 @@ def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
     )
 
 
+_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
+_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY = "_runtime_tool_compatibility_stream"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = "_runtime_tool_compatibility_attempt_generation"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY = "_runtime_tool_compatibility_attempt_plan"
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY = (
+    "_runtime_tool_compatibility_attempt_plan_generation"
+)
+_RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE = "tool_compatibility_capability_manifest"
+
+
+def _raise_malformed_runtime_tool_capability_manifest() -> NoReturn:
+    raise RuntimeToolCompatibilityError(
+        _RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE,
+        "malformed_capability_manifest",
+    )
+
+
+def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
+    boolean_keys = {
+        "function_lifecycle",
+        "supports_functions",
+        "namespace_lifecycle",
+        "supports_namespace",
+        "supports_namespaces",
+        "custom_lifecycle",
+        "supports_custom",
+        "supports_custom_tools",
+        "tool_search_lifecycle",
+        "supports_tool_search",
+        "accepts_namespace_adapter",
+        "namespace_adapter",
+        "accepts_custom_adapter",
+        "custom_adapter",
+    }
+    for key in boolean_keys:
+        if key in facts and type(facts[key]) is not bool:
+            _raise_malformed_runtime_tool_capability_manifest()
+
+    for key in ("hosted_lifecycles", "hosted_kinds", "unknown_lifecycles", "unknown_kinds"):
+        if key not in facts:
+            continue
+        value = facts[key]
+        if isinstance(value, str):
+            continue
+        if isinstance(value, Mapping):
+            if any(not isinstance(name, str) or type(enabled) is not bool for name, enabled in value.items()):
+                _raise_malformed_runtime_tool_capability_manifest()
+            continue
+        if isinstance(value, (bytes, bytearray)) or not isinstance(value, IterableABC):
+            _raise_malformed_runtime_tool_capability_manifest()
+        if any(not isinstance(name, str) for name in value):
+            _raise_malformed_runtime_tool_capability_manifest()
+
+    for key in ("max_tool_name_length", "max_alias_attempts"):
+        if key in facts and (type(facts[key]) is not int or facts[key] <= 0):
+            _raise_malformed_runtime_tool_capability_manifest()
+
+
+def _runtime_tool_protocol_capabilities(
+    tool_protocol: str,
+    upstream: Mapping[str, Any],
+) -> RuntimeProtocolCapabilities:
+    try:
+        supplied = upstream.get("tool_protocol_capabilities")
+        if supplied is not None and not isinstance(supplied, Mapping):
+            _raise_malformed_runtime_tool_capability_manifest()
+        if isinstance(supplied, Mapping):
+            _validate_runtime_tool_capability_facts(supplied)
+        facts = supplied if isinstance(supplied, Mapping) else None
+        # A capability manifest is authoritative only for predicates it
+        # explicitly states.  Responses and chat-completions retain the
+        # conservative plain-function + adapter baseline.  Text-compatible
+        # endpoints have no native lifecycle by default; every capability
+        # must be explicit.
+        if tool_protocol == "text_compat":
+            baseline_protocol = "none"
+        elif tool_protocol == "responses_structured":
+            baseline_protocol = "chat_tools"
+        else:
+            baseline_protocol = tool_protocol
+        if facts is not None:
+            return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, facts)
+        if baseline_protocol in {"chat_tools", "chat", "chat_completions"}:
+            return RuntimeProtocolCapabilities.chat_tools()
+        return RuntimeProtocolCapabilities()
+    except RuntimeToolCompatibilityError:
+        raise
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        _raise_malformed_runtime_tool_capability_manifest()
+
+
+def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError) -> NoReturn:
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(error.code, str(error))
+    ) from error
+
+
+def _prepare_runtime_tool_compatibility(
+    payload: dict[str, Any],
+    upstream: Mapping[str, Any],
+    tool_protocol: str,
+    event_context: dict[str, Any],
+    native_responses_tool_codec: str | None = None,
+) -> bool:
+    tools = payload.get("tools")
+    declarations = tools if isinstance(tools, list) else []
+    codec = (
+        native_responses_tool_codec
+        if native_responses_tool_codec is not None
+        else _external_native_responses_tool_codec(upstream)
+    )
+    if tool_protocol == "responses_structured" and codec == "strict_apply_patch":
+        apply_patch_tools = [
+            tool
+            for tool in declarations
+            if isinstance(tool, Mapping) and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+        ]
+        if len(apply_patch_tools) > 1:
+            _raise_native_responses_tool_contract_error(
+                event_context,
+                codec=codec,
+                reason="duplicate_declaration",
+                count=len(apply_patch_tools),
+            )
+        if apply_patch_tools:
+            apply_patch_tool = apply_patch_tools[0]
+            if apply_patch_tool.get("type") != "custom":
+                _raise_native_responses_tool_contract_error(
+                    event_context,
+                    codec=codec,
+                    reason="declaration_not_custom",
+                )
+            _validate_strict_apply_patch_custom_tool(
+                apply_patch_tool,
+                event_context,
+                codec=codec,
+            )
+    planned_declarations = [
+        declaration
+        for declaration in declarations
+        if not (
+            isinstance(declaration, Mapping)
+            and declaration.get("name") == APPLY_PATCH_FUNCTION_NAME
+            and (
+                codec == "strict_apply_patch"
+                or not isinstance(declaration.get("format"), Mapping)
+            )
+        )
+    ]
+    try:
+        plan = build_tool_compatibility_plan(
+            planned_declarations,
+            selected_protocol=tool_protocol,
+            provider_hosted_capabilities=upstream.get("hosted_tool_capabilities"),
+            tool_choice=payload.get("tool_choice"),
+            protocol_capabilities=_runtime_tool_protocol_capabilities(tool_protocol, upstream),
+            request_token=uuid.uuid4().hex,
+        )
+    except RuntimeToolCompatibilityError as exc:
+        write_proxy_event(
+            "runtime_tool_compatibility_rejected",
+            classification=exc.classification,
+            surface=exc.surface,
+        )
+        _raise_runtime_tool_compatibility_error(exc)
+    event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY, None)
+    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY, None)
+    write_proxy_event(
+        "runtime_tool_compatibility_planned",
+        counts=plan.diagnostics.as_dict()["counts"],
+    )
+    return False
+
+
+def _apply_runtime_tool_compatibility_plan(
+    payload: dict[str, Any],
+    plan: RuntimeToolCompatibilityPlan,
+) -> bool:
+    try:
+        encoded = plan.encode_payload(payload)
+    except RuntimeToolCompatibilityError as exc:
+        _raise_runtime_tool_compatibility_error(exc)
+    if encoded == payload:
+        return False
+    payload.clear()
+    payload.update(encoded)
+    return True
+
+
+def _runtime_tool_compatibility_plan(
+    event_context: Mapping[str, Any] | None,
+) -> RuntimeToolCompatibilityPlan | None:
+    value = (event_context or {}).get(_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY)
+    return value if isinstance(value, RuntimeToolCompatibilityPlan) else None
+
+
+def _runtime_tool_compatibility_plan_for_attempt(
+    event_context: Mapping[str, Any] | None,
+) -> RuntimeToolCompatibilityPlan | None:
+    """Resolve the immutable request plan into the current relay attempt.
+
+    The request plan owns stable aliases and declaration classification.  Each
+    permitted upstream retry receives a shallow plan copy with a fresh call
+    ownership ledger; no route or provider selection is performed here.
+    """
+    request_plan = _runtime_tool_compatibility_plan(event_context)
+    if request_plan is None or not isinstance(event_context, dict):
+        return request_plan
+    generation = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY)
+    if generation is None:
+        return request_plan
+    attempt_plan = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY)
+    planned_generation = event_context.get(
+        _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY
+    )
+    if (
+        not isinstance(attempt_plan, RuntimeToolCompatibilityPlan)
+        or planned_generation != generation
+        or attempt_plan is request_plan
+    ):
+        attempt_plan = request_plan.new_attempt()
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY] = attempt_plan
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY] = generation
+        event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
+    return attempt_plan
+
+
+def _runtime_tool_compatibility_stream_for_attempt(
+    event_context: Mapping[str, Any] | None,
+) -> tuple[RuntimeToolCompatibilityPlan | None, Any | None]:
+    """Return the attempt-local stream ledger shared by both relay surfaces."""
+    plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
+    if plan is None or not isinstance(event_context, dict):
+        return plan, None
+    stream = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY)
+    if stream is None or getattr(stream, "plan", None) is not plan:
+        stream = plan.new_stream()
+        event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream
+    return plan, stream
+
+
+def _runtime_required_tool_diagnostics(
+    plan: RuntimeToolCompatibilityPlan | None,
+    tool_choice_name: Any,
+) -> tuple[str, str]:
+    """Return bounded family/disposition fields for required-tool telemetry."""
+    if plan is None or not isinstance(tool_choice_name, str):
+        return "unknown", "unknown"
+
+    record = plan.registry.record_for_alias(tool_choice_name)
+    if record is not None:
+        family = record.family
+        disposition = next(
+            (
+                entry.disposition
+                for entry in plan.entries
+                if entry.declaration_index == record.declaration_index
+            ),
+            "unknown",
+        )
+    else:
+        matches = [
+            entry for entry in plan.entries if entry.original_name == tool_choice_name
+        ]
+        if len(matches) != 1:
+            return "unknown", "unknown"
+        family = matches[0].family
+        disposition = matches[0].disposition
+
+    bounded_families = {
+        "plain_function",
+        "namespace",
+        "custom_freeform",
+        "tool_search",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    }
+    bounded_dispositions = {
+        "native",
+        "adapt",
+        "omit",
+        "required-but-unavailable",
+    }
+    return (
+        family if family in bounded_families else "unknown",
+        disposition if disposition in bounded_dispositions else "unknown",
+    )
+
+
+def _runtime_alias_matches_namespace(
+    plan: RuntimeToolCompatibilityPlan | None,
+    tool: Any,
+    namespace: str,
+) -> bool:
+    if plan is None or not isinstance(tool, Mapping):
+        return False
+    record = plan.registry.record_for_alias(_tool_schema_name(tool))
+    return record is not None and record.namespace == namespace
+
+
+def _runtime_alias_for_namespace_child(
+    plan: RuntimeToolCompatibilityPlan | None,
+    namespace: str,
+    child_name: str,
+) -> str | None:
+    if plan is None:
+        return None
+    for alias in plan.aliases:
+        record = plan.registry.record_for_alias(alias)
+        if record is not None and record.namespace == namespace and record.child_name == child_name:
+            return alias
+    return None
+
+
+def _runtime_plan_has_native_plain_function(
+    plan: RuntimeToolCompatibilityPlan | None,
+    item: Mapping[str, Any],
+) -> bool:
+    name = item.get("name")
+    return bool(
+        plan is not None
+        and isinstance(name, str)
+        and any(
+            entry.family == "plain_function"
+            and entry.disposition == "native"
+            and entry.original_name == name
+            for entry in plan.entries
+        )
+    )
+
+
+def _rewrite_generated_guidance_tool_name(value: Any, original: str, alias: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(original, alias)
+    if isinstance(value, list):
+        return [_rewrite_generated_guidance_tool_name(item, original, alias) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            key: _rewrite_generated_guidance_tool_name(item, original, alias)
+            for key, item in value.items()
+        }
+    return value
+
+
 STRICT_APPLY_PATCH_EXAMPLE = """*** Begin Patch
 *** Update File: example.txt
 @@
@@ -6035,6 +6520,7 @@ def _rewrite_structured_tool_input_items(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None = None,
     upstream_name: str | None = None,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
 ) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -6051,6 +6537,16 @@ def _rewrite_structured_tool_input_items(
     available_function_names = _function_tool_names(payload.get("tools"))
     for item in input_items:
         if not isinstance(item, dict):
+            rewritten_items.append(item)
+            continue
+        if (
+            compatibility_plan is not None
+            and compatibility_plan.owns_wire_value(item)
+            and not _runtime_plan_has_native_plain_function(compatibility_plan, item)
+        ):
+            call_id = item.get("call_id")
+            if isinstance(call_id, str):
+                preserved_structured_call_ids.add(call_id)
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":
@@ -6322,7 +6818,12 @@ def _inject_explicit_codex_tools(
     return changed
 
 
-def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_node_repl_tools: bool) -> bool:
+def _filter_tools_for_subagent_coordinator(
+    payload: dict[str, Any],
+    *,
+    include_node_repl_tools: bool,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
+) -> bool:
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return False
@@ -6330,7 +6831,14 @@ def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_n
         tool
         for tool in tools
         if _is_multi_agent_tool_schema(tool)
-        or (include_node_repl_tools and _is_node_repl_tool_schema(tool))
+        or _runtime_alias_matches_namespace(compatibility_plan, tool, "multi_agent_v1")
+        or (
+            include_node_repl_tools
+            and (
+                _is_node_repl_tool_schema(tool)
+                or _runtime_alias_matches_namespace(compatibility_plan, tool, NODE_REPL_NAMESPACE)
+            )
+        )
     ]
     if len(filtered_tools) == len(tools):
         return False
@@ -6338,7 +6846,11 @@ def _filter_tools_for_subagent_coordinator(payload: dict[str, Any], *, include_n
     return True
 
 
-def _filter_tools_for_subagent_worker(payload: dict[str, Any]) -> bool:
+def _filter_tools_for_subagent_worker(
+    payload: dict[str, Any],
+    *,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
+) -> bool:
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return False
@@ -6347,6 +6859,14 @@ def _filter_tools_for_subagent_worker(payload: dict[str, Any]) -> bool:
         for tool in tools
         if not _is_multi_agent_tool_schema(tool)
         and not _is_mcp_or_codex_app_tool_schema(tool)
+        and not any(
+            _runtime_alias_matches_namespace(compatibility_plan, tool, namespace)
+            for namespace in (
+                NODE_REPL_NAMESPACE,
+                "multi_agent_v1",
+                "mcp__multi_agent_v1",
+            )
+        )
         and _tool_schema_name(tool) != TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
     ]
     if len(filtered_tools) == len(tools):
@@ -7020,6 +7540,8 @@ def _apply_external_worker_response_contract(
     validate_selectors: bool = True,
     attach_sidecars: bool = True,
 ) -> tuple[Any, bool]:
+    if _is_collaboration_v2_context(event_context):
+        return value, False
     if validate_selectors:
         _validate_external_worker_selectors(value, event_context, surface=surface)
     if attach_sidecars:
@@ -7126,12 +7648,17 @@ def _validate_worker_binding_history(
         )
 
 
-def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
+def _normalize_third_party_tool_call(
+    value: Any,
+    event_context: Mapping[str, Any] | None = None,
+) -> tuple[Any, bool]:
+    if _is_collaboration_v2_context(event_context):
+        return value, False
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _normalize_third_party_tool_call(item)
+            replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
@@ -7217,7 +7744,7 @@ def _normalize_third_party_tool_call(value: Any) -> tuple[Any, bool]:
             changed = True
 
     for key, item in list(rewritten.items()):
-        replacement, item_changed = _normalize_third_party_tool_call(item)
+        replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
         if item_changed:
             rewritten[key] = replacement
             changed = True
@@ -8431,7 +8958,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if _is_raw_provider_probe_context(context):
+    if _is_raw_provider_probe_context(context) or _is_collaboration_v2_context(context):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -8560,7 +9087,11 @@ def _suppress_coordinator_forbidden_tool_calls(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if bool(context.get("subagent_worker_context")) or _is_raw_provider_probe_context(context):
+    if (
+        bool(context.get("subagent_worker_context"))
+        or _is_raw_provider_probe_context(context)
+        or _is_collaboration_v2_context(context)
+    ):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -8684,7 +9215,7 @@ def _suppress_worker_multi_agent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    if not bool((event_context or {}).get("subagent_worker_context")):
+    if _is_collaboration_v2_context(event_context) or not bool((event_context or {}).get("subagent_worker_context")):
         return value, False
     if isinstance(event_context, dict):
         suppressed = event_context.setdefault("_worker_suppressed_multi_agent_item_ids", set())
@@ -9928,6 +10459,8 @@ def compatible_request_body(
     if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
         if _sanitize_official_reasoning_items(payload):
@@ -9977,11 +10510,12 @@ def compatible_request_body(
         if validated_tool_surface_strategy is not None
         else _external_tool_surface_strategy(upstream)
     )
+    collaboration_v2 = collaboration_protocol == _COLLABORATION_V2
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
-    if not raw_provider_probe:
+    if not raw_provider_probe and not collaboration_v2:
         _validate_worker_binding_history(payload)
     bounded_tool_search_terminal_calls = (
         {}
@@ -10007,7 +10541,20 @@ def compatible_request_body(
                 status=TOOL_SEARCH_UNAVAILABLE_STATUS,
             )
         changed = True
-    if raw_provider_probe:
+    runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
+    if isinstance(event_context, dict) and not raw_provider_probe:
+        if _hoist_additional_tools_input_items(payload):
+            changed = True
+        if _prepare_runtime_tool_compatibility(
+            payload,
+            upstream,
+            tool_protocol,
+            event_context,
+            native_responses_tool_codec=native_responses_tool_codec_override,
+        ):
+            changed = True
+        runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+    if raw_provider_probe or collaboration_v2:
         pass
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
@@ -10016,7 +10563,12 @@ def compatible_request_body(
         if tool_surface_strategy == "deferred_core" and _hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in STRUCTURED_TOOL_PROTOCOLS:
-            if _rewrite_structured_tool_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            if _rewrite_structured_tool_input_items(
+                payload,
+                event_context=event_context,
+                upstream_name=upstream_name,
+                compatibility_plan=runtime_tool_plan,
+            ):
                 changed = True
         elif tool_protocol == "none":
             tools = payload.get("tools")
@@ -10033,6 +10585,7 @@ def compatible_request_body(
     input_items = payload.get("input")
     subagent_worker_context = (
         not raw_provider_probe
+        and not collaboration_v2
         and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         and is_worker_subagent_request(input_items)
     )
@@ -10042,12 +10595,14 @@ def compatible_request_body(
     # Worker subagents retain their established restricted surface.
     include_tool_search = (
         tool_surface_strategy == "deferred_core"
+        and not collaboration_v2
         and not subagent_worker_context
     )
     subagent_state = (
         build_subagent_state(input_items)
         if (
             not raw_provider_probe
+            and not collaboration_v2
             and not subagent_worker_context
             and tool_protocol in {"text_compat", "chat_tools", "responses_structured"}
         )
@@ -10059,7 +10614,9 @@ def compatible_request_body(
         or subagent_state.next_action == "send_input"
     )
     node_repl_single_step_complete = (
-        not raw_provider_probe and _has_completed_single_step_node_repl_context(input_items)
+        not raw_provider_probe
+        and not collaboration_v2
+        and _has_completed_single_step_node_repl_context(input_items)
     )
     subagent_workflow_plan_read_complete = (
         not raw_provider_probe
@@ -10092,6 +10649,18 @@ def compatible_request_body(
         include_send_input = False
         state_hint = None
     elif subagent_worker_context:
+        open_agent_ids = []
+        wait_agent_ids = []
+        close_agent_ids = []
+        closed_agent_ids = []
+        lifecycle_complete = False
+        include_spawn_agent = False
+        include_wait_agent = False
+        include_close_agent = False
+        include_resume_agent = False
+        include_send_input = False
+        state_hint = None
+    elif collaboration_v2:
         open_agent_ids = []
         wait_agent_ids = []
         close_agent_ids = []
@@ -10264,6 +10833,17 @@ def compatible_request_body(
         event_context["subagent_workflow_plan_read_complete"] = bool(subagent_workflow_plan_read_complete)
         event_context["subagent_workflow_plan_read_required"] = bool(subagent_workflow_plan_read_required)
     if guidance_enabled and state_hint is not None and isinstance(input_items, list):
+        node_repl_alias = _runtime_alias_for_namespace_child(
+            runtime_tool_plan,
+            NODE_REPL_NAMESPACE,
+            "js",
+        )
+        if node_repl_alias is not None:
+            state_hint = _rewrite_generated_guidance_tool_name(
+                state_hint,
+                "mcp__node_repl__js",
+                node_repl_alias,
+            )
         input_items.append(state_hint)
         _write_adapter_event(
             event_context,
@@ -10307,6 +10887,16 @@ def compatible_request_body(
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if (
+        (
+            runtime_tool_plan is None
+            or (
+                native_responses_tool_codec_override
+                if native_responses_tool_codec_override is not None
+                else _external_native_responses_tool_codec(upstream)
+            )
+            == "strict_apply_patch"
+        )
+        and
         tool_protocol == "responses_structured"
         and _adapt_native_responses_tool_declarations(
             payload,
@@ -10317,7 +10907,7 @@ def compatible_request_body(
     ):
         changed = True
     allow_codex_tools = tool_protocol != "none"
-    if inject_codex_tools and allow_codex_tools and not raw_provider_probe:
+    if inject_codex_tools and allow_codex_tools and not raw_provider_probe and not collaboration_v2:
         if lifecycle_complete:
             if _hide_tools_for_completed_subagent_lifecycle(payload):
                 _write_adapter_event(
@@ -10337,8 +10927,20 @@ def compatible_request_body(
             )
             # Coordinator and worker restrictions deliberately remain narrower
             # than the normal deferred-core surface.
+            runtime_plain_tool_search = bool(
+                runtime_tool_plan is not None
+                and any(
+                    entry.family == "plain_function"
+                    and entry.original_name == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+                    and entry.disposition != "omit"
+                    for entry in runtime_tool_plan.entries
+                )
+            )
             effective_include_tool_search = (
-                include_tool_search and not restrict_to_subagent_coordinator_tools
+                include_tool_search
+                and (runtime_tool_plan is None or runtime_plain_tool_search)
+                and not subagent_worker_context
+                and not restrict_to_subagent_coordinator_tools
             )
             include_node_repl_for_subagent_workflow = (
                 restrict_to_subagent_coordinator_tools
@@ -10347,7 +10949,10 @@ def compatible_request_body(
                 and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
-            if subagent_worker_context and _filter_tools_for_subagent_worker(payload):
+            if subagent_worker_context and _filter_tools_for_subagent_worker(
+                payload,
+                compatibility_plan=runtime_tool_plan,
+            ):
                 _write_adapter_event(
                     event_context,
                     "subagent_worker_tools_restricted",
@@ -10358,6 +10963,7 @@ def compatible_request_body(
             if restrict_to_subagent_coordinator_tools and _filter_tools_for_subagent_coordinator(
                 payload,
                 include_node_repl_tools=include_node_repl_for_subagent_workflow,
+                compatibility_plan=runtime_tool_plan,
             ):
                 _write_adapter_event(
                     event_context,
@@ -10400,8 +11006,13 @@ def compatible_request_body(
                     else not node_repl_single_step_complete
                 ),
                 include_local_tool_gateway_tools=not subagent_worker_context,
-                strip_all_namespace_tools=tool_surface_strategy == "deferred_core",
-                include_flattened_namespace_tools=tool_surface_strategy == "eager",
+                strip_namespace_tools=runtime_tool_plan is None,
+                strip_all_namespace_tools=(
+                    runtime_tool_plan is None and tool_surface_strategy == "deferred_core"
+                ),
+                include_flattened_namespace_tools=(
+                    runtime_tool_plan is None and tool_surface_strategy == "eager"
+                ),
                 tool_surface_counts=tool_surface_counts,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
@@ -10432,12 +11043,21 @@ def compatible_request_body(
                 changed = True
             required_tool_choice_name = None
             if subagent_state_active:
+                runtime_node_repl_alias = _runtime_alias_for_namespace_child(
+                    runtime_tool_plan,
+                    NODE_REPL_NAMESPACE,
+                    "js",
+                )
+                required_node_repl_name = runtime_node_repl_alias or "mcp__node_repl__js"
                 if (
                     subagent_workflow_plan_read_required
                     and include_node_repl_for_subagent_workflow
-                    and "mcp__node_repl__js" in _function_tool_names(payload.get("tools"))
+                    and (
+                        runtime_node_repl_alias is not None
+                        or required_node_repl_name in _function_tool_names(payload.get("tools"))
+                    )
                 ):
-                    required_tool_choice_name = "mcp__node_repl__js"
+                    required_tool_choice_name = required_node_repl_name
                 else:
                     required_tool_choice_name = _required_subagent_tool_choice(
                         tool_protocol=tool_protocol,
@@ -10450,12 +11070,15 @@ def compatible_request_body(
                         include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
                     )
             if semantic_repair_enabled and _restrict_tools_to_required_tool(payload, required_tool_choice_name):
-                _write_adapter_event(
-                    event_context,
+                required_tool_family, required_tool_disposition = _runtime_required_tool_diagnostics(
+                    runtime_tool_plan,
+                    required_tool_choice_name,
+                )
+                write_proxy_event(
                     "required_tool_tools_restricted",
-                    upstream=upstream_name,
-                    model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-                    tool_name=required_tool_choice_name,
+                    tool_choice_required=True,
+                    required_tool_family=required_tool_family,
+                    required_tool_disposition=required_tool_disposition,
                 )
                 changed = True
             if semantic_repair_enabled and _set_required_subagent_tool_choice(
@@ -10465,6 +11088,27 @@ def compatible_request_body(
                 upstream=upstream_name,
             ):
                 changed = True
+    if runtime_tool_plan is not None and isinstance(payload.get("tools"), list):
+        final_declarations = [
+            tool
+            for tool in payload["tools"]
+            if not (
+                isinstance(tool, Mapping)
+                and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
+            )
+        ]
+        finalized_plan = runtime_tool_plan.with_final_declarations(
+            final_declarations,
+            tool_choice=payload.get("tool_choice"),
+        )
+        if finalized_plan is not runtime_tool_plan and isinstance(event_context, dict):
+            runtime_tool_plan = finalized_plan
+            event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan
+    if runtime_tool_plan is not None and _apply_runtime_tool_compatibility_plan(
+        payload,
+        runtime_tool_plan,
+    ):
+        changed = True
     model_id = payload.get("model")
     max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
     if max_output_tokens is not None:
@@ -11218,7 +11862,19 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
-    changed = _hide_reasoning_text(payload)
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+    changed = False
+    runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
+    if runtime_tool_plan is not None:
+        try:
+            decoded_payload = runtime_tool_plan.decode_payload(payload)
+        except RuntimeToolCompatibilityError as exc:
+            _raise_runtime_tool_compatibility_error(exc)
+        if decoded_payload != payload:
+            payload = decoded_payload
+            changed = True
+    changed = _hide_reasoning_text(payload) or changed
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
     payload, _ = _apply_external_worker_response_contract(
@@ -11227,7 +11883,7 @@ def compatible_response_body(
         surface="body",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -11291,17 +11947,41 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
+    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+
+    runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
+        event_context
+    )
+    if runtime_tool_plan is not None and stream_state is not None:
+        try:
+            decoded_events = stream_state.decode_events_for_event(payload)
+        except RuntimeToolCompatibilityError as exc:
+            _raise_runtime_tool_compatibility_error(exc)
+        if not decoded_events:
+            return b""
+        if len(decoded_events) > 1:
+            return b"".join(
+                _sse_json_line(event, line_ending) + line_ending
+                for event in decoded_events
+            )
+        decoded_payload = decoded_events[0]
+        runtime_tool_changed = decoded_payload != payload
+        payload = decoded_payload
+    else:
+        runtime_tool_changed = False
+
     if _is_reasoning_text_stream_event(payload):
         return b""
 
-    changed = _hide_reasoning_text(payload)
+    changed = _hide_reasoning_text(payload) or runtime_tool_changed
     payload, _ = _apply_external_worker_response_contract(
         payload,
         event_context,
         surface="sse",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -17406,6 +18086,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             open_attempt_budget = (
                 primary_route_attempt.retry.new_open_attempt_budget()
             )
+            runtime_tool_compatibility_attempt_generation = 0
             for route_attempt in route_plan.attempts:
                 active_route_attempt = route_attempt
                 upstream_format = route_attempt.selected_upstream_format
@@ -17433,6 +18114,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 lifecycle_final_retry_reason: str | None = None
                 try:
                     while relay_attempt <= max_relay_attempts:
+                        runtime_tool_compatibility_attempt_generation += 1
+                        if isinstance(adapter_event_context, dict):
+                            adapter_event_context[
+                                _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
+                            ] = runtime_tool_compatibility_attempt_generation
                         seam = _handler_downstream_stream_commit(self)
                         if seam is not None:
                             seam.set_upstream_format(upstream_format)
@@ -20412,7 +21098,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             sse_mutation_policy
                             != MutationPolicy.TRANSPARENT
                         ):
-                            event, _ = _normalize_third_party_tool_call(event)
+                            event, _ = _normalize_third_party_tool_call(event, compatibility_event_context)
                             event, _ = _suppress_bounded_tool_search_calls(
                                 event,
                                 compatibility_event_context,
@@ -20420,7 +21106,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             if event is None:
                                 continue
                             event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, event_context)
+                            event, _ = _guard_duplicate_multi_agent_spawn_calls(event, compatibility_event_context)
                         event_type = event.get("type")
                         if isinstance(event_type, str) and event_type:
                             if not self._write_sse_event(event_type, event):
@@ -21189,6 +21875,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                 else:
                     events = _chat_stream_chunks_to_response_events(chunks)
+                    runtime_tool_plan, runtime_tool_stream = (
+                        _runtime_tool_compatibility_stream_for_attempt(
+                            compatibility_event_context
+                        )
+                    )
+                    if runtime_tool_plan is not None and runtime_tool_stream is not None:
+                        decoded_events: list[Mapping[str, Any]] = []
+                        try:
+                            for event in events:
+                                decoded_events.extend(
+                                    runtime_tool_stream.decode_events_for_event(event)
+                                )
+                        except RuntimeToolCompatibilityError as exc:
+                            _raise_runtime_tool_compatibility_error(exc)
+                        events = decoded_events
                     _write_adapter_event(
                         event_context,
                         "chat_to_responses_event_summary",
@@ -21203,7 +21904,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         events,
                         event_context=compatibility_event_context,
                     )
-                    events, _ = _normalize_third_party_tool_call(events)
+                    events, _ = _normalize_third_party_tool_call(events, compatibility_event_context)
                     events, _ = _suppress_bounded_tool_search_calls(
                         events,
                         compatibility_event_context,
@@ -21344,14 +22045,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             upstream_name,
                             event_context=compatibility_event_context,
                         )
-                        rewritten_payload = _parse_sse_json_payload(rewritten_line) if upstream_name != "official" else usage_payload
-                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
-                        if isinstance(rewritten_payload, Mapping):
-                            rewritten_events.append(rewritten_payload)
-                        terminal = bool(
-                            isinstance(rewritten_payload, Mapping)
-                            and _responses_events_have_terminal([rewritten_payload])
+                        rewritten_payloads = (
+                            _parse_sse_json_payloads(rewritten_line)
+                            if upstream_name != "official"
+                            else ([usage_payload] if isinstance(usage_payload, Mapping) else [])
                         )
+                        if rewritten_payloads:
+                            _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                            for emitted_payload in rewritten_payloads[1:]:
+                                _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
+                            rewritten_events.extend(rewritten_payloads)
+                        else:
+                            _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                        terminal = _responses_events_have_terminal(rewritten_payloads)
                         buffered_lines.append((rewritten_line, terminal))
                         if saw_terminal_event:
                             break
@@ -21739,12 +22445,22 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             else:
                                 line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
                     line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
-                    rewritten_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                    if isinstance(rewritten_payload, Mapping):
-                        remember_completed_tool_event(rewritten_payload)
+                    rewritten_payloads = (
+                        _parse_sse_json_payloads(line)
+                        if upstream_name != "official"
+                        else []
+                    )
+                    if rewritten_payloads:
+                        for emitted_payload in rewritten_payloads:
+                            remember_completed_tool_event(emitted_payload)
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                        for emitted_payload in rewritten_payloads[1:]:
+                            _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
                     elif isinstance(usage_payload, Mapping):
                         remember_completed_tool_event(usage_payload)
-                    _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payload)
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                    else:
+                        _count_sse_reasoning_event(reasoning_stats, original_payload, None)
 
                     if not line and upstream_name != "official":
                         pending_sse_event_metadata = []
