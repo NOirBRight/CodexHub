@@ -1317,7 +1317,8 @@ function Get-ClientArguments {
         'codex-cli' {
             return @(
                 'exec', '--ephemeral', '--json', '--skip-git-repo-check',
-                '-C', $WorkRoot, '-m', $Model, '-s', 'read-only', '-'
+                '-C', $WorkRoot, '-m', $Model, '-s', 'read-only',
+                '-c', 'features.apps=false', '-'
             )
         }
         'opencode' {
