@@ -88,6 +88,43 @@ def test_collaboration_boundary_classifies_explicit_protocols_and_rejects_mixed_
         classify_collaboration_payload({"namespace": "collaboration", "type": "function_call"})
 
 
+def test_v2_namespace_function_declaration_accepts_parameters_schema() -> None:
+    body = {
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "followup_task",
+                        "description": "Continue work in a child task.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert classify_collaboration_payload(body) == COLLABORATION_V2
+
+    context: dict[str, object] = {}
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert json.loads(transformed)["tools"] == body["tools"]
+
+
 def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
     assert collaboration_protocols({"input": [_v1_spawn_call(), _v2_spawn_call()]}) == frozenset({
         COLLABORATION_V1,
