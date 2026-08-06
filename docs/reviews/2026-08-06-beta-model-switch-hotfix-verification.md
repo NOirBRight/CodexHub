@@ -71,9 +71,9 @@ claim live provider, CodexHub Gateway, or Desktop coverage.
 The CLI-only active-call harness and its cleanup checks both **passed** in this
 round.
 
-Real provider/Desktop active-call evidence remains `bounded_not_run`; no
-candidate-bound interactive Desktop session was available. This remains a
-release gate.
+Desktop/GUL validation is intentionally out of scope for this CLI-only
+authorization and is deferred to later manual validation; it is not a current
+Beta2 release gate. The CLI-only acceptance is the gate for this verification.
 
 ## Release decision
 
