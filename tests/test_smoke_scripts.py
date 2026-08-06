@@ -194,7 +194,7 @@ def test_issue_108_python_children_use_repository_python_313():
     assert "function Resolve-RepositoryPythonPath" in source
     assert "'-3.13'" in source
     assert "sys.version_info" in source
-    assert source.count("Resolve-RepositoryPythonPath") >= 5
+    assert source.count("Resolve-RepositoryPythonPath") >= 6
     assert "$pythonCommand = (Get-Command 'python'" not in source
     assert "$PythonCommand = (Get-Command 'python'" not in source
 
