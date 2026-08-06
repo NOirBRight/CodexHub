@@ -32,6 +32,19 @@ Date: 2026-08-06
 - The catalog fixture fixes only isolate the owner-key/HMAC setup and do not
   weaken production signature validation.
 
+## CLI-only build and compatibility evidence
+
+- The exact-source debug portable build **succeeded** for source SHA
+  `a7168e98581e1706f2782d5663b208e74751d642`.
+- The same-identifier candidate runner failed because the current
+  `D:\CodexHub-Dev\codexhub.exe` instance held the singleton. No sensitive
+  process or session details are recorded here.
+- A test-only variant that changed only the Tauri identifier, from the same
+  source SHA (explicitly **not a production candidate**), ran
+  `Run-RealClientE2E.ps1 -CliOnly`: **8/8 passed**.
+- Tool versions for that run: Codex CLI **0.146.0**, OpenCode **1.18.6**, Pi
+  **0.80.6**, and OMP **17.2.2**.
+
 ## Bounded CLI acceptance
 
 - Real CLI: `codex-cli 0.146.1`.
@@ -46,7 +59,7 @@ The record contains only bounded labels and counts; it does not include session/
 
 ## Active-call boundary
 
-Synthetic app-server probe: **passed** with `codex-cli 0.146.1`. The isolated
+Synthetic app-server probe: **passed** with `codex-cli 0.146.0`. The isolated
 loopback fixture observed one active `shell_command`, accepted
 `thread/settings/update` while that item was in flight, kept the original
 request/model bound as `A → A`, and used the new model on the next turn (`B`).
@@ -55,12 +68,15 @@ zero reconnect, and zero collaboration-boundary errors. The probe is recorded
 by `scripts/e2e_codex_active_call_regression.py` and deliberately does not
 claim live provider, CodexHub Gateway, or Desktop coverage.
 
+The CLI-only active-call harness and its cleanup checks both **passed** in this
+round.
+
 Real provider/Desktop active-call evidence remains `bounded_not_run`; no
 candidate-bound interactive Desktop session was available. This remains a
 release gate.
 
 ## Release decision
 
-No internal candidate was built and no release tag was created because the
-real provider/Desktop active-call gate is incomplete. The next action is to
-run that bounded manual validation before candidate promotion.
+An internal candidate was built, and the CLI-only test variant passed. The
+formal exact-candidate CLI gate still must be rerun after closing the existing
+instance; no formal release tag was created.
