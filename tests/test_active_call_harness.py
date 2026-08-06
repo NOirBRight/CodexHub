@@ -14,6 +14,7 @@ from e2e_codex_active_call_regression import (  # noqa: E402
     MODEL_A,
     MODEL_B,
     FakeResponsesScenario,
+    _safe_environment,
 )
 
 
@@ -59,3 +60,26 @@ def test_fake_responses_fixture_records_only_model_labels_and_distinguishes_mode
     assert "secret" not in repr(scenario.models)
     assert scenario.invalid_auth is False
     assert scenario.unexpected_path is False
+
+
+def test_isolated_environment_removes_shared_config_and_provider_secrets(monkeypatch, tmp_path) -> None:
+    for name in (
+        "CODEX_CONFIG",
+        "CODEXHUB_CODEX_TARGET_HOME",
+        "CODEXHUB_RUNTIME_HOME",
+        "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
+    ):
+        monkeypatch.setenv(name, "shared-value")
+
+    environment = _safe_environment(tmp_path / "isolated-home")
+
+    assert environment["CODEX_HOME"] == str(tmp_path / "isolated-home")
+    for name in (
+        "CODEX_CONFIG",
+        "CODEXHUB_CODEX_TARGET_HOME",
+        "CODEXHUB_RUNTIME_HOME",
+        "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
+    ):
+        assert name not in environment
