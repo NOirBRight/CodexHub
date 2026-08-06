@@ -125,6 +125,23 @@ def test_v2_namespace_function_declaration_accepts_parameters_schema() -> None:
     assert json.loads(transformed)["tools"] == body["tools"]
 
 
+def test_v2_function_call_with_top_level_parameters_fails_closed() -> None:
+    body = {
+        "input": [
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-parameters",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+
+    with pytest.raises(CollaborationBoundaryError, match="mixed_v1_v2"):
+        classify_collaboration_payload(body)
+
+
 def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
     assert collaboration_protocols({"input": [_v1_spawn_call(), _v2_spawn_call()]}) == frozenset({
         COLLABORATION_V1,

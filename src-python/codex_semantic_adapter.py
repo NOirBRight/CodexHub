@@ -111,6 +111,8 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
             return COLLABORATION_V2
         if name is None:
             raise CollaborationBoundaryError("missing_namespace")
+        if "parameters" in value and item_type not in {"namespace", "function"}:
+            raise CollaborationBoundaryError("mixed_v1_v2")
         if name in COLLABORATION_V1_TOOL_NAMES and name not in COLLABORATION_V2_TOOL_NAMES:
             raise CollaborationBoundaryError("mixed_v1_v2")
         if name in COLLABORATION_V2_TOOL_NAMES:
