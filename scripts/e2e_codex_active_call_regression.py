@@ -783,6 +783,8 @@ def run_regression(codex: Path, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dic
             )
         except ActiveCallFailure as error:
             cleanup_error = error
+        except Exception:
+            cleanup_error = ActiveCallFailure("active_call_cleanup_failed")
         if cleanup_error is not None:
             raise cleanup_error
     if result is not None:
