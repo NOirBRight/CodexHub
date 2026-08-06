@@ -6530,6 +6530,24 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
     return request_shape
 
 
+def _same_selected_v1_collaboration_function_call(
+    item: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> bool:
+    """Allow current V1 calls through the legacy structured-call adapter."""
+
+    if (
+        item.get("type") != "function_call"
+        or not isinstance(event_context, Mapping)
+        or event_context.get("collaboration_protocol") != _COLLABORATION_V1
+    ):
+        return False
+    try:
+        return _classify_collaboration_payload({"input": [item]}) == _COLLABORATION_V1
+    except _CollaborationBoundaryError:
+        return False
+
+
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
     """Promote Codex's internal tool carrier to the standard Responses field."""
     input_items = payload.get("input")
@@ -6590,6 +6608,7 @@ def _rewrite_structured_tool_input_items(
         if (
             compatibility_plan is not None
             and compatibility_plan.owns_wire_value(item)
+            and not _same_selected_v1_collaboration_function_call(item, event_context)
             and not _runtime_plan_has_native_plain_function(compatibility_plan, item)
         ):
             call_id = item.get("call_id")
