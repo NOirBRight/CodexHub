@@ -554,18 +554,116 @@ def _assert_active_item(
     )
 
 
+def _cleanup_active_call_resources(
+    scenario: FakeResponsesScenario,
+    home: Path,
+    *,
+    client: RecordingJsonRpcClient | None,
+    process: subprocess.Popen[str] | None,
+    server: ThreadingHTTPServer | None,
+    server_thread: threading.Thread | None,
+) -> dict[str, str]:
+    """Release and tear down every task-owned resource with bounded waits."""
+
+    statuses = {
+        "client": "not_started",
+        "appServer": "not_started",
+        "gateway": "not_started",
+        "gatewayThread": "not_started",
+        "temporaryHome": "not_started",
+    }
+    failures: list[str] = []
+    scenario.release_terminal.set()
+
+    if client is not None:
+        try:
+            client.close()
+            statuses["client"] = "passed"
+        except Exception:
+            statuses["client"] = "failed"
+            failures.append("client_cleanup_failed")
+
+    if process is not None:
+        try:
+            _stop_app_server(process)
+            statuses["appServer"] = "passed"
+        except Exception:
+            statuses["appServer"] = "failed"
+            failures.append("app_server_cleanup_failed")
+
+    if server is not None:
+        shutdown_errors: list[BaseException] = []
+
+        def shutdown_server() -> None:
+            try:
+                server.shutdown()
+            except BaseException as error:  # pragma: no cover - defensive thread boundary
+                shutdown_errors.append(error)
+
+        shutdown_thread = threading.Thread(target=shutdown_server, daemon=True)
+        try:
+            shutdown_thread.start()
+            shutdown_thread.join(timeout=5)
+            if shutdown_thread.is_alive() or shutdown_errors:
+                statuses["gateway"] = "failed"
+                failures.append("loopback_server_cleanup_failed")
+        except Exception:
+            statuses["gateway"] = "failed"
+            failures.append("loopback_server_cleanup_failed")
+        try:
+            server.server_close()
+        except Exception:
+            statuses["gateway"] = "failed"
+            failures.append("loopback_server_cleanup_failed")
+        else:
+            if statuses["gateway"] != "failed":
+                statuses["gateway"] = "passed"
+
+    if server_thread is not None:
+        try:
+            server_thread.join(timeout=2)
+            thread_alive = server_thread.is_alive()
+        except Exception:
+            thread_alive = True
+        if thread_alive:
+            statuses["gatewayThread"] = "failed"
+            failures.append("loopback_server_cleanup_failed")
+        else:
+            statuses["gatewayThread"] = "passed"
+
+    try:
+        resolved_home = home.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if resolved_home.parent != temp_root or not resolved_home.name.startswith(TEMP_HOME_PREFIX):
+            raise ActiveCallFailure("temporary_home_outside_scope")
+        shutil.rmtree(resolved_home)
+        statuses["temporaryHome"] = "passed"
+    except FileNotFoundError:
+        statuses["temporaryHome"] = "passed"
+    except Exception:
+        statuses["temporaryHome"] = "failed"
+        failures.append("temp_home_cleanup_failed")
+
+    if failures:
+        raise ActiveCallFailure(failures[0])
+    return statuses
+
+
 def run_regression(codex: Path, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     cli_version = _codex_version(codex)
     scenario = FakeResponsesScenario()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(scenario))
-    server.daemon_threads = True
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
     home = Path(tempfile.mkdtemp(prefix=TEMP_HOME_PREFIX))
+    server: ThreadingHTTPServer | None = None
+    server_thread: threading.Thread | None = None
     process: subprocess.Popen[str] | None = None
     client: RecordingJsonRpcClient | None = None
     result: dict[str, Any] | None = None
+    cleanup_error: ActiveCallFailure | None = None
     try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(scenario))
+        server.daemon_threads = True
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
         environment = _safe_environment(home)
         _prepare_home(home, environment, f"http://127.0.0.1:{server.server_port}")
         process = _start_app_server(codex, home, environment)
@@ -674,30 +772,21 @@ def run_regression(codex: Path, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dic
             "boundaryErrorCount": 0,
         }
     finally:
-        scenario.release_terminal.set()
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
-        if process is not None:
-            try:
-                _stop_app_server(process)
-            except ActiveCallFailure:
-                if result is None:
-                    raise
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=2)
         try:
-            resolved_home = home.resolve()
-            temp_root = Path(tempfile.gettempdir()).resolve()
-            if resolved_home.parent != temp_root or not resolved_home.name.startswith(TEMP_HOME_PREFIX):
-                raise ActiveCallFailure("temporary_home_outside_scope")
-            shutil.rmtree(resolved_home)
-        except (OSError, ActiveCallFailure):
-            if result is None:
-                raise ActiveCallFailure("temporary_home_cleanup_failed")
+            cleanup_statuses = _cleanup_active_call_resources(
+                scenario,
+                home,
+                client=client,
+                process=process,
+                server=server,
+                server_thread=server_thread,
+            )
+        except ActiveCallFailure as error:
+            cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
+    if result is not None:
+        result["cleanup"] = cleanup_statuses
     if result is None:
         raise ActiveCallFailure("active_call_missing_result")
     return result
