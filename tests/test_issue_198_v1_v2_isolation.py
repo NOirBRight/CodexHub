@@ -11,6 +11,7 @@ from codex_semantic_adapter import (
     COLLABORATION_V2,
     CollaborationBoundaryError,
     classify_collaboration_payload,
+    collaboration_protocols,
 )
 from subagent_policy import REPAIR_CODEX_SUBAGENT, guidance_enabled, semantic_repair_enabled
 
@@ -85,6 +86,13 @@ def test_collaboration_boundary_classifies_explicit_protocols_and_rejects_mixed_
         classify_collaboration_payload({"metadata": {"multi_agent_version": "v3"}})
     with pytest.raises(CollaborationBoundaryError, match="missing_namespace"):
         classify_collaboration_payload({"namespace": "collaboration", "type": "function_call"})
+
+
+def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
+    assert collaboration_protocols({"input": [_v1_spawn_call(), _v2_spawn_call()]}) == frozenset({
+        COLLABORATION_V1,
+        COLLABORATION_V2,
+    })
 
 
 def test_v2_disables_v1_guidance_and_semantic_repair() -> None:
