@@ -142,6 +142,106 @@ def test_v2_function_call_with_top_level_parameters_fails_closed() -> None:
         classify_collaboration_payload(body)
 
 
+@pytest.mark.parametrize(
+    "history_item",
+    [
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-parameters",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            id="top-level-parameters",
+        ),
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-v1-field",
+                "arguments": {"fork_context": False, "message": "continue"},
+            },
+            id="v1-only-field",
+        ),
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "tool_name": "spawn_agent",
+                "call_id": "call-v2-conflicting-discriminator",
+                "arguments": {"task_name": "continue"},
+            },
+            id="discriminator-conflict",
+        ),
+    ],
+)
+def test_current_v2_tools_reject_malformed_collaboration_history(
+    history_item: dict[str, object],
+) -> None:
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [history_item],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "followup_task"}],
+            }
+        ],
+    }
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _upstream(),
+            event_context={},
+        )
+
+    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_current_v2_tools_allow_completed_mixed_collaboration_history() -> None:
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [
+            _v1_spawn_call(),
+            {"type": "function_call_output", "call_id": "call_v1_spawn", "output": "done"},
+            _v2_spawn_call(),
+            {"type": "function_call_output", "call_id": "call_v2_spawn", "output": "done"},
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "followup_task"}],
+            }
+        ],
+    }
+    context = {"request_id": "mixed-history-v2-current"}
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+        transformed = codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _upstream(),
+            event_context=context,
+        )
+
+    transformed_payload = json.loads(transformed)
+    assert transformed_payload["input"] == body["input"]
+    assert transformed_payload["tools"][0]["name"] == "collaboration"
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    mixed_events = [
+        call for call in write_event.call_args_list
+        if call.args and call.args[0] == "collaboration_history_mixed"
+    ]
+    assert len(mixed_events) == 1
+    assert mixed_events[0].kwargs["protocol_count"] == 2
+    assert set(mixed_events[0].kwargs) <= {"request_id", "protocol_count"}
+
+
 def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
     assert collaboration_protocols({"input": [_v1_spawn_call(), _v2_spawn_call()]}) == frozenset({
         COLLABORATION_V1,

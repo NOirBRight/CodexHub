@@ -2519,6 +2519,11 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
+            history_protocols = _collaboration_protocols(
+                {"input": payload.get("input", [])}
+                if isinstance(payload, Mapping)
+                else {"input": []}
+            )
             protocol = current_protocol or metadata_protocol or context_protocol
             if (
                 raw_context_protocol is not None
@@ -2529,14 +2534,6 @@ def _resolve_collaboration_boundary(
                     event_context,
                     classification="unknown_state",
                     message="Collaboration protocol selection is unknown.",
-                )
-
-            history_protocols: frozenset[str] = frozenset()
-            if protocol is None:
-                history_protocols = _collaboration_protocols(
-                    {"input": payload.get("input", [])}
-                    if isinstance(payload, Mapping)
-                    else {"input": []}
                 )
         except _CollaborationBoundaryError as exc:
             _raise_collaboration_boundary_error(
