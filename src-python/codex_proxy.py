@@ -93,6 +93,7 @@ from codex_semantic_adapter import (
     COLLABORATION_V2 as _COLLABORATION_V2,
     CollaborationBoundaryError as _CollaborationBoundaryError,
     classify_collaboration_payload as _classify_collaboration_payload,
+    collaboration_protocols as _collaboration_protocols,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
@@ -2440,70 +2441,120 @@ def _raise_collaboration_boundary_error(
 def _resolve_collaboration_boundary(
     payload: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    surface: str = "request",
 ) -> str | None:
-    try:
-        payload_protocol = _classify_collaboration_payload(payload)
-        metadata_protocol = None
-        if isinstance(event_context, Mapping):
+    if surface != "request":
+        try:
+            protocol = _classify_collaboration_payload(payload)
+        except _CollaborationBoundaryError as exc:
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification=exc.classification,
+                message="Collaboration protocol boundary is malformed or ambiguous.",
+                cause=exc,
+            )
+        context_protocol = (
+            event_context.get("collaboration_protocol")
+            if isinstance(event_context, Mapping)
+            else None
+        )
+        if context_protocol is not None and context_protocol not in {
+            _COLLABORATION_V1,
+            _COLLABORATION_V2,
+        }:
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="unknown_state",
+                message="Collaboration protocol selection is unknown.",
+            )
+        if (
+            context_protocol is not None
+            and protocol is not None
+            and protocol != context_protocol
+        ):
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="conflicting_selection",
+                message="Collaboration protocol selection conflicts with the response.",
+            )
+    else:
+        try:
+            tool_protocols = _collaboration_protocols(
+                {"tools": payload.get("tools", [])}
+                if isinstance(payload, Mapping)
+                else {"tools": []}
+            )
+            if len(tool_protocols) > 1:
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="mixed_current_tool_surface",
+                    message="Current Collaboration tools contain multiple protocol families.",
+                )
+            current_protocol = next(iter(tool_protocols), None)
+
             metadata = {
                 key: event_context[key]
                 for key in (
-                    "collaboration_protocol",
                     "multi_agent_version",
                     "metadata",
                     "model_metadata",
                     "capabilities",
                     "features",
                 )
-                if key in event_context
+                if isinstance(event_context, Mapping) and key in event_context
             }
-        else:
-            metadata = {}
-        if metadata:
-            metadata_protocol = _classify_collaboration_payload(
-                {"metadata": metadata}
+            metadata_protocol = (
+                _classify_collaboration_payload({"metadata": metadata})
+                if metadata
+                else None
             )
-    except _CollaborationBoundaryError as exc:
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification=exc.classification,
-            message="Collaboration protocol boundary is malformed or ambiguous.",
-            cause=exc,
-        )
-    selected_protocol = None
-    metadata_conflict = False
-    if isinstance(event_context, Mapping):
-        selected_protocol = event_context.get("collaboration_protocol")
-        if (
-            selected_protocol is not None
-            and selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}
-        ):
+
+            raw_context_protocol = (
+                event_context.get("collaboration_protocol")
+                if isinstance(event_context, Mapping)
+                else None
+            )
+            context_protocol = raw_context_protocol if raw_context_protocol in {
+                _COLLABORATION_V1,
+                _COLLABORATION_V2,
+            } else None
+            protocol = current_protocol or metadata_protocol or context_protocol
+            if (
+                raw_context_protocol is not None
+                and context_protocol is None
+                and protocol is None
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="unknown_state",
+                    message="Collaboration protocol selection is unknown.",
+                )
+
+            history_protocols: frozenset[str] = frozenset()
+            if protocol is None:
+                history_protocols = _collaboration_protocols(
+                    {"input": payload.get("input", [])}
+                    if isinstance(payload, Mapping)
+                    else {"input": []}
+                )
+        except _CollaborationBoundaryError as exc:
             _raise_collaboration_boundary_error(
                 event_context,
-                classification="unknown_state",
-                message="Collaboration protocol selection is unknown.",
+                classification=exc.classification,
+                message="Collaboration protocol boundary is malformed or ambiguous.",
+                cause=exc,
             )
-        if selected_protocol is None:
-            selected_protocol = metadata_protocol
-        elif metadata_protocol is not None and selected_protocol != metadata_protocol:
-            metadata_conflict = True
-    if metadata_conflict:
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification="conflicting_selection",
-            message="Collaboration protocol metadata conflicts with the selected protocol.",
-        )
-    if (
-        selected_protocol is not None
-        and payload_protocol is not None
-        and selected_protocol != payload_protocol
-    ):
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification="conflicting_selection",
-            message="Collaboration protocol selection conflicts with the request.",
-        )
-    protocol = payload_protocol or selected_protocol
+
+        if len(history_protocols) > 1:
+            _write_adapter_event(
+                event_context,
+                "collaboration_history_mixed",
+                protocol_count=len(history_protocols),
+            )
+        if protocol is None and len(history_protocols) == 1:
+            protocol = next(iter(history_protocols))
+
     if isinstance(event_context, dict) and protocol is not None:
         event_context["collaboration_protocol"] = protocol
     return protocol
@@ -10459,7 +10510,11 @@ def compatible_request_body(
     if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="request",
+    )
 
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
@@ -11862,7 +11917,11 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="response",
+    )
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = False
     runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
@@ -11947,7 +12006,11 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="stream",
+    )
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
 
     runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
