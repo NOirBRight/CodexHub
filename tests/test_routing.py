@@ -55,6 +55,43 @@ def _load_glm_apply_patch_history_native_ids_fixture():
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def _load_model_switch_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "real_client_e2e" / "model-switch-v1-v2.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _model_switch_tool_surface(protocol: str) -> dict[str, Any]:
+    namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
+    return {
+        "type": "namespace",
+        "name": namespace,
+        "tools": [{"type": "function", "name": "spawn_agent"}],
+    }
+
+
+def _model_switch_call(protocol: str, call_id: str) -> dict[str, Any]:
+    arguments = (
+        {
+            "task_name": "bounded-model-switch-check",
+            "message": "return the bounded result",
+            "fork_turns": "all",
+        }
+        if protocol == "collaboration_v2"
+        else {
+            "agent_type": "general",
+            "message": "return the bounded result",
+        }
+    )
+    namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
+    return {
+        "type": "function_call",
+        "namespace": namespace,
+        "name": "spawn_agent",
+        "call_id": call_id,
+        "arguments": arguments,
+    }
+
+
 class FakeWFile:
     def __init__(self, fail_on_write=None):
         self.writes = []
@@ -3280,6 +3317,165 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["streaming_policy"], codex_proxy.StreamingPolicy.TRANSPARENT.value)
             self.assertEqual(fields["transport_policy"], codex_proxy.TransportPolicy.OFFICIAL_KEEPALIVE.value)
             self.assertEqual(fields["mutation_summary"], [codex_proxy.RouteMutation.MODEL_ALIAS.value])
+
+    def test_model_switch_gateway_request_response_path_uses_selected_model_in_both_directions(self):
+        fixture = _load_model_switch_fixture()
+        self.assertEqual(fixture["schema_version"], "codexhub.model-switch.v1")
+        self.assertEqual(fixture["expected"], {
+            "same_thread": True,
+            "fallback_model": None,
+            "boundary_error": None,
+            "reconnect_count": 0,
+        })
+        turns = fixture["turns"]
+        self.assertEqual(len(turns), 2)
+        self.assertEqual(
+            [(turn["selected_model"], turn["collaboration_protocol"]) for turn in turns],
+            [
+                ("gpt-5.6-luna", "collaboration_v2"),
+                ("deepseek-v4-flash:0731", "collaboration_v1"),
+            ],
+        )
+
+        def upstream_for(model: str) -> dict[str, Any]:
+            if model == "gpt-5.6-luna":
+                provider_id = "openai"
+                upstream_name = "official"
+                auth = "codex_auth"
+                upstream_model = model
+            else:
+                provider_id = "ollama-cloud"
+                upstream_name = "ollama_cloud"
+                auth = "api_key"
+                upstream_model = model
+            return {
+                "name": upstream_name,
+                "provider_id": provider_id,
+                "model_id": model,
+                "base_url": "https://model-switch.example.test/v1",
+                "auth": auth,
+                "api_key": "fixture-model-switch-key",
+                "upstream_model": upstream_model,
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+                "native_responses_tool_codec": "none",
+                "capability_binding": {
+                    "schema_version": 1,
+                    "provider": provider_id,
+                    "model": model,
+                    "upstream_protocol": "responses",
+                },
+            }
+
+        forbidden_events = {
+            "collaboration_boundary_rejected",
+            "invalid_collaboration_boundary",
+            "mixed_v1_v2",
+            "upstream_protocol_fallback",
+            "reconnect_storm",
+        }
+        expected_provider = {
+            "gpt-5.6-luna": ("official", "openai"),
+            "deepseek-v4-flash:0731": ("ollama_cloud", "ollama-cloud"),
+        }
+
+        for direction, ordered_turns in (("luna_to_deepseek", turns), ("deepseek_to_luna", tuple(reversed(turns)))):
+            self.write_proxy_event.reset_mock()
+            history: list[dict[str, Any]] = []
+            for turn_index, turn in enumerate(ordered_turns):
+                model = turn["selected_model"]
+                protocol = turn["collaboration_protocol"]
+                call_id = f"{direction}-call-{turn_index}"
+                call_item = _model_switch_call(protocol, call_id)
+                body = {
+                    "model": model,
+                    "input": [
+                        *history,
+                        {"type": "message", "role": "user", "content": "continue with the selected model"},
+                        call_item,
+                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                    ],
+                    "tools": [_model_switch_tool_surface(protocol)],
+                    "stream": False,
+                }
+                handler, fake = post_handler(
+                    "/v1/responses",
+                    json.dumps(body, separators=(",", ":")).encode("utf-8"),
+                    headers={
+                        "X-Codex-Client-Id": "unknown",
+                        "X-Codex-Thread-Id": "model-switch-thread",
+                        "X-Codex-Turn-Id": f"{direction}-turn-{turn_index}",
+                    },
+                )
+                upstream = upstream_for(model)
+                upstream_response = json.dumps(
+                    {
+                        "id": f"model-switch-response-{direction}-{turn_index}",
+                        "object": "response",
+                        "status": "completed",
+                        "model": model,
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "completed", "annotations": []}],
+                            }
+                        ],
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+
+                event_offset = len(self.write_proxy_event.call_args_list)
+                with (
+                    patch("codex_proxy.choose_upstream", return_value=upstream),
+                    patch("codex_proxy.codex_access_token", return_value="fixture-access-token"),
+                    patch("codex_proxy.codex_account_id", return_value="fixture-account-id"),
+                    patch(
+                        "codex_proxy._open_upstream_response",
+                        return_value=FakeContextResponse(upstream_response),
+                    ) as open_upstream,
+                ):
+                    CodexProxyHandler.do_POST(handler)
+
+                self.assertEqual(fake.status, 200, direction)
+                open_upstream.assert_called_once()
+                forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+                self.assertEqual(forwarded["model"], model)
+
+                events = [
+                    (event_call.args[0], event_call.kwargs)
+                    for event_call in self.write_proxy_event.call_args_list[event_offset:]
+                    if event_call.args
+                ]
+                event_names = [event for event, _fields in events]
+                self.assertTrue(
+                    forbidden_events.isdisjoint(event_names),
+                    (direction, turn_index, event_names),
+                )
+                starts = [fields for event, fields in events if event == "request_start"]
+                completes = [fields for event, fields in events if event == "request_complete"]
+                self.assertEqual(len(starts), 1, (direction, turn_index, event_names))
+                self.assertEqual(len(completes), 1, (direction, turn_index, event_names))
+                for fields in (*starts, *completes):
+                    self.assertEqual(fields["model_requested"], model)
+                    self.assertEqual(fields["model_canonical"], model)
+                    self.assertEqual(fields["model"], model)
+                    self.assertEqual(fields["upstream"], expected_provider[model][0])
+                    self.assertEqual(fields["provider_id"], expected_provider[model][0])
+                    self.assertEqual(fields["capability_binding_provider_id"], expected_provider[model][1])
+                    self.assertEqual(fields["capability_binding_model_id"], model)
+                    self.assertNotIn("terra", repr(fields).lower())
+                self.assertEqual(len(starts[0]["route_attempts"]), 1)
+                self.assertEqual(completes[0]["route_attempt_index"], 0)
+                self.assertEqual(completes[0]["route_attempt_protocol"], "responses")
+                self.assertEqual(completes[0]["status"], 200)
+                history.extend(
+                    [
+                        call_item,
+                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                    ]
+                )
 
     def test_third_party_app_official_responses_nonstream_buffers_forced_sse(self):
         body = json.dumps(
