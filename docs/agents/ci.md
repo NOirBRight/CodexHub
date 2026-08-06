@@ -1,21 +1,22 @@
-# CI and manual verification
+# Local verification
 
-GitHub Actions runs the required PR validation for branches targeting `dev`
-and `main` on fresh GitHub-hosted runners. Actions owns the trigger, exact-SHA
-logs, artifacts, Check status, and readback. Local candidate checks are
-selected by `docs/agents/verification-policy.md`; they do not duplicate every
-CI job by default.
+GitHub Actions CI is disabled for this project. It is not a merge, release, or
+issue gate, and no candidate may wait for or claim a Hosted `CI / gate` result.
+Historical workflow runs and the matrix below are retained only as reference.
+All current candidates are verified locally on the exact candidate SHA using
+`docs/agents/verification-policy.md`.
 
-## CI jobs
+## Historical Hosted matrix (non-gating)
 
-Every workflow run creates one immutable **CI classifier** and one final
-**`CI / gate`** check.  The classifier in
+The former workflow created one immutable **CI classifier** and one final
+**`CI / gate`** check. The classifier in
 `scripts/ci/ci_change_plan.py` compares a pull request's merge-base to its
 head and emits the job-selection booleans.  Formal jobs keep their existing
 check names, but are skipped when their contract is unaffected.  A skipped
 formal job is acceptable only when the classifier selected it as out of scope;
-the gate fails on classifier failure, cancellation, or any selected job that
-does not pass.
+the historical gate failed on classifier failure, cancellation, or any
+selected job that did not pass. These jobs are not run by the current release
+process.
 
 - **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0` when the classifier selects Python core.
 - **Synthetic real-client contract**: when selected, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The unified classifier uses the existing synthetic dependency set; `python scripts/ci/check_python_test_partitions.py` still proves the core and synthetic partitions are disjoint and complete.
@@ -33,17 +34,12 @@ does not pass.
   `safe_file.rs` must stay free of crate dependencies so the standalone compile
   keeps working.
 
-### Triggers and path scheduling
+### Former triggers and path scheduling
 
-Same-repository and fork PRs to `dev` and `main` always run the classifier and
-gate.  The classifier selects Python, frontend, Rust, Linux `safe_file`, and
-release checks from changed paths; documentation-only changes run only the
-classifier and gate.  Unknown paths, planner/workflow changes, path-read
-failures, pushes, schedules, and manual dispatches fail closed to the full
-matrix.  Workflow triggers intentionally do not use `paths` filters, so the
-required `CI / gate` check is never left permanently pending by GitHub.
-Hosted runners are disposable and do not depend on the developer machine or a
-repository self-hosted registration.
+The former workflow ran the classifier and gate for pull requests, pushes,
+schedules, and manual dispatches. Its path planner and fail-closed behavior
+remain useful references for selecting the equivalent local suites, but no
+GitHub check is required or authoritative.
 
 Windows jobs pin `windows-2025`; the Linux-only `safe_file` job pins
 `ubuntu-24.04`, so its `cfg(unix)` code is compiled and exercised on Linux.
@@ -64,13 +60,13 @@ return a typed `not_applicable_unmanaged_checkout` result in CI. Missing Paseo
 state in an unmanaged checkout is not a product regression and must not be
 reported as one.
 
-### Hosted runner contract
+### Former Hosted runner contract (historical)
 
-Routine CI must remain runnable on a clean GitHub-hosted Windows or Linux
-virtual machine. Do not add requirements for a persistent service, desktop
-session, local credentials, or a developer/Paseo workspace. Cargo caches may
-contain only `~/.cargo/registry` and `~/.cargo/git`; never cache
-`src-tauri/target`.
+The former routine CI ran on clean GitHub-hosted Windows or Linux virtual
+machines. It is disabled and must not be restarted to unblock a candidate.
+The old contract remains documented for provenance only. Cargo caches in any
+local verification must contain only `~/.cargo/registry` and `~/.cargo/git`;
+never cache `src-tauri/target`.
 
 The former repository self-hosted runners are retired. Their historical
 registration and de-registration record is kept in
@@ -100,9 +96,9 @@ classifier failure instead of silently accepting a partial plan.
 
 The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
 
-## Full manual fallback
+## Full local verification matrix
 
-Use all of these commands when GitHub Actions is unavailable and the change must be integrated. Before opening a normal PR, run only the local suites selected by the verification policy:
+For `standard` and `strict` candidates, run the affected suites selected by the verification policy. Use the following complete matrix when the changed boundary spans the whole product or when a release gate explicitly requires it:
 
 ```powershell
 python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0

@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "audit_issue_62_runtime_artifacts.py"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 
 
 def load_audit_module():
@@ -27,6 +28,7 @@ def run_audit(
     gateway_db: Path,
     *,
     config_written_at: str = "1970-01-01T00:06:00Z",
+    source_contract: Path = SOURCE_CONTRACT,
 ):
     return module.audit_artifacts(
         codex_log_db=codex_db,
@@ -37,6 +39,7 @@ def run_audit(
         config_written_at=config_written_at,
         catalog_written_at="1970-01-01T00:02:00Z",
         snapshot_ended_at="1970-01-01T00:10:00Z",
+        source_contract=source_contract,
     )
 
 
@@ -282,6 +285,14 @@ def test_audit_reports_only_sanitized_schema_and_gate_facts(tmp_path: Path) -> N
             "type": "tool_search",
         },
     ]
+    assert [entry["family"] for entry in planner["declaration_families"]] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
 
     gateway = audit["gateway_identity_route"]
     assert gateway["request_starts"] == 1
@@ -385,7 +396,17 @@ def test_audit_surfaces_unclassified_items_and_prefix_mismatch(tmp_path: Path) -
 
 def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() -> None:
     audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
 
+    assert audit["provenance"]["capture_status"] == "not_observed"
+    assert audit["provenance"]["capture_status"] == source_contract["capture_status"]
+    for field, value in source_contract["provenance"].items():
+        assert audit["provenance"][field] == value
+    assert audit["provenance"]["historical_capture"] == {
+        "captured_at": "2026-07-12T14:57:55+08:00",
+        "cli_version": "0.144.0-alpha.4",
+        "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    }
     assert audit["gateway_identity_route"]["request_starts"] == 525
     assert audit["gateway_identity_route"]["prefix_equal"] == 525
     assert audit["gateway_identity_route"]["prefix_mismatch"] == 0
@@ -406,7 +427,194 @@ def test_committed_audit_preserves_the_bounded_fact_and_sanitization_boundary() 
     assert "https://" not in serialized
     assert ".codex" not in serialized.lower()
     assert not re.search(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", serialized)
-    assert not re.search(r'(?<![A-Za-z0-9])[a-f0-9]{64}(?![A-Za-z0-9])', serialized)
+    # The only full SHA-256 permitted in this sanitized audit is the public,
+    # attested source-contract binary identity.  Raw capture/body fingerprints
+    # must remain absent.
+    sha256_values = re.findall(r'(?<![A-Za-z0-9])[a-f0-9]{64}(?![A-Za-z0-9])', serialized)
+    assert sha256_values == [
+        "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+    ]
+
+
+def test_audit_rejects_source_contract_provenance_drift(tmp_path: Path) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["provenance"]["source_commit"] = "0" * 40
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source contract provenance"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
+
+
+def test_audit_rejects_captured_source_contract_claim(tmp_path: Path) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["request_shape"]["non_streaming_control"][
+        "captured"
+    ] = True
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="captured non-streaming"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_audit_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="request_shape"):
+        module._source_contract_provenance(source_contract_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "family_runtime_type",
+        "family_wire_type",
+        "family_executor",
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+        "response_item_type",
+    ],
+)
+def test_audit_rejects_nested_source_contract_schema_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    surface = source_contract["runtime_wire_surface"]
+    examples = surface["declaration_family_examples"]
+    if mutation == "family_runtime_type":
+        surface["declaration_families"][0]["runtime_type"] = "bogus"
+    elif mutation == "family_wire_type":
+        surface["declaration_families"][0]["wire_declaration_type"] = "bogus"
+    elif mutation == "family_executor":
+        surface["declaration_families"][0]["executor"] = "bogus"
+    elif mutation == "declaration":
+        examples["plain_function"]["declaration"]["type"] = "bogus"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["type"] = "bogus"
+    elif mutation == "result":
+        examples["plain_function"]["result"]["type"] = "bogus"
+    elif mutation == "history":
+        examples["plain_function"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["event"] = "bogus"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["event"] = "bogus"
+    elif mutation == "namespace_tool":
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    else:
+        surface["response_shape"]["response_item_types"].append("future_item")
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError):
+        module._source_contract_provenance(source_contract_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["top_level", "runtime_wire_surface", "request_shape", "response_shape"],
+)
+def test_audit_rejects_unknown_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = load_audit_module()
+    codex_db = tmp_path / "codex.sqlite"
+    gateway_db = tmp_path / "gateway.sqlite"
+    create_codex_log_db(codex_db)
+    create_gateway_db(gateway_db)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown"):
+        run_audit(module, codex_db, gateway_db, source_contract=source_contract_path)
 
 
 def test_audit_detects_generic_response_body_fingerprint_fields(tmp_path: Path) -> None:

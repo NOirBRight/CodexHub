@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = ROOT / "docs" / "evidence" / "issue-62" / "current-codexhub-thread-tool-surface.json"
+SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-contract.json"
 WIRE_FIXTURE = ROOT / "docs" / "evidence" / "issue-62" / "codexhub-runtime-wire-fixture.json"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
 REPLAY_SCRIPT = ROOT / "scripts" / "check-codex-thread-tool-surface.ps1"
@@ -57,6 +58,9 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
 
     assert trace["schema_version"] == 4
     assert "session_id" not in trace["source"]
+    assert trace["captured_at"] == "2026-07-12T14:57:55+08:00"
+    assert trace["source"]["cli_version"] == "0.144.0-alpha.4"
+    assert trace["planner_gates"]["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
     assert len(trace["registered_codex_app_tools"]) == 15
     required = set(trace["required_thread_tools"])
     assert required <= set(trace["registered_codex_app_tools"])
@@ -103,11 +107,28 @@ def test_trace_covers_dynamic_tool_exposure_and_sanitizes_session_identity() -> 
     assert snapshot["model_entry_supports_search_tool"] is True
     assert len(snapshot["sha256"]) == 64
 
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    assert source_contract["capture_status"] == "not_observed"
+    assert source_contract["qualification_status"] == "unqualified"
+    assert source_contract["provenance"]["cli_version"] == "0.146.0"
+    assert source_contract["provenance"]["source_commit"] == "e363b08c9175ac1cbe5893615dd2cb9ddf95043b"
+    families = source_contract["runtime_wire_surface"]["declaration_families"]
+    assert [family["family"] for family in families] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+
 
 def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
     wire = json.loads(WIRE_FIXTURE.read_text(encoding="utf-8"))
 
     assert wire["route"]["upstream_route"] == "official"
+    assert wire["provenance"]["cli_version"] == "0.144.0-alpha.4"
+    assert wire["provenance"]["source_commit"] == "9e552e9d15ba52bed7077d5357f3e18e330f8f38"
     assert "no full request or response body fingerprint" in wire["evidence_limit"][
         "transport_observation"
     ]
@@ -140,6 +161,19 @@ def test_wire_fixture_keeps_identity_and_unknown_sentinels() -> None:
         item.get("tag") == "unknown"
         for item in wire["response"]["non_streaming"]["response_items"]
     )
+    assert json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))["runtime_wire_surface"]["declaration_family_order"] == [
+        "plain_function",
+        "custom_freeform",
+        "namespace",
+        "client_executed_tool_discovery",
+        "selected_provider_hosted",
+        "unknown_future_kind",
+    ]
+    hosted = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))["runtime_wire_surface"]["declaration_family_examples"][
+        "selected_provider_hosted"
+    ]
+    assert hosted["provider_scope"] == "selected_provider_only"
+    assert hosted["cross_provider_proxy"] == "forbidden"
 
 
 def test_identity_replay_passes() -> None:
@@ -257,8 +291,10 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
     audit["gate_classification"]["non_direct_states"] = "pass"
     trace_path = tmp_path / TRACE.name
     wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
     shutil.copyfile(TRACE, trace_path)
     shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(SOURCE_CONTRACT, source_contract_path)
     audit_path = tmp_path / "read-only-gate-audit.json"
     audit_path.write_text(
         json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -282,6 +318,8 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
             "Bypass",
             "-File",
             str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
             "-TracePath",
             str(trace_path),
             "-WireFixturePath",
@@ -298,6 +336,324 @@ def test_powershell_accepts_pass_non_direct_state_like_python(tmp_path: Path) ->
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_powershell_rejects_historical_capture_provenance_drift(tmp_path: Path) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(SOURCE_CONTRACT, source_contract_path)
+    audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+    audit["provenance"]["historical_capture"]["captured_at"] = "2026-07-13T14:57:55+08:00"
+    audit_path.write_text(
+        json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
+def test_powershell_rejects_source_contract_family_schema_drift(tmp_path: Path) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    source_contract["runtime_wire_surface"]["declaration_family_examples"]["plain_function"][
+        "call"
+    ]["type"] = "web_search_call"
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["top_level", "runtime_wire_surface", "request_shape", "response_shape"],
+)
+def test_powershell_rejects_unknown_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    if mutation == "top_level":
+        source_contract["future_field"] = "must not be accepted"
+    elif mutation == "runtime_wire_surface":
+        source_contract["runtime_wire_surface"]["future_field"] = "must not be accepted"
+    elif mutation == "request_shape":
+        source_contract["runtime_wire_surface"]["request_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"][
+            "future_field"
+        ] = "must not be accepted"
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "declaration",
+        "call",
+        "result",
+        "history",
+        "streaming",
+        "terminal",
+        "error",
+        "namespace_tool",
+        "response_item_type",
+    ],
+)
+def test_powershell_rejects_unknown_nested_source_contract_fields(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    examples = source_contract["runtime_wire_surface"]["declaration_family_examples"]
+    if mutation == "declaration":
+        examples["plain_function"]["declaration"]["future_field"] = "must fail"
+    elif mutation == "call":
+        examples["plain_function"]["call"]["future_field"] = "must fail"
+    elif mutation == "result":
+        examples["custom_freeform"]["result"]["future_field"] = "must fail"
+    elif mutation == "history":
+        examples["client_executed_tool_discovery"]["history"]["future_field"] = "must fail"
+    elif mutation == "streaming":
+        examples["plain_function"]["streaming"]["future_field"] = "must fail"
+    elif mutation == "terminal":
+        examples["plain_function"]["terminal"]["future_field"] = "must fail"
+    elif mutation == "error":
+        examples["plain_function"]["error"]["future_field"] = "must fail"
+    elif mutation == "namespace_tool":
+        examples["namespace"]["declaration"]["tools"][0]["future_field"] = "must fail"
+    else:
+        source_contract["runtime_wire_surface"]["response_shape"]["response_item_types"].append(
+            "future_item"
+        )
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "protocol",
+        "streaming_fields",
+        "representative_model",
+        "representative_input",
+        "representative_tools",
+        "representative_tool_choice",
+        "representative_parallel_tool_calls",
+        "representative_stream",
+        "representative_store",
+        "non_streaming_stream",
+        "non_streaming_response_body",
+    ],
+)
+def test_powershell_rejects_source_contract_request_shape_value_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    trace_path = tmp_path / TRACE.name
+    wire_path = tmp_path / WIRE_FIXTURE.name
+    source_contract_path = tmp_path / SOURCE_CONTRACT.name
+    audit_path = tmp_path / AUDIT.name
+    inventory_path = tmp_path / "runtime-wire-inventory.json"
+    shutil.copyfile(TRACE, trace_path)
+    shutil.copyfile(WIRE_FIXTURE, wire_path)
+    shutil.copyfile(AUDIT, audit_path)
+    shutil.copyfile(ROOT / "docs/evidence/issue-62/runtime-wire-inventory.json", inventory_path)
+    source_contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    request_shape = source_contract["runtime_wire_surface"]["request_shape"]
+    if mutation == "protocol":
+        request_shape["protocol"] = "chat_completions"
+    elif mutation == "streaming_fields":
+        request_shape["streaming_fields"] = ["model"]
+    elif mutation.startswith("representative_"):
+        field = mutation.removeprefix("representative_")
+        values = {
+            "model": "gpt-5.5",
+            "input": "not-redacted",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+            "stream": False,
+            "store": True,
+        }
+        request_shape["representative"][field] = values[field]
+    elif mutation == "non_streaming_stream":
+        request_shape["non_streaming_control"]["stream"] = True
+    else:
+        request_shape["non_streaming_control"]["response_body"] = "captured-body"
+    source_contract_path.write_text(
+        json.dumps(source_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPLAY_SCRIPT),
+            "-SourceContractPath",
+            str(source_contract_path),
+            "-TracePath",
+            str(trace_path),
+            "-WireFixturePath",
+            str(wire_path),
+            "-AuditPath",
+            str(audit_path),
+            "-InventoryPath",
+            str(inventory_path),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "generated inventory drift check failed" in result.stderr.lower()
 
 
 @pytest.mark.parametrize("case", ["mutation", "deletion", "loss"])

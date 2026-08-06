@@ -25,6 +25,7 @@
   "provenance": {
     "cli_version": "0.144.0-alpha.4",
     "source_commit": "9e552e9d15ba52bed7077d5357f3e18e330f8f38",
+    "captured_at": "2026-07-12T14:57:55+08:00",
     "capture_id": "sanitized-current-side-capture"
   },
   "exposure_state_tags": ["Direct", "DirectModelOnly", "Deferred", "Hidden", "hosted-only", "host-unavailable"],

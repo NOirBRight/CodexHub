@@ -894,6 +894,39 @@ where
         &StartupOutputCapture,
     ) -> Result<StartupOutcome, String>,
 {
+    start_with_paths_and_command_builder(
+        paths,
+        timeout,
+        poll_interval,
+        health_probe,
+        inspector,
+        listener_inspector,
+        build_start_command,
+        wait_for_startup,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_with_paths_and_command_builder<F>(
+    paths: &ProxyPaths,
+    timeout: Duration,
+    poll_interval: Duration,
+    health_probe: &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+    inspector: &dyn ProcessInspector,
+    listener_inspector: &dyn ListenerInspector,
+    command_builder: fn(&Path, &Path, &ProxyPaths, &Settings) -> Command,
+    wait_for_startup: F,
+) -> Result<GatewayStartOutcome, GatewayStartFailure>
+where
+    F: FnOnce(
+        &mut Child,
+        u16,
+        Duration,
+        Duration,
+        &dyn Fn(u16) -> Result<Option<HealthResponse>, String>,
+        &StartupOutputCapture,
+    ) -> Result<StartupOutcome, String>,
+{
     let existing =
         reconciled_snapshot_with_controls(paths, health_probe, inspector, listener_inspector)?;
     if existing.identity.is_some() {
@@ -918,7 +951,7 @@ where
 
     remove_pid(paths)?;
     let python = find_python(paths);
-    let mut command = build_start_command(&python, &script, paths, &settings);
+    let mut command = command_builder(&python, &script, paths, &settings);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -1858,9 +1891,35 @@ fn build_start_command(
     paths: &ProxyPaths,
     settings: &Settings,
 ) -> Command {
+    build_start_command_with_diagnostics(
+        python,
+        script,
+        paths,
+        settings,
+        build_info::current().diagnostics_enabled,
+    )
+}
+
+#[cfg(test)]
+fn build_start_command_without_diagnostics(
+    python: &Path,
+    script: &Path,
+    paths: &ProxyPaths,
+    settings: &Settings,
+) -> Command {
+    build_start_command_with_diagnostics(python, script, paths, settings, false)
+}
+
+fn build_start_command_with_diagnostics(
+    python: &Path,
+    script: &Path,
+    paths: &ProxyPaths,
+    settings: &Settings,
+    diagnostics_enabled: bool,
+) -> Command {
     let mut command = Command::new(python);
-    let build = build_info::current();
-    if build.diagnostics_enabled {
+    if diagnostics_enabled {
+        let build = build_info::current();
         command
             .arg("-c")
             .arg(DEBUG_DIAGNOSTIC_BOOTSTRAP)
@@ -3476,9 +3535,9 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 #[cfg(test)]
 mod tests {
     use super::{
-        build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
-        comparable_path, configure_start_stdio, detect_mode, find_python,
-        force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
+        build_start_command, build_start_command_without_diagnostics, capture_child_stdio,
+        clean_up_failed_start_with_controls, comparable_path, configure_start_stdio, detect_mode,
+        find_python, force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
         reconciled_snapshot_with_controls,
         replace_managed_proxy_from_previous_bundle_with_controls, start_with_paths_and_controls,
         start_with_paths_and_waiter, status_with_paths,
@@ -3492,7 +3551,8 @@ mod tests {
 
     #[cfg(windows)]
     use super::{
-        run_bounded_inspection_command_with_hook, run_windows_inspection, WindowsInspectionKind,
+        run_bounded_inspection_command, run_bounded_inspection_command_with_hook,
+        run_windows_inspection, WindowsInspectionKind,
     };
     #[cfg(not(windows))]
     use super::{start_with_paths, stop_with_paths};
@@ -3625,21 +3685,22 @@ mod tests {
     fn inspection_returns_when_a_descendant_inherits_output_handles() {
         let root = temp_root("inspection-descendant");
         let descendant_pid_path = root.join("descendant.pid");
-        let escaped_path = descendant_pid_path
-            .to_string_lossy()
-            .replace(char::from(39), "''");
+        let child_pid_path =
+            serde_json::to_string(&descendant_pid_path.to_string_lossy().to_string())
+                .expect("encode descendant PID path");
+        let child_script = "import time; time.sleep(60)";
         let script = format!(
-            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -NoNewWindow -PassThru; $child.Id | Set-Content -NoNewline -Path '{escaped_path}'; [Console]::Out.Write('parent-exited')"
+            "import subprocess, sys; child = subprocess.Popen([sys.executable, '-c', {child_script:?}], close_fds=False); open({child_pid_path}, 'w', encoding='ascii').write(str(child.pid)); sys.stdout.write('parent-exited'); sys.stdout.flush()"
         );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            // Generous timeout: the parent chains two PowerShell cold starts
-            // (itself plus Start-Process), which can take well over five
-            // seconds under parallel test load.
-            let result = run_windows_inspection(
-                &script,
+            let mut command = Command::new("python");
+            command.args(["-c", &script]);
+            super::configure_no_window(&mut command);
+            let result = run_bounded_inspection_command(
+                command,
+                Instant::now() + Duration::from_secs(20),
                 WindowsInspectionKind::Process,
-                Duration::from_secs(20),
             );
             let _ = result_tx.send(result);
         });
@@ -5252,6 +5313,7 @@ time.sleep(10)
             },
             inspector: &inspector,
             listener_inspector: &listener_inspector,
+            command_builder: build_start_command_without_diagnostics,
             session_owned_identity: RefCell::new(None),
         };
         let coordinator = crate::gateway_lifecycle::GatewayLifecycleCoordinator::new();
@@ -5372,6 +5434,8 @@ time.sleep(10)
             let old_status =
                 start_with_controlled_inspector(&old_paths, &old_inspector, &listener_inspector)?;
             ensure(old_status.proxy_running, "old bundle should start")?;
+            let old_pid = read_pid(&old_paths)?
+                .ok_or_else(|| "old bundle should own the proxy PID".to_string())?;
 
             replace_managed_proxy_from_previous_bundle_with_controls(
                 &new_paths,
@@ -5380,6 +5444,11 @@ time.sleep(10)
                 &listener_inspector,
             )?;
             previous_bundle_replaced = true;
+            // The debug Gateway closes its health endpoint before its recorder
+            // drains and the Python process exits.  Keep the bundle-upgrade
+            // fixture from racing the next reconciliation through that
+            // transient health-unavailable/PID-still-live window.
+            wait_for_missing_process(old_pid);
             let new_status =
                 start_with_controlled_inspector(&new_paths, &new_inspector, &listener_inspector)?;
             ensure(new_status.proxy_running, "new bundle should start")?;
@@ -5934,6 +6003,7 @@ time.sleep(10)
         delegate: ProxyLifecycleBackend,
         inspector: &'a FastProcessInspector,
         listener_inspector: &'a dyn ListenerInspector,
+        command_builder: fn(&Path, &Path, &ProxyPaths, &Settings) -> Command,
         session_owned_identity: RefCell<Option<super::GatewayIdentity>>,
     }
 
@@ -5960,13 +6030,14 @@ time.sleep(10)
         }
 
         fn start(&self) -> Result<super::GatewayStartOutcome, super::GatewayStartFailure> {
-            super::start_with_paths_and_controls(
+            super::start_with_paths_and_command_builder(
                 &self.delegate.paths,
                 super::START_TIMEOUT,
                 Duration::from_millis(200),
                 &super::health,
                 self.inspector,
                 self.listener_inspector,
+                self.command_builder,
                 |child, port, timeout, poll_interval, health_probe, _output_capture| {
                     super::wait_for_startup_health(
                         child,

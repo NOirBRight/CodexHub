@@ -22,8 +22,15 @@ payloads are redacted.
   Gateway filtering beyond the observed prefix. The exact-version Desktop core
   and Code Mode app-server controls pass.
 
-The source snapshot is OpenAI Codex commit
-9e552e9d15ba52bed7077d5357f3e18e330f8f38. At that revision, the dynamic
+The retained Desktop capture is historical: it was captured on 2026-07-12
+with Codex CLI `0.144.0-alpha.4`, source commit
+`9e552e9d15ba52bed7077d5357f3e18e330f8f38`. It must not be relabeled as the
+later CLI 0.146.0 release. The separate
+`codex-0.146-source-contract.json` records the 0.146.0 source contract (tag
+`rust-v0.146.0`, attested commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`,
+and exact binary hash) with `capture_status=not_observed` and
+`qualification_status=unqualified`. At that
+historical revision, the dynamic
 tool protocol defines optional deferLoading; the dynamic handler maps true to
 Deferred and missing or false to Direct. ToolExposure keeps Direct,
 DirectModelOnly, Deferred, and Hidden distinct. Tool search is planned only
@@ -90,6 +97,10 @@ session, task, turn, call, item, request, or response identifiers.
 The bounded audit establishes these additional facts without a restart,
 reconnect, configuration write, or production-handler change:
 
+Its candidate provenance is explicitly `capture_status=not_observed` and is
+bound to the same 0.146 source contract; the retained historical capture
+metadata remains recorded separately rather than being promoted to 0.146.
+
 - Forty-three retained Sol transport rows resolve to three actual
   model-visible planner surfaces. The largest retained surface includes the
   base functions, collaboration namespace, goal functions, image generation,
@@ -123,6 +134,7 @@ Run the sanitizer with explicit bounded inputs and observation cutoffs:
 
 ```powershell
 python scripts/audit_issue_62_runtime_artifacts.py `
+  --source-contract docs/evidence/issue-62/codex-0.146-source-contract.json `
   --codex-log-db <codex-log-db> `
   --gateway-db <gateway-telemetry-db> `
   --model gpt-5.6-sol `
@@ -146,18 +158,28 @@ records one per-scope disposition for every taxonomy item the Codex CLI
 exposes over the core Responses contract and the explicitly-deferred advanced
 capabilities.
 
-The artifact is bound to CLI floor `0.145.0` and to the candidate identity
-derived from the existing sanitized artifacts (`cli_version=0.144.0-alpha.4`,
-source commit `9e552e9d15ba52bed7077d5357f3e18e330f8f38`, official Responses
-route). Because the captured CLI is below the floor, the generated
-`qualification.ready_for_beta1` is `false` and the candidate is explicitly
-marked `legacy_below_floor`; this evidence cannot be used as the beta.1
-candidate. The generator rejects an explicitly supplied CLI/source value that
-does not match the trace, binds route/provider/model fields across trace and
-wire fixtures (including pre/post models, catalog binding, and route profile),
-and records a canonical-LF SHA-256 manifest for all three input artifacts.  It
-never fabricates a capability disposition for a gate the artifacts do not
-qualify.
+The artifact is bound to CLI floor `0.146.0` and to the candidate identity
+from the unobserved 0.146 source contract (`cli_version=0.146.0`, source
+commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`, candidate revision
+`accab8ff6eb4d6ebd93cda84585fb5f6cb89da82`, official Responses route). The
+historical trace and wire fixture remain explicitly bound as 0.144.0 evidence.
+The audit carries the 0.146 source-contract provenance with
+`capture_status=not_observed` and nested historical-capture metadata; it is not
+a 0.146 runtime capture. The candidate is version-eligible, but
+`qualification.ready_for_beta2` remains
+`false`: planner completeness, clean current-binding cold start,
+independently fingerprinted full pre/post request and response bodies,
+non-streaming/terminal/error/hosted/unknown controls, and wire replay evidence
+are still incomplete. This is evidence for #62's downstream gates, not a #65
+qualification or capability unlock. The generator rejects an explicitly
+supplied CLI/source value that does not match the trace, binds route/provider/
+model fields across trace and wire fixtures (including pre/post models, catalog
+binding, and route profile), and records a canonical-LF SHA-256 manifest for
+all four input artifacts (including the source contract). The audit sanitizer
+must receive that source-contract path so reruns retain the exact
+`capture_status=not_observed` 0.146 provenance and nested historical 0.144
+capture metadata. It never fabricates a capability disposition for a gate the
+artifacts do not qualify.
 
 The qualification also has a separate `wire_identity_replay` gate. A full
 request/response fingerprint is not treated as replay proof by itself: a
@@ -219,7 +241,7 @@ reconciliation invokes the same drift check, then independently checks the
 input fingerprints, rejects duplicate scopes, and requires each core scope to
 point at its declared evidence path. A zero
 `unclassified_core_items` count therefore describes vocabulary validity only;
-`qualification.ready_for_beta1` is the separate completion gate. That gate also
+`qualification.ready_for_beta2` is the separate completion gate. That gate also
 consumes planner completeness, current-binding cold-start, full-wire
 fingerprinting, non-streaming, and identity-replay statuses; item dispositions
 alone cannot make an incomplete evidence set ready.
@@ -260,7 +282,7 @@ Evidence may use `cli_source_commit: null` with
 not acceptable.  If the npm provenance attestation has been independently
 verified, its exact SLSA resolved-dependency commit may instead be recorded
 with status `published` (for `0.146.0`, the attested release commit is
-`e363b08c9175ac1cbe5893615dd2cb9ddf95043b2`).
+`e363b08c9175ac1cbe5893615dd2cb9ddf95043b`).
 
 ## Isolated live-evidence sidecar lane
 
