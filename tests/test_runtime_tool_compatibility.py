@@ -131,6 +131,30 @@ def test_namespace_alias_round_trip_preserves_version_fields_and_ids() -> None:
     assert plan.entries[0].aliases == (alias,)
 
 
+def test_namespace_alias_count_is_not_limited_by_collision_attempt_budget() -> None:
+    declaration = {
+        "type": "namespace",
+        "name": "mcp__bulk",
+        "tools": [
+            {"type": "function", "name": f"tool_{index}", "parameters": {"type": "object"}}
+            for index in range(129)
+        ],
+    }
+    plan = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="chat_tools",
+        # A single probe is enough when there are no collisions.  This also
+        # proves the limit is per allocation, not a request-wide alias count.
+        protocol_capabilities=ProtocolCapabilities.chat_tools(max_alias_attempts=1),
+        request_token="bulk-namespace-aliases",
+    )
+
+    aliases = plan.entries[0].aliases
+    assert len(aliases) == 129
+    assert len(set(aliases)) == 129
+    assert aliases[-1].rsplit("_", 1)[-1] == "129"
+
+
 def test_native_plain_name_wins_over_unqualified_namespace_child() -> None:
     plain = {"type": "function", "name": "run"}
     namespace = {
