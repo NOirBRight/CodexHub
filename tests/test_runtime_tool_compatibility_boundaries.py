@@ -978,6 +978,21 @@ def test_native_namespace_rejects_unqualified_child_without_plain_owner(surface)
     assert exc_info.value.classification == "unknown_native_identity"
 
 
+def test_foreign_collaboration_history_is_preserved_when_current_plan_is_different() -> None:
+    plan = _adapted_namespace_plan(_namespace("multi_agent_v1", child="spawn_agent"))
+    history = [{
+        "type": "function_call",
+        "namespace": "collaboration",
+        "name": "followup_task",
+        "call_id": "old-v2-call",
+        "arguments": '{"task_name":"old","fork_turns":"all"}',
+    }]
+
+    encoded = plan.encode_payload({"input": history})
+
+    assert encoded["input"] == history
+
+
 def test_native_namespace_stream_rejects_unqualified_child_without_plain_owner():
     plan = _native_plan(_namespace("vendor", child="run"))
     state = CompatibilityStreamState(plan)
