@@ -1351,6 +1351,8 @@ class ToolCompatibilityPlan:
     def owns_wire_value(self, value: Any) -> bool:
         if not isinstance(value, Mapping):
             return False
+        if _is_opaque_collaboration_history_item(value):
+            return True
         name = value.get("name")
         namespace = value.get("namespace")
         if self.registry.record_for_alias(name) is not None:
