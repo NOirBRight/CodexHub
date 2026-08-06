@@ -1087,28 +1087,35 @@ class CatalogSyncTests(unittest.TestCase):
 
     def test_catalog_override_validates_managed_identity_digest(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
-        managed = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
-        current = json.loads(json.dumps(managed))
-        current["models"][0]["multi_agent_version"] = "v2"
-        current["models"][0]["codex_proxy_metadata"][catalog_sync.CATALOG_OWNER_IDENTITY_KEY] = "0" * 64
-        baseline = json.loads(json.dumps(managed))
-        baseline.update({"schema_version": 1, "managed_baseline": True})
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             current_path = root / "catalog.json"
             baseline_path = root / "baseline.json"
-            current_path.write_text(json.dumps(current), encoding="utf-8")
-            baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
             with (
-                patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
-                patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline_path),
                 patch.object(catalog_sync, "CATALOG_OVERRIDES_PATH", root / "overrides.json"),
+                patch.object(catalog_sync, "_CATALOG_OWNER_SECRET_CACHE", None),
             ):
-                overrides, diagnostics = catalog_sync._collect_catalog_overrides()
+                (root / catalog_sync.CATALOG_OWNER_SECRET_FILENAME).write_text(
+                    "88" * 32,
+                    encoding="ascii",
+                )
+                managed = catalog_sync.build_codex_catalog(official, [], self.policy, "0.146.0")
+                current = json.loads(json.dumps(managed))
+                current["models"][0]["multi_agent_version"] = "v2"
+                current["models"][0]["codex_proxy_metadata"][catalog_sync.CATALOG_OWNER_IDENTITY_KEY] = "0" * 64
+                baseline = json.loads(json.dumps(managed))
+                baseline.update({"schema_version": 1, "managed_baseline": True})
+                current_path.write_text(json.dumps(current), encoding="utf-8")
+                baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+                with (
+                    patch.object(catalog_sync, "GENERATED_CATALOG_PATH", current_path),
+                    patch.object(catalog_sync, "MANAGED_CATALOG_BASELINE_PATH", baseline_path),
+                ):
+                    overrides, diagnostics = catalog_sync._collect_catalog_overrides()
 
-            self.assertEqual(overrides, {})
-            self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
+                self.assertEqual(overrides, {})
+                self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
 
         target = json.loads(json.dumps(managed["models"][0]))
         target["codex_proxy_metadata"][catalog_sync.CATALOG_OWNER_IDENTITY_KEY] = "0" * 64
