@@ -358,3 +358,84 @@ def test_v1_request_keeps_existing_repair_path_and_boundary_is_fail_closed() -> 
             event_context={"request_id": "issue198-mixed"},
         )
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_model_switch_v2_history_to_v1_current_surface_is_allowed() -> None:
+    context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v2-v1"}
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [_v2_spawn_call(), {"type": "function_call_output", "call_id": "call_v2_spawn", "output": "done"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "tools": [{"type": "function", "name": "spawn_agent"}],
+        }],
+    }
+
+    payload = json.loads(codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), _upstream(), event_context=context,
+    ))
+
+    assert context["collaboration_protocol"] == COLLABORATION_V1
+    assert payload["input"][0]["namespace"] == "collaboration"
+    assert payload["tools"][0]["name"] == "multi_agent_v1"
+
+
+def test_model_switch_v1_history_to_v2_current_surface_is_allowed() -> None:
+    context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v1-v2"}
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [_v1_spawn_call(), {"type": "function_call_output", "call_id": "call_v1_spawn", "output": "done"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "collaboration",
+            "tools": [{"type": "function", "name": "followup_task"}],
+        }],
+    }
+
+    payload = json.loads(codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), _upstream(), event_context=context,
+    ))
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert payload["input"][0]["namespace"] == "multi_agent_v1"
+    assert payload["tools"][0]["name"] == "collaboration"
+
+
+def test_current_tool_surface_overrides_previous_turn_protocol_context() -> None:
+    context = {
+        "repair_policy": REPAIR_CODEX_SUBAGENT,
+        "collaboration_protocol": COLLABORATION_V2,
+        "request_id": "switch-stale-context",
+    }
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "tools": [{"type": "function", "name": "spawn_agent"}],
+        }],
+    }
+
+    codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), _upstream(), event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == COLLABORATION_V1
+
+
+def test_current_tool_surface_containing_both_protocols_still_fails_closed() -> None:
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "tools": [
+            {"type": "namespace", "name": "multi_agent_v1", "tools": [{"type": "function", "name": "spawn_agent"}]},
+            {"type": "namespace", "name": "collaboration", "tools": [{"type": "function", "name": "followup_task"}]},
+        ],
+    }
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+        codex_proxy.compatible_request_body(json.dumps(body).encode(), _upstream(), event_context={})
+
+    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
