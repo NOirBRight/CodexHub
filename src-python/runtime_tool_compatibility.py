@@ -1355,11 +1355,17 @@ class ToolCompatibilityPlan:
             return True
         name = value.get("name")
         namespace = value.get("namespace")
+        item_type = value.get("type")
         if self.registry.record_for_alias(name) is not None:
             return True
         if self.registry.looks_like_alias(name):
             return True
-        if self._entry_for_name(name, namespace) is not None:
+        if self._entry_for_name(
+            name,
+            namespace,
+            expected_family=self._family_for_item_type(item_type, namespace),
+            item_type=item_type,
+        ) is not None:
             return True
         return self.registry.record_for_call(value.get("call_id")) is not None
 
