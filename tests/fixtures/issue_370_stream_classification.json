@@ -51,7 +51,8 @@
         "terminal": false,
         "downstream_output_started": false,
         "retry_forbidden": true,
-        "retry_safety_class": "suppressed_post_write"
+        "retry_safety_class": "suppressed_post_write",
+        "failure_phase": "response_headers"
       }
     },
     {
@@ -71,7 +72,8 @@
         "terminal": false,
         "downstream_output_started": true,
         "retry_forbidden": true,
-        "retry_safety_class": "suppressed_post_exposure"
+        "retry_safety_class": "suppressed_post_exposure",
+        "failure_phase": "downstream_write"
       }
     },
     {
@@ -89,7 +91,9 @@
         "failure_class": "quick_transient",
         "terminal": false,
         "downstream_output_started": true,
-        "retry_forbidden": true
+        "retry_forbidden": true,
+        "retry_safety_class": "suppressed_post_exposure",
+        "failure_phase": "stream_body"
       }
     },
     {

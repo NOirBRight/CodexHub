@@ -150,52 +150,84 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
-    def test_stream_classification_event_keeps_only_bounded_fields(self):
+    def test_failure_boundary_event_keeps_only_bounded_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
                     importlib.reload(codex_proxy)
-                    codex_proxy.write_proxy_event(
-                        "stream_classification",
-                        request_id="req-stream-classification",
-                        status=502,
-                        failure_class="quick_transient",
-                        terminal=False,
-                        downstream_output_started=True,
-                        retry_forbidden=True,
-                        stream_idle_phase="model_event",
-                        sse_events_streamed=3,
-                        sse_event_types=["response.created", "response.output_text.delta"],
-                        sse_event_type_counts={
-                            "response.created": 1,
-                            "response.output_text.delta": 1,
-                        },
+                    request = codex_proxy.Request(
+                        "https://example.test/v1/responses",
+                        data=b"{}",
+                        method="POST",
                     )
-                    codex_proxy.flush_proxy_event_writer()
+                    error = HTTPError(
+                        request.full_url,
+                        502,
+                        "Upstream Gateway Error",
+                        {},
+                        io.BytesIO(b'{"error":{"type":"server_error"}}'),
+                    )
+                    private_values = (
+                        "PRIVATE_PROMPT",
+                        "PRIVATE_REASONING",
+                        "resp_private",
+                        "PRIVATE_TOOL_ARGUMENT",
+                        "PRIVATE_TOOL_RESULT",
+                        "PRIVATE_CREDENTIAL",
+                        "provider-private-id",
+                    )
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch("codex_proxy.urlopen", side_effect=error) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        with self.assertRaises(HTTPError):
+                            codex_proxy._open_upstream_response(
+                                request,
+                                upstream_name="ollama_cloud",
+                                upstream_format="responses",
+                                timeout=1,
+                                event_context={
+                                    "request_id": "req-stream-classification",
+                                    "model": "ollama-cloud/glm-5.2",
+                                    "provider_id": private_values[-1],
+                                    "prompt": private_values[0],
+                                    "reasoning_text": private_values[1],
+                                    "response_id": private_values[2],
+                                    "tool_arguments": private_values[3],
+                                    "tool_results": private_values[4],
+                                    "credentials": {
+                                        "Authorization": private_values[5]
+                                    },
+                                },
+                            )
 
-                    payload = json.loads(
-                        codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip()
-                    )
+                    self.assertEqual(open_once.call_count, 1)
+                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    jsonl = codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
+                    payload = json.loads(jsonl.strip())
+                    self.assertEqual(payload["event"], "upstream_retry_suppressed")
                     self.assertEqual(payload["status"], 502)
                     self.assertEqual(payload["failure_class"], "quick_transient")
                     self.assertFalse(payload["terminal"])
-                    self.assertTrue(payload["downstream_output_started"])
+                    self.assertFalse(payload["downstream_output_started"])
                     self.assertTrue(payload["retry_forbidden"])
-                    self.assertEqual(payload["sse_events_streamed"], 3)
                     self.assertEqual(
-                        payload["sse_event_type_counts"],
-                        {"response.created": 1, "response.output_text.delta": 1},
+                        payload["retry_safety_class"],
+                        "suppressed_post_write",
                     )
-                    for forbidden in (
-                        "prompt",
-                        "reasoning_text",
-                        "response_id",
-                        "tool_arguments",
-                        "tool_results",
-                        "Authorization",
-                    ):
-                        self.assertNotIn(forbidden, payload)
+                    self.assertEqual(payload["failure_phase"], "response_headers")
+                    self.assertEqual(payload["provider_id"], "ollama_cloud")
+                    for private_value in private_values:
+                        self.assertNotIn(private_value, jsonl)
             finally:
                 importlib.reload(codex_proxy)
 

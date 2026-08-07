@@ -2226,6 +2226,61 @@ def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+_FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST = frozenset(
+    {
+        "behavior_profile",
+        "client_id",
+        "client_inference_source",
+        "inbound_format",
+        "model",
+        "model_canonical",
+        "model_requested",
+        "provider_hint",
+        "request_id",
+        "request_kind",
+        "route_attempt_fallback_http_statuses",
+        "route_attempt_index",
+        "route_attempt_mutation_summary",
+        "route_attempt_protocol",
+        "route_mode",
+        "route_reason",
+        "upstream_format",
+    }
+)
+
+_FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS = frozenset(
+    {
+        "route_attempt_fallback_http_statuses",
+        "route_attempt_mutation_summary",
+    }
+)
+
+
+def _bounded_failure_event_context(
+    context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep only bounded routing metadata on failure-classification events."""
+
+    bounded: dict[str, Any] = {}
+    for key, value in (context or {}).items():
+        if key not in _FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST:
+            continue
+        if isinstance(value, str):
+            bounded[key] = value[:200]
+        elif isinstance(value, (bool, int, float)) or value is None:
+            bounded[key] = value
+        elif (
+            key in _FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS
+            and isinstance(value, (list, tuple))
+        ):
+            bounded[key] = [
+                item[:80] if isinstance(item, str) else item
+                for item in value[:32]
+                if isinstance(item, (str, bool, int, float)) or item is None
+            ]
+    return bounded
+
+
 def _usage_observed_context(
     event_context: Mapping[str, Any] | None,
     *,
@@ -2413,6 +2468,18 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
+
+
+def _write_failure_event(
+    event_context: Mapping[str, Any] | None,
+    event: str,
+    **fields: Any,
+) -> None:
+    _write_adapter_event(
+        _bounded_failure_event_context(event_context),
+        event,
+        **fields,
+    )
 
 
 def _raise_collaboration_boundary_error(
@@ -12617,7 +12684,7 @@ def _emit_upstream_retry_suppressed_event(
     detail = safe_upstream_error_detail(exc, redact_identity=identity)
     if isinstance(exc, UpstreamStreamErrorEvent):
         detail = "Upstream SSE error event"
-    _write_adapter_event(
+    _write_failure_event(
         event_context,
         "upstream_retry_suppressed",
         upstream=upstream_name,
@@ -12634,6 +12701,11 @@ def _emit_upstream_retry_suppressed_event(
         detail=detail,
         failure_phase=failure_phase or transport_failure_phase(exc),
         retry_safety_class=retry_safety_class,
+        terminal=False,
+        downstream_output_started=(
+            retry_safety_class == RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+        ),
+        retry_forbidden=True,
     )
 
 
@@ -16190,7 +16262,7 @@ def _emit_upstream_retry_event(
     }
     if retry_safety_class is not None:
         fields["retry_safety_class"] = retry_safety_class
-    _write_adapter_event(
+    _write_failure_event(
         event_context,
         "upstream_retry",
         **fields,
@@ -20533,7 +20605,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 # Stopped only because a terminal event was already committed.
                 return status
             exc = write_error if write_error is not None else OSError("downstream closed")
-            event_fields = _public_event_context(event_context)
+            event_fields = _bounded_failure_event_context(event_context)
             for key in (
                 "request_id",
                 "model",
@@ -21091,7 +21163,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         def finish_downstream_stream_closed(exc: OSError) -> int:
             self.close_connection = True
-            event_fields = _public_event_context(event_context)
+            event_fields = _bounded_failure_event_context(event_context)
             for key in ("request_id", "model", "upstream", "status", "error", "detail"):
                 event_fields.pop(key, None)
             write_proxy_event(
@@ -22976,6 +23048,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if defer_stream_errors and not downstream_output_started:
                     raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
                 self.close_connection = True
+                retry_forbidden = bool(
+                    downstream_output_started
+                    or completed_tool_output_items
+                    or seam._downstream_content_exposed
+                )
                 write_proxy_event(
                     "upstream_stream_incomplete",
                     request_id=request_id,
@@ -22988,8 +23065,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     downstream_output_started=downstream_output_started,
                     terminal=False,
                     failure_class=RETRY_FAILURE_QUICK_TRANSIENT,
-                    retry_forbidden=bool(
-                        downstream_output_started or completed_tool_output_items
+                    failure_phase="stream_body",
+                    failure_side="upstream_read",
+                    retry_forbidden=retry_forbidden,
+                    retry_safety_class=(
+                        RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                        if retry_forbidden
+                        else RETRY_SAFETY_SAFE_PREWRITE
                     ),
                     completed_tool_calls=len(completed_tool_output_items),
                     pending_downstream_lines=len(pending_downstream_lines),

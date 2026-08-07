@@ -16413,6 +16413,9 @@ class RoutingTests(unittest.TestCase):
         }
 
         for case in fixture["cases"]:
+            case = dict(case)
+            if "relay_fixture" in case:
+                case["relay_fixture"] = relay_fixtures[case["relay_fixture"]]
             with self.subTest(case=case["name"]):
                 expected = case["expected"]
                 self.write_proxy_event.reset_mock()
@@ -16429,24 +16432,76 @@ class RoutingTests(unittest.TestCase):
                         {},
                         io.BytesIO(b'{"error":{"type":"server_error"}}'),
                     )
-                    status = getattr(error, "code", 502)
-                    failure_class = codex_proxy._upstream_failure_class(error)
-                    retry_safety_class = codex_proxy._retry_safety_class(
-                        error,
-                        request=request,
-                        upstream_name=case["upstream"],
-                        request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
-                        downstream_exposed=False,
-                        model_access_path=(),
-                        failure_phase="response_headers",
-                    )
-                    terminal = False
-                    downstream_output_started = False
-                    retry_forbidden = retry_safety_class in {
-                        codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_WRITE,
-                        codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
-                        codex_proxy.RETRY_SAFETY_UNKNOWN,
+                    private_context = {
+                        "request_id": f"req-{case['name']}",
+                        "model": "ollama-cloud/glm-5.2",
+                        "provider_id": "provider-private-id",
+                        "prompt": "PRIVATE_PROMPT",
+                        "reasoning_text": "PRIVATE_REASONING",
+                        "response_id": "resp_private",
+                        "tool_arguments": {"private": True},
+                        "tool_results": "PRIVATE_TOOL_RESULT",
+                        "credentials": {"Authorization": "Bearer private"},
                     }
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch("codex_proxy.urlopen", side_effect=error) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        with self.assertRaises(HTTPError) as raised:
+                            codex_proxy._open_upstream_response(
+                                request,
+                                upstream_name=case["upstream"],
+                                upstream_format="responses",
+                                timeout=1,
+                                event_context=private_context,
+                            )
+
+                    handler = FakeHandler()
+                    status = relay_upstream_response(
+                        handler,
+                        raised.exception,
+                        case["upstream"],
+                        relay_fixture=RELAY_TRANSPARENT,
+                        request_id=private_context["request_id"],
+                        model=private_context["model"],
+                        upstream_format="responses",
+                        inbound_format="responses",
+                        caller_stream=False,
+                        event_context=private_context,
+                    )
+                    self.assertEqual(open_once.call_count, 1)
+                    seam = handler._downstream_stream_commit
+                    terminal = seam.terminal_committed
+                    downstream_output_started = seam._downstream_output_started
+                    failure_event = next(
+                        call.kwargs
+                        for call in self.write_proxy_event.call_args_list
+                        if call.args and call.args[0] == "upstream_retry_suppressed"
+                    )
+                    failure_class = failure_event["failure_class"]
+                    retry_forbidden = failure_event["retry_forbidden"]
+                    retry_safety_class = failure_event["retry_safety_class"]
+                    failure_phase = failure_event["failure_phase"]
+                    self.assertFalse(
+                        {
+                            "prompt",
+                            "reasoning_text",
+                            "response_id",
+                            "tool_arguments",
+                            "tool_results",
+                            "credentials",
+                        }
+                        & failure_event.keys()
+                    )
+                    self.assertEqual(failure_event["provider_id"], case["upstream"])
                 else:
                     events = [
                         b"data: "
@@ -16495,7 +16550,7 @@ class RoutingTests(unittest.TestCase):
                             handler,
                             FakeSequencedDelayedSseResponse(sequenced_lines),
                             upstream_name,
-                            relay_fixture=relay_fixtures[case["relay_fixture"]],
+                            relay_fixture=case["relay_fixture"],
                             request_id=f"req-{case['name']}",
                             model=model,
                             upstream_format="responses",
@@ -16536,9 +16591,16 @@ class RoutingTests(unittest.TestCase):
                         if failure_event is not None
                         else None
                     )
+                    failure_phase = (
+                        failure_event.get("failure_phase")
+                        if failure_event is not None
+                        else None
+                    )
                     if status == 200:
                         self.assertNotIn("upstream_stream_incomplete", event_names)
                         self.assertNotIn("downstream_stream_closed", event_names)
+                        downstream = b"".join(handler.wfile.writes)
+                        self.assertIn(b'"type":"response.completed"', downstream)
 
                 self.assertEqual(status, expected["status"])
                 self.assertEqual(failure_class, expected["failure_class"])
@@ -16550,6 +16612,45 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(retry_forbidden, expected["retry_forbidden"])
                 if "retry_safety_class" in expected:
                     self.assertEqual(retry_safety_class, expected["retry_safety_class"])
+                if "failure_phase" in expected:
+                    self.assertEqual(failure_phase, expected["failure_phase"])
+
+    def test_issue_370_incomplete_stream_suppresses_retry_after_completed_tool_call(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_private","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_item.done","item":{"id":"item_private","type":"function_call","status":"completed","call_id":"call_private","name":"shell_command","arguments":"{\\"command\\":\\"PRIVATE_TOOL_ARGUMENT\\"}"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "official",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-incomplete-tool-side-effect",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(event["completed_tool_calls"], 1)
+        self.assertTrue(event["retry_forbidden"])
+        self.assertEqual(event["failure_phase"], "stream_body")
+        self.assertEqual(
+            event["retry_safety_class"],
+            codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+        )
+        self.assertNotIn(b"PRIVATE_TOOL_ARGUMENT", b"".join(handler.wfile.writes))
 
     def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()

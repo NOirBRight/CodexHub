@@ -56,6 +56,8 @@
       "terminal": false,
       "downstream_output_started": true,
       "retry_forbidden": true,
+      "retry_safety_class": "suppressed_post_exposure",
+      "failure_phase": "stream_body",
       "event": "upstream_stream_incomplete"
     },
     {
@@ -73,8 +75,9 @@
       "DeepSeek V4 Flash 0731",
       "GLM-5.2"
     ],
-    "status": "unrun_in_worker",
-    "reason": "authenticated CLI and interactive Desktop evidence gate unavailable",
+    "status": "authenticated_cli_comparison_complete",
+    "evidence": "live-cli-comparison.json",
+    "desktop_status": "not_run",
     "credentials_retained": false,
     "raw_output_retained": false
   }
