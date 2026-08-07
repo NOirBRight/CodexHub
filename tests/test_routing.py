@@ -24205,6 +24205,68 @@ Execution constraints:
             surface="sse",
         )
 
+    def test_native_responses_sse_streaming_incomplete_selector_fails_closed_before_sidecar(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "glm-5.2",
+                "reasoning": "high",
+            },
+        }
+        item = {
+            "id": "fc_incomplete_stream",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_incomplete_stream",
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": "",
+        }
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**item, "status": "in_progress"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": '{"agent_type":"worker"',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": "}",
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": "BROKEN",
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+        ]
+
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            for event in events:
+                compatible_sse_line(
+                    b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                    "synthetic-provider",
+                    event_context=event_context,
+                )
+
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="malformed_arguments",
+            surface="sse",
+        )
+
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
             json.dumps(
