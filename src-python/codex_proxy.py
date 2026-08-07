@@ -9061,13 +9061,43 @@ def _rewrite_v2_unsupported_custom_tool_history(
         if compatibility_plan is not None
         else _runtime_tool_protocol_capabilities(tool_protocol, upstream)
     )
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        tools = []
+    declared_custom_names = {
+        tool.get("name")
+        for tool in tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "custom"
+        and isinstance(tool.get("name"), str)
+    }
+
+    def plan_owns_custom_call(item: Mapping[str, Any]) -> bool:
+        if compatibility_plan is None:
+            return False
+        name = item.get("name")
+        if compatibility_plan.registry.record_for_alias(name) is not None:
+            return True
+        call_id = item.get("call_id")
+        if compatibility_plan.registry.record_for_call(call_id) is not None:
+            return True
+        return any(
+            entry.family == "custom_freeform"
+            and entry.original_name == name
+            for entry in compatibility_plan.entries
+        )
 
     def preserve_custom_call(item: Mapping[str, Any]) -> bool:
-        if capabilities.custom_lifecycle:
-            return True
-        # A declared custom tool may be adapted by the immutable plan later in
-        # this function.  Leave its wire item intact until that pass.
-        return compatibility_plan is not None and compatibility_plan.owns_wire_value(item)
+        # Preserve only a custom lifecycle that belongs to this request's
+        # immutable compatibility plan.  A provider capability fact alone does
+        # not establish ownership of an undeclared historical item (and must
+        # not let a plain-function name collision bypass sanitization).
+        if compatibility_plan is not None:
+            return plan_owns_custom_call(item)
+        return (
+            capabilities.custom_lifecycle
+            and item.get("name") in declared_custom_names
+        )
 
     preserved_call_ids = {
         item.get("call_id")

@@ -378,6 +378,140 @@ def test_v2_does_not_preserve_custom_history_that_only_matches_a_plain_function(
     )
 
 
+def test_v2_does_not_preserve_undeclared_custom_history_when_capability_is_explicit() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-custom-capability-collision"}
+    upstream = {
+        **_upstream(),
+        "tool_protocol_capabilities": {
+            "namespace_lifecycle": True,
+            "custom_lifecycle": True,
+        },
+    }
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_exec_history",
+                "name": "exec",
+                "input": "echo sanitized",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_history",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+            {"type": "function", "name": "exec"},
+        ],
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        upstream,
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+    assert "Read-only Codex tool call transcript" in payload["input"][1]["content"]
+    assert "Read-only Codex tool result transcript" in payload["input"][2]["content"]
+
+
+def test_v2_does_not_preserve_unknown_custom_alias_history() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-unknown-custom-alias"}
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_unknown_custom_alias",
+                "name": "__codexhub_custom_fake",
+                "input": "echo sanitized",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_unknown_custom_alias",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+        ],
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+    assert "Read-only Codex tool call transcript" in payload["input"][1]["content"]
+    assert "Read-only Codex tool result transcript" in payload["input"][2]["content"]
+
+
+def test_v2_sanitizes_custom_history_when_tools_are_null() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-null-tools"}
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_null_tools",
+                "name": "exec",
+                "input": "echo sanitized",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_null_tools",
+                "output": "completed",
+            },
+        ],
+        "tools": None,
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+    assert "Read-only Codex tool call transcript" in payload["input"][1]["content"]
+    assert "Read-only Codex tool result transcript" in payload["input"][2]["content"]
+
+
 def test_v2_preserves_custom_history_when_upstream_explicitly_supports_custom_lifecycle() -> None:
     context: dict[str, object] = {"request_id": "issue198-v2-native-custom"}
     upstream = {
@@ -426,6 +560,54 @@ def test_v2_preserves_custom_history_when_upstream_explicitly_supports_custom_li
     payload = json.loads(transformed)
 
     assert payload["input"][1:] == body["input"][1:]
+
+
+def test_v2_preserves_declared_custom_history_without_event_context() -> None:
+    body = {
+        "model": "glm-5.2",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_exec_history",
+                "name": "exec",
+                "input": "echo native",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_history",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {"type": "text"},
+            },
+        ],
+    }
+    upstream = {
+        **_upstream(),
+        "tool_protocol_capabilities": {
+            "namespace_lifecycle": True,
+            "custom_lifecycle": True,
+        },
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        upstream,
+    )
+    payload = json.loads(transformed)
+
+    assert payload["input"] == body["input"]
 
 
 def test_v2_response_does_not_apply_v1_alias_repair() -> None:
