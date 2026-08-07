@@ -20556,6 +20556,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
                 close_phase=close_phase,
+                failure_phase="downstream_write",
+                failure_side="downstream_write",
+                failure_class="downstream_client_closed",
+                client_disconnected=True,
+                terminal=seam.terminal_committed,
+                terminal_seen=seam._sse_stats.terminal_event_seen,
+                downstream_output_started=seam._downstream_output_started,
+                retry_forbidden=True,
+                retry_safety_class=(
+                    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                    if seam._downstream_content_exposed or seam._downstream_output_started
+                    else RETRY_SAFETY_SUPPRESSED_POST_WRITE
+                ),
                 **event_fields,
             )
             return 499
@@ -21091,6 +21104,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 inbound_format=inbound_format,
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
+                failure_phase="downstream_write",
+                failure_side="downstream_write",
+                failure_class="downstream_client_closed",
+                client_disconnected=True,
+                terminal=seam.terminal_committed,
+                terminal_seen=seam._sse_stats.terminal_event_seen,
+                downstream_output_started=seam._downstream_output_started,
+                retry_forbidden=True,
+                retry_safety_class=(
+                    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                    if seam._downstream_content_exposed or seam._downstream_output_started
+                    else RETRY_SAFETY_SUPPRESSED_POST_WRITE
+                ),
                 **event_fields,
             )
             _capture_usage(
@@ -22960,6 +22986,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     inbound_format=inbound_format,
                     terminal_seen=saw_terminal_event,
                     downstream_output_started=downstream_output_started,
+                    terminal=False,
+                    failure_class=RETRY_FAILURE_QUICK_TRANSIENT,
+                    retry_forbidden=bool(
+                        downstream_output_started or completed_tool_output_items
+                    ),
                     completed_tool_calls=len(completed_tool_output_items),
                     pending_downstream_lines=len(pending_downstream_lines),
                     pending_downstream_bytes=sum(len(pending_line) for pending_line in pending_downstream_lines),

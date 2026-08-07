@@ -150,6 +150,55 @@ class ProxyEventLoggingTests(TestCase):
             finally:
                 importlib.reload(codex_proxy)
 
+    def test_stream_classification_event_keeps_only_bounded_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            try:
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
+                    importlib.reload(codex_proxy)
+                    codex_proxy.write_proxy_event(
+                        "stream_classification",
+                        request_id="req-stream-classification",
+                        status=502,
+                        failure_class="quick_transient",
+                        terminal=False,
+                        downstream_output_started=True,
+                        retry_forbidden=True,
+                        stream_idle_phase="model_event",
+                        sse_events_streamed=3,
+                        sse_event_types=["response.created", "response.output_text.delta"],
+                        sse_event_type_counts={
+                            "response.created": 1,
+                            "response.output_text.delta": 1,
+                        },
+                    )
+                    codex_proxy.flush_proxy_event_writer()
+
+                    payload = json.loads(
+                        codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip()
+                    )
+                    self.assertEqual(payload["status"], 502)
+                    self.assertEqual(payload["failure_class"], "quick_transient")
+                    self.assertFalse(payload["terminal"])
+                    self.assertTrue(payload["downstream_output_started"])
+                    self.assertTrue(payload["retry_forbidden"])
+                    self.assertEqual(payload["sse_events_streamed"], 3)
+                    self.assertEqual(
+                        payload["sse_event_type_counts"],
+                        {"response.created": 1, "response.output_text.delta": 1},
+                    )
+                    for forbidden in (
+                        "prompt",
+                        "reasoning_text",
+                        "response_id",
+                        "tool_arguments",
+                        "tool_results",
+                        "Authorization",
+                    ):
+                        self.assertNotIn(forbidden, payload)
+            finally:
+                importlib.reload(codex_proxy)
+
     def test_event_log_writes_jsonl_without_sqlite_request_path_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"

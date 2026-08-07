@@ -60,6 +60,11 @@ def _load_issue_370_reasoning_fixture():
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def _load_issue_370_stream_classification_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "issue_370_stream_classification.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def _load_model_switch_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "real_client_e2e" / "model-switch-v1-v2.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -16399,6 +16404,152 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b"response.function_call_arguments.done", data)
         self.assertIn(b"response.completed", data)
         self.assertNotIn(b"upstream_stream_idle_timeout", data)
+
+    def test_issue_370_stream_classification_fixtures(self):
+        fixture = _load_issue_370_stream_classification_fixture()
+        relay_fixtures = {
+            "gateway": RELAY_GATEWAY,
+            "transparent": RELAY_TRANSPARENT,
+        }
+
+        for case in fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                expected = case["expected"]
+                self.write_proxy_event.reset_mock()
+                if case["kind"] == "http_error":
+                    request = codex_proxy.Request(
+                        "https://example.test/v1/responses",
+                        data=b"{}",
+                        method="POST",
+                    )
+                    error = HTTPError(
+                        request.full_url,
+                        case["status"],
+                        "Upstream Gateway Error",
+                        {},
+                        io.BytesIO(b'{"error":{"type":"server_error"}}'),
+                    )
+                    status = getattr(error, "code", 502)
+                    failure_class = codex_proxy._upstream_failure_class(error)
+                    retry_safety_class = codex_proxy._retry_safety_class(
+                        error,
+                        request=request,
+                        upstream_name=case["upstream"],
+                        request_kind=codex_proxy.RETRY_REQUEST_MAIN_GENERATION,
+                        downstream_exposed=False,
+                        model_access_path=(),
+                        failure_phase="response_headers",
+                    )
+                    terminal = False
+                    downstream_output_started = False
+                    retry_forbidden = retry_safety_class in {
+                        codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+                        codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+                        codex_proxy.RETRY_SAFETY_UNKNOWN,
+                    }
+                else:
+                    events = [
+                        b"data: "
+                        + json.dumps(event, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                        + b"\n\n"
+                        for event in case.get("events", [])
+                    ]
+                    delays = case.get("delay_ms", [])
+                    sequenced_lines = [
+                        (
+                            (delays[index] if index < len(delays) else 0) / 1000,
+                            line,
+                        )
+                        for index, line in enumerate(events)
+                    ]
+                    trailing_bytes = case.get("trailing_bytes")
+                    if isinstance(trailing_bytes, str):
+                        sequenced_lines.append((0, trailing_bytes.encode("utf-8")))
+                    sequenced_lines.append(
+                        (
+                            (delays[len(events)] if len(delays) > len(events) else 0) / 1000,
+                            b"",
+                        )
+                    )
+                    handler = FakeHandler()
+                    if case["kind"] == "downstream_write_failure":
+                        fail_index = int(case["fail_on_write_index"])
+                        handler.wfile = FakeWFile(
+                            fail_on_write=lambda _data, index, fail_index=fail_index: index >= fail_index
+                        )
+                    upstream_name = case["upstream"]
+                    model = (
+                        "openai/gpt-5.5"
+                        if upstream_name == "official"
+                        else "ollama-cloud/glm-5.2"
+                    )
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "1",
+                            "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.15",
+                        },
+                        clear=False,
+                    ):
+                        status = relay_upstream_response(
+                            handler,
+                            FakeSequencedDelayedSseResponse(sequenced_lines),
+                            upstream_name,
+                            relay_fixture=relay_fixtures[case["relay_fixture"]],
+                            request_id=f"req-{case['name']}",
+                            model=model,
+                            upstream_format="responses",
+                            inbound_format="responses",
+                            caller_stream=True,
+                        )
+                    seam = handler._downstream_stream_commit
+                    terminal = seam.terminal_committed
+                    downstream_output_started = seam._downstream_output_started
+                    event_names = [
+                        call.args[0]
+                        for call in self.write_proxy_event.call_args_list
+                        if call.args
+                    ]
+                    failure_event = next(
+                        (
+                            call.kwargs
+                            for call in self.write_proxy_event.call_args_list
+                            if call.args
+                            and call.args[0]
+                            in {
+                                "downstream_stream_closed",
+                                "upstream_stream_incomplete",
+                            }
+                        ),
+                        None,
+                    )
+                    failure_class = (
+                        failure_event.get("failure_class")
+                        if failure_event is not None
+                        else None
+                    )
+                    retry_forbidden = bool(
+                        failure_event and failure_event.get("retry_forbidden", False)
+                    )
+                    retry_safety_class = (
+                        failure_event.get("retry_safety_class")
+                        if failure_event is not None
+                        else None
+                    )
+                    if status == 200:
+                        self.assertNotIn("upstream_stream_incomplete", event_names)
+                        self.assertNotIn("downstream_stream_closed", event_names)
+
+                self.assertEqual(status, expected["status"])
+                self.assertEqual(failure_class, expected["failure_class"])
+                self.assertEqual(terminal, expected["terminal"])
+                self.assertEqual(
+                    downstream_output_started,
+                    expected["downstream_output_started"],
+                )
+                self.assertEqual(retry_forbidden, expected["retry_forbidden"])
+                if "retry_safety_class" in expected:
+                    self.assertEqual(retry_safety_class, expected["retry_safety_class"])
 
     def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()
