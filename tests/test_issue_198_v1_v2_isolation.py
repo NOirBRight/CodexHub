@@ -392,6 +392,30 @@ def test_selected_v2_model_metadata_in_context_skips_v1_injection() -> None:
     }
 
 
+def test_selected_v2_model_metadata_in_request_skips_v1_injection() -> None:
+    context = {
+        "repair_policy": REPAIR_CODEX_SUBAGENT,
+        "request_id": "issue198-request-v2",
+    }
+    body = {
+        "model": "glm-5.2",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "metadata": {"multi_agent_version": "v2"},
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert "multi_agent_v1__spawn_agent" not in {
+        tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)
+    }
+
+
 @pytest.mark.parametrize(
     ("selection", "expected"),
     [

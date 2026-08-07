@@ -2519,12 +2519,34 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
+            request_metadata = {
+                key: payload[key]
+                for key in (
+                    "collaboration_protocol",
+                    "multi_agent_version",
+                    "metadata",
+                    "model_metadata",
+                    "capabilities",
+                    "features",
+                )
+                if isinstance(payload, Mapping) and key in payload
+            }
+            request_metadata_protocol = (
+                _classify_collaboration_payload(request_metadata)
+                if request_metadata
+                else None
+            )
             history_protocols = _collaboration_protocols(
                 {"input": payload.get("input", [])}
                 if isinstance(payload, Mapping)
                 else {"input": []}
             )
-            protocol = current_protocol or metadata_protocol or context_protocol
+            protocol = (
+                current_protocol
+                or request_metadata_protocol
+                or metadata_protocol
+                or context_protocol
+            )
             if (
                 raw_context_protocol is not None
                 and context_protocol is None
