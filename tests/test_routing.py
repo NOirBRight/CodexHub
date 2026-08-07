@@ -24153,7 +24153,7 @@ Execution constraints:
             "call_id": "call_malformed_stream",
             "namespace": "multi_agent_v1",
             "name": "spawn_agent",
-            "arguments": "",
+            "arguments": '{"agent_type":"worker"}BROKEN',
         }
         events = [
             {

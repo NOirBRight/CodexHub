@@ -7600,8 +7600,10 @@ def _remember_worker_stream_item(
             record["arguments"] = json.dumps(raw_arguments, ensure_ascii=True, separators=(",", ":"))
         parsed = _semantic_strict_json_object(record.get("arguments"))
         if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            record["agent_type"] = parsed["agent_type"]
+            if not record.get("selector_invalid"):
+                record["agent_type"] = parsed["agent_type"]
         else:
+            record["selector_invalid"] = True
             record.pop("agent_type", None)
 
 
@@ -7634,8 +7636,10 @@ def _remember_worker_stream_event(
         record["arguments"] = f"{record.get('arguments', '')}{delta}"
         parsed = _semantic_strict_json_object(record["arguments"])
         if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            record["agent_type"] = parsed["agent_type"]
+            if not record.get("selector_invalid"):
+                record["agent_type"] = parsed["agent_type"]
         else:
+            record["selector_invalid"] = True
             record.pop("agent_type", None)
         return
     if event_type == "response.function_call_arguments.done":
@@ -7654,8 +7658,10 @@ def _remember_worker_stream_event(
             record["arguments"] = arguments
             parsed = _semantic_strict_json_object(arguments)
             if parsed is not None and isinstance(parsed.get("agent_type"), str):
-                record["agent_type"] = parsed["agent_type"]
+                if not record.get("selector_invalid"):
+                    record["agent_type"] = parsed["agent_type"]
             else:
+                record["selector_invalid"] = True
                 record.pop("agent_type", None)
         return
     if event_type == "response.completed":
@@ -7669,30 +7675,56 @@ def _remember_worker_stream_event(
 def _attach_worker_requested_binding_sidecars(
     value: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+            replacement, item_changed = _attach_worker_requested_binding_sidecars(
+                item,
+                event_context,
+                capture_stream_event=capture_stream_event,
+            )
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
     if not isinstance(value, dict):
         return value, False
 
-    _remember_worker_stream_event(value, event_context)
+    if capture_stream_event:
+        _remember_worker_stream_event(value, event_context)
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
-        replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+        replacement, item_changed = _attach_worker_requested_binding_sidecars(
+            item,
+            event_context,
+            capture_stream_event=capture_stream_event,
+        )
         if item_changed:
             rewritten[key] = replacement
             changed = True
 
     if _multi_agent_function_call_name(rewritten) != "spawn_agent":
         return (rewritten if changed else value), changed
-    arguments = _json_object_from_arguments(rewritten.get("arguments"))
+    # Binding sidecars require an exact selector.  The general argument
+    # normalizer intentionally accepts a valid JSON prefix for other repair
+    # paths, but that would let malformed streamed arguments inherit a worker
+    # binding after the strict stream state has already been cleared.
+    arguments = _semantic_strict_json_object(rewritten.get("arguments"))
+    context = event_context or {}
+    pending_agent_type = None
+    stream_item_tracked = False
+    stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    item_id = rewritten.get("id")
+    if isinstance(stream_state, Mapping) and isinstance(item_id, str):
+        stream_items = stream_state.get("items")
+        record = stream_items.get(item_id) if isinstance(stream_items, Mapping) else None
+        if isinstance(record, Mapping):
+            stream_item_tracked = True
+            pending_agent_type = record.get("agent_type")
     if arguments is None:
         # Responses streams may publish the function-call item before its
         # arguments.  The arguments delta/done events carry the selector, but
@@ -7701,15 +7733,6 @@ def _attach_worker_requested_binding_sidecars(
         # sidecar on that item so the next turn can validate the reconstructed
         # worker call.  A normal body call has no lifecycle status and keeps the
         # old fail-closed behavior.
-        context = event_context or {}
-        pending_agent_type = None
-        stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
-        item_id = rewritten.get("id")
-        if isinstance(stream_state, Mapping) and isinstance(item_id, str):
-            stream_items = stream_state.get("items")
-            record = stream_items.get(item_id) if isinstance(stream_items, Mapping) else None
-            if isinstance(record, Mapping):
-                pending_agent_type = record.get("agent_type")
         if not (
             rewritten.get("arguments") in (None, "")
             and bool(context.get("_worker_binding_required"))
@@ -7718,6 +7741,8 @@ def _attach_worker_requested_binding_sidecars(
         ):
             return (rewritten if changed else value), changed
     elif arguments.get("agent_type") != "worker":
+        return (rewritten if changed else value), changed
+    elif stream_item_tracked and pending_agent_type != "worker":
         return (rewritten if changed else value), changed
     call_id = rewritten.get("call_id")
     if not isinstance(call_id, str) or not call_id:
@@ -7747,13 +7772,18 @@ def _apply_external_worker_response_contract(
     surface: str,
     validate_selectors: bool = True,
     attach_sidecars: bool = True,
+    capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
     if _is_collaboration_v2_context(event_context):
         return value, False
     if validate_selectors:
         _validate_external_worker_selectors(value, event_context, surface=surface)
     if attach_sidecars:
-        return _attach_worker_requested_binding_sidecars(value, event_context)
+        return _attach_worker_requested_binding_sidecars(
+            value,
+            event_context,
+            capture_stream_event=capture_stream_event,
+        )
     return value, False
 
 
@@ -12163,6 +12193,7 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
+    _remember_worker_stream_event(payload, event_context)
     collaboration_protocol = _resolve_collaboration_boundary(
         payload,
         event_context,
@@ -12246,6 +12277,7 @@ def compatible_sse_line(
         event_context,
         surface="sse",
         validate_selectors=False,
+        capture_stream_event=False,
     )
     changed = changed or requested_binding_changed
     repaired_line = _repair_missing_required_subagent_call_sse_line(payload, event_context, line_ending)
