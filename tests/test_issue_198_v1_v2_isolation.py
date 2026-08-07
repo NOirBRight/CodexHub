@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import patch
 
@@ -463,6 +464,68 @@ def test_v2_does_not_preserve_unknown_custom_alias_history() -> None:
         _upstream(),
         event_context=context,
     )
+    payload = json.loads(transformed)
+
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+    assert "Read-only Codex tool call transcript" in payload["input"][1]["content"]
+    assert "Read-only Codex tool result transcript" in payload["input"][2]["content"]
+
+
+def test_v2_does_not_treat_namespace_alias_as_custom_history_owner() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-namespace-alias-collision"}
+    token = "namespace-alias-test"
+    token_digest = hashlib.sha256(token.encode()).hexdigest()[:10]
+    namespace_alias = f"__codexhub_ns_{token_digest}_2"
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_namespace_alias",
+                "name": namespace_alias,
+                "input": "echo sanitized",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_namespace_alias",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+            {
+                "type": "namespace",
+                "name": "other",
+                "tools": [{"type": "function", "name": "exec"}],
+            },
+        ],
+    }
+    upstream = {
+        **_upstream(),
+        "tool_protocol_capabilities": {
+            "function_lifecycle": True,
+            "namespace_lifecycle": False,
+            "accepts_namespace_adapter": True,
+        },
+    }
+
+    with patch("codex_proxy.uuid.uuid4") as uuid4:
+        uuid4.return_value.hex = token
+        transformed = codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            upstream,
+            event_context=context,
+        )
     payload = json.loads(transformed)
 
     assert all(

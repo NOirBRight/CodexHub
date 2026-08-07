@@ -9076,10 +9076,12 @@ def _rewrite_v2_unsupported_custom_tool_history(
         if compatibility_plan is None:
             return False
         name = item.get("name")
-        if compatibility_plan.registry.record_for_alias(name) is not None:
+        alias_record = compatibility_plan.registry.record_for_alias(name)
+        if alias_record is not None and alias_record.family == "custom_freeform":
             return True
         call_id = item.get("call_id")
-        if compatibility_plan.registry.record_for_call(call_id) is not None:
+        call_record = compatibility_plan.registry.record_for_call(call_id)
+        if call_record is not None and call_record.family == "custom_freeform":
             return True
         return any(
             entry.family == "custom_freeform"
