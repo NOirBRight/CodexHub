@@ -23930,6 +23930,288 @@ Execution constraints:
             done_call["_codexhub_worker_requested_binding"],
         )
 
+    def test_native_responses_sse_streaming_worker_sidecar_survives_empty_item_arguments(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "glm-5.2",
+                "reasoning": "high",
+            },
+        }
+        worker_arguments = json.dumps(
+            {"agent_type": "worker", "message": "delegate"},
+            separators=(",", ":"),
+        )
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_glm_stream",
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": "call_glm_stream",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_glm_stream",
+                "output_index": 0,
+                "delta": worker_arguments,
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_glm_stream",
+                "output_index": 0,
+                "arguments": worker_arguments,
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_glm_stream",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_glm_stream",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_glm_stream",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "id": "fc_glm_stream",
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": "call_glm_stream",
+                            "namespace": "multi_agent_v1",
+                            "name": "spawn_agent",
+                            "arguments": "",
+                        }
+                    ],
+                },
+            },
+        ]
+
+        transformed = [
+            compatible_sse_line(
+                b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                "synthetic-provider",
+                event_context=event_context,
+            )
+            for event in events
+        ]
+        payloads = [json.loads(line.removeprefix(b"data: ")) for line in transformed]
+        done_call = next(
+            payload["item"]
+            for payload in payloads
+            if payload.get("type") == "response.output_item.done"
+        )
+        completed_call = next(
+            payload["response"]["output"][0]
+            for payload in payloads
+            if payload.get("type") == "response.completed"
+        )
+
+        self.assertIn("_codexhub_worker_requested_binding", done_call)
+        self.assertIn("_codexhub_worker_requested_binding", completed_call)
+        self.assertEqual(
+            done_call["_codexhub_worker_requested_binding"],
+            completed_call["_codexhub_worker_requested_binding"],
+        )
+
+        reconstructed_history_call = json.loads(json.dumps(completed_call))
+        reconstructed_history_call["arguments"] = worker_arguments
+        replay = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "reasoning": {"effort": "high"},
+                    "input": [
+                        reconstructed_history_call,
+                        self._worker_effective_output(
+                            "call_glm_stream",
+                            model="glm-5.2",
+                            reasoning="high",
+                        ),
+                    ],
+                    "tools": [],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={},
+        )
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replay)["input"][0],
+        )
+
+    def test_native_responses_sse_streaming_general_spawn_keeps_worker_sidecar_absent(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "glm-5.2",
+                "reasoning": "high",
+            },
+        }
+        general_arguments = json.dumps(
+            {"agent_type": "general", "message": "delegate"},
+            separators=(",", ":"),
+        )
+        item = {
+            "id": "fc_general_stream",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_general_stream",
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": "",
+        }
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**item, "status": "in_progress"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": general_arguments,
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": item["id"],
+                "output_index": 0,
+                "arguments": general_arguments,
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_general_stream",
+                    "status": "completed",
+                    "output": [item],
+                },
+            },
+        ]
+
+        transformed = [
+            compatible_sse_line(
+                b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                "synthetic-provider",
+                event_context=event_context,
+            )
+            for event in events
+        ]
+        payloads = [json.loads(line.removeprefix(b"data: ")) for line in transformed]
+        done_call = next(
+            payload["item"]
+            for payload in payloads
+            if payload.get("type") == "response.output_item.done"
+        )
+        completed_call = next(
+            payload["response"]["output"][0]
+            for payload in payloads
+            if payload.get("type") == "response.completed"
+        )
+
+        self.assertNotIn("_codexhub_worker_requested_binding", done_call)
+        self.assertNotIn("_codexhub_worker_requested_binding", completed_call)
+
+    def test_native_responses_sse_streaming_malformed_selector_does_not_reuse_worker_state(self):
+        event_context = {
+            "inbound_format": "responses",
+            "_worker_binding_required": True,
+            "_worker_requested_binding": {
+                "agent_type": "worker",
+                "model": "glm-5.2",
+                "reasoning": "high",
+            },
+        }
+        item = {
+            "id": "fc_malformed_stream",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_malformed_stream",
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": "",
+        }
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**item, "status": "in_progress"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": '{"agent_type":"worker"}',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": "BROKEN",
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": item["id"],
+                "output_index": 0,
+                "arguments": '{"agent_type":"worker"}BROKEN',
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_malformed_stream",
+                    "status": "completed",
+                    "output": [item],
+                },
+            },
+        ]
+        transformed = [
+            compatible_sse_line(
+                b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                "synthetic-provider",
+                event_context=event_context,
+            )
+            for event in events
+        ]
+        payloads = [json.loads(line.removeprefix(b"data: ")) for line in transformed]
+        done_call = next(
+            payload["item"]
+            for payload in payloads
+            if payload.get("type") == "response.output_item.done"
+        )
+        completed_call = next(
+            payload["response"]["output"][0]
+            for payload in payloads
+            if payload.get("type") == "response.completed"
+        )
+
+        self.assertNotIn("_codexhub_worker_requested_binding", done_call)
+        self.assertNotIn("_codexhub_worker_requested_binding", completed_call)
+
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
             json.dumps(

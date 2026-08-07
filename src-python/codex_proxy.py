@@ -7550,6 +7550,100 @@ def _verified_worker_requested_binding(
     return requested, None
 
 
+_WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
+
+
+def _remember_worker_stream_item(
+    state: dict[str, Any],
+    item: Any,
+) -> None:
+    if not isinstance(item, Mapping) or _multi_agent_function_call_name(item) != "spawn_agent":
+        return
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return
+    items = state.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = {}
+        state["items"] = items
+    record = items.setdefault(item_id, {})
+    if not isinstance(record, dict):
+        record = {}
+        items[item_id] = record
+    raw_arguments = item.get("arguments")
+    if raw_arguments not in (None, ""):
+        if isinstance(raw_arguments, str):
+            record["arguments"] = raw_arguments
+        elif isinstance(raw_arguments, Mapping):
+            record["arguments"] = json.dumps(raw_arguments, ensure_ascii=True, separators=(",", ":"))
+        parsed = _semantic_strict_json_object(record.get("arguments"))
+        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+            record["agent_type"] = parsed["agent_type"]
+        else:
+            record.pop("agent_type", None)
+
+
+def _remember_worker_stream_event(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(event_context, dict):
+        return
+    state = event_context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    if not isinstance(state, dict):
+        state = {"items": {}}
+        event_context[_WORKER_STREAM_BINDING_STATE_FIELD] = state
+    event_type = value.get("type")
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        _remember_worker_stream_item(state, value.get("item"))
+        return
+    if event_type == "response.function_call_arguments.delta":
+        item_id = value.get("item_id")
+        delta = value.get("delta")
+        if not isinstance(item_id, str) or not item_id or not isinstance(delta, str):
+            return
+        items = state.setdefault("items", {})
+        if not isinstance(items, dict):
+            return
+        record = items.setdefault(item_id, {})
+        if not isinstance(record, dict):
+            record = {}
+            items[item_id] = record
+        record["arguments"] = f"{record.get('arguments', '')}{delta}"
+        parsed = _semantic_strict_json_object(record["arguments"])
+        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+            record["agent_type"] = parsed["agent_type"]
+        else:
+            record.pop("agent_type", None)
+        return
+    if event_type == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            return
+        items = state.setdefault("items", {})
+        if not isinstance(items, dict):
+            return
+        record = items.setdefault(item_id, {})
+        if not isinstance(record, dict):
+            record = {}
+            items[item_id] = record
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            record["arguments"] = arguments
+            parsed = _semantic_strict_json_object(arguments)
+            if parsed is not None and isinstance(parsed.get("agent_type"), str):
+                record["agent_type"] = parsed["agent_type"]
+            else:
+                record.pop("agent_type", None)
+        return
+    if event_type == "response.completed":
+        response = value.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if isinstance(output, list):
+            for item in output:
+                _remember_worker_stream_item(state, item)
+
+
 def _attach_worker_requested_binding_sidecars(
     value: Any,
     event_context: Mapping[str, Any] | None,
@@ -7565,6 +7659,7 @@ def _attach_worker_requested_binding_sidecars(
     if not isinstance(value, dict):
         return value, False
 
+    _remember_worker_stream_event(value, event_context)
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
@@ -7576,7 +7671,31 @@ def _attach_worker_requested_binding_sidecars(
     if _multi_agent_function_call_name(rewritten) != "spawn_agent":
         return (rewritten if changed else value), changed
     arguments = _json_object_from_arguments(rewritten.get("arguments"))
-    if arguments is None or arguments.get("agent_type") != "worker":
+    if arguments is None:
+        # Responses streams may publish the function-call item before its
+        # arguments.  The arguments delta/done events carry the selector, but
+        # the item that Codex persists can still have an empty arguments field.
+        # When this request has an external worker binding, carry the signed
+        # sidecar on that item so the next turn can validate the reconstructed
+        # worker call.  A normal body call has no lifecycle status and keeps the
+        # old fail-closed behavior.
+        context = event_context or {}
+        pending_agent_type = None
+        stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+        item_id = rewritten.get("id")
+        if isinstance(stream_state, Mapping) and isinstance(item_id, str):
+            stream_items = stream_state.get("items")
+            record = stream_items.get(item_id) if isinstance(stream_items, Mapping) else None
+            if isinstance(record, Mapping):
+                pending_agent_type = record.get("agent_type")
+        if not (
+            rewritten.get("arguments") in (None, "")
+            and bool(context.get("_worker_binding_required"))
+            and rewritten.get("status") in {"in_progress", "completed"}
+            and pending_agent_type == "worker"
+        ):
+            return (rewritten if changed else value), changed
+    elif arguments.get("agent_type") != "worker":
         return (rewritten if changed else value), changed
     call_id = rewritten.get("call_id")
     if not isinstance(call_id, str) or not call_id:
