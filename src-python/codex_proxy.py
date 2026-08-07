@@ -7601,6 +7601,7 @@ def _remember_worker_stream_item(
         return
     raw_arguments = item.get("arguments")
     if raw_arguments not in (None, ""):
+        record["selector_arguments_pending"] = False
         if isinstance(raw_arguments, str):
             record["arguments"] = raw_arguments
         elif isinstance(raw_arguments, Mapping):
@@ -7616,9 +7617,12 @@ def _remember_worker_stream_item(
         else:
             record["selector_delta_incomplete"] = True
             record.pop("agent_type", None)
-    elif terminal and record.get("selector_delta_incomplete"):
-        record["selector_invalid"] = True
-        record.pop("agent_type", None)
+    else:
+        if not terminal:
+            record["selector_arguments_pending"] = True
+        elif record.get("selector_arguments_pending") and not record.get("selector_arguments_done"):
+            record["selector_invalid"] = True
+            record.pop("agent_type", None)
 
 
 def _remember_worker_stream_event(
@@ -7652,6 +7656,7 @@ def _remember_worker_stream_event(
             record = {}
             items[item_id] = record
         record["arguments"] = f"{record.get('arguments', '')}{delta}"
+        record["selector_arguments_pending"] = True
         parsed = _semantic_strict_json_object(record["arguments"])
         if parsed is not None and isinstance(parsed.get("agent_type"), str):
             if not record.get("selector_invalid"):
@@ -7677,6 +7682,8 @@ def _remember_worker_stream_event(
             record["arguments"] = arguments
             if record.get("tool_name") != "spawn_agent":
                 return
+            record["selector_arguments_done"] = True
+            record["selector_arguments_pending"] = False
             parsed = _semantic_strict_json_object(arguments)
             if parsed is not None and isinstance(parsed.get("agent_type"), str):
                 if not record.get("selector_invalid"):

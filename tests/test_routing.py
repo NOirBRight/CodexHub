@@ -24267,6 +24267,40 @@ Execution constraints:
             surface="sse",
         )
 
+        missing_done_context = {
+            "inbound_format": "responses",
+            "_worker_binding_required": True,
+            "_worker_requested_binding": event_context["_worker_requested_binding"],
+        }
+        missing_done_item = {
+            **item,
+            "id": "fc_missing_done_stream",
+            "call_id": "call_missing_done_stream",
+            "arguments": "",
+        }
+        missing_done_events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**missing_done_item, "status": "in_progress"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": missing_done_item["id"],
+                "output_index": 0,
+                "delta": '{"agent_type":"worker"}',
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": {**missing_done_item, "arguments": ""}},
+        ]
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as missing_done_raised:
+            for event in missing_done_events:
+                compatible_sse_line(
+                    b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                    "synthetic-provider",
+                    event_context=missing_done_context,
+                )
+        self.assertEqual(missing_done_raised.exception.cause.code, "external_worker_selector_rejected")
+
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
             json.dumps(
