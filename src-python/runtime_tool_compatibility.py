@@ -62,6 +62,23 @@ _V1_FORBIDDEN = frozenset({"task_path", "continuation_id", "task_name", "fork_tu
 _V2_FORBIDDEN = frozenset({"agent_id", "fork_context"})
 
 
+def _is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    namespace = item.get("namespace")
+    name = item.get("name")
+    return (
+        (namespace == "multi_agent_v1" and name in _V1_NAMES)
+        or (namespace == "collaboration" and name in _V2_NAMES)
+        or (
+            namespace is None
+            and isinstance(name, str)
+            and name.startswith("multi_agent_v1__")
+            and name.removeprefix("multi_agent_v1__") in _V1_NAMES
+        )
+    )
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
@@ -299,6 +316,11 @@ class RequestScopedToolAliasRegistry:
         self._aliases: dict[str, AliasRecord] = {}
         self._by_declaration: dict[tuple[int, int | None], str] = {}
         self._calls: dict[str, AliasRecord] = {}
+        # ``max_alias_attempts`` bounds collision probing for one allocation;
+        # it must not cap the total number of aliases in a request.  Keep the
+        # next ordinal per alias family so a request with more than that many
+        # adapted namespace/custom tools remains representable.
+        self._next_ordinals: dict[str, int] = {}
 
     @property
     def aliases(self) -> tuple[str, ...]:
@@ -329,7 +351,9 @@ class RequestScopedToolAliasRegistry:
         return isinstance(value, str) and value.startswith((_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX))
 
     def _allocate(self, record_without_alias: AliasRecord, prefix: str) -> str:
-        for ordinal in range(1, self._max_attempts + 1):
+        start_ordinal = self._next_ordinals.get(prefix, 1)
+        for offset in range(self._max_attempts):
+            ordinal = start_ordinal + offset
             candidate = f"{prefix}{self._token}_{ordinal}"
             if len(candidate) > self._max_length:
                 raise ToolCompatibilityError(
@@ -350,6 +374,7 @@ class RequestScopedToolAliasRegistry:
             )
             self._aliases[candidate] = record
             self._by_declaration[(record.declaration_index, record.child_index)] = candidate
+            self._next_ordinals[prefix] = ordinal + 1
             return candidate
         raise ToolCompatibilityError(
             "tool_compatibility_alias_limit",
@@ -433,6 +458,7 @@ class RequestScopedToolAliasRegistry:
         attempt._aliases = dict(self._aliases)
         attempt._by_declaration = dict(self._by_declaration)
         attempt._calls = {}
+        attempt._next_ordinals = dict(self._next_ordinals)
         return attempt
 
 
@@ -1325,6 +1351,8 @@ class ToolCompatibilityPlan:
     def owns_wire_value(self, value: Any) -> bool:
         if not isinstance(value, Mapping):
             return False
+        if _is_opaque_collaboration_history_item(value):
+            return True
         name = value.get("name")
         namespace = value.get("namespace")
         if self.registry.record_for_alias(name) is not None:
@@ -1635,6 +1663,8 @@ class ToolCompatibilityPlan:
         omitted/native declaration merely because name lookup returned no exact
         match.  Adapter aliases remain valid function-call wire names.
         """
+        if surface == "history" and _is_opaque_collaboration_history_item(item):
+            return
         if item.get("type") == "function_call" and self.registry.record_for_alias(item.get("name")) is not None:
             return
         if (
@@ -2606,7 +2636,6 @@ class ToolCompatibilityPlan:
 
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = _copy_mapping(payload)
-        changed = False
         for key in ("output", "input", "history"):
             if key in result:
                 decoded, item_changed = self._decode_items(
@@ -2615,7 +2644,6 @@ class ToolCompatibilityPlan:
                 )
                 if item_changed:
                     result[key] = decoded
-                    changed = True
         return result
 
     def encode_history(self, items: Iterable[Mapping[str, Any]]) -> list[Any]:

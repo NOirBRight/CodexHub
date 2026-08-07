@@ -93,6 +93,7 @@ from codex_semantic_adapter import (
     COLLABORATION_V2 as _COLLABORATION_V2,
     CollaborationBoundaryError as _CollaborationBoundaryError,
     classify_collaboration_payload as _classify_collaboration_payload,
+    collaboration_protocols as _collaboration_protocols,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
@@ -2440,13 +2441,86 @@ def _raise_collaboration_boundary_error(
 def _resolve_collaboration_boundary(
     payload: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    surface: str = "request",
 ) -> str | None:
-    try:
-        payload_protocol = _classify_collaboration_payload(payload)
-        metadata_protocol = None
-        if isinstance(event_context, Mapping):
+    if surface != "request":
+        try:
+            protocol = _classify_collaboration_payload(payload)
+        except _CollaborationBoundaryError as exc:
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification=exc.classification,
+                message="Collaboration protocol boundary is malformed or ambiguous.",
+                cause=exc,
+            )
+        context_protocol = (
+            event_context.get("collaboration_protocol")
+            if isinstance(event_context, Mapping)
+            else None
+        )
+        if context_protocol is not None and context_protocol not in {
+            _COLLABORATION_V1,
+            _COLLABORATION_V2,
+        }:
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="unknown_state",
+                message="Collaboration protocol selection is unknown.",
+            )
+        if (
+            context_protocol is not None
+            and protocol is not None
+            and protocol != context_protocol
+        ):
+            _raise_collaboration_boundary_error(
+                event_context,
+                classification="conflicting_selection",
+                message="Collaboration protocol selection conflicts with the response.",
+            )
+    else:
+        try:
+            tool_protocols = _collaboration_protocols(
+                {"tools": payload.get("tools", [])}
+                if isinstance(payload, Mapping)
+                else {"tools": []}
+            )
+            if len(tool_protocols) > 1:
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="mixed_current_tool_surface",
+                    message="Current Collaboration tools contain multiple protocol families.",
+                )
+            current_protocol = next(iter(tool_protocols), None)
+
             metadata = {
                 key: event_context[key]
+                for key in (
+                    "multi_agent_version",
+                    "metadata",
+                    "model_metadata",
+                    "capabilities",
+                    "features",
+                )
+                if isinstance(event_context, Mapping) and key in event_context
+            }
+            metadata_protocol = (
+                _classify_collaboration_payload({"metadata": metadata})
+                if metadata
+                else None
+            )
+
+            raw_context_protocol = (
+                event_context.get("collaboration_protocol")
+                if isinstance(event_context, Mapping)
+                else None
+            )
+            context_protocol = raw_context_protocol if raw_context_protocol in {
+                _COLLABORATION_V1,
+                _COLLABORATION_V2,
+            } else None
+            request_metadata = {
+                key: payload[key]
                 for key in (
                     "collaboration_protocol",
                     "multi_agent_version",
@@ -2455,55 +2529,51 @@ def _resolve_collaboration_boundary(
                     "capabilities",
                     "features",
                 )
-                if key in event_context
+                if isinstance(payload, Mapping) and key in payload
             }
-        else:
-            metadata = {}
-        if metadata:
-            metadata_protocol = _classify_collaboration_payload(
-                {"metadata": metadata}
+            request_metadata_protocol = (
+                _classify_collaboration_payload(request_metadata)
+                if request_metadata
+                else None
             )
-    except _CollaborationBoundaryError as exc:
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification=exc.classification,
-            message="Collaboration protocol boundary is malformed or ambiguous.",
-            cause=exc,
-        )
-    selected_protocol = None
-    metadata_conflict = False
-    if isinstance(event_context, Mapping):
-        selected_protocol = event_context.get("collaboration_protocol")
-        if (
-            selected_protocol is not None
-            and selected_protocol not in {_COLLABORATION_V1, _COLLABORATION_V2}
-        ):
+            history_protocols = _collaboration_protocols(
+                {"input": payload.get("input", [])}
+                if isinstance(payload, Mapping)
+                else {"input": []}
+            )
+            protocol = (
+                current_protocol
+                or request_metadata_protocol
+                or metadata_protocol
+                or context_protocol
+            )
+            if (
+                raw_context_protocol is not None
+                and context_protocol is None
+                and protocol is None
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="unknown_state",
+                    message="Collaboration protocol selection is unknown.",
+                )
+        except _CollaborationBoundaryError as exc:
             _raise_collaboration_boundary_error(
                 event_context,
-                classification="unknown_state",
-                message="Collaboration protocol selection is unknown.",
+                classification=exc.classification,
+                message="Collaboration protocol boundary is malformed or ambiguous.",
+                cause=exc,
             )
-        if selected_protocol is None:
-            selected_protocol = metadata_protocol
-        elif metadata_protocol is not None and selected_protocol != metadata_protocol:
-            metadata_conflict = True
-    if metadata_conflict:
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification="conflicting_selection",
-            message="Collaboration protocol metadata conflicts with the selected protocol.",
-        )
-    if (
-        selected_protocol is not None
-        and payload_protocol is not None
-        and selected_protocol != payload_protocol
-    ):
-        _raise_collaboration_boundary_error(
-            event_context,
-            classification="conflicting_selection",
-            message="Collaboration protocol selection conflicts with the request.",
-        )
-    protocol = payload_protocol or selected_protocol
+
+        if len(history_protocols) > 1:
+            _write_adapter_event(
+                event_context,
+                "collaboration_history_mixed",
+                protocol_count=len(history_protocols),
+            )
+        if protocol is None and len(history_protocols) == 1:
+            protocol = next(iter(history_protocols))
+
     if isinstance(event_context, dict) and protocol is not None:
         event_context["collaboration_protocol"] = protocol
     return protocol
@@ -6482,6 +6552,24 @@ def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, An
     return request_shape
 
 
+def _same_selected_v1_collaboration_function_call(
+    item: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> bool:
+    """Allow current V1 calls through the legacy structured-call adapter."""
+
+    if (
+        item.get("type") != "function_call"
+        or not isinstance(event_context, Mapping)
+        or event_context.get("collaboration_protocol") != _COLLABORATION_V1
+    ):
+        return False
+    try:
+        return _classify_collaboration_payload({"input": [item]}) == _COLLABORATION_V1
+    except _CollaborationBoundaryError:
+        return False
+
+
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
     """Promote Codex's internal tool carrier to the standard Responses field."""
     input_items = payload.get("input")
@@ -6542,6 +6630,7 @@ def _rewrite_structured_tool_input_items(
         if (
             compatibility_plan is not None
             and compatibility_plan.owns_wire_value(item)
+            and not _same_selected_v1_collaboration_function_call(item, event_context)
             and not _runtime_plan_has_native_plain_function(compatibility_plan, item)
         ):
             call_id = item.get("call_id")
@@ -7483,33 +7572,265 @@ def _verified_worker_requested_binding(
     return requested, None
 
 
+_WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
+
+
+def _remember_worker_stream_item(
+    state: dict[str, Any],
+    item: Any,
+    *,
+    terminal: bool = False,
+) -> None:
+    if not isinstance(item, Mapping):
+        return
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return
+    tool_name = _multi_agent_function_call_name(item)
+    items = state.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = {}
+        state["items"] = items
+    record = items.setdefault(item_id, {})
+    if not isinstance(record, dict):
+        record = {}
+        items[item_id] = record
+    if tool_name is not None:
+        record["tool_name"] = tool_name
+    if tool_name != "spawn_agent":
+        return
+    raw_arguments = item.get("arguments")
+    if raw_arguments not in (None, ""):
+        record["selector_arguments_pending"] = False
+        if isinstance(raw_arguments, str):
+            record["arguments"] = raw_arguments
+        elif isinstance(raw_arguments, Mapping):
+            record["arguments"] = json.dumps(raw_arguments, ensure_ascii=True, separators=(",", ":"))
+        parsed = _semantic_strict_json_object(record.get("arguments"))
+        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+            if not record.get("selector_invalid"):
+                record["selector_delta_incomplete"] = False
+                record["agent_type"] = parsed["agent_type"]
+        elif terminal:
+            record["selector_invalid"] = True
+            record.pop("agent_type", None)
+        else:
+            record["selector_delta_incomplete"] = True
+            record.pop("agent_type", None)
+    else:
+        if not terminal:
+            record["selector_arguments_pending"] = True
+        elif record.get("selector_arguments_pending") and not record.get("selector_arguments_done"):
+            record["selector_invalid"] = True
+            record.pop("agent_type", None)
+
+
+def _remember_worker_stream_event(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(event_context, dict):
+        return
+    state = event_context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    if not isinstance(state, dict):
+        state = {"items": {}}
+        event_context[_WORKER_STREAM_BINDING_STATE_FIELD] = state
+    event_type = value.get("type")
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        _remember_worker_stream_item(
+            state,
+            value.get("item"),
+            terminal=event_type == "response.output_item.done",
+        )
+        return
+    if event_type == "response.function_call_arguments.delta":
+        item_id = value.get("item_id")
+        delta = value.get("delta")
+        if not isinstance(item_id, str) or not item_id or not isinstance(delta, str):
+            return
+        items = state.setdefault("items", {})
+        if not isinstance(items, dict):
+            return
+        record = items.setdefault(item_id, {})
+        if not isinstance(record, dict):
+            record = {}
+            items[item_id] = record
+        record["arguments"] = f"{record.get('arguments', '')}{delta}"
+        record["selector_arguments_pending"] = True
+        parsed = _semantic_strict_json_object(record["arguments"])
+        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+            if not record.get("selector_invalid"):
+                record["selector_delta_incomplete"] = False
+                record["agent_type"] = parsed["agent_type"]
+        else:
+            record["selector_delta_incomplete"] = True
+            record.pop("agent_type", None)
+        return
+    if event_type == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            return
+        items = state.setdefault("items", {})
+        if not isinstance(items, dict):
+            return
+        record = items.setdefault(item_id, {})
+        if not isinstance(record, dict):
+            record = {}
+            items[item_id] = record
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            record["arguments"] = arguments
+            if record.get("tool_name") != "spawn_agent":
+                return
+            record["selector_arguments_done"] = True
+            record["selector_arguments_pending"] = False
+            parsed = _semantic_strict_json_object(arguments)
+            if parsed is not None and isinstance(parsed.get("agent_type"), str):
+                if not record.get("selector_invalid"):
+                    record["selector_delta_incomplete"] = False
+                    record["agent_type"] = parsed["agent_type"]
+            else:
+                record["selector_invalid"] = True
+                record.pop("agent_type", None)
+        return
+    if event_type == "response.completed":
+        response = value.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if isinstance(output, list):
+            for item in output:
+                _remember_worker_stream_item(state, item, terminal=True)
+
+
+def _raise_on_invalid_worker_stream_event(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    """Reject a terminal streamed worker call before any semantic repair."""
+    if _is_collaboration_v2_context(event_context):
+        return
+    context = event_context or {}
+    if not context.get("_worker_binding_required"):
+        return
+    state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    items = state.get("items") if isinstance(state, Mapping) else None
+    if not isinstance(items, Mapping):
+        return
+
+    event_type = value.get("type")
+    item_ids: list[str] = []
+    if event_type == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id:
+            item_ids.append(item_id)
+    elif event_type == "response.output_item.done":
+        item = value.get("item")
+        item_id = item.get("id") if isinstance(item, Mapping) else None
+        if isinstance(item_id, str) and item_id:
+            item_ids.append(item_id)
+    elif event_type == "response.completed":
+        response = value.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if isinstance(output, list):
+            item_ids.extend(
+                item["id"]
+                for item in output
+                if isinstance(item, Mapping)
+                and isinstance(item.get("id"), str)
+                and item.get("id")
+            )
+
+    for item_id in item_ids:
+        record = items.get(item_id)
+        if (
+            isinstance(record, Mapping)
+            and record.get("tool_name") == "spawn_agent"
+            and record.get("selector_invalid")
+        ):
+            _raise_worker_contract_error(
+                event="worker_selector_validated",
+                error_code=WORKER_SELECTOR_ERROR_CODE,
+                classification="malformed_arguments",
+                surface=surface,
+            )
+
+
 def _attach_worker_requested_binding_sidecars(
     value: Any,
     event_context: Mapping[str, Any] | None,
+    *,
+    capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
         rewritten = []
         for item in value:
-            replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+            replacement, item_changed = _attach_worker_requested_binding_sidecars(
+                item,
+                event_context,
+                capture_stream_event=capture_stream_event,
+            )
             rewritten.append(replacement)
             changed = changed or item_changed
         return (rewritten if changed else value), changed
     if not isinstance(value, dict):
         return value, False
 
+    if capture_stream_event:
+        _remember_worker_stream_event(value, event_context)
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
-        replacement, item_changed = _attach_worker_requested_binding_sidecars(item, event_context)
+        replacement, item_changed = _attach_worker_requested_binding_sidecars(
+            item,
+            event_context,
+            capture_stream_event=capture_stream_event,
+        )
         if item_changed:
             rewritten[key] = replacement
             changed = True
 
     if _multi_agent_function_call_name(rewritten) != "spawn_agent":
         return (rewritten if changed else value), changed
-    arguments = _json_object_from_arguments(rewritten.get("arguments"))
-    if arguments is None or arguments.get("agent_type") != "worker":
+    # Binding sidecars require an exact selector.  The general argument
+    # normalizer intentionally accepts a valid JSON prefix for other repair
+    # paths, but that would let malformed streamed arguments inherit a worker
+    # binding after the strict stream state has already been cleared.
+    arguments = _semantic_strict_json_object(rewritten.get("arguments"))
+    context = event_context or {}
+    pending_agent_type = None
+    stream_item_tracked = False
+    stream_selector_invalid = False
+    stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    item_id = rewritten.get("id")
+    if isinstance(stream_state, Mapping) and isinstance(item_id, str):
+        stream_items = stream_state.get("items")
+        record = stream_items.get(item_id) if isinstance(stream_items, Mapping) else None
+        if isinstance(record, Mapping):
+            stream_item_tracked = True
+            pending_agent_type = record.get("agent_type")
+            stream_selector_invalid = bool(record.get("selector_invalid"))
+    if arguments is None:
+        # Responses streams may publish the function-call item before its
+        # arguments.  The arguments delta/done events carry the selector, but
+        # the item that Codex persists can still have an empty arguments field.
+        # When this request has an external worker binding, carry the signed
+        # sidecar on that item so the next turn can validate the reconstructed
+        # worker call.  A normal body call has no lifecycle status and keeps the
+        # old fail-closed behavior.
+        if not (
+            rewritten.get("arguments") in (None, "")
+            and bool(context.get("_worker_binding_required"))
+            and rewritten.get("status") in {"in_progress", "completed"}
+            and pending_agent_type == "worker"
+        ):
+            return (rewritten if changed else value), changed
+    elif arguments.get("agent_type") != "worker":
+        return (rewritten if changed else value), changed
+    elif stream_item_tracked and (
+        stream_selector_invalid or pending_agent_type not in {None, "worker"}
+    ):
         return (rewritten if changed else value), changed
     call_id = rewritten.get("call_id")
     if not isinstance(call_id, str) or not call_id:
@@ -7539,13 +7860,18 @@ def _apply_external_worker_response_contract(
     surface: str,
     validate_selectors: bool = True,
     attach_sidecars: bool = True,
+    capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
     if _is_collaboration_v2_context(event_context):
         return value, False
     if validate_selectors:
         _validate_external_worker_selectors(value, event_context, surface=surface)
     if attach_sidecars:
-        return _attach_worker_requested_binding_sidecars(value, event_context)
+        return _attach_worker_requested_binding_sidecars(
+            value,
+            event_context,
+            capture_stream_event=capture_stream_event,
+        )
     return value, False
 
 
@@ -10459,7 +10785,11 @@ def compatible_request_body(
     if official_passthrough:
         return official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="request",
+    )
 
     changed = _normalize_responses_message_input_items(payload)
     if upstream_name == "official":
@@ -11862,7 +12192,11 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="response",
+    )
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = False
     runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
@@ -11947,8 +12281,18 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
-    collaboration_protocol = _resolve_collaboration_boundary(payload, event_context)
+    _remember_worker_stream_event(payload, event_context)
+    collaboration_protocol = _resolve_collaboration_boundary(
+        payload,
+        event_context,
+        surface="stream",
+    )
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+    _raise_on_invalid_worker_stream_event(
+        payload,
+        event_context,
+        surface="sse",
+    )
 
     runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
         event_context
@@ -12026,6 +12370,7 @@ def compatible_sse_line(
         event_context,
         surface="sse",
         validate_selectors=False,
+        capture_stream_event=False,
     )
     changed = changed or requested_binding_changed
     repaired_line = _repair_missing_required_subagent_call_sse_line(payload, event_context, line_ending)

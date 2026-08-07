@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "Run-RealClientE2E.ps1"
 FIXTURES = ROOT / "tests" / "fixtures" / "real_client_e2e"
+MODEL_SWITCH_FIXTURE = FIXTURES / "model-switch-v1-v2.json"
 CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
 THIRD_PARTY_MODEL = "codexhub-ollama-cloud/glm-5.2"
@@ -231,6 +232,10 @@ def _manual_case(case: dict) -> dict:
         "fallback_count": 0,
         "duplicate_terminal_count": 0,
     }
+
+
+def _load_model_switch_fixture() -> dict:
+    return json.loads(MODEL_SWITCH_FIXTURE.read_text(encoding="utf-8"))
 
 
 def _prepare_run(
@@ -544,6 +549,32 @@ def _run(
             finalizer_stop.set()
             finalizer.join(timeout=1)
     return result
+
+
+def test_model_switch_fixture_is_a_bounded_cli_acceptance_contract():
+    fixture = _load_model_switch_fixture()
+
+    assert set(fixture) == {"schema_version", "turns", "expected"}
+    assert fixture["schema_version"] == "codexhub.model-switch.v1"
+    assert fixture["turns"] == [
+        {
+            "selected_model": "gpt-5.6-luna",
+            "collaboration_protocol": "collaboration_v2",
+            "status": "completed",
+        },
+        {
+            "selected_model": "deepseek-v4-flash:0731",
+            "collaboration_protocol": "collaboration_v1",
+            "status": "completed",
+        },
+    ]
+    assert fixture["expected"] == {
+        "same_thread": True,
+        "fallback_model": None,
+        "boundary_error": None,
+        "reconnect_count": 0,
+    }
+    assert "terra" not in repr(fixture).lower()
 
 
 def _pid_is_running(process_id: int) -> bool:

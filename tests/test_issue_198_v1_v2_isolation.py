@@ -11,6 +11,7 @@ from codex_semantic_adapter import (
     COLLABORATION_V2,
     CollaborationBoundaryError,
     classify_collaboration_payload,
+    collaboration_protocols,
 )
 from subagent_policy import REPAIR_CODEX_SUBAGENT, guidance_enabled, semantic_repair_enabled
 
@@ -85,6 +86,167 @@ def test_collaboration_boundary_classifies_explicit_protocols_and_rejects_mixed_
         classify_collaboration_payload({"metadata": {"multi_agent_version": "v3"}})
     with pytest.raises(CollaborationBoundaryError, match="missing_namespace"):
         classify_collaboration_payload({"namespace": "collaboration", "type": "function_call"})
+
+
+def test_v2_namespace_function_declaration_accepts_parameters_schema() -> None:
+    body = {
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "followup_task",
+                        "description": "Continue work in a child task.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert classify_collaboration_payload(body) == COLLABORATION_V2
+
+    context: dict[str, object] = {}
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert json.loads(transformed)["tools"] == body["tools"]
+
+
+def test_v2_function_call_with_top_level_parameters_fails_closed() -> None:
+    body = {
+        "input": [
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-parameters",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+
+    with pytest.raises(CollaborationBoundaryError, match="mixed_v1_v2"):
+        classify_collaboration_payload(body)
+
+
+@pytest.mark.parametrize(
+    "history_item",
+    [
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-parameters",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            id="top-level-parameters",
+        ),
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "call_id": "call-v2-v1-field",
+                "arguments": {"fork_context": False, "message": "continue"},
+            },
+            id="v1-only-field",
+        ),
+        pytest.param(
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "followup_task",
+                "tool_name": "spawn_agent",
+                "call_id": "call-v2-conflicting-discriminator",
+                "arguments": {"task_name": "continue"},
+            },
+            id="discriminator-conflict",
+        ),
+    ],
+)
+def test_current_v2_tools_reject_malformed_collaboration_history(
+    history_item: dict[str, object],
+) -> None:
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [history_item],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "followup_task"}],
+            }
+        ],
+    }
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _upstream(),
+            event_context={},
+        )
+
+    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_current_v2_tools_allow_completed_mixed_collaboration_history() -> None:
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [
+            _v1_spawn_call(),
+            {"type": "function_call_output", "call_id": "call_v1_spawn", "output": "done"},
+            _v2_spawn_call(),
+            {"type": "function_call_output", "call_id": "call_v2_spawn", "output": "done"},
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "followup_task"}],
+            }
+        ],
+    }
+    context = {"request_id": "mixed-history-v2-current"}
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+        transformed = codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _upstream(),
+            event_context=context,
+        )
+
+    transformed_payload = json.loads(transformed)
+    assert transformed_payload["input"] == body["input"]
+    assert transformed_payload["tools"][0]["name"] == "collaboration"
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    mixed_events = [
+        call for call in write_event.call_args_list
+        if call.args and call.args[0] == "collaboration_history_mixed"
+    ]
+    assert len(mixed_events) == 1
+    assert mixed_events[0].kwargs["protocol_count"] == 2
+    assert set(mixed_events[0].kwargs) <= {"request_id", "protocol_count"}
+
+
+def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
+    assert collaboration_protocols({"input": [_v1_spawn_call(), _v2_spawn_call()]}) == frozenset({
+        COLLABORATION_V1,
+        COLLABORATION_V2,
+    })
 
 
 def test_v2_disables_v1_guidance_and_semantic_repair() -> None:
@@ -230,6 +392,30 @@ def test_selected_v2_model_metadata_in_context_skips_v1_injection() -> None:
     }
 
 
+def test_selected_v2_model_metadata_in_request_skips_v1_injection() -> None:
+    context = {
+        "repair_policy": REPAIR_CODEX_SUBAGENT,
+        "request_id": "issue198-request-v2",
+    }
+    body = {
+        "model": "glm-5.2",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "metadata": {"multi_agent_version": "v2"},
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert "multi_agent_v1__spawn_agent" not in {
+        tool.get("name") for tool in payload.get("tools", []) if isinstance(tool, dict)
+    }
+
+
 @pytest.mark.parametrize(
     ("selection", "expected"),
     [
@@ -271,47 +457,55 @@ def test_unknown_context_state_fails_closed() -> None:
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_boundary_rejection_diagnostic_is_bounded_and_does_not_include_payload() -> None:
+def test_mixed_history_diagnostic_is_bounded_and_does_not_include_payload() -> None:
     context = {"request_id": "safe-request", "repair_policy": REPAIR_CODEX_SUBAGENT}
     body = {
         "model": "glm-5.2",
         "input": [
             {
                 **_v1_spawn_call(),
-                "arguments": {"message": "SECRET_PROMPT", "task_path": "SECRET_TASK"},
+                "arguments": {"message": "SECRET_PROMPT SECRET_TASK"},
             },
             _v2_spawn_call(),
         ],
     }
 
     with patch.object(codex_proxy, "write_proxy_event") as write_event:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy.compatible_request_body(
-                json.dumps(body).encode(),
-                _upstream(),
-                event_context=context,
-            )
+        assert codex_proxy._resolve_collaboration_boundary(body, context) is None
 
-    event = next(call for call in write_event.call_args_list if call.args[0] == "collaboration_boundary_rejected")
+    event = next(call for call in write_event.call_args_list if call.args[0] == "collaboration_history_mixed")
     fields = event.kwargs
-    assert fields["classification"] == "mixed_v1_v2"
+    assert fields["protocol_count"] == 2
     assert "SECRET_PROMPT" not in repr(fields)
     assert "SECRET_TASK" not in repr(fields)
     assert "call_v1_spawn" not in repr(fields)
 
 
-def test_payload_and_selected_v2_metadata_conflict_fails_closed() -> None:
+def test_selected_v2_context_overrides_v1_history() -> None:
     context = {
         "repair_policy": REPAIR_CODEX_SUBAGENT,
         "collaboration_protocol": COLLABORATION_V2,
         "request_id": "issue198-conflict",
     }
 
+    codex_proxy.compatible_request_body(
+        json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
+        _upstream(),
+        event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+
+
+def test_conflicting_current_target_metadata_fails_closed() -> None:
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
         codex_proxy.compatible_request_body(
-            json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
+            json.dumps({"model": "glm-5.2", "input": "continue"}).encode(),
             _upstream(),
-            event_context=context,
+            event_context={
+                "multi_agent_version": "v1",
+                "features": {"multi_agent_version": "v2"},
+            },
         )
 
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
@@ -336,7 +530,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
     assert payload["input"] == body_payload["input"]
 
 
-def test_v1_request_keeps_existing_repair_path_and_boundary_is_fail_closed() -> None:
+def test_v1_request_keeps_existing_repair_path_and_mixed_history_is_tolerated() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "issue198-v1"}
     transformed = codex_proxy.compatible_request_body(
         json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
@@ -351,10 +545,157 @@ def test_v1_request_keeps_existing_repair_path_and_boundary_is_fail_closed() -> 
         for item in payload.get("tools", [])
     )
 
+    mixed_context = {"request_id": "issue198-mixed"}
+    codex_proxy.compatible_request_body(
+        json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call(), _v2_spawn_call()]}).encode(),
+        _upstream(),
+        event_context=mixed_context,
+    )
+
+
+def test_model_switch_v2_history_to_v1_current_surface_is_allowed() -> None:
+    context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v2-v1"}
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [_v2_spawn_call(), {"type": "function_call_output", "call_id": "call_v2_spawn", "output": "done"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "tools": [{"type": "function", "name": "spawn_agent"}],
+        }],
+    }
+    upstream = _upstream()
+    upstream["upstream_model"] = body["model"]
+
+    payload = json.loads(codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), upstream, event_context=context,
+    ))
+
+    assert context["collaboration_protocol"] == COLLABORATION_V1
+    assert payload["model"] == upstream["upstream_model"]
+    assert payload["input"][0]["namespace"] == "collaboration"
+    assert payload["tools"][0]["name"] == "multi_agent_v1"
+
+
+def test_model_switch_v1_history_to_v2_current_surface_is_allowed() -> None:
+    context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v1-v2"}
+    body = {
+        "model": "gpt-5.6-luna",
+        "input": [_v1_spawn_call(), {"type": "function_call_output", "call_id": "call_v1_spawn", "output": "done"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "collaboration",
+            "tools": [{"type": "function", "name": "followup_task"}],
+        }],
+    }
+    upstream = _upstream()
+    upstream["upstream_model"] = body["model"]
+
+    payload = json.loads(codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), upstream, event_context=context,
+    ))
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert payload["model"] == upstream["upstream_model"]
+    assert payload["input"][0]["namespace"] == "multi_agent_v1"
+    assert payload["tools"][0]["name"] == "collaboration"
+
+
+def test_current_tool_surface_overrides_previous_turn_protocol_context() -> None:
+    context = {
+        "repair_policy": REPAIR_CODEX_SUBAGENT,
+        "collaboration_protocol": COLLABORATION_V2,
+        "request_id": "switch-stale-context",
+    }
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "tools": [{
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "tools": [{"type": "function", "name": "spawn_agent"}],
+        }],
+    }
+
+    codex_proxy.compatible_request_body(
+        json.dumps(body).encode(), _upstream(), event_context=context,
+    )
+
+    assert context["collaboration_protocol"] == COLLABORATION_V1
+
+
+def test_current_tool_surface_containing_both_protocols_still_fails_closed() -> None:
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "tools": [
+            {"type": "namespace", "name": "multi_agent_v1", "tools": [{"type": "function", "name": "spawn_agent"}]},
+            {"type": "namespace", "name": "collaboration", "tools": [{"type": "function", "name": "followup_task"}]},
+        ],
+    }
+
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_request_body(
-            json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call(), _v2_spawn_call()]}).encode(),
-            _upstream(),
-            event_context={"request_id": "issue198-mixed"},
-        )
+        codex_proxy.compatible_request_body(json.dumps(body).encode(), _upstream(), event_context={})
+
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_current_target_boundary_precedence_handles_mixed_history() -> None:
+    current_v1_tools_body = {
+        "input": [_v1_spawn_call(), _v2_spawn_call()],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "multi_agent_v1",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            }
+        ],
+    }
+    context = {}
+
+    assert codex_proxy._resolve_collaboration_boundary(
+        current_v1_tools_body,
+        context,
+    ) == COLLABORATION_V1
+    assert context["collaboration_protocol"] == COLLABORATION_V1
+
+    assert codex_proxy._resolve_collaboration_boundary(
+        {"input": [_v1_spawn_call(), _v2_spawn_call()]},
+        {"multi_agent_version": "v2"},
+    ) == COLLABORATION_V2
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+        history_context = {}
+        assert codex_proxy._resolve_collaboration_boundary(
+            {"input": [_v1_spawn_call(), _v2_spawn_call()]},
+            history_context,
+        ) is None
+
+    history_event = next(
+        call for call in write_event.call_args_list
+        if call.args[0] == "collaboration_history_mixed"
+    )
+    assert history_event.kwargs == {"protocol_count": 2}
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
+        codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "input": [{"type": "message", "role": "user", "content": "continue"}],
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "multi_agent_v1",
+                            "tools": [{"type": "function", "name": "spawn_agent"}],
+                        },
+                        {
+                            "type": "namespace",
+                            "name": "collaboration",
+                            "tools": [{"type": "function", "name": "followup_task"}],
+                        },
+                    ],
+                }
+            ).encode(),
+            _upstream(),
+            event_context={},
+        )

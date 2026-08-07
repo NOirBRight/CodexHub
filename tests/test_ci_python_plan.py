@@ -324,7 +324,7 @@ def test_ci_md_fallback_commands_use_watchdog_with_3600s_bound():
     assert "run-with-windows-watchdog.py" in ci_md
     assert "--timeout-seconds 3600" in ci_md
     # Direct unattended synthetic pytest must not remain in a fallback block.
-    fallback_start = ci_md.find("## Full manual fallback")
+    fallback_start = ci_md.find("## Full local verification matrix")
     assert fallback_start != -1
     fallback_section = ci_md[fallback_start:]
     # Every synthetic pytest command in the fallback must be a continuation of
