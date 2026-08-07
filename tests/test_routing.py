@@ -55,6 +55,11 @@ def _load_glm_apply_patch_history_native_ids_fixture():
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def _load_issue_370_reasoning_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "issue_370_reasoning_stream.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def _load_model_switch_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "real_client_e2e" / "model-switch-v1-v2.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -13671,6 +13676,42 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("rs_external_not_on_openai", transformed.decode("utf-8"))
         self.assertNotIn("foreign summary", transformed.decode("utf-8"))
 
+    def test_external_reasoning_item_does_not_cross_official_store_false_route_boundary(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        external_item = fixture["reasoning_done"]["item"]
+        official_encrypted = "gAAAAredacted-official-encrypted-content"
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "store": False,
+                "stream": True,
+                "input": [
+                    external_item,
+                    {
+                        "type": "reasoning",
+                        "id": "rs_official_redacted",
+                        "summary": [],
+                        "encrypted_content": official_encrypted,
+                    },
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            choose_upstream("gpt-5.5"),
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+        input_items = payload["input"]
+
+        self.assertEqual([item["type"] for item in input_items], ["reasoning", "message"])
+        self.assertEqual(input_items[0]["encrypted_content"], official_encrypted)
+        self.assertNotIn("rs_external_redacted", transformed.decode("utf-8"))
+        self.assertNotIn("redacted summary", transformed.decode("utf-8"))
+        self.assertNotIn("provider-local", transformed.decode("utf-8"))
+
     def test_official_passthrough_keeps_portable_reasoning_and_tool_history_order(self):
         upstream = choose_upstream("gpt-5.5")
         encrypted_content = "gAAAAABqQFxWldgz0tjB8nSg51Eg5_bsIdx_8n85wX2RQLunO8HVW1mm"
@@ -13974,7 +14015,58 @@ class RoutingTests(unittest.TestCase):
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
         self.assertNotIn("encrypted_content", payload["item"])
-        self.assertEqual(payload["item"]["summary"], [])
+        self.assertEqual(payload["item"]["summary"], [{"type": "summary_text", "text": "third party summary"}])
+
+    def test_external_reasoning_stream_forwards_summary_and_suppresses_raw_events(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        raw_line = b"data: " + json.dumps(fixture["raw_reasoning_delta"], separators=(",", ":")).encode("utf-8") + b"\n"
+        summary_part_line = b"data: " + json.dumps(fixture["summary_part_added"], separators=(",", ":")).encode("utf-8") + b"\n"
+        summary_line = b"data: " + json.dumps(fixture["summary_delta"], separators=(",", ":")).encode("utf-8") + b"\n"
+
+        self.assertTrue(codex_proxy._is_raw_reasoning_stream_event(fixture["raw_reasoning_delta"]))
+        self.assertFalse(codex_proxy._is_raw_reasoning_stream_event(fixture["summary_delta"]))
+        self.assertTrue(codex_proxy._is_reasoning_summary_stream_event(fixture["summary_delta"]))
+        self.assertEqual(compatible_sse_line(raw_line, "ollama_cloud", event_context={}), b"")
+
+        forwarded_part = compatible_sse_line(summary_part_line, "ollama_cloud", event_context={})
+        self.assertIn(b"response.reasoning_summary_part.added", forwarded_part)
+
+        forwarded = compatible_sse_line(summary_line, "ollama_cloud", event_context={})
+        self.assertIn(b"response.reasoning_summary_text.delta", forwarded)
+        self.assertIn(b'"delta":"redacted summary progress"', forwarded)
+
+    def test_external_reasoning_done_keeps_only_text_summaries(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        line = b"data: " + json.dumps(fixture["reasoning_done"], separators=(",", ":")).encode("utf-8") + b"\n"
+
+        forwarded = compatible_sse_line(line, "ollama_cloud", event_context={})
+        payload = json.loads(forwarded.removeprefix(b"data: "))
+        item = payload["item"]
+
+        self.assertEqual(item["summary"], [{"type": "summary_text", "text": "redacted summary"}])
+        for forbidden in ("content", "raw_content", "reasoning_content", "thinking", "encrypted_content"):
+            self.assertNotIn(forbidden, item)
+        self.assertNotIn(b"provider-local", forwarded)
+
+    def test_external_reasoning_summary_progress_releases_buffer_but_empty_terminal_is_not_visible(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        response = FakeSseResponse(
+            [
+                b"data: " + json.dumps(fixture["summary_delta"], separators=(",", ":")).encode("utf-8") + b"\n\n",
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"response.reasoning_summary_text.delta", data)
+        self.assertIn(b'"delta":"redacted summary progress"', data)
+        self.assertNotIn(b"response.completed", data)
+        self.assertIn(b"upstream_empty_completed_response", data)
 
     def test_external_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
@@ -13993,7 +14085,7 @@ class RoutingTests(unittest.TestCase):
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
         self.assertNotIn("encrypted_content", payload["item"])
-        self.assertEqual(payload["item"]["summary"], [])
+        self.assertEqual(payload["item"]["summary"], [{"type": "summary_text", "text": "third party summary"}])
 
     def test_external_sse_relay_copies_reasoning_content_to_summary_for_codex_app(self):
         handler = FakeHandler()
@@ -14041,42 +14133,24 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"response.completed", data)
         self.assertIn(b"upstream_empty_completed_response", data)
 
-    def test_external_responses_sse_relay_drops_named_reasoning_summary_event_frame(self):
+    def test_external_responses_sse_relay_preserves_standard_reasoning_summary_progress(self):
+        response = FakeSseResponse([
+            b'event: response.reasoning_summary_text.delta\n',
+            b'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_ext","output_index":0,"summary_index":0,"delta":"progress"}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"answer"}\n\n',
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+            b"",
+        ])
         handler = FakeHandler()
-        response = FakeSseResponse(
-            [
-                b"event: response.reasoning_summary_text.delta\n",
-                b'data: {"type":"response.reasoning_summary_text.delta","delta":"hidden"}\n',
-                b"\n",
-                b"event: response.output_text.delta\n",
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n',
-                b"\n",
-                b"event: response.completed\n",
-                b'data: {"type":"response.completed","response":{"status":"completed"}}\n',
-                b"\n",
-                b"",
-            ]
-        )
-
         status = relay_upstream_response(
-            handler,
-            response,
-            "ollama_cloud",
+            handler, response, "ollama_cloud",
             relay_fixture=RELAY_GATEWAY,
-            request_id="req_named_reasoning_summary",
-            model="ollama-cloud/glm-5.2",
-            upstream_format="responses",
-            inbound_format="responses",
-            caller_stream=True,
+            upstream_format="responses", inbound_format="responses", caller_stream=True,
         )
-
+        assert status == 200
         data = b"".join(handler.wfile.writes)
-        self.assertEqual(status, 200)
-        self.assertNotIn(b"event: response.reasoning_summary_text.delta", data)
-        self.assertNotIn(b"hidden", data)
-        self.assertIn(b"event: response.output_text.delta", data)
-        self.assertIn(b'"delta":"ok"', data)
-        self.assertIn(b"event: response.completed", data)
+        assert b"response.reasoning_summary_text.delta" in data
+        assert b'"delta":"progress"' in data
 
     def test_external_sse_relay_downgrades_invalid_function_call_name(self):
         handler = FakeHandler()
@@ -16401,7 +16475,7 @@ class RoutingTests(unittest.TestCase):
 
         payload = json.loads(handler.wfile.writes[0])
         self.assertNotIn("encrypted_content", payload["output"][0])
-        self.assertEqual(payload["output"][0]["summary"], [])
+        self.assertEqual(payload["output"][0]["summary"], [{"type": "summary_text", "text": "third party summary"}])
 
     def test_external_non_sse_relay_copies_reasoning_content_to_summary_for_codex_app(self):
         handler = FakeHandler()

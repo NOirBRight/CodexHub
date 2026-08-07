@@ -3696,14 +3696,13 @@ RAW_REASONING_DELTA_EVENTS = {
     "response.reasoning_text.delta",
     "response.reasoning_content.delta",
     "response.reasoning_raw_content.delta",
-    "response.reasoning_summary_text.delta",
 }
 REASONING_TEXT_EVENT_PREFIXES = (
     "response.reasoning_text.",
     "response.reasoning_content.",
     "response.reasoning_raw_content.",
-    "response.reasoning_summary_text.",
 )
+REASONING_SUMMARY_EVENT_PREFIX = "response.reasoning_summary_text."
 
 
 def _collect_text_fragments(value: Any) -> list[str]:
@@ -3786,8 +3785,20 @@ def _hide_reasoning_text(value: Any) -> bool:
         return False
 
     if value.get("type") == "reasoning":
-        if value.get("summary") != []:
-            value["summary"] = []
+        summary = value.get("summary")
+        valid_summary = (
+            [
+                {"type": "summary_text", "text": item["text"]}
+                for item in summary
+                if isinstance(item, dict)
+                and item.get("type") == "summary_text"
+                and isinstance(item.get("text"), str)
+            ]
+            if isinstance(summary, list)
+            else []
+        )
+        if summary != valid_summary:
+            value["summary"] = valid_summary
             changed = True
         for key in ("content", "raw_content", "reasoning_content", "thinking", "encrypted_content"):
             if key in value:
@@ -3801,9 +3812,18 @@ def _hide_reasoning_text(value: Any) -> bool:
     return changed
 
 
-def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
+def _is_raw_reasoning_stream_event(payload: Mapping[str, Any]) -> bool:
     event_type = payload.get("type")
     return isinstance(event_type, str) and event_type.startswith(REASONING_TEXT_EVENT_PREFIXES)
+
+
+def _is_reasoning_summary_stream_event(payload: Mapping[str, Any]) -> bool:
+    event_type = payload.get("type")
+    return isinstance(event_type, str) and event_type.startswith(REASONING_SUMMARY_EVENT_PREFIX)
+
+
+def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
+    return _is_raw_reasoning_stream_event(payload) or _is_reasoning_summary_stream_event(payload)
 
 
 def _sse_line_ending(line: bytes) -> bytes:
@@ -4331,6 +4351,9 @@ def _responses_event_starts_downstream_output(event: Mapping[str, Any]) -> bool:
     if event_type == "response.output_text.done":
         text = event.get("text")
         return isinstance(text, str) and bool(text)
+    if event_type == "response.reasoning_summary_text.done":
+        text = event.get("text")
+        return isinstance(text, str) and bool(text)
     if event_type == "response.function_call_arguments.delta":
         delta = event.get("delta")
         return isinstance(delta, str) and bool(delta)
@@ -4358,9 +4381,12 @@ def _responses_event_commits_downstream_output(event: Mapping[str, Any], upstrea
     if event_type == "response.refusal.done":
         refusal = event.get("refusal")
         return isinstance(refusal, str) and bool(refusal)
-    if upstream_name == "official" and event_type == "response.reasoning_summary_text.delta":
+    if event_type == "response.reasoning_summary_text.delta":
         delta = event.get("delta")
         return isinstance(delta, str) and bool(delta)
+    if event_type == "response.reasoning_summary_text.done":
+        text = event.get("text")
+        return isinstance(text, str) and bool(text)
     if event_type == "response.output_item.done":
         item = event.get("item")
         return isinstance(item, Mapping) and item.get("type") == "reasoning"
@@ -12315,7 +12341,7 @@ def compatible_sse_line(
     else:
         runtime_tool_changed = False
 
-    if _is_reasoning_text_stream_event(payload):
+    if _is_raw_reasoning_stream_event(payload):
         return b""
 
     changed = _hide_reasoning_text(payload) or runtime_tool_changed
@@ -22766,7 +22792,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             is_reasoning_done = isinstance(item, Mapping) and item.get("type") == "reasoning"
                             if (
                                 _responses_event_commits_downstream_output(usage_payload, upstream_name)
-                                and (upstream_name == "official" or is_reasoning_done)
+                                and (
+                                    upstream_name == "official"
+                                    or is_reasoning_done
+                                    or _is_reasoning_summary_stream_event(usage_payload)
+                                )
                             ):
                                 downstream_output_started = True
                         buffer_current_line = (
