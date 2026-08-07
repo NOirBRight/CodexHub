@@ -7578,12 +7578,15 @@ _WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
 def _remember_worker_stream_item(
     state: dict[str, Any],
     item: Any,
+    *,
+    terminal: bool = False,
 ) -> None:
-    if not isinstance(item, Mapping) or _multi_agent_function_call_name(item) != "spawn_agent":
+    if not isinstance(item, Mapping):
         return
     item_id = item.get("id")
     if not isinstance(item_id, str) or not item_id:
         return
+    tool_name = _multi_agent_function_call_name(item)
     items = state.setdefault("items", {})
     if not isinstance(items, dict):
         items = {}
@@ -7592,6 +7595,10 @@ def _remember_worker_stream_item(
     if not isinstance(record, dict):
         record = {}
         items[item_id] = record
+    if tool_name is not None:
+        record["tool_name"] = tool_name
+    if tool_name != "spawn_agent":
+        return
     raw_arguments = item.get("arguments")
     if raw_arguments not in (None, ""):
         if isinstance(raw_arguments, str):
@@ -7600,9 +7607,9 @@ def _remember_worker_stream_item(
             record["arguments"] = json.dumps(raw_arguments, ensure_ascii=True, separators=(",", ":"))
         parsed = _semantic_strict_json_object(record.get("arguments"))
         if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            if not record.get("selector_invalid"):
-                record["agent_type"] = parsed["agent_type"]
-        else:
+            record["selector_invalid"] = False
+            record["agent_type"] = parsed["agent_type"]
+        elif terminal:
             record["selector_invalid"] = True
             record.pop("agent_type", None)
 
@@ -7619,7 +7626,11 @@ def _remember_worker_stream_event(
         event_context[_WORKER_STREAM_BINDING_STATE_FIELD] = state
     event_type = value.get("type")
     if event_type in {"response.output_item.added", "response.output_item.done"}:
-        _remember_worker_stream_item(state, value.get("item"))
+        _remember_worker_stream_item(
+            state,
+            value.get("item"),
+            terminal=event_type == "response.output_item.done",
+        )
         return
     if event_type == "response.function_call_arguments.delta":
         item_id = value.get("item_id")
@@ -7636,11 +7647,7 @@ def _remember_worker_stream_event(
         record["arguments"] = f"{record.get('arguments', '')}{delta}"
         parsed = _semantic_strict_json_object(record["arguments"])
         if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            if not record.get("selector_invalid"):
-                record["agent_type"] = parsed["agent_type"]
-        else:
-            record["selector_invalid"] = True
-            record.pop("agent_type", None)
+            record["agent_type"] = parsed["agent_type"]
         return
     if event_type == "response.function_call_arguments.done":
         item_id = value.get("item_id")
@@ -7656,10 +7663,12 @@ def _remember_worker_stream_event(
         arguments = value.get("arguments")
         if isinstance(arguments, str):
             record["arguments"] = arguments
+            if record.get("tool_name") != "spawn_agent":
+                return
             parsed = _semantic_strict_json_object(arguments)
             if parsed is not None and isinstance(parsed.get("agent_type"), str):
-                if not record.get("selector_invalid"):
-                    record["agent_type"] = parsed["agent_type"]
+                record["selector_invalid"] = False
+                record["agent_type"] = parsed["agent_type"]
             else:
                 record["selector_invalid"] = True
                 record.pop("agent_type", None)
@@ -7669,7 +7678,62 @@ def _remember_worker_stream_event(
         output = response.get("output") if isinstance(response, Mapping) else None
         if isinstance(output, list):
             for item in output:
-                _remember_worker_stream_item(state, item)
+                _remember_worker_stream_item(state, item, terminal=True)
+
+
+def _raise_on_invalid_worker_stream_event(
+    value: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    """Reject a terminal streamed worker call before any semantic repair."""
+    if _is_collaboration_v2_context(event_context):
+        return
+    context = event_context or {}
+    if not context.get("_worker_binding_required"):
+        return
+    state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
+    items = state.get("items") if isinstance(state, Mapping) else None
+    if not isinstance(items, Mapping):
+        return
+
+    event_type = value.get("type")
+    item_ids: list[str] = []
+    if event_type == "response.function_call_arguments.done":
+        item_id = value.get("item_id")
+        if isinstance(item_id, str) and item_id:
+            item_ids.append(item_id)
+    elif event_type == "response.output_item.done":
+        item = value.get("item")
+        item_id = item.get("id") if isinstance(item, Mapping) else None
+        if isinstance(item_id, str) and item_id:
+            item_ids.append(item_id)
+    elif event_type == "response.completed":
+        response = value.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if isinstance(output, list):
+            item_ids.extend(
+                item["id"]
+                for item in output
+                if isinstance(item, Mapping)
+                and isinstance(item.get("id"), str)
+                and item.get("id")
+            )
+
+    for item_id in item_ids:
+        record = items.get(item_id)
+        if (
+            isinstance(record, Mapping)
+            and record.get("tool_name") == "spawn_agent"
+            and record.get("selector_invalid")
+        ):
+            _raise_worker_contract_error(
+                event="worker_selector_validated",
+                error_code=WORKER_SELECTOR_ERROR_CODE,
+                classification="malformed_arguments",
+                surface=surface,
+            )
 
 
 def _attach_worker_requested_binding_sidecars(
@@ -7717,6 +7781,7 @@ def _attach_worker_requested_binding_sidecars(
     context = event_context or {}
     pending_agent_type = None
     stream_item_tracked = False
+    stream_selector_invalid = False
     stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
     item_id = rewritten.get("id")
     if isinstance(stream_state, Mapping) and isinstance(item_id, str):
@@ -7725,6 +7790,7 @@ def _attach_worker_requested_binding_sidecars(
         if isinstance(record, Mapping):
             stream_item_tracked = True
             pending_agent_type = record.get("agent_type")
+            stream_selector_invalid = bool(record.get("selector_invalid"))
     if arguments is None:
         # Responses streams may publish the function-call item before its
         # arguments.  The arguments delta/done events carry the selector, but
@@ -7742,7 +7808,9 @@ def _attach_worker_requested_binding_sidecars(
             return (rewritten if changed else value), changed
     elif arguments.get("agent_type") != "worker":
         return (rewritten if changed else value), changed
-    elif stream_item_tracked and pending_agent_type != "worker":
+    elif stream_item_tracked and (
+        stream_selector_invalid or pending_agent_type not in {None, "worker"}
+    ):
         return (rewritten if changed else value), changed
     call_id = rewritten.get("call_id")
     if not isinstance(call_id, str) or not call_id:
@@ -12200,6 +12268,11 @@ def compatible_sse_line(
         surface="stream",
     )
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+    _raise_on_invalid_worker_stream_event(
+        payload,
+        event_context,
+        surface="sse",
+    )
 
     runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
         event_context

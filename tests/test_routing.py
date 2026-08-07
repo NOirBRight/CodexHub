@@ -24189,28 +24189,21 @@ Execution constraints:
                 },
             },
         ]
-        transformed = [
-            compatible_sse_line(
-                b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
-                "synthetic-provider",
-                event_context=event_context,
-            )
-            for event in events
-        ]
-        payloads = [json.loads(line.removeprefix(b"data: ")) for line in transformed]
-        done_call = next(
-            payload["item"]
-            for payload in payloads
-            if payload.get("type") == "response.output_item.done"
-        )
-        completed_call = next(
-            payload["response"]["output"][0]
-            for payload in payloads
-            if payload.get("type") == "response.completed"
-        )
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as raised:
+            for event in events:
+                compatible_sse_line(
+                    b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n",
+                    "synthetic-provider",
+                    event_context=event_context,
+                )
 
-        self.assertNotIn("_codexhub_worker_requested_binding", done_call)
-        self.assertNotIn("_codexhub_worker_requested_binding", completed_call)
+        self.assertEqual(raised.exception.cause.code, "external_worker_selector_rejected")
+        self.write_proxy_event.assert_any_call(
+            "worker_selector_validated",
+            outcome="rejected",
+            classification="malformed_arguments",
+            surface="sse",
+        )
 
     def test_responses_caller_chat_upstream_preserves_ordinary_function_call_replay(self):
         replay = compatible_request_body(
