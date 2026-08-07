@@ -285,6 +285,149 @@ def test_v2_request_preserves_native_namespace_and_does_not_inject_v1_tools() ->
     }
 
 
+def test_v2_preserves_collaboration_calls_but_rewrites_unsupported_custom_tool_history() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-custom-history"}
+    custom_call = {
+        "type": "custom_tool_call",
+        "status": "completed",
+        "call_id": "call_exec_history",
+        "name": "exec",
+        "input": "echo sanitized",
+    }
+    custom_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_exec_history",
+        "output": "completed",
+    }
+    body = {
+        "model": "glm-5.2",
+        "input": [
+            _v2_spawn_call(),
+            {"type": "function_call_output", "call_id": "call_v2_spawn", "output": "done"},
+            custom_call,
+            custom_output,
+            {"type": "message", "role": "user", "content": "continue"},
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            }
+        ],
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert payload["input"][0:2] == body["input"][0:2]
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+    assert "Read-only Codex tool call transcript" in payload["input"][2]["content"]
+    assert "Read-only Codex tool result transcript" in payload["input"][3]["content"]
+
+
+def test_v2_does_not_preserve_custom_history_that_only_matches_a_plain_function() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-custom-name-collision"}
+    body = {
+        "model": "deepseek-v4-flash:0731",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_exec_history",
+                "name": "exec",
+                "input": "echo sanitized",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_history",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+            {"type": "function", "name": "exec"},
+        ],
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _upstream(),
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert all(
+        item.get("type") not in {"custom_tool_call", "custom_tool_call_output"}
+        for item in payload["input"]
+        if isinstance(item, dict)
+    )
+
+
+def test_v2_preserves_custom_history_when_upstream_explicitly_supports_custom_lifecycle() -> None:
+    context: dict[str, object] = {"request_id": "issue198-v2-native-custom"}
+    upstream = {
+        **_upstream(),
+        "tool_protocol_capabilities": {
+            "namespace_lifecycle": True,
+            "custom_lifecycle": True,
+        },
+    }
+    body = {
+        "model": "glm-5.2",
+        "input": [
+            _v2_spawn_call(),
+            {
+                "type": "custom_tool_call",
+                "status": "completed",
+                "call_id": "call_exec_history",
+                "name": "exec",
+                "input": "echo native",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_history",
+                "output": "completed",
+            },
+        ],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "spawn_agent"}],
+            },
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {"type": "text"},
+            },
+        ],
+    }
+
+    transformed = codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        upstream,
+        event_context=context,
+    )
+    payload = json.loads(transformed)
+
+    assert payload["input"][1:] == body["input"][1:]
+
+
 def test_v2_response_does_not_apply_v1_alias_repair() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "collaboration_protocol": COLLABORATION_V2}
     body = {
