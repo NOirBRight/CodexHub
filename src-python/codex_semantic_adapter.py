@@ -111,7 +111,7 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
             return COLLABORATION_V2
         if name is None:
             raise CollaborationBoundaryError("missing_namespace")
-        if "parameters" in value and item_type != "namespace":
+        if "parameters" in value and item_type not in {"namespace", "function"}:
             raise CollaborationBoundaryError("mixed_v1_v2")
         if name in COLLABORATION_V1_TOOL_NAMES and name not in COLLABORATION_V2_TOOL_NAMES:
             raise CollaborationBoundaryError("mixed_v1_v2")
@@ -157,12 +157,12 @@ def _metadata_protocol(value: Mapping[str, Any]) -> str | None:
     return next(iter(protocols), None)
 
 
-def classify_collaboration_payload(value: Any) -> str | None:
-    """Resolve the V1/V2 boundary before semantic repair or tool injection.
+def collaboration_protocols(value: Any) -> frozenset[str]:
+    """Collect Collaboration protocol markers from a payload.
 
     Unrelated tools are ignored.  Any known Collaboration marker with a
     missing, conflicting, or unknown protocol fails closed.  The return value
-    is one protocol family or ``None`` when the payload contains no marker.
+    contains every protocol family found in the payload.
     """
 
     protocols: set[str] = set()
@@ -200,6 +200,18 @@ def classify_collaboration_payload(value: Any) -> str | None:
                 visit(child, inherited_namespace)
 
     visit(value)
+    return frozenset(protocols)
+
+
+def classify_collaboration_payload(value: Any) -> str | None:
+    """Resolve the V1/V2 boundary before semantic repair or tool injection.
+
+    Unrelated tools are ignored.  Any known Collaboration marker with a
+    missing, conflicting, or unknown protocol fails closed.  The return value
+    is one protocol family or ``None`` when the payload contains no marker.
+    """
+
+    protocols = collaboration_protocols(value)
     if len(protocols) > 1:
         raise CollaborationBoundaryError("mixed_v1_v2")
     return next(iter(protocols), None)

@@ -1,0 +1,21 @@
+{
+  "schema_version": "codexhub.model-switch.v1",
+  "turns": [
+    {
+      "selected_model": "gpt-5.6-luna",
+      "collaboration_protocol": "collaboration_v2",
+      "status": "completed"
+    },
+    {
+      "selected_model": "deepseek-v4-flash:0731",
+      "collaboration_protocol": "collaboration_v1",
+      "status": "completed"
+    }
+  ],
+  "expected": {
+    "same_thread": true,
+    "fallback_model": null,
+    "boundary_error": null,
+    "reconnect_count": 0
+  }
+}

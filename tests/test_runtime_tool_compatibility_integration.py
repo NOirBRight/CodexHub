@@ -578,6 +578,81 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
 
 
+@pytest.mark.parametrize(
+    ("current_namespace", "current_child", "foreign_history"),
+    [
+        (
+            "multi_agent_v1",
+            "spawn_agent",
+            [
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "name": "followup_task",
+                    "call_id": "old-v2-call",
+                    "arguments": '{"task_name":"old","fork_turns":"all"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "old-v2-call",
+                    "output": "done",
+                },
+            ],
+        ),
+        (
+            "collaboration",
+            "followup_task",
+            [
+                {
+                    "type": "function_call",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "call_id": "old-v1-call",
+                    "arguments": '{"agent_type":"general","message":"old"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "old-v1-call",
+                    "output": "done",
+                },
+            ],
+        ),
+    ],
+    ids=["current-v1-foreign-v2", "current-v2-foreign-v1"],
+)
+def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions(
+    current_namespace: str,
+    current_child: str,
+    foreign_history: list[dict],
+) -> None:
+    body = {
+        "model": "custom-model",
+        "input": foreign_history,
+        "tools": [
+            {
+                "type": "namespace",
+                "name": current_namespace,
+                "tools": [{"type": "function", "name": current_child}],
+            }
+        ],
+    }
+
+    context: dict = {}
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode("utf-8"),
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert payload["input"] == foreign_history
+    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "adapt"
+    assert payload["tools"][0]["type"] == "function"
+    assert payload["tools"][0]["name"].startswith("__codexhub_ns_")
+
+
 def _external_responses_upstream() -> dict:
     return {
         "name": "responses_endpoint",

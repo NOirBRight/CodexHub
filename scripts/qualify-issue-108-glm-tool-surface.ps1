@@ -57,6 +57,38 @@ function Invoke-Checked {
     }
 }
 
+function Resolve-RepositoryPythonPath {
+    $pythonLauncher = Get-Command 'py.exe' -ErrorAction SilentlyContinue
+    if ($null -eq $pythonLauncher) {
+        $pythonLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $pythonLauncher -and -not [string]::IsNullOrWhiteSpace([string]$pythonLauncher.Source)) {
+        $pythonPathOutput = @(& $pythonLauncher.Source '-3.13' '-c' 'import sys; print(sys.executable)' 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            $pythonPath = ([string]($pythonPathOutput | Select-Object -Last 1)).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($pythonPath) -and (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+                return $pythonPath
+            }
+        }
+    }
+
+    # Keep environments that expose Python 3.13 directly supported while
+    # rejecting an ambient interpreter that cannot parse repository syntax.
+    $pythonCommand = Get-Command 'python.exe' -ErrorAction SilentlyContinue
+    if ($null -eq $pythonCommand) {
+        $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $pythonCommand -and -not [string]::IsNullOrWhiteSpace([string]$pythonCommand.Source)) {
+        $pythonPath = [string]$pythonCommand.Source
+        $versionOutput = @(& $pythonPath '-c' 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and ([string]($versionOutput | Select-Object -Last 1)).Trim() -eq '3.13') {
+            return $pythonPath
+        }
+    }
+
+    throw 'repository_python_3_13_not_found'
+}
+
 function Get-TrackedProcessIdentity {
     param(
         [Parameter(Mandatory = $true)]
@@ -705,14 +737,7 @@ function Invoke-LifecycleReplay {
 
     try {
         New-Item -ItemType Directory -Force -Path $runRoot, $replayHome, $replayTemp | Out-Null
-        $pythonCommand = Get-Command 'python.exe' -ErrorAction SilentlyContinue
-        if ($null -eq $pythonCommand) {
-            $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue
-        }
-        if ($null -eq $pythonCommand -or [string]::IsNullOrWhiteSpace([string]$pythonCommand.Source)) {
-            throw 'lifecycle_python_not_found'
-        }
-        $pythonPath = [string]$pythonCommand.Source
+        $pythonPath = Resolve-RepositoryPythonPath
         $lifecycleChildCommand = @'
 import hashlib
 import json
@@ -1226,7 +1251,7 @@ function Invoke-HistoryAdapterReplay {
 
     try {
         New-Item -ItemType Directory -Force -Path $runRoot, $replayHome, $replayTemp | Out-Null
-        $pythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+        $pythonCommand = Resolve-RepositoryPythonPath
         $replayScript = @'
 import json
 import os
@@ -1429,7 +1454,7 @@ function Invoke-EvidenceReplay {
             Add-SanitizedSummaryFailure -Summary $summary -Code 'qualification_evidence_fixture_missing'
         }
         else {
-            $pythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+            $pythonCommand = Resolve-RepositoryPythonPath
             $validatorPath = Join-Path $ReplayWorkspace 'tests\validate_issue_108_evidence.py'
             if (-not (Test-Path -LiteralPath $validatorPath -PathType Leaf)) {
                 throw 'evidence_validator_missing'
@@ -1661,7 +1686,7 @@ def main():
         [System.IO.File]::WriteAllText($gatewayStubPath, $gatewayStub, [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText($capturePhasePath, 'acceptance', [System.Text.UTF8Encoding]::new($false))
 
-        $pythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+        $pythonCommand = Resolve-RepositoryPythonPath
         $environment = New-QualificationChildEnvironment -CodexHome $replayHome -TempRoot $replayTemp -ExecutablePaths @($pythonCommand) -Additional @{
             CODEXHUB_REQUEST_TOOL_SHAPE_PATH = $capturePath
             CODEXHUB_REQUEST_CAPTURE_PHASE_PATH = $capturePhasePath
@@ -1909,7 +1934,7 @@ if (-not (Test-Path -LiteralPath $CodexCommand)) {
     throw "Codex command was not found: $CodexCommand"
 }
 
-$PythonCommand = (Get-Command 'python' -ErrorAction Stop).Source
+$PythonCommand = Resolve-RepositoryPythonPath
 $NodeCommand = (Get-Command 'node' -ErrorAction Stop).Source
 $GitCommand = (Get-Command 'git' -ErrorAction Stop).Source
 $SharedModelsCachePath = Join-Path $HOME '.codex\models_cache.json'

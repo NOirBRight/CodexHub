@@ -5,6 +5,10 @@ import json
 
 import pytest
 
+from codex_semantic_adapter import (
+    CollaborationBoundaryError,
+    classify_collaboration_payload,
+)
 from runtime_tool_compatibility import (
     ADAPT,
     CompatibilityStreamState,
@@ -16,6 +20,7 @@ from runtime_tool_compatibility import (
     SELECTED_PROVIDER_HOSTED,
     RequiredToolUnavailableError,
     ToolCompatibilityError,
+    _is_opaque_collaboration_history_item,
     build_tool_compatibility_plan,
 )
 
@@ -976,6 +981,59 @@ def test_native_namespace_rejects_unqualified_child_without_plain_owner(surface)
             plan.encode_payload({"input": [item]})
 
     assert exc_info.value.classification == "unknown_native_identity"
+
+
+def test_foreign_collaboration_history_is_preserved_when_current_plan_is_different() -> None:
+    plan = _adapted_namespace_plan(_namespace("multi_agent_v1", child="spawn_agent"))
+    history = [{
+        "type": "function_call",
+        "namespace": "collaboration",
+        "name": "followup_task",
+        "call_id": "old-v2-call",
+        "arguments": '{"task_name":"old","fork_turns":"all"}',
+    }]
+
+    encoded = plan.encode_payload({"input": history})
+
+    assert encoded["input"] == history
+
+
+@pytest.mark.parametrize(
+    ("item", "classification"),
+    [
+        (
+            {
+                "type": "function_call",
+                "namespace": "multi_agent_v1",
+                "name": "unknown_child",
+                "call_id": "unknown-child",
+                "arguments": "{}",
+            },
+            "unknown_v1_tool",
+        ),
+        (
+            {
+                "type": "function_call",
+                "namespace": "multi_agent_v1",
+                "name": "followup_task",
+                "call_id": "mixed-fields",
+                "arguments": '{"task_name":"foreign-v2"}',
+            },
+            "mixed_v1_v2",
+        ),
+    ],
+    ids=["unknown-v1-child", "v1-v2-only-tool"],
+)
+def test_malformed_foreign_collaboration_history_stays_at_semantic_boundary(
+    item: dict,
+    classification: str,
+) -> None:
+    assert not _is_opaque_collaboration_history_item(item)
+
+    with pytest.raises(CollaborationBoundaryError) as exc_info:
+        classify_collaboration_payload({"input": [item]})
+
+    assert exc_info.value.classification == classification
 
 
 def test_native_namespace_stream_rejects_unqualified_child_without_plain_owner():

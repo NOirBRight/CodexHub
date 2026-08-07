@@ -186,6 +186,19 @@ def test_issue_108_environment_isolation_replay_keeps_cli_secrets_out_of_child(t
     assert summary["cleanup_elapsed_milliseconds"] <= summary["cleanup_budget_milliseconds"]
 
 
+def test_issue_108_python_children_use_repository_python_313():
+    source = (ROOT / "scripts" / "qualify-issue-108-glm-tool-surface.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert "function Resolve-RepositoryPythonPath" in source
+    assert "'-3.13'" in source
+    assert "sys.version_info" in source
+    assert source.count("Resolve-RepositoryPythonPath") >= 6
+    assert "$pythonCommand = (Get-Command 'python'" not in source
+    assert "$PythonCommand = (Get-Command 'python'" not in source
+
+
 def test_issue_108_history_adapter_negative_control_replay_is_bounded_and_sanitized(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:

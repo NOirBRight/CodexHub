@@ -62,6 +62,23 @@ _V1_FORBIDDEN = frozenset({"task_path", "continuation_id", "task_name", "fork_tu
 _V2_FORBIDDEN = frozenset({"agent_id", "fork_context"})
 
 
+def _is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    namespace = item.get("namespace")
+    name = item.get("name")
+    return (
+        (namespace == "multi_agent_v1" and name in _V1_NAMES)
+        or (namespace == "collaboration" and name in _V2_NAMES)
+        or (
+            namespace is None
+            and isinstance(name, str)
+            and name.startswith("multi_agent_v1__")
+            and name.removeprefix("multi_agent_v1__") in _V1_NAMES
+        )
+    )
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
@@ -1334,6 +1351,8 @@ class ToolCompatibilityPlan:
     def owns_wire_value(self, value: Any) -> bool:
         if not isinstance(value, Mapping):
             return False
+        if _is_opaque_collaboration_history_item(value):
+            return True
         name = value.get("name")
         namespace = value.get("namespace")
         if self.registry.record_for_alias(name) is not None:
@@ -1644,6 +1663,8 @@ class ToolCompatibilityPlan:
         omitted/native declaration merely because name lookup returned no exact
         match.  Adapter aliases remain valid function-call wire names.
         """
+        if surface == "history" and _is_opaque_collaboration_history_item(item):
+            return
         if item.get("type") == "function_call" and self.registry.record_for_alias(item.get("name")) is not None:
             return
         if (
