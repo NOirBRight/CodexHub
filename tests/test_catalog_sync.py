@@ -814,6 +814,22 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(repeated["models"][0]["multi_agent_version"], "v2")
             self.assertEqual(len(repeated_overrides["overrides"]), 1)
 
+            # Codex may rewrite the effective catalog to the managed baseline
+            # while leaving CodexHub's user-owned sidecar intact.  A sync must
+            # re-apply the explicit model-level choice instead of interpreting
+            # the transient generated row as a UI clear.
+            reset_by_codex = json.loads(generated.read_text(encoding="utf-8"))
+            reset_by_codex["models"][0]["multi_agent_version"] = "v1"
+            generated.write_text(json.dumps(reset_by_codex), encoding="utf-8")
+            run_sync()
+            preserved = json.loads(generated.read_text(encoding="utf-8"))
+            preserved_overrides = json.loads(overrides.read_text(encoding="utf-8"))
+            self.assertEqual(preserved["models"][0]["multi_agent_version"], "v2")
+            self.assertEqual(
+                preserved_overrides["overrides"][0]["fields"],
+                {"multi_agent_version": "v2"},
+            )
+
             # Model-level save publishes the effective row before the sync
             # reads the sidecar.  Verify both clear and re-select preserve the
             # intended value across the same restart/sync boundary.

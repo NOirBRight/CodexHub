@@ -153,37 +153,45 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
 }
 
-const OFFICIAL_COLLABORATION_BASELINES: Record<string, "v1" | "v2"> = {
-  "gpt-5.6-sol": "v2",
-  "gpt-5.6-terra": "v2",
-  "gpt-5.6-luna": "v1",
+type OfficialCollaborationCapability = {
+  baseline: "v1" | "v2";
+  verdict: "GO" | "PARTIAL" | "NO-GO" | "UNQUALIFIED";
+  candidate: string;
 };
 
-// This allow-list is the reviewed output of the exact CLI 0.146.1 matrix.
-// Keep it model-scoped: an unqualified or hidden catalog row never receives a
-// V1/V2 selector merely because it shares a display name or provider.
-const QUALIFIED_OFFICIAL_COLLABORATION_MODELS = new Set([
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-]);
+// This is the checked-in decision table produced by the exact CLI 0.146.1
+// capability matrix.  A selector is exposed only for an accepted GO row;
+// model/provider names alone never qualify a row.
+const OFFICIAL_COLLABORATION_CAPABILITIES: Record<string, OfficialCollaborationCapability> = {
+  "gpt-5.6-sol": { baseline: "v2", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
+  "gpt-5.6-terra": { baseline: "v2", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
+  "gpt-5.6-luna": { baseline: "v1", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
+};
 
-export function officialCollaborationVersionOptions(model: Model) {
+export function officialCollaborationVersionOptions(
+  model: Model,
+  explicitOverrides: Readonly<Record<string, "v1" | "v2">> = {},
+) {
   const canonical = normalizeOfficialModelId(model.id);
-  const baseline = canonical ? OFFICIAL_COLLABORATION_BASELINES[canonical] : undefined;
+  const capability = canonical ? OFFICIAL_COLLABORATION_CAPABILITIES[canonical] : undefined;
   if (
-    !baseline ||
+    !capability ||
     !canonical ||
-    !QUALIFIED_OFFICIAL_COLLABORATION_MODELS.has(canonical) ||
+    capability.verdict !== "GO" ||
     !isCatalogModelListable(model)
   ) {
     return null;
   }
-  const effective = model.multi_agent_version ?? baseline;
+  const baseline = capability.baseline;
+  const explicit = explicitOverrides[canonical];
+  // The managed catalog baseline is authoritative until the user selects a
+  // model-level override.  A stale generated row must not silently promote a
+  // different Collaboration version after restart or catalog refresh.
+  const effective = explicit ?? baseline;
   if (effective !== "v1" && effective !== "v2") {
     return null;
   }
-  return { baseline, effective } as const;
+  return { baseline, effective, explicit: explicit ?? null, candidate: capability.candidate } as const;
 }
 
 export function resolveOfficialModelContextWindow(

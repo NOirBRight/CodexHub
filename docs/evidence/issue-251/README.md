@@ -1,26 +1,23 @@
 # Issue #251: bounded Code Mode evidence
 
-Status: local, protocol-controlled replay on the Beta3 reasoning candidate
-base. This artifact is the bounded evidence scaffold for #251 (with #279's
-codec and #280's workflow verification); it is not a live Provider
-qualification, an Issue-closure claim, or a release approval.
+Status: local, protocol-controlled replay bound to the reviewed Beta3
+implementation candidate `c115551a2246e141a0a6e33c41c9ae40bd02be73`. This
+artifact is the bounded evidence for #251 (with #279's codec); the separate
+real CLI workflow evidence is recorded by #280 before Issue closure.
 
 ## Candidate binding
 
-The fixture is currently based on `2cc3b1ecd287b8ee15d14715d084d0eb18df12c8`.
-`tests/fixtures/issue_251_code_mode_evidence.json` intentionally contains
-`candidate_sha: PENDING_CANDIDATE_SHA`. Before the Beta3 candidate gate, replace
-that value with the exact reviewed candidate SHA and run the validator with
-the same SHA:
+The fixture retains its implementation base
+`2cc3b1ecd287b8ee15d14715d084d0eb18df12c8` and binds the evidence to
+`candidate_sha: c115551a2246e141a0a6e33c41c9ae40bd02be73`. Run the validator
+with the same SHA during the candidate gate:
 
 ```powershell
 python tests/validate_issue_251_evidence.py
 python tests/validate_issue_251_evidence.py --candidate-sha <exact-reviewed-candidate-sha>
 ```
 
-The second command must pass only after the fixture is bound. A pending value
-is allowed for this local replay so that the evidence can be reviewed before
-the cumulative candidate is frozen.
+Both commands must pass before the candidate is reviewed.
 
 ## Scope and provenance
 

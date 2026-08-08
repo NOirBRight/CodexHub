@@ -1,0 +1,104 @@
+{
+  "schema": "codexhub.issue369.official-v1-v2-cli-matrix.v1",
+  "evidence_status": "authenticated_cli_sanitized",
+  "qualification_status": "qualified_visible_rows_only",
+  "candidate_revision": "c115551a2246e141a0a6e33c41c9ae40bd02be73",
+  "cli": {
+    "version": "0.146.1",
+    "source_contract_floor": "0.146.0",
+    "gateway_execution_owner": "codex_client",
+    "capture_home": "isolated",
+    "captured_on": "2026-08-08"
+  },
+  "selector_policy": {
+    "required_visibility": "list",
+    "required_verdict": "GO",
+    "required_versions": ["v1", "v2"],
+    "model_scoped": true,
+    "global_switch": false,
+    "third_party_rows_changed": false
+  },
+  "models": [
+    {
+      "model": "gpt-5.6-sol",
+      "visibility": "list",
+      "managed_baseline": "v2",
+      "v1": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_send_wait_close", "terminal_status": 200},
+      "v2": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_list_send_followup_wait_list", "terminal_status": 200},
+      "verdict": "GO",
+      "selector": true
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "visibility": "list",
+      "managed_baseline": "v2",
+      "v1": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_send_wait_close", "terminal_status": 200},
+      "v2": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_list_send_followup_wait_list", "terminal_status": 200},
+      "verdict": "GO",
+      "selector": true
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "visibility": "list",
+      "managed_baseline": "v1",
+      "v1": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_send_wait_close", "terminal_status": 200},
+      "v2": {"selection": "model_catalog_multi_agent_version", "lifecycle": "spawn_list_send_followup_wait_list", "terminal_status": 200},
+      "verdict": "GO",
+      "selector": true
+    },
+    {
+      "model": "gpt-5.5",
+      "visibility": "list",
+      "managed_baseline": null,
+      "v1": {"selection": "not_qualified", "lifecycle": "not_observed", "terminal_status": null},
+      "v2": {"selection": "not_qualified", "lifecycle": "native_surface_unavailable", "terminal_status": null},
+      "verdict": "UNQUALIFIED",
+      "selector": false
+    },
+    {
+      "model": "gpt-5.3-codex-spark",
+      "visibility": "list",
+      "managed_baseline": null,
+      "v1": {"selection": "not_qualified", "lifecycle": "not_observed", "terminal_status": null},
+      "v2": {"selection": "not_qualified", "lifecycle": "incomplete_probe", "terminal_status": null},
+      "verdict": "UNQUALIFIED",
+      "selector": false
+    },
+    {
+      "model": "gpt-5.2",
+      "visibility": "absent",
+      "managed_baseline": null,
+      "v1": {"selection": "not_testable", "lifecycle": "not_testable", "terminal_status": null},
+      "v2": {"selection": "not_testable", "lifecycle": "not_testable", "terminal_status": null},
+      "verdict": "UNQUALIFIED",
+      "selector": false
+    },
+    {
+      "model": "gpt-5.4",
+      "visibility": "list",
+      "managed_baseline": null,
+      "v1": {"selection": "catalog_null", "lifecycle": "native_surface_unavailable", "terminal_status": 200},
+      "v2": {"selection": "catalog_null", "lifecycle": "native_surface_unavailable", "terminal_status": 200},
+      "verdict": "NO-GO",
+      "selector": false
+    },
+    {
+      "model": "gpt-5.4-mini",
+      "visibility": "list",
+      "managed_baseline": null,
+      "v1": {"selection": "catalog_null", "lifecycle": "native_surface_unavailable", "terminal_status": 200},
+      "v2": {"selection": "catalog_null", "lifecycle": "native_surface_unavailable", "terminal_status": 200},
+      "verdict": "NO-GO",
+      "selector": false
+    },
+    {
+      "model": "codex-auto-review",
+      "visibility": "hidden",
+      "managed_baseline": null,
+      "v1": {"selection": "never_exposed", "lifecycle": "not_qualified", "terminal_status": null},
+      "v2": {"selection": "never_exposed", "lifecycle": "not_qualified", "terminal_status": null},
+      "verdict": "UNQUALIFIED",
+      "selector": false
+    }
+  ]
+}

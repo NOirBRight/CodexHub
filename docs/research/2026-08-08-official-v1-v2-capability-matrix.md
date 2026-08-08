@@ -1,51 +1,57 @@
 # Official Collaboration V1/V2 capability matrix
 
 Issue: #369  
-Candidate: `3e518330`  
-Codex runtime: Codex CLI/Desktop `0.146.1` (native binary SHA prefix `AE9D865F…`)  
-Runtime cache snapshot: `C:\Users\noirb\.codex\models_cache.json`, `client_version=0.146.0`, fetched `2026-08-02`  
-Catalog metadata source revision: `b24aa20107f365a1d0f06de9e0b28df5c516c7dd`  
+Candidate: `c115551a2246e141a0a6e33c41c9ae40bd02be73`  
+Codex CLI/Desktop: `0.146.1` (source-contract floor `0.146.0`)  
 Captured: `2026-08-08`
 
-## Scope and decision rule
+The machine-readable, sanitized evidence is
+[`docs/evidence/issue-369/official-v1-v2-cli-matrix.json`](../evidence/issue-369/official-v1-v2-cli-matrix.json).
+Validate it with:
 
-This is an evidence report, not a model allowlist and not a default/catalog change. A catalog `null`, a missing runtime row, or a partial lifecycle observation is `UNQUALIFIED`; a spawn-only observation is never `GO`. A V1/V2 selector may be enabled only for a list-visible row with a complete accepted `GO` verdict. Internal/hidden rows remain recorded but are never picker-visible.
+```powershell
+py -3.13 scripts/validate_issue_369_matrix.py
+```
 
-The report separates three sources:
+## Decision rule
 
-1. CodexHub's managed baseline in `config/official_model_catalog_metadata.json` and `src-tauri/src/models.rs`.
-2. The native Codex 0.146 runtime cache snapshot.
-3. Complete Collaboration lifecycle evidence. No complete lifecycle capture was available for this candidate, so no row is promoted to `GO`.
+The selector is enabled only when the exact visible Official row has an
+accepted `GO` verdict for both the requested V1 and V2 paths. A catalog value,
+a native cache marker, or a model-name guess is not capability evidence. Hidden
+and unknown rows are recorded but never become picker-visible. The selector is
+model-scoped; it does not create a global switch and it never changes a
+third-party row.
 
 ## Matrix
 
-| Canonical model | CodexHub baseline | Runtime cache | Catalog visibility | Explicit V1/V2 probe | Lifecycle evidence | Verdict |
+| Canonical model | Visibility | Managed baseline | V1 probe | V2 probe | Verdict | Selector |
 | --- | --- | --- | --- | --- | --- | --- |
-| `gpt-5.6-sol` | `v2` | `v2` | list | Selection is the model-level `multi_agent_version` field; no selector enabled | No complete spawn/message/follow-up/wait/list/interrupt/restart capture bound to `3e518330` | `UNQUALIFIED` |
-| `gpt-5.6-terra` | `v2` | `v2` | list | Same model-level field; no selector enabled | No complete lifecycle capture | `UNQUALIFIED` |
-| `gpt-5.6-luna` | `v1` | `v2` | list | Baseline/override conflict is recorded; no default change and no selector enabled | No complete lifecycle capture | `UNQUALIFIED` |
-| `gpt-5.5` | `null` | `null` | list | No inferred capability; no selector enabled | No complete lifecycle capture | `UNQUALIFIED` |
-| `gpt-5.2` | absent | absent | absent/unknown | No selection method; not picker-visible | Not testable from the installed catalog/cache | `UNQUALIFIED` |
-| `gpt-5.4` | `null` | `null` | list in managed builtin metadata | No inferred capability; no selector enabled | No complete lifecycle capture | `UNQUALIFIED` |
-| `gpt-5.4-mini` | `null` | `null` | list in managed builtin metadata | No inferred capability; no selector enabled | No complete lifecycle capture | `UNQUALIFIED` |
-| `codex-auto-review` | internal row | `v2` in cache | hidden from picker by internal-identity policy | Never expose a selector | No lifecycle qualification; internal row is recorded only | `UNQUALIFIED` |
+| `gpt-5.6-sol` | list | `v2` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
+| `gpt-5.6-terra` | list | `v2` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
+| `gpt-5.6-luna` | list | `v1` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
+| `gpt-5.5` | list | `null` | no accepted baseline selection | full probe reported no native Collaboration surface | `UNQUALIFIED` | no |
+| `gpt-5.3-codex-spark` | list | `null` | no accepted baseline selection | simple response only; no complete lifecycle evidence | `UNQUALIFIED` | no |
+| `gpt-5.2` | absent/unknown | absent | not testable | not testable | `UNQUALIFIED` | no |
+| `gpt-5.4` | list | `null` | no native Collaboration surface | no native Collaboration surface | `NO-GO` | no |
+| `gpt-5.4-mini` | list | `null` | no native Collaboration surface | no native Collaboration surface | `NO-GO` | no |
+| `codex-auto-review` | hidden/internal | internal | never exposed | never exposed | `UNQUALIFIED` | no |
 
-The native cache's `v2` values for Luna and `codex-auto-review` are runtime observations, not permission to rewrite CodexHub's managed baseline. The Luna conflict is the input to #368's model-level override work.
+The V1 and V2 probes used the exact selected model and an isolated Beta3
+Gateway. Evidence retains only lifecycle phase names, terminal status, and
+bounded event counts; it retains no prompt, reasoning, tool payload, opaque
+identity, credential, or session data. A successful child result alone was not
+accepted for rows marked `GO`: the accepted rows also have the full lifecycle
+probe and a terminal `200` response.
 
-## Lifecycle contract
+## UI and persistence consequence
 
-The required lifecycle for a future `GO` row is: explicit V1 and V2 selection, spawn, returned task identity/path, `message`/`agent_message`, follow-up, wait/result, list/interrupt where supported, streaming/history, restart/readback, and terminal/error shape. The candidate evidence set contains no complete, replayable capture satisfying that contract. In particular, the existing #64 source-contract inventory records `capture_status=not_observed`; it cannot be upgraded to `GO` by inference from the cache or a spawn-only result.
+`frontend/src/lib/officialModels.ts` consumes the three exact `GO` rows above.
+Sol and Terra retain their catalog V2 baselines. Luna retains its catalog V1
+baseline and may receive an explicit model-level V2 override. The override is
+keyed by the exact Official identity and is persisted by the managed catalog
+sidecar; refresh, restart, catalog regeneration, and session overlay writes do
+not erase it. Clearing the selector removes only that model's override.
 
-## Reproduction and verification
-
-```powershell
-codex --version
-Get-Content $env:USERPROFILE\.codex\models_cache.json
-py -3.13 -m pytest -q tests/test_catalog_sync.py
-```
-
-The first two commands were run against the installed native runtime and the third is the catalog contract regression. No credentials, prompts, reasoning text, task IDs, tool arguments/results, or raw client output are retained in this report.
-
-## Decision for #368
-
-Do not expose a V1/V2 selector from this matrix yet. #368 may implement persistence and UI plumbing behind an accepted matrix verdict, but the effective value must remain the managed baseline until a later exact-runtime lifecycle capture records `GO` for the specific Official model. The matrix does not change defaults, add a global switch, or authorize fallback.
+No selector is exposed for `UNQUALIFIED`, `NO-GO`, hidden, or stale rows. This
+matrix does not authorize third-party Collaboration V2, fallback, or
+cross-Provider execution; those remain later generic qualification work.

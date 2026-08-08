@@ -11,9 +11,9 @@
   },
   "candidate_binding": {
     "base_sha": "2cc3b1ecd287b8ee15d14715d084d0eb18df12c8",
-    "candidate_sha": "PENDING_CANDIDATE_SHA",
+    "candidate_sha": "c115551a2246e141a0a6e33c41c9ae40bd02be73",
     "binding_required_before_gate": true,
-    "pending_reason": "Replace candidate_sha with the exact reviewed Beta3 candidate SHA before promotion."
+    "pending_reason": null
   },
   "declarations": [
     {

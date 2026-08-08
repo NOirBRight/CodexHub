@@ -315,6 +315,8 @@ export const api = {
       model_id: modelId,
       version,
     }),
+  listOfficialMultiAgentOverrides: () =>
+    call<Record<string, "v1" | "v2">>("list_official_multi_agent_overrides"),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
   reconcileAfterRouteSwitch: (targetProvider?: string) =>

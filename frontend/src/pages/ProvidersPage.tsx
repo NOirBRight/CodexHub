@@ -140,6 +140,9 @@ function ProvidersPageImpl({
       normalizedSettings?.official_model_sort_order ?? [],
     );
   });
+  const [officialCollaborationOverrides, setOfficialCollaborationOverrides] = useState<
+    Record<string, "v1" | "v2">
+  >({});
   const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
@@ -204,6 +207,20 @@ function ProvidersPageImpl({
     toast: { showToast, updateToast },
     updateToastWithError,
   });
+
+  useEffect(() => {
+    let active = true;
+    void api.listOfficialMultiAgentOverrides()
+      .then((overrides) => {
+        if (active) {
+          setOfficialCollaborationOverrides(overrides);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
@@ -878,6 +895,8 @@ function ProvidersPageImpl({
                 busy={busy}
                 gatewayContextById={gatewayContextById}
                 models={officialModels}
+                officialCollaborationOverrides={officialCollaborationOverrides}
+                onOfficialCollaborationOverridesChanged={setOfficialCollaborationOverrides}
                 officialDisabledModels={officialDisabledModels}
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
@@ -1443,6 +1462,8 @@ function OfficialDetail({
   dirty,
   gatewayContextById,
   models,
+  officialCollaborationOverrides,
+  onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
@@ -1468,6 +1489,8 @@ function OfficialDetail({
   dirty: boolean;
   gatewayContextById: Map<string, number>;
   models: Model[];
+  officialCollaborationOverrides: Readonly<Record<string, "v1" | "v2">>;
+  onOfficialCollaborationOverridesChanged: (overrides: Record<string, "v1" | "v2">) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
@@ -1628,6 +1651,14 @@ function OfficialDetail({
     );
     try {
       await api.saveOfficialMultiAgentVersion(modelId, version);
+      const canonical = normalizeOfficialModelId(modelId) ?? modelId;
+      const next = { ...officialCollaborationOverrides };
+      if (version === null) {
+        delete next[canonical];
+      } else {
+        next[canonical] = version;
+      }
+      onOfficialCollaborationOverridesChanged(next);
       await onRefresh();
       updateToast(toastId, {
         action: null,
@@ -1725,6 +1756,7 @@ function OfficialDetail({
         }
         interactionDisabled={authState !== "authorized"}
         models={models}
+        officialCollaborationOverrides={officialCollaborationOverrides}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
         onReorder={onReorder}

@@ -509,6 +509,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .map(str::to_string);
             to_value(models::save_official_multi_agent_version(model_id, version))
         }
+        "list_official_multi_agent_overrides" => {
+            to_value(models::list_official_multi_agent_overrides())
+        }
         "sync_history" => {
             let target_provider = request
                 .args

@@ -10,11 +10,10 @@ tool results, or real wire identifiers.
 
 ## Candidate binding
 
-The fixture currently binds to the `codex/0.1.8-beta3-reasoning` lineage with
-`candidate.revision=REPLACE_WITH_FINAL_BETA3_SHA`. The Beta3 candidate is still
-being assembled. Before a qualification or release decision, replace that
-placeholder with the final 40-character candidate SHA, set
-`candidate.revision_status` to `final_candidate`, and rerun:
+The fixture binds to the reviewed Beta3 implementation candidate
+`c115551a2246e141a0a6e33c41c9ae40bd02be73` and has
+`candidate.revision_status=final_candidate`. Rerun the bounded validator
+before the release gate:
 
 ```powershell
 python scripts/validate_issue_63_evidence.py `

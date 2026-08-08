@@ -1106,10 +1106,13 @@ def _collect_catalog_overrides(
             continue
         fields = _delta_override_fields(identity, model, baseline_model)
         if not fields:
-            # An explicit edit back to the managed value removes the prior
-            # sidecar override instead of making it impossible to opt out.
-            if baseline_model is not None and identity in overrides:
-                overrides.pop(identity, None)
+            # The sidecar is the durable record of an explicit model-level
+            # choice.  The generated catalog is an effective cache and may be
+            # rewritten by Codex before this sync runs; treating a temporary
+            # baseline-valued row as an explicit clear would lose the user's
+            # choice on restart.  Clearing is performed by the UI command,
+            # which removes the exact sidecar field before publishing the
+            # baseline-valued effective row.
             continue
         if _planner_override_is_valid(identity, fields):
             overrides[identity] = fields

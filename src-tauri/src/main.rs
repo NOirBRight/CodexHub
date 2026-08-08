@@ -645,11 +645,19 @@ fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 }
 
 #[tauri::command]
-fn save_official_multi_agent_version(
+async fn save_official_multi_agent_version(
     model_id: String,
     version: Option<String>,
 ) -> Result<Model, String> {
-    models::save_official_multi_agent_version(model_id, version)
+    run_blocking("save_official_multi_agent_version", move || {
+        models::save_official_multi_agent_version(model_id, version)
+    })
+    .await
+}
+
+#[tauri::command]
+fn list_official_multi_agent_overrides() -> Result<std::collections::HashMap<String, String>, String> {
+    models::list_official_multi_agent_overrides()
 }
 
 #[tauri::command]
@@ -1146,6 +1154,7 @@ fn run_gui() {
             list_model_metadata,
             save_model_metadata_override,
             save_official_multi_agent_version,
+            list_official_multi_agent_overrides,
             sync_history,
             reconcile_after_route_switch,
             migrate_official_history_to_unified,
