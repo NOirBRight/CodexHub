@@ -6122,6 +6122,8 @@ def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
         "namespace_adapter",
         "accepts_custom_adapter",
         "custom_adapter",
+        "accepts_tool_search_adapter",
+        "tool_search_adapter",
     }
     for key in boolean_keys:
         if key in facts and type(facts[key]) is not bool:

@@ -30,9 +30,12 @@ UNKNOWN_FUTURE_KIND = "unknown_future_kind"
 
 CUSTOM_INPUT_KEY = "__codexhub_custom_input"
 CUSTOM_OUTPUT_KEY = "__codexhub_custom_output"
+TOOL_SEARCH_INPUT_KEY = "__codexhub_tool_search_input"
+TOOL_SEARCH_OUTPUT_KEY = "__codexhub_tool_search_output"
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
 _CUSTOM_ALIAS_PREFIX = "__codexhub_custom_"
+_TOOL_SEARCH_ALIAS_PREFIX = "__codexhub_search_"
 _KNOWN_HOSTED_TYPES = frozenset(
     {
         "web_search",
@@ -153,6 +156,7 @@ class ProtocolCapabilities:
     unknown_lifecycles: frozenset[str] = frozenset()
     accepts_namespace_adapter: bool = False
     accepts_custom_adapter: bool = False
+    accepts_tool_search_adapter: bool = False
     max_tool_name_length: int = 128
     max_alias_attempts: int = 128
 
@@ -173,6 +177,7 @@ class ProtocolCapabilities:
             "tool_search_lifecycle": False,
             "accepts_namespace_adapter": True,
             "accepts_custom_adapter": True,
+            "accepts_tool_search_adapter": True,
         }
         values.update(overrides)
         return cls(**values)
@@ -235,6 +240,9 @@ class ProtocolCapabilities:
             ),
             accepts_custom_adapter=boolean(
                 "accepts_custom_adapter", "custom_adapter", default=defaults.accepts_custom_adapter
+            ),
+            accepts_tool_search_adapter=boolean(
+                "accepts_tool_search_adapter", "tool_search_adapter", default=defaults.accepts_tool_search_adapter
             ),
             max_tool_name_length=int(facts.get("max_tool_name_length", defaults.max_tool_name_length)),
             max_alias_attempts=int(facts.get("max_alias_attempts", defaults.max_alias_attempts)),
@@ -338,7 +346,11 @@ class RequestScopedToolAliasRegistry:
                 continue
             self._aliases.pop(alias, None)
             self._by_declaration.pop((record.declaration_index, record.child_index), None)
-            prefix = _NAMESPACE_ALIAS_PREFIX if record.family == NAMESPACE else _CUSTOM_ALIAS_PREFIX
+            prefix = {
+                NAMESPACE: _NAMESPACE_ALIAS_PREFIX,
+                CUSTOM_FREEFORM: _CUSTOM_ALIAS_PREFIX,
+                TOOL_SEARCH: _TOOL_SEARCH_ALIAS_PREFIX,
+            }.get(record.family, _CUSTOM_ALIAS_PREFIX)
             replacement = self._allocate(record, prefix)
             remapped[alias] = replacement
         return remapped
@@ -348,7 +360,9 @@ class RequestScopedToolAliasRegistry:
 
     @staticmethod
     def looks_like_alias(value: Any) -> bool:
-        return isinstance(value, str) and value.startswith((_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX))
+        return isinstance(value, str) and value.startswith(
+            (_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX, _TOOL_SEARCH_ALIAS_PREFIX)
+        )
 
     def _allocate(self, record_without_alias: AliasRecord, prefix: str) -> str:
         start_ordinal = self._next_ordinals.get(prefix, 1)
@@ -417,6 +431,21 @@ class RequestScopedToolAliasRegistry:
                 version=version,
             ),
             _CUSTOM_ALIAS_PREFIX,
+        )
+
+    def allocate_tool_search(self, *, declaration_index: int) -> str:
+        return self._allocate(
+            AliasRecord(
+                alias="",
+                family=TOOL_SEARCH,
+                declaration_index=declaration_index,
+                child_index=None,
+                namespace=None,
+                child_name="tool_search",
+                original_name="tool_search",
+                version=None,
+            ),
+            _TOOL_SEARCH_ALIAS_PREFIX,
         )
 
     def record_for_alias(self, alias: Any) -> AliasRecord | None:
@@ -777,6 +806,9 @@ def build_tool_compatibility_plan(
         elif family == TOOL_SEARCH:
             if valid and capabilities.tool_search_lifecycle:
                 disposition, reason = NATIVE, "native_client_tool_search"
+            elif valid and capabilities.function_lifecycle and capabilities.accepts_tool_search_adapter:
+                disposition, reason = ADAPT, "tool_search_function_envelope"
+                aliases.append(registry.allocate_tool_search(declaration_index=index))
             else:
                 reason = "client_tool_search_lifecycle_unavailable"
         elif family == SELECTED_PROVIDER_HOSTED:
@@ -863,6 +895,31 @@ def _json_object_exact(value: Any, *, output: bool = False) -> dict[str, Any]:
         raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
     expected = CUSTOM_OUTPUT_KEY if output else CUSTOM_INPUT_KEY
     if not isinstance(parsed, dict) or set(parsed) != {expected}:
+        raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
+    return parsed
+
+
+def _json_object_with_key(value: Any, key: str) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        parsed = _copy_mapping(value)
+    elif isinstance(value, str):
+        def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for item_key, item in items:
+                if item_key in result:
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_envelope_key")
+                result[item_key] = item
+            return result
+
+        try:
+            parsed = json.loads(value, object_pairs_hook=pairs)
+        except ToolCompatibilityError:
+            raise
+        except (TypeError, ValueError):
+            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope") from None
+    else:
+        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
+    if not isinstance(parsed, dict) or set(parsed) != {key}:
         raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
     return parsed
 
@@ -1114,6 +1171,9 @@ class ToolCompatibilityPlan:
             elif family == TOOL_SEARCH:
                 if self.capabilities.tool_search_lifecycle:
                     disposition, reason = NATIVE, "native_client_tool_search"
+                elif self.capabilities.function_lifecycle and self.capabilities.accepts_tool_search_adapter:
+                    disposition, reason = ADAPT, "tool_search_function_envelope"
+                    aliases = [self.registry.allocate_tool_search(declaration_index=len(entries))]
             elif family == SELECTED_PROVIDER_HOSTED:
                 # Provider capability facts are intentionally not inferred for
                 # declarations added after the request plan was built.
@@ -1411,6 +1471,25 @@ class ToolCompatibilityPlan:
                 )
                 changed = True
                 continue
+            if entry.family == TOOL_SEARCH:
+                alias = entry.aliases[0]
+                function = _copy_mapping(raw_tool)
+                function["type"] = "function"
+                function["name"] = alias
+                function.pop("execution", None)
+                function.pop("description", None)
+                source_parameters = function.get("parameters")
+                if not isinstance(source_parameters, Mapping):
+                    source_parameters = {"type": "object"}
+                function["parameters"] = {
+                    "type": "object",
+                    "properties": {TOOL_SEARCH_INPUT_KEY: source_parameters},
+                    "required": [TOOL_SEARCH_INPUT_KEY],
+                    "additionalProperties": False,
+                }
+                encoded.append(function)
+                changed = True
+                continue
             encoded.append(_copy_mapping(raw_tool))
         return encoded, changed
 
@@ -1418,6 +1497,14 @@ class ToolCompatibilityPlan:
         thawed = _thaw(value)
         if isinstance(thawed, str):
             entry = self._entry_for_name(thawed)
+            if entry is None and thawed == "tool_search":
+                candidates = [
+                    candidate
+                    for candidate in self.entries
+                    if candidate.family == TOOL_SEARCH
+                ]
+                if len(candidates) == 1:
+                    entry = candidates[0]
             alias = self._alias_for(entry) if entry is not None and entry.disposition == ADAPT else None
             return (alias, True) if alias else (thawed, False)
         if not isinstance(thawed, Mapping):
@@ -1455,6 +1542,14 @@ class ToolCompatibilityPlan:
             if entry is not None and entry.disposition == ADAPT
             else None
         )
+        if alias is None and name == "tool_search" and result.get("type") == "function":
+            candidates = [
+                candidate
+                for candidate in self.entries
+                if candidate.family == TOOL_SEARCH and candidate.disposition == ADAPT
+            ]
+            if len(candidates) == 1:
+                alias = candidates[0].aliases[0]
         if alias:
             result["name"] = alias
             result["type"] = "function"
@@ -1476,6 +1571,10 @@ class ToolCompatibilityPlan:
         if _hosted_output_kind_for_item_type(item_type) is not None:
             raise ToolCompatibilityError("tool_compatibility_boundary", "unsupported_hosted_lifecycle", surface="history")
         entry = self._entry_for_name(name, namespace, item_type=item_type)
+        if entry is None and item_type in {"tool_search_call", "tool_search_output"}:
+            candidates = [candidate for candidate in self.entries if candidate.family == TOOL_SEARCH]
+            if len(candidates) == 1:
+                entry = candidates[0]
         if item_type == "function_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry, child_name=name)
             if alias is None:
@@ -1503,6 +1602,25 @@ class ToolCompatibilityPlan:
             item["name"] = alias
             item["arguments"] = _dump_envelope(CUSTOM_INPUT_KEY, item.pop("input"))
             return item, True
+        if item_type == "tool_search_call" and entry is not None and entry.disposition == ADAPT:
+            alias = self._alias_for(entry)
+            if alias is None:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias")
+            if item.get("execution") != "client":
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "invalid_tool_search_execution",
+                    surface="history",
+                )
+            call_id = item.get("call_id")
+            self.registry.bind_call(call_id, alias)
+            call_aliases[str(call_id)] = alias
+            item["type"] = "function_call"
+            item["name"] = alias
+            item.pop("namespace", None)
+            item.pop("execution", None)
+            item["arguments"] = _dump_envelope(TOOL_SEARCH_INPUT_KEY, item.pop("arguments", {}))
+            return item, True
         if item_type in {"function_call_output", "custom_tool_call_output"}:
             call_id = item.get("call_id")
             alias = call_aliases.get(call_id) if isinstance(call_id, str) else None
@@ -1515,6 +1633,27 @@ class ToolCompatibilityPlan:
                 return item, True
             if record is not None and record.family == NAMESPACE:
                 _validate_version_fields(item, record)
+            return item, False
+        if item_type == "tool_search_output":
+            call_id = item.get("call_id")
+            alias = call_aliases.get(call_id) if isinstance(call_id, str) else None
+            record = self.registry.record_for_call(call_id) if alias is None else self.registry.record_for_alias(alias)
+            if record is not None and record.family == TOOL_SEARCH:
+                if item.get("execution") != "client":
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "invalid_tool_search_execution",
+                        surface="history",
+                    )
+                payload = _copy_mapping(item)
+                for key in ("type", "execution", "id", "item_id", "call_id"):
+                    payload.pop(key, None)
+                item["type"] = "function_call_output"
+                item["output"] = _dump_envelope(TOOL_SEARCH_OUTPUT_KEY, payload)
+                for key in payload:
+                    item.pop(key, None)
+                item.pop("execution", None)
+                return item, True
             return item, False
         return item, False
 
@@ -1631,7 +1770,7 @@ class ToolCompatibilityPlan:
 
     def _expected_response_output_type(self, entry: ToolCompatibilityEntry) -> str | None:
         expected = self._history_output_type_for_entry(entry)
-        if entry.disposition == ADAPT and entry.family in {NAMESPACE, CUSTOM_FREEFORM}:
+        if entry.disposition == ADAPT and entry.family in {NAMESPACE, CUSTOM_FREEFORM, TOOL_SEARCH}:
             return "function_call_output"
         return expected
 
@@ -2271,6 +2410,16 @@ class ToolCompatibilityPlan:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope", surface="response")
             else:
                 result["type"] = "custom_tool_call"
+        elif record.family == TOOL_SEARCH:
+            result.pop("name", None)
+            result.pop("namespace", None)
+            result["type"] = "tool_search_call"
+            result["execution"] = "client"
+            if "arguments" in result and result.get("arguments") not in {None, ""}:
+                envelope = _json_object_with_key(result["arguments"], TOOL_SEARCH_INPUT_KEY)
+                result["arguments"] = envelope[TOOL_SEARCH_INPUT_KEY]
+            elif not allow_incomplete:
+                raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope", surface="response")
         return result, record, True
 
     def _validate_registered_item_identity(self, item: Mapping[str, Any], *, surface: str) -> None:
@@ -2319,6 +2468,18 @@ class ToolCompatibilityPlan:
             envelope = _json_object_exact(result["output"], output=True)
             result["type"] = "custom_tool_call_output"
             result["output"] = envelope[CUSTOM_OUTPUT_KEY]
+        elif record.family == TOOL_SEARCH:
+            envelope = _json_object_with_key(result.get("output"), TOOL_SEARCH_OUTPUT_KEY)
+            payload = envelope[TOOL_SEARCH_OUTPUT_KEY]
+            if not isinstance(payload, Mapping):
+                raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope", surface="response")
+            result["type"] = "tool_search_output"
+            result["execution"] = "client"
+            result.pop("output", None)
+            for key, value in payload.items():
+                if key in {"type", "execution", "id", "item_id", "call_id"}:
+                    continue
+                result[key] = value
         return result, True
 
     def _native_entry_for_item(self, item: Mapping[str, Any]) -> ToolCompatibilityEntry | None:
@@ -2677,6 +2838,17 @@ class _BufferedCustomStreamItem:
 
 
 @dataclass(slots=True)
+class _BufferedToolSearchStreamItem:
+    record: AliasRecord
+    added_event: dict[str, Any]
+    item_id: str
+    call_id: str
+    fragments: list[str] = field(default_factory=list)
+    arguments_done_event: dict[str, Any] | None = None
+    native_arguments: Any = None
+
+
+@dataclass(slots=True)
 class _OpaqueStreamItem:
     """Track a provider-local custom call without claiming a declaration.
 
@@ -2734,6 +2906,7 @@ class CompatibilityStreamState:
         self._native_fragments: dict[str, list[str]] = {}
         self._hosted_pending: dict[str, _HostedStreamState] = {}
         self._buffered_custom: dict[str, _BufferedCustomStreamItem] = {}
+        self._buffered_tool_search: dict[str, _BufferedToolSearchStreamItem] = {}
         # Provider-local custom calls have no declaration/alias owner.  Keep
         # an opaque stream owner once ``output_item.added`` establishes it so
         # later deltas and terminal events cannot borrow an arbitrary id.
@@ -2948,6 +3121,15 @@ class CompatibilityStreamState:
             except ToolCompatibilityError:
                 return ("custom_arguments_raw", arguments)
             return ("custom_input", _freeze(envelope.get(CUSTOM_INPUT_KEY)))
+        if family == TOOL_SEARCH and item_type == "function_call":
+            arguments = item.get("arguments")
+            if arguments in (None, ""):
+                return None
+            try:
+                envelope = _json_object_with_key(arguments, TOOL_SEARCH_INPUT_KEY)
+            except ToolCompatibilityError:
+                return ("tool_search_arguments_raw", arguments)
+            return ("arguments", _freeze(envelope[TOOL_SEARCH_INPUT_KEY]))
         if item_type == "function_call":
             arguments = item.get("arguments")
             if arguments in (None, ""):
@@ -3130,7 +3312,11 @@ class CompatibilityStreamState:
             not opaque.arguments_done or not opaque.item_done
             for opaque in self._opaque_pending.values()
         )
-        if incomplete or native_incomplete or opaque_incomplete:
+        search_incomplete = any(
+            pending.arguments_done_event is None
+            for pending in self._buffered_tool_search.values()
+        )
+        if incomplete or native_incomplete or opaque_incomplete or search_incomplete:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
 
@@ -3902,6 +4088,20 @@ class CompatibilityStreamState:
         result.pop("arguments", None)
         return result
 
+    @staticmethod
+    def _native_tool_search_item(
+        item: Mapping[str, Any],
+        native_arguments: Any,
+    ) -> dict[str, Any]:
+        """Convert an adapted function-call item back to tool_search."""
+        result = _copy_mapping(item)
+        result["type"] = "tool_search_call"
+        result.pop("name", None)
+        result.pop("namespace", None)
+        result["execution"] = "client"
+        result["arguments"] = {} if native_arguments is None else _thaw(native_arguments)
+        return result
+
     def decode_events_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(event, Mapping):
             raise self._stream_error("malformed_stream_event")
@@ -3911,7 +4111,7 @@ class CompatibilityStreamState:
         item = value.get("item")
 
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
-            if self._buffered_custom:
+            if self._buffered_custom or self._buffered_tool_search:
                 raise self._stream_error("incomplete_stream")
             return [self.decode_event(value)]
 
@@ -3919,38 +4119,73 @@ class CompatibilityStreamState:
             self.plan._validate_registered_item_identity(item, surface="stream")
             self.plan._reject_unknown_standard_item(item, surface="stream")
             record = self.plan.registry.record_for_alias(item.get("name"))
-            if record is None or record.family != CUSTOM_FREEFORM:
+            if record is None or record.family not in {CUSTOM_FREEFORM, TOOL_SEARCH}:
                 return [self.decode_event(value)]
-            if item.get("type") != "function_call":
-                raise self._stream_error("ambiguous_call_identity")
-            item_id = self._item_id(item)
-            call_id = item.get("call_id")
-            if (
-                not item_id
-                or not isinstance(call_id, str)
-                or not call_id
-                or item_id in self._seen_item_ids
-                or call_id in self._seen_call_ids
-                or item.get("arguments") not in {None, ""}
-                or item.get("namespace") is not None
-            ):
-                raise self._stream_error("invalid_custom_stream_identity")
-            self._seen_item_ids.add(item_id)
-            self._seen_call_ids.add(call_id)
-            if self.plan.registry.record_for_call(call_id) is None:
-                self.plan.registry.bind_call(call_id, record.alias)
-            self._buffered_custom[item_id] = _BufferedCustomStreamItem(
-                record=record,
-                added_event=value,
-                item_id=item_id,
-                call_id=call_id,
-            )
-            self._adapter_wire_identities[item_id] = (
-                call_id,
-                record,
-                self._native_wire_identity(item),
-            )
-            return []
+            if record.family == CUSTOM_FREEFORM:
+                if item.get("type") != "function_call":
+                    raise self._stream_error("ambiguous_call_identity")
+                item_id = self._item_id(item)
+                call_id = item.get("call_id")
+                if (
+                    not item_id
+                    or not isinstance(call_id, str)
+                    or not call_id
+                    or item_id in self._seen_item_ids
+                    or call_id in self._seen_call_ids
+                    or item.get("arguments") not in {None, ""}
+                    or item.get("namespace") is not None
+                ):
+                    raise self._stream_error("invalid_custom_stream_identity")
+                self._seen_item_ids.add(item_id)
+                self._seen_call_ids.add(call_id)
+                if self.plan.registry.record_for_call(call_id) is None:
+                    self.plan.registry.bind_call(call_id, record.alias)
+                self._buffered_custom[item_id] = _BufferedCustomStreamItem(
+                    record=record,
+                    added_event=value,
+                    item_id=item_id,
+                    call_id=call_id,
+                )
+                self._adapter_wire_identities[item_id] = (
+                    call_id,
+                    record,
+                    self._native_wire_identity(item),
+                )
+                return []
+
+        if event_type == "response.output_item.added" and isinstance(item, Mapping):
+            record = self.plan.registry.record_for_alias(item.get("name"))
+            if record is not None and record.family == TOOL_SEARCH:
+                if item.get("type") != "function_call":
+                    raise self._stream_error("ambiguous_call_identity")
+                item_id = self._item_id(item)
+                call_id = item.get("call_id")
+                if (
+                    not item_id
+                    or not isinstance(call_id, str)
+                    or not call_id
+                    or item_id in self._seen_item_ids
+                    or call_id in self._seen_call_ids
+                    or item.get("arguments") not in {None, ""}
+                    or item.get("namespace") is not None
+                ):
+                    raise self._stream_error("invalid_tool_search_stream_identity")
+                self._seen_item_ids.add(item_id)
+                self._seen_call_ids.add(call_id)
+                if self.plan.registry.record_for_call(call_id) is None:
+                    self.plan.registry.bind_call(call_id, record.alias)
+                self._buffered_tool_search[item_id] = _BufferedToolSearchStreamItem(
+                    record=record,
+                    added_event=value,
+                    item_id=item_id,
+                    call_id=call_id,
+                )
+                self._adapter_wire_identities[item_id] = (
+                    call_id,
+                    record,
+                    self._native_wire_identity(item),
+                )
+                return []
 
         item_id = self._item_id(value)
         pending = self._buffered_custom.get(item_id) if item_id else None
@@ -3986,51 +4221,109 @@ class CompatibilityStreamState:
             pending.native_input = native_input
             return []
 
+        search_pending = self._buffered_tool_search.get(item_id) if item_id else None
+        if event_type == "response.function_call_arguments.delta" and search_pending is not None:
+            supplied_call_id = value.get("call_id")
+            if supplied_call_id is not None and supplied_call_id != search_pending.call_id:
+                raise self._stream_error("ambiguous_call_identity")
+            delta = value.get("delta")
+            if not isinstance(delta, str) or search_pending.arguments_done_event is not None:
+                raise self._stream_error("malformed_stream_delta")
+            search_pending.fragments.append(delta)
+            return []
+
+        if event_type == "response.function_call_arguments.done" and search_pending is not None:
+            supplied_call_id = value.get("call_id")
+            if supplied_call_id is not None and supplied_call_id != search_pending.call_id:
+                raise self._stream_error("ambiguous_call_identity")
+            if search_pending.arguments_done_event is not None:
+                raise self._stream_error("duplicate_stream_done")
+            arguments = value.get("arguments")
+            if not isinstance(arguments, str) or (
+                search_pending.fragments and "".join(search_pending.fragments) != arguments
+            ):
+                raise self._stream_error("incomplete_stream_delta")
+            try:
+                envelope = _json_object_with_key(arguments, TOOL_SEARCH_INPUT_KEY)
+            except ToolCompatibilityError as exc:
+                raise self._stream_error(exc.classification) from exc
+            search_pending.arguments_done_event = value
+            search_pending.native_arguments = envelope[TOOL_SEARCH_INPUT_KEY]
+            return []
+
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
             done_item_id = self._item_id(item)
             pending = self._buffered_custom.get(done_item_id) if done_item_id else None
-            if pending is None:
+            if pending is not None:
+                expected_wire = self._adapter_wire_identities.get(pending.item_id)
+                if (
+                    expected_wire is None
+                    or self._native_wire_identity(item) != expected_wire[2]
+                ):
+                    raise self._stream_error("ambiguous_native_identity")
+                if (
+                    pending.arguments_done_event is None
+                    or pending.native_input is None
+                    or item.get("call_id") != pending.call_id
+                    or item.get("name") != pending.record.alias
+                    or item.get("arguments") != pending.arguments_done_event.get("arguments")
+                ):
+                    raise self._stream_error("incomplete_stream")
+
+                added_event = _copy_mapping(pending.added_event)
+                added_event["item"] = self._native_custom_item(
+                    added_event["item"],
+                    pending.record,
+                    "",
+                )
+
+                delta_event = _copy_mapping(pending.arguments_done_event)
+                delta_event["type"] = "response.custom_tool_call_input.delta"
+                delta_event["delta"] = pending.native_input
+                delta_event.pop("arguments", None)
+
+                input_done_event = _copy_mapping(pending.arguments_done_event)
+                input_done_event["type"] = "response.custom_tool_call_input.done"
+                input_done_event["input"] = pending.native_input
+                input_done_event.pop("arguments", None)
+
+                value["item"] = self._native_custom_item(
+                    item,
+                    pending.record,
+                    pending.native_input,
+                )
+                self._wire_payloads[pending.item_id] = self._semantic_wire_payload(item, pending.record)
+                del self._buffered_custom[pending.item_id]
+                return [added_event, delta_event, input_done_event, value]
+
+        if event_type == "response.output_item.done" and isinstance(item, Mapping):
+            done_item_id = self._item_id(item)
+            search_pending = self._buffered_tool_search.get(done_item_id) if done_item_id else None
+            if search_pending is None:
                 return [self.decode_event(value)]
-            expected_wire = self._adapter_wire_identities.get(pending.item_id)
+            expected_wire = self._adapter_wire_identities.get(search_pending.item_id)
             if (
                 expected_wire is None
                 or self._native_wire_identity(item) != expected_wire[2]
-            ):
-                raise self._stream_error("ambiguous_native_identity")
-            if (
-                pending.arguments_done_event is None
-                or pending.native_input is None
-                or item.get("call_id") != pending.call_id
-                or item.get("name") != pending.record.alias
-                or item.get("arguments") != pending.arguments_done_event.get("arguments")
+                or search_pending.arguments_done_event is None
+                or item.get("call_id") != search_pending.call_id
+                or item.get("name") != search_pending.record.alias
+                or item.get("arguments") != search_pending.arguments_done_event.get("arguments")
             ):
                 raise self._stream_error("incomplete_stream")
-
-            added_event = _copy_mapping(pending.added_event)
-            added_event["item"] = self._native_custom_item(
-                added_event["item"],
-                pending.record,
-                "",
+            native_added = _copy_mapping(search_pending.added_event)
+            native_added["item"] = self._native_tool_search_item(
+                native_added["item"],
+                search_pending.native_arguments,
             )
-
-            delta_event = _copy_mapping(pending.arguments_done_event)
-            delta_event["type"] = "response.custom_tool_call_input.delta"
-            delta_event["delta"] = pending.native_input
-            delta_event.pop("arguments", None)
-
-            input_done_event = _copy_mapping(pending.arguments_done_event)
-            input_done_event["type"] = "response.custom_tool_call_input.done"
-            input_done_event["input"] = pending.native_input
-            input_done_event.pop("arguments", None)
-
-            value["item"] = self._native_custom_item(
+            value["item"] = self._native_tool_search_item(item, search_pending.native_arguments)
+            self._wire_payloads[search_pending.item_id] = self._semantic_wire_payload(
                 item,
-                pending.record,
-                pending.native_input,
+                search_pending.record,
             )
-            self._wire_payloads[pending.item_id] = self._semantic_wire_payload(item, pending.record)
-            del self._buffered_custom[pending.item_id]
-            return [added_event, delta_event, input_done_event, value]
+            self._native_done.add(search_pending.item_id)
+            del self._buffered_tool_search[search_pending.item_id]
+            return [native_added, value]
 
         return [self.decode_event(value)]
 
@@ -4057,6 +4350,8 @@ __all__ = [
     "CUSTOM_FREEFORM",
     "CUSTOM_INPUT_KEY",
     "CUSTOM_OUTPUT_KEY",
+    "TOOL_SEARCH_INPUT_KEY",
+    "TOOL_SEARCH_OUTPUT_KEY",
     "HostedCapabilityFacts",
     "NAMESPACE",
     "NATIVE",

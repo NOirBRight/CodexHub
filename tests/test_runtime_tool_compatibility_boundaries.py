@@ -653,6 +653,150 @@ def test_native_tool_search_body_and_history_preserve_exact_client_execution_mar
     assert plan.encode_payload({"input": [call, output]})["input"] == [call, output]
 
 
+def _adapted_tool_search_plan():
+    return build_tool_compatibility_plan(
+        [{"type": "tool_search", "execution": "client"}],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="adapted-tool-search",
+    )
+
+
+def test_adapted_tool_search_round_trips_choice_call_output_and_discovered_tools():
+    declaration = {"type": "tool_search", "execution": "client"}
+    call = {
+        "type": "tool_search_call",
+        "id": "search-item",
+        "call_id": "search-call",
+        "execution": "client",
+        "arguments": {"query": "opaque"},
+    }
+    output = {
+        "type": "tool_search_output",
+        "id": "search-output",
+        "call_id": "search-call",
+        "execution": "client",
+        "tools": [{"type": "function", "name": "discovered"}],
+    }
+    plan = _adapted_tool_search_plan()
+    alias = plan.entries[0].aliases[0]
+
+    encoded = plan.encode_payload(
+        {
+            "tools": [declaration],
+            "tool_choice": "tool_search",
+            "input": [call, output],
+        }
+    )
+
+    assert encoded["tools"][0]["type"] == "function"
+    assert encoded["tools"][0]["name"] == alias
+    assert encoded["tool_choice"] == alias
+    assert encoded["input"][0] == {
+        "type": "function_call",
+        "id": "search-item",
+        "call_id": "search-call",
+        "name": alias,
+        "arguments": '{"__codexhub_tool_search_input":{"query":"opaque"}}',
+    }
+    assert encoded["input"][1]["type"] == "function_call_output"
+    assert encoded["input"][1]["id"] == "search-output"
+    assert encoded["input"][1]["call_id"] == "search-call"
+    assert set(encoded["input"][1]) == {"type", "id", "call_id", "output"}
+    assert encoded["input"][1]["output"] == (
+        '{"__codexhub_tool_search_output":{"tools":[{"type":"function","name":"discovered"}]}}'
+    )
+
+    decoded = plan.decode_payload({"output": encoded["input"]})
+    assert decoded["output"] == [call, output]
+
+
+def test_adapted_tool_search_stream_emits_only_native_client_lifecycle():
+    plan = _adapted_tool_search_plan()
+    alias = plan.entries[0].aliases[0]
+    arguments = '{"__codexhub_tool_search_input":{"query":"opaque"}}'
+    state = CompatibilityStreamState(plan)
+
+    assert state.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "search-item",
+                "call_id": "search-call",
+                "name": alias,
+                "arguments": "",
+            },
+        }
+    ) == []
+    assert state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "search-item",
+            "call_id": "search-call",
+            "delta": arguments,
+        }
+    ) == []
+    assert state.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "search-item",
+            "call_id": "search-call",
+            "arguments": arguments,
+        }
+    ) == []
+
+    decoded = state.decode_events_for_event(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "search-item",
+                "call_id": "search-call",
+                "name": alias,
+                "arguments": arguments,
+            },
+        }
+    )
+    assert [event["type"] for event in decoded] == [
+        "response.output_item.added",
+        "response.output_item.done",
+    ]
+    assert all(event["item"]["type"] == "tool_search_call" for event in decoded)
+    assert all(event["item"]["execution"] == "client" for event in decoded)
+    assert decoded[-1]["item"]["arguments"] == {"query": "opaque"}
+
+
+@pytest.mark.parametrize("item_type", ["tool_search_call", "tool_search_output"])
+def test_adapted_tool_search_rejects_non_client_execution_marker(item_type):
+    plan = _adapted_tool_search_plan()
+    item = {
+        "type": item_type,
+        "id": "search-item" if item_type.endswith("call") else "search-output",
+        "call_id": "search-call",
+        "execution": "provider",
+    }
+    if item_type == "tool_search_call":
+        item["arguments"] = {"query": "opaque"}
+    else:
+        item["tools"] = []
+    items = [item]
+    if item_type == "tool_search_output":
+        items.insert(
+            0,
+            {
+                "type": "tool_search_call",
+                "id": "search-item",
+                "call_id": "search-call",
+                "execution": "client",
+                "arguments": {"query": "opaque"},
+            },
+        )
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload({"input": items})
+    assert exc_info.value.classification == "invalid_tool_search_execution"
+
+
 @pytest.mark.parametrize(
     "item",
     [
