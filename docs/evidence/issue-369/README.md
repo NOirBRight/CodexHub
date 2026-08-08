@@ -7,7 +7,7 @@ or opaque agent/task identities.
 
 ## Candidate and runtime
 
-- Candidate implementation revision: `207fad4bf762c3b87129b009fecfe05d1eeaead9`
+- Candidate implementation revision: `c7f5f13949a767f62601d0b7d0e146cdb10c4098`
 - Codex CLI: `0.146.1` (source-contract floor `0.146.0`)
 - Gateway: isolated V1 and V2 loopback instances
 - Capture Home: persistent isolated Homes (not `--ephemeral`, so restart/readback
