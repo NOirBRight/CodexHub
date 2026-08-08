@@ -30,7 +30,7 @@ REQUIRED_MODELS = {
     "gpt-5.4-mini",
     "codex-auto-review",
 }
-GO_MODELS = {"gpt-5.6-terra", "gpt-5.6-luna"}
+GO_MODELS = {"gpt-5.6-luna"}
 SELECTIONS = {
     "model_catalog_multi_agent_version",
     "not_qualified",

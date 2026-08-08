@@ -1,9 +1,10 @@
 # Issue #251: bounded Code Mode evidence
 
-Status: local, protocol-controlled replay bound to the reviewed Beta3
-implementation candidate `adba39866581cd33be813c717a3a0598b15f5858`. This
-artifact is the bounded evidence for #251 (with #279's codec); the separate
-real CLI workflow evidence is recorded by #280 before Issue closure.
+Status: deterministic replay plus bounded Codex CLI evidence bound to the
+reviewed Beta3 implementation candidate
+`adba39866581cd33be813c717a3a0598b15f5858`. This artifact is the contract
+evidence for #251 (with #279's codec); the four-case #278/#280 runner summary
+records the corresponding native and adapted Code Mode workflows.
 
 ## Candidate binding
 
@@ -21,11 +22,12 @@ Both commands must pass before the candidate is reviewed.
 
 ## Scope and provenance
 
-The replay is deterministic and in memory. It does not launch Codex, contact a
-Provider, read credentials, write a workspace, or call the production HTTP
-routing path. No model/provider name selects a codec. The route fields in the
-fixture are generic sentinels; the validator records each case's selected
-route digest while translating protocol shape.
+The replay is deterministic and in memory. It does not contact a third-party
+Provider, read credentials, write a real workspace, or execute a tool. The
+separate CLI runner owns a synthetic loopback upstream and records only
+sanitized workflow/status digests. No model/provider name selects a codec.
+The route fields in the fixture are generic sentinels; the validator records
+each case's selected route digest while translating protocol shape.
 
 The implementation seam under test is
 [`runtime_tool_compatibility.py`](../../../src-python/runtime_tool_compatibility.py):
@@ -83,6 +85,11 @@ pytest -q tests/test_runtime_tool_compatibility.py tests/test_runtime_tool_compa
 The first command validates the fixture schema, sanitization, native/adapted
 declaration and envelope shape, stream/replay identity, request-scoped alias
 allocation, route identity digests, and all negative controls. The focused
-pytest command covers the broader implementation boundaries. This local
-artifact does not satisfy the separate #280 requirement for a real Codex CLI
-manual run against a protocol-controlled upstream; that gate remains explicit.
+pytest command covers the broader implementation boundaries. Validate the
+bounded #278/#280 CLI summary with:
+
+```powershell
+python scripts/validate_issue_278_evidence.py `
+  --summary docs/evidence/issue-278/summary.json `
+  --candidate-sha adba39866581cd33be813c717a3a0598b15f5858
+```

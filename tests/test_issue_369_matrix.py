@@ -29,6 +29,9 @@ def test_issue_369_matrix_is_sanitized_and_selector_fails_closed() -> None:
     terra = next(row for row in payload["models"] if row["model"] == "gpt-5.6-terra")
     assert terra["verdict"] == "PARTIAL"
     assert terra["selector"] is False
+    luna = next(row for row in payload["models"] if row["model"] == "gpt-5.6-luna")
+    assert luna["verdict"] == "GO"
+    assert luna["selector"] is True
     assert {row["model"] for row in payload["models"]} == {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -88,9 +91,10 @@ def test_issue_369_requires_all_sanitized_phase_fields_and_bounded_statuses() ->
 
 def test_issue_369_rejects_unobserved_go_phase(tmp_path: Path) -> None:
     payload = _matrix()
-    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-terra")
+    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-luna")
     row["verdict"] = "GO"
     row["selector"] = True
+    row["v2"]["stream_history"] = "not_observed"
 
     with pytest.raises(ValueError, match="GO lifecycle evidence"):
         validate(_write_matrix(tmp_path, payload))
@@ -114,7 +118,7 @@ def test_issue_369_rejects_raw_identity_fields(tmp_path: Path) -> None:
 
 def test_issue_369_rejects_wrong_observed_identity_kind(tmp_path: Path) -> None:
     payload = _matrix()
-    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-terra")
+    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-luna")
     row["v1"]["spawn_identity_kind"] = "task_path"
 
     with pytest.raises(ValueError, match="lifecycle identity kind"):
@@ -132,7 +136,7 @@ def test_issue_369_rejects_forged_unqualified_selector(tmp_path: Path) -> None:
 
 def test_issue_369_rejects_incomplete_go_lifecycle(tmp_path: Path) -> None:
     payload = _matrix()
-    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-terra")
+    row = next(row for row in payload["models"] if row["model"] == "gpt-5.6-luna")
     row["verdict"] = "GO"
     row["selector"] = True
     row["v2"]["terminal_status"] = None

@@ -1,12 +1,14 @@
 # Issue #63 generic client-executed `tool_search` evidence
 
-This directory is an offline, sanitized evidence scaffold for Beta3 Issues
+This directory is a sanitized contract and bounded CLI evidence record for Beta3 Issues
 [#63](https://github.com/NOirBRight/CodexHub/issues/63),
 [#277](https://github.com/NOirBRight/CodexHub/issues/277), and
-[#278](https://github.com/NOirBRight/CodexHub/issues/278). It is not a live
-Provider capture, a release gate, or an Issue-closure claim. The fixture never
-opens a network connection and contains no credentials, headers, prompts, raw
-tool results, or real wire identifiers.
+[#278](https://github.com/NOirBRight/CodexHub/issues/278). The checked-in
+fixture is offline; the companion #278 runner separately exercises the same
+four cases through Codex CLI 0.146.1 and a request-owned synthetic upstream.
+Neither artifact is an authenticated third-party Provider qualification. No
+credential, header, prompt, raw tool result, or real wire identifier is
+retained.
 
 ## Candidate binding
 
@@ -21,9 +23,11 @@ python scripts/validate_issue_63_evidence.py `
   --require-final-candidate
 ```
 
-The fixture records CLI `0.146.0` only as the current source-contract floor;
-the source contract remains `not_observed`. No real Codex CLI or Provider
-request was run for this commit.
+The fixture records CLI `0.146.0` only as the source-contract floor. The
+bounded CLI result is recorded in
+`docs/evidence/issue-278/summary.json`, bound to the same implementation
+candidate, and reports Codex CLI `0.146.1` with native and adapted explicit
+cases completed and no-hint cases classified as `model_not_selected`.
 
 ## What the current implementation proves
 
@@ -37,13 +41,13 @@ revalidation, duplicate/missing identities, and conservative omission when
 the lifecycle fact is absent. The Responses integration fixture also covers
 the explicit-fact native disposition.
 
-The same implementation does not currently contain a generic adapted
-`tool_search` alias/envelope path. The `adapted_explicit_hint` case in
-`tool-search-lifecycle.json` is therefore a contract-only, protocol-controlled
-fixture: it checks the required injective envelope, inverse mapping, IDs,
-ordering, streaming assembly, discovered declaration, subsequent call/result,
-and replay history without claiming that production routing already supports
-it. This is the remaining #277 implementation boundary.
+For a protocol without native namespace support, the implementation derives a
+request-scoped reversible function envelope. The `adapted_explicit_hint` case
+and the runner's `adapted_explicit` case check the injective alias, inverse
+mapping, IDs, ordering, streaming assembly, discovered declaration,
+subsequent call/result, and replay history. This does not claim that hosted
+Provider search is proxied or that an authenticated Provider is universally
+compatible; it proves only the generic wire boundary owned by CodexHub.
 
 ## Fixture cases
 
@@ -51,8 +55,8 @@ it. This is the remaining #277 implementation boundary.
 
 | Case | Protocol disposition | Selection | Evidence meaning |
 | --- | --- | --- | --- |
-| `native_explicit_hint` | `native` | explicit hint selected | Existing native shape and complete canonical lifecycle contract; fixture-only until an authorized CLI capture binds it. |
-| `adapted_explicit_hint` | `adapt` | explicit hint selected | Reversible adapter contract for #277, including function `added`/`delta`/`done` ordering; not a production qualification. |
+| `native_explicit_hint` | `native` | explicit hint selected | Native contract plus the bounded CLI `native_explicit` run. |
+| `adapted_explicit_hint` | `adapt` | explicit hint selected | Reversible adapter contract plus the bounded CLI `adapted_explicit` run. |
 | `native_no_hint` | `native` | not selected | `model_not_selected` classification; no search lifecycle is treated as a Gateway failure. |
 | `adapted_no_hint` | `adapt` | not selected | The same `model_not_selected` classification for the adapted protocol variant. |
 
@@ -75,10 +79,13 @@ search call.
 
 ## Offline validation
 
-Run the standard-library validator from the repository root:
+Run the standard-library validators from the repository root:
 
 ```powershell
 python scripts/validate_issue_63_evidence.py
+python scripts/validate_issue_278_evidence.py `
+  --summary docs/evidence/issue-278/summary.json `
+  --candidate-sha adba39866581cd33be813c717a3a0598b15f5858
 ```
 
 Success prints `ISSUE_63_EVIDENCE_FIXTURE_OK` and one status for each case.
@@ -91,13 +98,9 @@ integration.
 
 ## Qualification boundary
 
-The fixture is necessary but not sufficient for #63/#278. A separately
-authorized Beta3 evidence window must later bind the final candidate SHA, the
-exact CLI/runtime build, and a sanitized real-CLI explicit-hint run through a
-protocol-controlled upstream for both native and adapted variants. That run
-must capture planner eligibility, model-visible client `tool_search`, search
-call/output, discovered declaration, subsequent call/result, SSE, and replay
-history. A no-hint run must retain the same route and classify model
-non-selection separately from infrastructure failures. Hosted search cannot
-stand in for client-executed `tool_search`, and no alternate Provider may be
-contacted.
+The fixture is necessary but not sufficient for #63/#278. The checked-in
+summary is the bounded real-CLI evidence window: it binds the candidate SHA
+and exact CLI/runtime, and records planner eligibility, model-visible client
+`tool_search`, search/discovery/workflow completion, SSE/history digests, and
+no-hint classification. Hosted search cannot stand in for client-executed
+`tool_search`, and no alternate Provider may be contacted.

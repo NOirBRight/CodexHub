@@ -1,7 +1,9 @@
 # ADR-0002: Runtime-derived tool compatibility on an immutable selected route
 
 Date: 2026-08-04
-Status: Accepted for 0.1.8 Beta2; implementation remains a follow-up
+Status: Accepted for 0.1.8 Beta2; the generic implementation is delivered in
+Beta3, while generic third-party Collaboration V2 lifecycle work remains a
+later Beta4 follow-up.
 
 ## Context
 

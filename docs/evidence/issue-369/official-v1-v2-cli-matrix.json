@@ -5,6 +5,7 @@
   "candidate_revision": "adba39866581cd33be813c717a3a0598b15f5858",
   "evidence_links": [
     "docs/research/2026-08-08-official-v1-v2-capability-matrix.md",
+    "docs/evidence/issue-369/README.md",
     "docs/evidence/issue-64/README.md"
   ],
   "cli": {
@@ -97,30 +98,30 @@
         "selection": "model_catalog_multi_agent_version",
         "lifecycle": "spawn_send_wait_close",
         "terminal_status": 200,
-        "spawn_identity_kind": "not_observed",
+        "spawn_identity_kind": "agent_id",
         "message_agent_message": "observed",
         "follow_up": "not_applicable",
         "wait_result": "observed",
         "list_interrupt": "not_applicable",
-        "stream_history": "not_observed",
-        "restart_readback": "not_observed",
-        "terminal_error_replayable": "not_observed"
+        "stream_history": "observed",
+        "restart_readback": "observed",
+        "terminal_error_replayable": "observed"
       },
       "v2": {
         "selection": "model_catalog_multi_agent_version",
         "lifecycle": "spawn_list_send_followup_wait_list",
         "terminal_status": 200,
-        "spawn_identity_kind": "not_observed",
+        "spawn_identity_kind": "task_path",
         "message_agent_message": "observed",
         "follow_up": "observed",
         "wait_result": "observed",
-        "list_interrupt": "not_observed",
-        "stream_history": "not_observed",
-        "restart_readback": "not_observed",
-        "terminal_error_replayable": "not_observed"
+        "list_interrupt": "observed",
+        "stream_history": "observed",
+        "restart_readback": "observed",
+        "terminal_error_replayable": "observed"
       },
-      "verdict": "PARTIAL",
-      "selector": false
+      "verdict": "GO",
+      "selector": true
     },
     {
       "model": "gpt-5.5",
