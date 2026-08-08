@@ -32,6 +32,15 @@ Provider run. Raw request/response bodies, prompts, headers, credentials,
 workspace paths, and real IDs are not retained. `evidence_status` therefore
 remains `observed_synthetic_upstream`, not authenticated-provider evidence.
 
+Each observed case also carries a shape-only `provenance` ledger. Its trace
+records the planner declaration, search/result, discovered declaration and
+follow-up call/result, then the Code Mode
+`shell_command -> apply_patch -> shell_command` call/result pairs. The history
+section records request/response counts, wire protocol sequence, response shape
+markers, and recomputable order/identity digests. The validator checks these
+stages and recomputes every digest, so planner booleans alone cannot qualify a
+forged summary.
+
 Focused checks:
 
 ```powershell

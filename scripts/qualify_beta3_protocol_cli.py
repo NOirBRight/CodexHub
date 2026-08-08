@@ -64,6 +64,28 @@ NO_HINT_CASES = frozenset(CASE_IDS - EXPLICIT_CASES)
 TOOL_SEARCH_DECLARATION = {"type": "tool_search", "execution": "client"}
 DISCOVERED_TOOL_NAME = "fixture_discovered_tool"
 WORKFLOW_TOOL_NAMES = ("shell_command", "apply_patch", "shell_command")
+TRACE_DECLARATION = "tool_search.declaration"
+TRACE_NOT_SELECTED = "tool_search.not_selected"
+TRACE_SEARCH_CALL = "tool_search.call"
+TRACE_SEARCH_RESULT = "tool_search.result"
+TRACE_DISCOVERED_DECLARATION = "discovered.declaration"
+TRACE_DISCOVERED_CALL = "discovered.call"
+TRACE_DISCOVERED_RESULT = "discovered.result"
+EXPECTED_EXPLICIT_TRACE = (
+    TRACE_DECLARATION,
+    TRACE_SEARCH_CALL,
+    TRACE_SEARCH_RESULT,
+    TRACE_DISCOVERED_DECLARATION,
+    TRACE_DISCOVERED_CALL,
+    TRACE_DISCOVERED_RESULT,
+    "code_mode.shell_command.call",
+    "code_mode.shell_command.result",
+    "code_mode.apply_patch.call",
+    "code_mode.apply_patch.result",
+    "code_mode.shell_command.call",
+    "code_mode.shell_command.result",
+)
+EXPECTED_NO_HINT_TRACE = (TRACE_DECLARATION, TRACE_NOT_SELECTED)
 SENSITIVE_ENVIRONMENT_NAMES = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -118,6 +140,14 @@ class FixtureState:
     auth_failures: int = 0
     unexpected_paths: int = 0
     history_digest_inputs: list[str] = field(default_factory=list)
+    trace_tokens: list[str] = field(default_factory=list)
+    response_shape_tokens: list[str] = field(default_factory=list)
+    response_count: int = 0
+
+    def __post_init__(self) -> None:
+        # This is a planner contract marker, not a retained wire declaration.
+        # The actual request/response stages are appended as the fixture runs.
+        self.trace_tokens.append(TRACE_DECLARATION)
 
     @property
     def explicit(self) -> bool:
@@ -137,6 +167,14 @@ class FixtureState:
                 self.malformed_requests += 1
                 return self.requests
             self.requests += 1
+            if self.explicit and self.requests > 1 and self.trace_tokens:
+                previous = self.trace_tokens[-1]
+                if previous == TRACE_SEARCH_CALL:
+                    self.trace_tokens.extend((TRACE_SEARCH_RESULT, TRACE_DISCOVERED_DECLARATION))
+                elif previous == TRACE_DISCOVERED_CALL:
+                    self.trace_tokens.append(TRACE_DISCOVERED_RESULT)
+                elif previous.startswith("code_mode.") and previous.endswith(".call"):
+                    self.trace_tokens.append(previous[:-5] + ".result")
             self.protocols.append("chat_completions" if path.endswith("chat/completions") else "responses")
             # The isolated model/provider binding explicitly requests the
             # deferred planner surface.  Some Codex CLI versions consume the
@@ -167,17 +205,25 @@ class FixtureState:
         if not self.explicit:
             with self.lock:
                 self.terminal_count += 1
+                self.trace_tokens.append(TRACE_NOT_SELECTED)
             return _text_response_events()
         # Requests are deliberately stage-driven.  The client decides when a
         # tool result is submitted; the fixture never parses or stores it.
         if index == 1:
-            self.search_seen = True
+            with self.lock:
+                self.search_seen = True
+                self.trace_tokens.append(TRACE_SEARCH_CALL)
             return _search_events(adapted=self.adapted)
         if index == 2:
-            self.discovered_seen = True
+            with self.lock:
+                self.discovered_seen = True
+                self.trace_tokens.append(TRACE_DISCOVERED_CALL)
             return _discovered_call_events(adapted=self.adapted)
         if index in {3, 4, 5}:
-            self.workflow_seen.append(WORKFLOW_TOOL_NAMES[index - 3])
+            with self.lock:
+                name = WORKFLOW_TOOL_NAMES[index - 3]
+                self.workflow_seen.append(name)
+                self.trace_tokens.append(f"code_mode.{name}.call")
             return _workflow_call_events(WORKFLOW_TOOL_NAMES[index - 3], adapted=self.adapted)
         with self.lock:
             self.terminal_count += 1
@@ -185,10 +231,16 @@ class FixtureState:
 
     def record_sse_events(self, events: Iterable[dict[str, Any]]) -> None:
         with self.lock:
+            self.response_count += 1
             for event in events:
                 event_type = event.get("type") if isinstance(event, dict) else None
                 if isinstance(event_type, str):
                     self.sse_event_types.append(event_type)
+                    item = event.get("item") if isinstance(event.get("item"), dict) else None
+                    item_type = item.get("type") if isinstance(item, dict) else None
+                    self.response_shape_tokens.append(
+                        f"{event_type}:{item_type}" if isinstance(item_type, str) else event_type
+                    )
 
 
 def _text_response_events() -> tuple[dict[str, Any], ...]:
@@ -605,6 +657,58 @@ def _run_cli(codex: Path, case_id: str, model: str, home: Path, workspace: Path,
     return process.returncode, events[:256]
 
 
+def _provenance_summary(state: FixtureState) -> dict[str, Any]:
+    """Return shape-only lifecycle evidence derived from the fixture ledger."""
+
+    trace = list(state.trace_tokens)
+    search_trace = [
+        token
+        for token in trace
+        if token.startswith("tool_search.") or token.startswith("discovered.")
+    ]
+    code_trace = [token for token in trace if token.startswith("code_mode.")]
+    code_steps = [token[len("code_mode.") : -len(".call")] for token in code_trace if token.endswith(".call")]
+    identity_slots = [{"ordinal": ordinal, "role": token} for ordinal, token in enumerate(trace, start=1)]
+    history_order_digest = _digest(
+        {
+            "trace": trace,
+            "protocols": list(state.protocols),
+            "response_shapes": list(state.response_shape_tokens),
+        }
+    )
+    search = {
+        "ordered_stages": search_trace,
+        "stage_count": len(search_trace),
+        "call_count": search_trace.count(TRACE_SEARCH_CALL),
+        "result_count": search_trace.count(TRACE_SEARCH_RESULT),
+        "discovered_declaration_count": search_trace.count(TRACE_DISCOVERED_DECLARATION),
+        "subsequent_call_count": search_trace.count(TRACE_DISCOVERED_CALL),
+        "subsequent_result_count": search_trace.count(TRACE_DISCOVERED_RESULT),
+    }
+    search["order_digest"] = _digest(search_trace)
+    code_mode = {
+        "ordered_steps": code_steps,
+        "call_count": sum(token.endswith(".call") for token in code_trace),
+        "result_count": sum(token.endswith(".result") for token in code_trace),
+    }
+    code_mode["order_digest"] = _digest(code_trace)
+    history = {
+        "request_count": state.requests,
+        "response_count": state.response_count,
+        "protocol_sequence": list(state.protocols),
+        "response_shapes": list(state.response_shape_tokens),
+        "order_digest": history_order_digest,
+        "identity_digest": _digest(identity_slots),
+    }
+    return {
+        "trace": trace,
+        "trace_digest": _digest(trace),
+        "search": search,
+        "code_mode": code_mode,
+        "history": history,
+    }
+
+
 def _run_case(codex: Path, case_id: str, timeout: float) -> dict[str, Any]:
     state = FixtureState(case_id)
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _fixture_handler(state))
@@ -649,19 +753,25 @@ def _run_case(codex: Path, case_id: str, timeout: float) -> dict[str, Any]:
             )
             if explicit:
                 passed = passed and workflow == list(WORKFLOW_TOOL_NAMES)
+            provenance = _provenance_summary(state)
+            expected_trace = EXPECTED_EXPLICIT_TRACE if explicit else EXPECTED_NO_HINT_TRACE
+            passed = passed and provenance["trace"] == list(expected_trace)
+            passed = passed and provenance["history"]["response_count"] == (6 if explicit else 1)
             result = {
                 "id": case_id,
                 "disposition": DISPOSITION_BY_CASE[case_id],
+                "protocol": PROTOCOL_BY_CASE[case_id],
                 "planner_eligible": True,
                 "tool_search_visible": bool(state.tool_search_visible),
                 "selection": "selected" if explicit and state.search_seen else "model_not_selected",
                 "classification": "completed" if passed and explicit else ("model_not_selected" if passed else "cli_or_gateway_failure"),
                 "sse_event_types": list(dict.fromkeys(state.sse_event_types)),
-                "history_order_digest": _digest({"requests": state.requests, "protocols": state.protocols}),
+                "history_order_digest": provenance["history"]["order_digest"],
                 "identity_preserved": passed,
                 "gateway_owned_tool_execution_count": 0,
                 "cli_event_shape_count": len(client_events),
                 "upstream_request_count": state.requests,
+                "provenance": provenance,
             }
             if not explicit:
                 result["classification"] = "model_not_selected" if passed else "cli_or_gateway_failure"

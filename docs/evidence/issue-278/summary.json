@@ -14,6 +14,7 @@
     {
       "id": "native_explicit",
       "disposition": "native",
+      "protocol": "responses_structured",
       "planner_eligible": true,
       "tool_search_visible": true,
       "selection": "selected",
@@ -27,15 +28,108 @@
         "response.function_call_arguments.done",
         "response.output_text.delta"
       ],
-      "history_order_digest": "sha256:5fcf00b3526aa073eae21f41f24912e822eb7f3d91a272daebdc1ae7957c1311",
+      "history_order_digest": "sha256:1b418eb59f531b2d12f8dbe1f4ef6486e43fe2f03edb729cc7b7d3445d6b1af1",
       "identity_preserved": true,
       "gateway_owned_tool_execution_count": 0,
       "cli_event_shape_count": 9,
-      "upstream_request_count": 6
+      "upstream_request_count": 6,
+      "provenance": {
+        "trace": [
+          "tool_search.declaration",
+          "tool_search.call",
+          "tool_search.result",
+          "discovered.declaration",
+          "discovered.call",
+          "discovered.result",
+          "code_mode.shell_command.call",
+          "code_mode.shell_command.result",
+          "code_mode.apply_patch.call",
+          "code_mode.apply_patch.result",
+          "code_mode.shell_command.call",
+          "code_mode.shell_command.result"
+        ],
+        "trace_digest": "sha256:027ea69202adbd8aad705eba4df538af1a8e13613600d86c2065b45f37802ae2",
+        "search": {
+          "ordered_stages": [
+            "tool_search.declaration",
+            "tool_search.call",
+            "tool_search.result",
+            "discovered.declaration",
+            "discovered.call",
+            "discovered.result"
+          ],
+          "stage_count": 6,
+          "call_count": 1,
+          "result_count": 1,
+          "discovered_declaration_count": 1,
+          "subsequent_call_count": 1,
+          "subsequent_result_count": 1,
+          "order_digest": "sha256:ed723fcbba9d5475f04d9f452a80f5313b16121e708c7148bd139acb441053b4"
+        },
+        "code_mode": {
+          "ordered_steps": [
+            "shell_command",
+            "apply_patch",
+            "shell_command"
+          ],
+          "call_count": 3,
+          "result_count": 3,
+          "order_digest": "sha256:a279018f9b4ef7ffd1cefc53481d45299c750efece40595c8c4b998b016fa614"
+        },
+        "history": {
+          "request_count": 6,
+          "response_count": 6,
+          "protocol_sequence": [
+            "responses",
+            "responses",
+            "responses",
+            "responses",
+            "responses",
+            "responses"
+          ],
+          "response_shapes": [
+            "response.created",
+            "response.output_item.done:tool_search_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:message",
+            "response.output_text.delta",
+            "response.output_item.done:message",
+            "response.completed"
+          ],
+          "order_digest": "sha256:1b418eb59f531b2d12f8dbe1f4ef6486e43fe2f03edb729cc7b7d3445d6b1af1",
+          "identity_digest": "sha256:0ee8c156a160a365239a23fa30fed798f2f96b8578394a2b6b819f959a922d73"
+        }
+      }
     },
     {
       "id": "native_no_hint",
       "disposition": "native",
+      "protocol": "responses_structured",
       "planner_eligible": true,
       "tool_search_visible": true,
       "selection": "model_not_selected",
@@ -47,15 +141,58 @@
         "response.output_item.done",
         "response.completed"
       ],
-      "history_order_digest": "sha256:f2822a0318d8be60f47e1364fd5ef125438107b3c1d68b0c79990005399b76ce",
+      "history_order_digest": "sha256:33a5c12cb75e42db11dda891828e9204002199c3620bea727c698ce950efbe27",
       "identity_preserved": true,
       "gateway_owned_tool_execution_count": 0,
       "cli_event_shape_count": 4,
-      "upstream_request_count": 1
+      "upstream_request_count": 1,
+      "provenance": {
+        "trace": [
+          "tool_search.declaration",
+          "tool_search.not_selected"
+        ],
+        "trace_digest": "sha256:69afb98e1442a46c57de629f1f2abb93235ba4a7914f5f42c73149fe522555b2",
+        "search": {
+          "ordered_stages": [
+            "tool_search.declaration",
+            "tool_search.not_selected"
+          ],
+          "stage_count": 2,
+          "call_count": 0,
+          "result_count": 0,
+          "discovered_declaration_count": 0,
+          "subsequent_call_count": 0,
+          "subsequent_result_count": 0,
+          "order_digest": "sha256:69afb98e1442a46c57de629f1f2abb93235ba4a7914f5f42c73149fe522555b2"
+        },
+        "code_mode": {
+          "ordered_steps": [],
+          "call_count": 0,
+          "result_count": 0,
+          "order_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "history": {
+          "request_count": 1,
+          "response_count": 1,
+          "protocol_sequence": [
+            "responses"
+          ],
+          "response_shapes": [
+            "response.created",
+            "response.output_item.added:message",
+            "response.output_text.delta",
+            "response.output_item.done:message",
+            "response.completed"
+          ],
+          "order_digest": "sha256:33a5c12cb75e42db11dda891828e9204002199c3620bea727c698ce950efbe27",
+          "identity_digest": "sha256:7f63f2d8bcf393009577695c32ea5eb1113486f893a3b7b7045152c0d810d2b3"
+        }
+      }
     },
     {
       "id": "adapted_explicit",
       "disposition": "adapt",
+      "protocol": "chat_tools",
       "planner_eligible": true,
       "tool_search_visible": true,
       "selection": "selected",
@@ -69,15 +206,111 @@
         "response.completed",
         "response.output_text.delta"
       ],
-      "history_order_digest": "sha256:5fcf00b3526aa073eae21f41f24912e822eb7f3d91a272daebdc1ae7957c1311",
+      "history_order_digest": "sha256:5b9aab0fcdf012b60f522dcdf069d0842b82ff787a7e2d45b7d57a90ee264c47",
       "identity_preserved": true,
       "gateway_owned_tool_execution_count": 0,
       "cli_event_shape_count": 9,
-      "upstream_request_count": 6
+      "upstream_request_count": 6,
+      "provenance": {
+        "trace": [
+          "tool_search.declaration",
+          "tool_search.call",
+          "tool_search.result",
+          "discovered.declaration",
+          "discovered.call",
+          "discovered.result",
+          "code_mode.shell_command.call",
+          "code_mode.shell_command.result",
+          "code_mode.apply_patch.call",
+          "code_mode.apply_patch.result",
+          "code_mode.shell_command.call",
+          "code_mode.shell_command.result"
+        ],
+        "trace_digest": "sha256:027ea69202adbd8aad705eba4df538af1a8e13613600d86c2065b45f37802ae2",
+        "search": {
+          "ordered_stages": [
+            "tool_search.declaration",
+            "tool_search.call",
+            "tool_search.result",
+            "discovered.declaration",
+            "discovered.call",
+            "discovered.result"
+          ],
+          "stage_count": 6,
+          "call_count": 1,
+          "result_count": 1,
+          "discovered_declaration_count": 1,
+          "subsequent_call_count": 1,
+          "subsequent_result_count": 1,
+          "order_digest": "sha256:ed723fcbba9d5475f04d9f452a80f5313b16121e708c7148bd139acb441053b4"
+        },
+        "code_mode": {
+          "ordered_steps": [
+            "shell_command",
+            "apply_patch",
+            "shell_command"
+          ],
+          "call_count": 3,
+          "result_count": 3,
+          "order_digest": "sha256:a279018f9b4ef7ffd1cefc53481d45299c750efece40595c8c4b998b016fa614"
+        },
+        "history": {
+          "request_count": 6,
+          "response_count": 6,
+          "protocol_sequence": [
+            "responses",
+            "responses",
+            "responses",
+            "responses",
+            "responses",
+            "responses"
+          ],
+          "response_shapes": [
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:function_call",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done:function_call",
+            "response.completed",
+            "response.created",
+            "response.output_item.added:message",
+            "response.output_text.delta",
+            "response.output_item.done:message",
+            "response.completed"
+          ],
+          "order_digest": "sha256:5b9aab0fcdf012b60f522dcdf069d0842b82ff787a7e2d45b7d57a90ee264c47",
+          "identity_digest": "sha256:0ee8c156a160a365239a23fa30fed798f2f96b8578394a2b6b819f959a922d73"
+        }
+      }
     },
     {
       "id": "adapted_no_hint",
       "disposition": "adapt",
+      "protocol": "chat_tools",
       "planner_eligible": true,
       "tool_search_visible": true,
       "selection": "model_not_selected",
@@ -89,11 +322,53 @@
         "response.output_item.done",
         "response.completed"
       ],
-      "history_order_digest": "sha256:f2822a0318d8be60f47e1364fd5ef125438107b3c1d68b0c79990005399b76ce",
+      "history_order_digest": "sha256:33a5c12cb75e42db11dda891828e9204002199c3620bea727c698ce950efbe27",
       "identity_preserved": true,
       "gateway_owned_tool_execution_count": 0,
       "cli_event_shape_count": 4,
-      "upstream_request_count": 1
+      "upstream_request_count": 1,
+      "provenance": {
+        "trace": [
+          "tool_search.declaration",
+          "tool_search.not_selected"
+        ],
+        "trace_digest": "sha256:69afb98e1442a46c57de629f1f2abb93235ba4a7914f5f42c73149fe522555b2",
+        "search": {
+          "ordered_stages": [
+            "tool_search.declaration",
+            "tool_search.not_selected"
+          ],
+          "stage_count": 2,
+          "call_count": 0,
+          "result_count": 0,
+          "discovered_declaration_count": 0,
+          "subsequent_call_count": 0,
+          "subsequent_result_count": 0,
+          "order_digest": "sha256:69afb98e1442a46c57de629f1f2abb93235ba4a7914f5f42c73149fe522555b2"
+        },
+        "code_mode": {
+          "ordered_steps": [],
+          "call_count": 0,
+          "result_count": 0,
+          "order_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "history": {
+          "request_count": 1,
+          "response_count": 1,
+          "protocol_sequence": [
+            "responses"
+          ],
+          "response_shapes": [
+            "response.created",
+            "response.output_item.added:message",
+            "response.output_text.delta",
+            "response.output_item.done:message",
+            "response.completed"
+          ],
+          "order_digest": "sha256:33a5c12cb75e42db11dda891828e9204002199c3620bea727c698ce950efbe27",
+          "identity_digest": "sha256:7f63f2d8bcf393009577695c32ea5eb1113486f893a3b7b7045152c0d810d2b3"
+        }
+      }
     }
   ],
   "negative_controls": {
