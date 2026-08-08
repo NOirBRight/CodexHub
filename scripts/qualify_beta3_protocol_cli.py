@@ -1647,7 +1647,7 @@ def _gateway_route_observation(
     }
 
 
-def _negative_control_statuses() -> dict[str, str]:
+def _negative_control_statuses(*, candidate_sha: str | None = None) -> dict[str, str]:
     """Run and inspect the shared adapter negative-control replay.
 
     A validator exit code alone is not evidence that each named control was
@@ -1664,8 +1664,11 @@ def _negative_control_statuses() -> dict[str, str]:
     }
     statuses = {name: "not_verified" for name in expected}
     try:
+        command = [sys.executable, str(validator)]
+        if candidate_sha is not None:
+            command.extend(["--candidate-sha", candidate_sha])
         result = subprocess.run(
-            [sys.executable, str(validator)],
+            command,
             cwd=REPO_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -1868,7 +1871,19 @@ def _free_port() -> int:
     return int(port)
 
 
-def _summary(candidate_sha: str, cli_version: str, *, cases: list[dict[str, Any]], status: str, failure: str | None = None) -> dict[str, Any]:
+def _summary(
+    candidate_sha: str,
+    cli_version: str,
+    *,
+    cases: list[dict[str, Any]],
+    status: str,
+    failure: str | None = None,
+    negative_controls: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if negative_controls is None:
+        negative_controls = _negative_control_statuses(
+            candidate_sha=candidate_sha if _valid_candidate_sha(candidate_sha) else None,
+        )
     route_identity_digests = [
         case["route_identity_digest"]
         for case in cases
@@ -1893,7 +1908,7 @@ def _summary(candidate_sha: str, cli_version: str, *, cases: list[dict[str, Any]
             "identity_digests": route_identity_digests,
         },
         "cases": cases,
-        "negative_controls": _negative_control_statuses(),
+        "negative_controls": negative_controls,
         "sanitization": {"raw_bodies_retained": False, "prompts_retained": False, "credentials_retained": False, "ids_opaque_or_hashed": True},
     }
     if failure:
@@ -1923,7 +1938,11 @@ def main(argv: list[str] | None = None) -> int:
         for case_id in selected:
             cases.append(_run_case(codex, case_id, max(1.0, float(args.timeout_seconds))))
         status = "passed" if all(case.get("classification") in {"completed", "model_not_selected"} for case in cases) else "failed"
-        controls = _negative_control_statuses()
+        # Run the offline controls once and use the same snapshot for both
+        # the release status decision and the persisted evidence.  Replaying
+        # them independently could produce contradictory status/evidence if
+        # the local runtime changes between invocations.
+        controls = _negative_control_statuses(candidate_sha=args.candidate_sha or None)
         if status == "passed" and set(controls.values()) != {"passed"}:
             status = "failed"
         summary = _summary(
@@ -1932,6 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
             cases=cases,
             status=status,
             failure=("negative_controls_unverified" if status == "failed" and set(controls.values()) != {"passed"} else None),
+            negative_controls=controls,
         )
         exit_code = 0 if status == "passed" else 1
     except RunnerFailure as error:

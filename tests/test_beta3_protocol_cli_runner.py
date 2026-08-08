@@ -196,6 +196,35 @@ def test_runner_summary_is_bounded_and_sanitized() -> None:
     assert "Authorization" not in encoded
 
 
+def test_negative_controls_are_bound_to_candidate_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    report = {
+        "status": "pass",
+        "cases": [
+            {
+                "controls": {
+                    "unknown_alias": "unknown_alias",
+                    "duplicate_identity": "invalid_custom_stream_identity",
+                    "malformed_envelope": "invalid_envelope",
+                }
+            }
+        ],
+    }
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner._negative_control_statuses(candidate_sha="b" * 40) == {
+        "unknown_alias": "passed",
+        "duplicate_identity": "passed",
+        "malformed_envelope": "passed",
+    }
+    assert calls and calls[0][-2:] == ["--candidate-sha", "b" * 40]
+
+
 def test_validator_requires_structured_provenance_for_explicit_case() -> None:
     case = _minimal_case()
     with pytest.raises(validator.EvidenceValidationError, match="provenance_missing"):

@@ -592,9 +592,13 @@ def validate_summary(value: dict[str, Any], *, candidate_sha: str | None = None)
     )
     controls = value.get("negative_controls")
     _require(
-        controls == {"unknown_alias": "passed", "duplicate_identity": "passed", "malformed_envelope": "passed"},
+        isinstance(controls, dict)
+        and set(controls) == {"unknown_alias", "duplicate_identity", "malformed_envelope"}
+        and all(status in {"passed", "not_verified"} for status in controls.values()),
         "negative_controls_invalid",
     )
+    if value.get("qualification_status") == "passed":
+        _require(all(status == "passed" for status in controls.values()), "negative_controls_unverified")
 
     cases = value.get("cases")
     _require(isinstance(cases, list) and len(cases) <= MAX_CASES, "cases_invalid")

@@ -14,9 +14,9 @@
   },
   "cases": [],
   "negative_controls": {
-    "unknown_alias": "passed",
-    "duplicate_identity": "passed",
-    "malformed_envelope": "passed"
+    "unknown_alias": "not_verified",
+    "duplicate_identity": "not_verified",
+    "malformed_envelope": "not_verified"
   },
   "sanitization": {
     "raw_bodies_retained": false,
