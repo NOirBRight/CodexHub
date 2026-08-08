@@ -65,9 +65,10 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
 
     assert payload["model"] == "custom-model"
     assert payload["tools"][0] == tools[0]
-    assert [tool["type"] for tool in payload["tools"]] == ["function", "function", "function"]
+    assert [tool["type"] for tool in payload["tools"]] == ["function", "function", "function", "function"]
     assert payload["tools"][1]["name"].startswith("__codexhub_ns_")
     assert payload["tools"][2]["name"].startswith("__codexhub_custom_")
+    assert payload["tools"][3]["name"].startswith("__codexhub_search_")
     assert {entry.disposition for entry in context["_runtime_tool_compatibility_plan"].entries} == {
         "native",
         "adapt",
@@ -686,10 +687,11 @@ def test_responses_structured_without_explicit_facts_uses_conservative_tool_defa
     )
 
     entries = context["_runtime_tool_compatibility_plan"].entries
-    assert [entry.disposition for entry in entries] == ["adapt", "adapt", "omit"]
-    assert [tool["type"] for tool in payload["tools"]] == ["function", "function"]
+    assert [entry.disposition for entry in entries] == ["adapt", "adapt", "adapt"]
+    assert [tool["type"] for tool in payload["tools"]] == ["function", "function", "function"]
     assert payload["tools"][0]["name"].startswith("__codexhub_ns_")
     assert payload["tools"][1]["name"].startswith("__codexhub_custom_")
+    assert payload["tools"][2]["name"].startswith("__codexhub_search_")
 
 
 def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():

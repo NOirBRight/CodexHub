@@ -285,6 +285,12 @@ PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS = {
     "gpt-5.6-terra": "v2",
     "gpt-5.6-luna": "v1",
 }
+# Only rows with an accepted GO verdict may accept a user-selected
+# Collaboration V1/V2 override. Other pinned rows retain their managed
+# baseline but remain selector-ineligible until separately qualified.
+QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS = {
+    "gpt-5.6-luna": "v1",
+}
 PINNED_OFFICIAL_LEGACY_MODEL_IDS = (
     "gpt-5.5",
     "gpt-5.4",
@@ -553,7 +559,7 @@ def _planner_override_is_valid(
             # must itself be one of the pinned Code Mode rows; legacy Official
             # rows intentionally have a null version and reject this field.
             if (
-                slug not in PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS
+                slug not in QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS
                 or not isinstance(value, str)
                 or value not in {"v1", "v2"}
             ):
@@ -1106,10 +1112,13 @@ def _collect_catalog_overrides(
             continue
         fields = _delta_override_fields(identity, model, baseline_model)
         if not fields:
-            # An explicit edit back to the managed value removes the prior
-            # sidecar override instead of making it impossible to opt out.
-            if baseline_model is not None and identity in overrides:
-                overrides.pop(identity, None)
+            # The sidecar is the durable record of an explicit model-level
+            # choice.  The generated catalog is an effective cache and may be
+            # rewritten by Codex before this sync runs; treating a temporary
+            # baseline-valued row as an explicit clear would lose the user's
+            # choice on restart.  Clearing is performed by the UI command,
+            # which removes the exact sidecar field before publishing the
+            # baseline-valued effective row.
             continue
         if _planner_override_is_valid(identity, fields):
             overrides[identity] = fields

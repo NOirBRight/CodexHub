@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping, NoReturn
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 from urllib.request import Request, getproxies, proxy_bypass, urlopen
 
 try:
@@ -2226,6 +2226,88 @@ def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+_FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST = frozenset(
+    {
+        "behavior_profile",
+        "client_id",
+        "client_inference_source",
+        "inbound_format",
+        "model",
+        "model_canonical",
+        "model_requested",
+        "provider_hint",
+        "request_id",
+        "request_kind",
+        "route_attempt_fallback_http_statuses",
+        "route_attempt_index",
+        "route_attempt_endpoint_url",
+        "route_attempt_model_canonical",
+        "route_attempt_model_requested",
+        "route_attempt_mutation_summary",
+        "route_attempt_protocol",
+        "route_attempt_provider_id",
+        "route_attempt_upstream_model",
+        "route_endpoint_url",
+        "route_model_canonical",
+        "route_model_requested",
+        "route_provider_id",
+        "route_mode",
+        "route_reason",
+        "route_upstream_model",
+        "upstream_format",
+    }
+)
+
+_FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS = frozenset(
+    {
+        "route_attempt_fallback_http_statuses",
+        "route_attempt_mutation_summary",
+    }
+)
+
+
+def _bounded_failure_event_context(
+    context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep only bounded routing metadata on failure-classification events."""
+
+    bounded: dict[str, Any] = {}
+    for key, value in (context or {}).items():
+        if key not in _FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST:
+            continue
+        if isinstance(value, str):
+            bounded[key] = value[:200]
+        elif isinstance(value, (bool, int, float)) or value is None:
+            bounded[key] = value
+        elif (
+            key in _FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS
+            and isinstance(value, (list, tuple))
+        ):
+            bounded[key] = [
+                item[:80] if isinstance(item, str) else item
+                for item in value[:32]
+                if isinstance(item, (str, bool, int, float)) or item is None
+            ]
+    return bounded
+
+
+def _route_failure_event_fields(
+    context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return only route identity fields for direct failure events.
+
+    Several stream failure branches already pass request/model/status fields
+    explicitly.  Keeping this helper route-only avoids duplicate keyword
+    arguments while preserving the exact provider/model/endpoint identity.
+    """
+
+    return {
+        key: value
+        for key, value in _bounded_failure_event_context(context).items()
+        if key.startswith("route_")
+    }
+
+
 def _usage_observed_context(
     event_context: Mapping[str, Any] | None,
     *,
@@ -2413,6 +2495,18 @@ def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **
     payload = _public_event_context(event_context)
     payload.update(fields)
     write_proxy_event(event, **payload)
+
+
+def _write_failure_event(
+    event_context: Mapping[str, Any] | None,
+    event: str,
+    **fields: Any,
+) -> None:
+    _write_adapter_event(
+        _bounded_failure_event_context(event_context),
+        event,
+        **fields,
+    )
 
 
 def _raise_collaboration_boundary_error(
@@ -3242,6 +3336,7 @@ def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] 
 
 def _route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
     keys = (
+        "tool_protocol_capabilities",
         "tool_exposure_mode",
         "tool_capability_state",
         "supports_search_tool",
@@ -3696,14 +3791,13 @@ RAW_REASONING_DELTA_EVENTS = {
     "response.reasoning_text.delta",
     "response.reasoning_content.delta",
     "response.reasoning_raw_content.delta",
-    "response.reasoning_summary_text.delta",
 }
 REASONING_TEXT_EVENT_PREFIXES = (
     "response.reasoning_text.",
     "response.reasoning_content.",
     "response.reasoning_raw_content.",
-    "response.reasoning_summary_text.",
 )
+REASONING_SUMMARY_EVENT_PREFIX = "response.reasoning_summary_text."
 
 
 def _collect_text_fragments(value: Any) -> list[str]:
@@ -3786,8 +3880,20 @@ def _hide_reasoning_text(value: Any) -> bool:
         return False
 
     if value.get("type") == "reasoning":
-        if value.get("summary") != []:
-            value["summary"] = []
+        summary = value.get("summary")
+        valid_summary = (
+            [
+                {"type": "summary_text", "text": item["text"]}
+                for item in summary
+                if isinstance(item, dict)
+                and item.get("type") == "summary_text"
+                and isinstance(item.get("text"), str)
+            ]
+            if isinstance(summary, list)
+            else []
+        )
+        if summary != valid_summary:
+            value["summary"] = valid_summary
             changed = True
         for key in ("content", "raw_content", "reasoning_content", "thinking", "encrypted_content"):
             if key in value:
@@ -3801,9 +3907,18 @@ def _hide_reasoning_text(value: Any) -> bool:
     return changed
 
 
-def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
+def _is_raw_reasoning_stream_event(payload: Mapping[str, Any]) -> bool:
     event_type = payload.get("type")
     return isinstance(event_type, str) and event_type.startswith(REASONING_TEXT_EVENT_PREFIXES)
+
+
+def _is_reasoning_summary_stream_event(payload: Mapping[str, Any]) -> bool:
+    event_type = payload.get("type")
+    return isinstance(event_type, str) and event_type.startswith(REASONING_SUMMARY_EVENT_PREFIX)
+
+
+def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
+    return _is_raw_reasoning_stream_event(payload) or _is_reasoning_summary_stream_event(payload)
 
 
 def _sse_line_ending(line: bytes) -> bytes:
@@ -4159,6 +4274,7 @@ class PassthroughSseSemanticStats:
         *,
         terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.events_streamed = 0
         self.json_events_streamed = 0
@@ -4174,6 +4290,14 @@ class PassthroughSseSemanticStats:
         self._terminal_observer = (
             terminal_observer if terminal_observer is not None else _responses_terminal_observer
         )
+        self._clock = clock
+        self._started_at = self._clock()
+        self._first_byte_elapsed_ms: int | None = None
+        self._first_event_elapsed_ms: int | None = None
+        self._last_event_at: float | None = None
+        self._max_inter_event_gap_ms: int | None = None
+        self._last_inter_event_gap_ms: int | None = None
+        self._terminal_elapsed_ms: int | None = None
         self._assembler = SseEventAssembler(max_frame_bytes=max_frame_bytes)
         self._eof_disposition: str | None = None
         self._incomplete_bytes_discarded = 0
@@ -4181,6 +4305,8 @@ class PassthroughSseSemanticStats:
     def observe_bytes(self, chunk: bytes) -> None:
         if self._eof_disposition == "size_limit":
             return
+        if chunk and self._first_byte_elapsed_ms is None:
+            self._first_byte_elapsed_ms = self._elapsed_ms(self._clock() - self._started_at)
         try:
             self._assembler.feed(chunk, on_event=self._observe_event)
         except SseFrameTooLargeError:
@@ -4213,6 +4339,17 @@ class PassthroughSseSemanticStats:
             "sse_downstream_output_seen": self.downstream_output_seen,
             "sse_event_types": event_types,
             "sse_event_type_counts": {key: self.event_type_counts[key] for key in event_types},
+            # The Gateway observes the stream after the response has already
+            # been opened.  Successful DNS/TCP/TLS phase duration is therefore
+            # intentionally explicit as not observed here; transport failures
+            # carry their concrete phase from the upstream-open boundary.
+            "upstream_connect_timing": "not_observed",
+            "upstream_tls_timing": "not_observed",
+            "sse_first_byte_elapsed_ms": self._first_byte_elapsed_ms,
+            "sse_first_event_elapsed_ms": self._first_event_elapsed_ms,
+            "sse_last_inter_event_gap_ms": self._last_inter_event_gap_ms,
+            "sse_max_inter_event_gap_ms": self._max_inter_event_gap_ms,
+            "sse_terminal_elapsed_ms": self._terminal_elapsed_ms,
         }
         if self.last_event_type is not None:
             fields["sse_last_event_type"] = self.last_event_type
@@ -4224,6 +4361,15 @@ class PassthroughSseSemanticStats:
         return fields
 
     def _observe_event(self, event: SseEvent) -> None:
+        observed_at = self._clock()
+        if self._first_event_elapsed_ms is None:
+            self._first_event_elapsed_ms = self._elapsed_ms(observed_at - self._started_at)
+        if self._last_event_at is not None:
+            gap_ms = self._elapsed_ms(observed_at - self._last_event_at)
+            self._last_inter_event_gap_ms = gap_ms
+            if self._max_inter_event_gap_ms is None or gap_ms > self._max_inter_event_gap_ms:
+                self._max_inter_event_gap_ms = gap_ms
+        self._last_event_at = observed_at
         event_name: str | None = None
         if event.event is not None:
             event_name = event.event.decode("utf-8", errors="replace").strip() or None
@@ -4268,6 +4414,15 @@ class PassthroughSseSemanticStats:
                 self.completed_event_seen = True
         if self._terminal_observer(event_name, data, payload):
             self.terminal_event_seen = True
+            if self._terminal_elapsed_ms is None:
+                self._terminal_elapsed_ms = self._elapsed_ms(observed_at - self._started_at)
+
+    def _elapsed_ms(self, value: float) -> int:
+        """Convert a monotonic interval to a bounded non-negative integer."""
+
+        if value <= 0:
+            return 0
+        return min(7 * 24 * 60 * 60 * 1000, int(value * 1000))
 
     def _record_event_type(self, event_type: str) -> None:
         if event_type in self.event_type_counts:
@@ -4331,6 +4486,9 @@ def _responses_event_starts_downstream_output(event: Mapping[str, Any]) -> bool:
     if event_type == "response.output_text.done":
         text = event.get("text")
         return isinstance(text, str) and bool(text)
+    if event_type == "response.reasoning_summary_text.done":
+        text = event.get("text")
+        return isinstance(text, str) and bool(text)
     if event_type == "response.function_call_arguments.delta":
         delta = event.get("delta")
         return isinstance(delta, str) and bool(delta)
@@ -4358,9 +4516,12 @@ def _responses_event_commits_downstream_output(event: Mapping[str, Any], upstrea
     if event_type == "response.refusal.done":
         refusal = event.get("refusal")
         return isinstance(refusal, str) and bool(refusal)
-    if upstream_name == "official" and event_type == "response.reasoning_summary_text.delta":
+    if event_type == "response.reasoning_summary_text.delta":
         delta = event.get("delta")
         return isinstance(delta, str) and bool(delta)
+    if event_type == "response.reasoning_summary_text.done":
+        text = event.get("text")
+        return isinstance(text, str) and bool(text)
     if event_type == "response.output_item.done":
         item = event.get("item")
         return isinstance(item, Mapping) and item.get("type") == "reasoning"
@@ -4371,6 +4532,18 @@ def _responses_output_item_has_visible_or_tool_output(item: Mapping[str, Any]) -
     item_type = item.get("type")
     if item_type in {"function_call", "custom_tool_call"}:
         return _responses_completed_tool_item(item) is not None
+    # `tool_search_call` is a client-executed Responses output item.  The
+    # Gateway must not execute or rewrite it, but it is still a completed
+    # control/tool item and therefore makes a third-party response non-empty.
+    # Without this classification the relay buffers the entire stream and
+    # rejects the valid `response.completed` as an empty response, causing
+    # Codex to reconnect before it can submit `tool_search_output`.
+    if item_type == "tool_search_call":
+        return (
+            isinstance(item.get("call_id"), str)
+            and bool(item.get("call_id"))
+            and item.get("execution") == "client"
+        )
     if item_type == "message":
         return bool(_message_item_visible_text(item))
     return False
@@ -4809,8 +4982,19 @@ _responses_tools_to_chat_tools = responses_tools_to_chat_tools
 _responses_tool_choice_to_chat_tool_choice = responses_tool_choice_to_chat_tool_choice
 
 
-def _responses_request_to_chat_completion_body(body: bytes) -> bytes:
-    return responses_request_to_chat_completion_body(body)
+def _responses_request_to_chat_completion_body(
+    body: bytes,
+    *,
+    drop_client_metadata: bool = False,
+    drop_client_transport_fields: bool = False,
+    drop_reasoning: bool = False,
+) -> bytes:
+    return responses_request_to_chat_completion_body(
+        body,
+        drop_client_metadata=drop_client_metadata,
+        drop_client_transport_fields=drop_client_transport_fields,
+        drop_reasoning=drop_reasoning,
+    )
 
 
 XMLISH_TOOL_INVOKE_RE = re.compile(
@@ -6029,6 +6213,8 @@ def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
         "namespace_adapter",
         "accepts_custom_adapter",
         "custom_adapter",
+        "accepts_tool_search_adapter",
+        "tool_search_adapter",
     }
     for key in boolean_keys:
         if key in facts and type(facts[key]) is not bool:
@@ -7142,7 +7328,10 @@ def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str
         call_id = item.get("call_id")
         if not isinstance(call_id, str) or not call_id:
             continue
-        if item.get("type") == "tool_search_call":
+        # A search-shaped item is client-owned only with the explicit
+        # execution marker.  Missing/unknown ownership must not seed the
+        # bounded-search ledger or later rewrite a provider lifecycle.
+        if item.get("type") == "tool_search_call" and item.get("execution") == "client":
             arguments = _normalize_tool_search_arguments(item.get("arguments"))
             if arguments is None or _is_multi_agent_discovery_arguments(arguments):
                 continue
@@ -7249,10 +7438,36 @@ def _bounded_tool_search_query_digests(event_context: Mapping[str, Any] | None) 
     return {digest for digest in value if isinstance(digest, bytes)}
 
 
-def _tool_search_call_arguments(value: Mapping[str, Any]) -> dict[str, Any] | None:
-    if value.get("type") == "tool_search_call":
+def _tool_search_call_arguments(
+    value: Mapping[str, Any],
+    *,
+    candidate_item_ids: set[str] | None = None,
+    allow_legacy_function: bool = False,
+) -> dict[str, Any] | None:
+    # A provider may use the same item type for its own lifecycle.  An
+    # explicit provider execution marker must never be treated as the
+    # client-owned Codex search call that the bounded-miss guard can suppress.
+    # The execution marker is part of the ownership contract.  Missing or
+    # unknown values are not evidence that Codex owns the lifecycle; leave
+    # those provider items untouched rather than letting the bounded-search
+    # guard rewrite them.
+    if value.get("type") == "tool_search_call" and value.get("execution") == "client":
         return _normalize_tool_search_arguments(value.get("arguments"))
-    if value.get("type") == "function_call" and value.get("name") == "tool_search":
+    # A provider is allowed to expose an ordinary function named
+    # ``tool_search``.  Treat the flattened spelling as client-owned only
+    # after the stream has declared the item as a search candidate (or when a
+    # legacy caller explicitly supplies the candidate set).  Otherwise the
+    # bounded empty-search suppression would silently rewrite an unrelated
+    # provider function with a matching ``query`` argument.
+    if (
+        value.get("type") == "function_call"
+        and value.get("name") == "tool_search"
+        and isinstance(value.get("id"), str)
+        and value.get("id")
+        and candidate_item_ids is not None
+        and value.get("id") in candidate_item_ids
+        and allow_legacy_function
+    ):
         return _normalize_tool_search_arguments(value.get("arguments"))
     return None
 
@@ -7297,15 +7512,18 @@ def _suppress_bounded_tool_search_calls(
         suppressed_value = event_context.setdefault("_bounded_tool_search_suppressed_item_ids", set())
         suppressed_item_ids = suppressed_value if isinstance(suppressed_value, set) else set()
         event_context["_bounded_tool_search_suppressed_item_ids"] = suppressed_item_ids
+        allow_legacy_function = bool(event_context.get("_tool_search_client_owned"))
     else:
         candidate_item_ids = set()
         suppressed_item_ids = set()
+        allow_legacy_function = False
 
     return _suppress_bounded_tool_search_calls_inner(
         value,
         bounded_digests,
         candidate_item_ids,
         suppressed_item_ids,
+        allow_legacy_function,
     )
 
 
@@ -7314,6 +7532,7 @@ def _suppress_bounded_tool_search_calls_inner(
     bounded_digests: set[bytes],
     candidate_item_ids: set[str],
     suppressed_item_ids: set[str],
+    allow_legacy_function: bool,
 ) -> tuple[Any, bool]:
     if isinstance(value, list):
         changed = False
@@ -7324,6 +7543,7 @@ def _suppress_bounded_tool_search_calls_inner(
                 bounded_digests,
                 candidate_item_ids,
                 suppressed_item_ids,
+                allow_legacy_function,
             )
             if replacement is None:
                 changed = True
@@ -7344,8 +7564,15 @@ def _suppress_bounded_tool_search_calls_inner(
                 isinstance(item_id, str)
                 and item_id
                 and (
-                    item.get("type") == "tool_search_call"
-                    or (item.get("type") == "function_call" and item.get("name") == "tool_search")
+                    (
+                        item.get("type") == "tool_search_call"
+                        and item.get("execution") == "client"
+                    )
+                    or (
+                        allow_legacy_function
+                        and item.get("type") == "function_call"
+                        and item.get("name") == "tool_search"
+                    )
                 )
             ):
                 candidate_item_ids.add(item_id)
@@ -7366,7 +7593,11 @@ def _suppress_bounded_tool_search_calls_inner(
                 suppressed_item_ids.add(item_id)
                 return None, True
 
-    arguments = _tool_search_call_arguments(value)
+    arguments = _tool_search_call_arguments(
+        value,
+        candidate_item_ids=candidate_item_ids,
+        allow_legacy_function=allow_legacy_function,
+    )
     if (
         arguments is not None
         and _tool_search_query_digest(arguments["query"]) in bounded_digests
@@ -7384,6 +7615,7 @@ def _suppress_bounded_tool_search_calls_inner(
             bounded_digests,
             candidate_item_ids,
             suppressed_item_ids,
+            allow_legacy_function,
         )
         if replacement is None:
             rewritten.pop(key, None)
@@ -7994,7 +8226,11 @@ def _normalize_third_party_tool_call(
 
     changed = False
     rewritten = dict(value)
-    if value.get("type") == "function_call" and value.get("name") == "tool_search":
+    if (
+        value.get("type") == "function_call"
+        and value.get("name") == "tool_search"
+        and bool((event_context or {}).get("_tool_search_client_owned"))
+    ):
         arguments = _normalize_tool_search_arguments(value.get("arguments"))
         if arguments is not None:
             rewritten["type"] = "tool_search_call"
@@ -10976,6 +11212,24 @@ def compatible_request_body(
         query for query, _count in bounded_tool_search_terminal_calls.values()
     }
     if isinstance(event_context, dict):
+        # A flattened ``function_call`` named ``tool_search`` is ambiguous
+        # unless this request actually exposed Codex's client-owned search
+        # declaration.  Remember that bounded history or an explicit
+        # declaration established that ownership; ordinary provider
+        # functions with the same name must remain untouched.
+        declared_client_tool_search = any(
+            isinstance(tool, Mapping)
+            and (
+                (tool.get("type") == "tool_search" and tool.get("execution") == "client")
+                or (
+                    tool.get("type") == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["type"]
+                    and tool == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL
+                )
+            )
+            for tool in (payload.get("tools") if isinstance(payload.get("tools"), list) else ())
+        )
+        if bounded_tool_search_queries or declared_client_tool_search:
+            event_context["_tool_search_client_owned"] = True
         if bounded_tool_search_queries:
             event_context["_bounded_tool_search_query_digests"] = frozenset(
                 _tool_search_query_digest(query) for query in bounded_tool_search_queries
@@ -11004,17 +11258,32 @@ def compatible_request_body(
         ):
             changed = True
         runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
-    if collaboration_v2 and _rewrite_v2_unsupported_custom_tool_history(
-        payload,
-        upstream=upstream,
-        tool_protocol=tool_protocol,
-        compatibility_plan=runtime_tool_plan,
-        event_context=event_context,
-        upstream_name=upstream_name,
-    ):
-        changed = True
-    if raw_provider_probe or collaboration_v2:
+    if raw_provider_probe:
         pass
+    elif collaboration_v2:
+        # V2 must not run V1 semantic repair, but a third-party structured
+        # Responses endpoint still cannot consume Codex's freeform
+        # ``apply_patch`` history items. Keep this wire-only inverse adapter
+        # active so the next request does not leak ``custom_tool_call`` into
+        # an endpoint that only accepts function-call history.
+        input_items = payload.get("input")
+        if isinstance(input_items, list):
+            adapted_items, _adapted_call_ids, history_changed = _adapt_apply_patch_custom_tool_history(
+                input_items,
+                event_context=event_context,
+            )
+            if history_changed:
+                payload["input"] = adapted_items
+                changed = True
+        if _rewrite_v2_unsupported_custom_tool_history(
+            payload,
+            upstream=upstream,
+            tool_protocol=tool_protocol,
+            compatibility_plan=runtime_tool_plan,
+            event_context=event_context,
+            upstream_name=upstream_name,
+        ):
+            changed = True
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it
@@ -11389,7 +11658,7 @@ def compatible_request_body(
             runtime_plain_tool_search = bool(
                 runtime_tool_plan is not None
                 and any(
-                    entry.family == "plain_function"
+                    entry.family in {"plain_function", "tool_search"}
                     and entry.original_name == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
                     and entry.disposition != "omit"
                     for entry in runtime_tool_plan.entries
@@ -11397,7 +11666,16 @@ def compatible_request_body(
             )
             effective_include_tool_search = (
                 include_tool_search
-                and (runtime_tool_plan is None or runtime_plain_tool_search)
+                and (
+                    runtime_tool_plan is None
+                    or runtime_plain_tool_search
+                    # The Gateway owns the deferred-core declaration for
+                    # structured Responses/Chat routes.  It is not present
+                    # in the caller's initial tool list, so requiring a
+                    # pre-existing plan entry would suppress the very
+                    # declaration that must be adapted for Chat providers.
+                    or tool_protocol in STRUCTURED_TOOL_PROTOCOLS
+                )
                 and not subagent_worker_context
                 and not restrict_to_subagent_coordinator_tools
             )
@@ -12444,7 +12722,7 @@ def compatible_sse_line(
     else:
         runtime_tool_changed = False
 
-    if _is_reasoning_text_stream_event(payload):
+    if _is_raw_reasoning_stream_event(payload):
         return b""
 
     changed = _hide_reasoning_text(payload) or runtime_tool_changed
@@ -12720,7 +12998,7 @@ def _emit_upstream_retry_suppressed_event(
     detail = safe_upstream_error_detail(exc, redact_identity=identity)
     if isinstance(exc, UpstreamStreamErrorEvent):
         detail = "Upstream SSE error event"
-    _write_adapter_event(
+    _write_failure_event(
         event_context,
         "upstream_retry_suppressed",
         upstream=upstream_name,
@@ -12737,6 +13015,11 @@ def _emit_upstream_retry_suppressed_event(
         detail=detail,
         failure_phase=failure_phase or transport_failure_phase(exc),
         retry_safety_class=retry_safety_class,
+        terminal=False,
+        downstream_output_started=(
+            retry_safety_class == RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+        ),
+        retry_forbidden=True,
     )
 
 
@@ -13180,6 +13463,7 @@ class RouteAttemptPlan:
         return {
             "index": self.index,
             "upstream_protocol": self.upstream_protocol.value,
+            "endpoint_url": _safe_route_endpoint_url(self.endpoint_url),
             "wire_format_adapter": self.wire_format_adapter,
             "request_conversion_steps": list(
                 self.request_conversion_steps
@@ -13222,7 +13506,11 @@ class RouteAttemptPlan:
             self.request_body_mode
             == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
         ):
-            return _responses_request_to_chat_completion_body(prepared_body)
+            return _responses_request_to_chat_completion_body(
+                prepared_body,
+                drop_client_transport_fields=True,
+                drop_reasoning=True,
+            )
         raise UnsupportedRouteProtocolError(
             f"unsupported planned request body mode: {self.request_body_mode}"
         )
@@ -13559,6 +13847,68 @@ def _route_endpoint_url(
     raise UnsupportedRouteProtocolError(
         f"planned attempt has no executable upstream protocol: {protocol.value}"
     )
+
+
+def _safe_route_endpoint_url(endpoint_url: str) -> str:
+    """Return endpoint identity without credentials or query secrets.
+
+    Route diagnostics need to distinguish configured endpoints, but failure
+    telemetry must never copy userinfo, query parameters, or fragments from a
+    provider URL.  The route planner only creates HTTP(S) endpoint URLs (or a
+    relative fixture path), so preserve the scheme/host/path and bound the
+    result for event payloads.
+    """
+
+    value = str(endpoint_url or "")
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    def safe_path(path: str) -> str:
+        # A provider may legitimately put a credential or signed token in its
+        # base URL path.  Keep the common fixed API paths readable, but never
+        # persist an arbitrary path segment verbatim in telemetry.
+        safe_paths = {
+            "/v1",
+            "/v2",
+            "/responses",
+            "/response",
+            "/chat/completions",
+            "/v1/responses",
+            "/v1/response",
+            "/v1/chat/completions",
+        }
+        if path in safe_paths:
+            return path
+        if not path:
+            return ""
+        segments = path.split("/")
+        return "/".join(
+            "" if index == 0 and segment == "" else (
+                "" if segment == "" else f"sha256:{hashlib.sha256(segment.encode('utf-8')).hexdigest()[:16]}"
+            )
+            for index, segment in enumerate(segments)
+        )
+
+    # ``urlsplit`` accepts schemeless network-path references such as
+    # ``//user:secret@example.test/v1``.  They still have a usable hostname,
+    # so sanitize them through the same host/port path below.  For malformed
+    # values such as ``user:secret@example.test/v1`` there is no trustworthy
+    # authority boundary; never echo the raw value because it can contain
+    # credentials.
+    if not parsed.netloc:
+        path = parsed.path if value.startswith("/") and not value.startswith("//") else ""
+        return safe_path(path.split("?", 1)[0].split("#", 1)[0])[:300]
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    try:
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+    except ValueError:
+        pass
+    return urlunsplit((parsed.scheme, netloc, safe_path(parsed.path), "", ""))[:300]
 
 
 def _capability_state(value: Any, *, default: CapabilityState) -> CapabilityState:
@@ -14428,6 +14778,15 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
     return {
         "route_plan_schema_version": plan.schema_version,
         "route_plan_summary_scope": "planned",
+        "route_provider_id": plan.provider_id,
+        "route_model_requested": plan.model_requested,
+        "route_model_canonical": plan.canonical_model,
+        "route_upstream_model": plan.upstream_model,
+        "route_endpoint_url": (
+            _safe_route_endpoint_url(primary_attempt.endpoint_url)
+            if primary_attempt is not None
+            else None
+        ),
         "configured_upstream_protocol_name": plan.configured_upstream_protocol_name,
         "configured_upstream_protocol": plan.configured_upstream_protocol.value,
         "protocol_capability_state": plan.protocol_capability_state.value,
@@ -14546,11 +14905,23 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
     }
 
 
-def _route_attempt_event_fields(attempt: RouteAttemptPlan) -> dict[str, Any]:
+def _route_attempt_event_fields(
+    attempt: RouteAttemptPlan,
+    *,
+    provider_id: str | None = None,
+    model_requested: str | None = None,
+    model_canonical: str | None = None,
+    upstream_model: str | None = None,
+) -> dict[str, Any]:
     snapshot = attempt.telemetry_snapshot()
     retry = snapshot["retry"]
     return {
         "execution_summary_scope": "selected_attempt_plan",
+        "route_attempt_provider_id": provider_id,
+        "route_attempt_model_requested": model_requested,
+        "route_attempt_model_canonical": model_canonical,
+        "route_attempt_upstream_model": upstream_model,
+        "route_attempt_endpoint_url": snapshot["endpoint_url"],
         "executed_upstream_protocol": snapshot["upstream_protocol"],
         "executed_wire_format_adapter": snapshot["wire_format_adapter"],
         "executed_request_conversion_steps": snapshot[
@@ -16293,7 +16664,7 @@ def _emit_upstream_retry_event(
     }
     if retry_safety_class is not None:
         fields["retry_safety_class"] = retry_safety_class
-    _write_adapter_event(
+    _write_failure_event(
         event_context,
         "upstream_retry",
         **fields,
@@ -18160,7 +18531,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             route_policy_event_fields = {
                 **_route_plan_event_fields(route_plan),
                 **(
-                    _route_attempt_event_fields(primary_route_attempt)
+                    _route_attempt_event_fields(
+                        primary_route_attempt,
+                        provider_id=route_plan.provider_id,
+                        model_requested=route_plan.model_requested,
+                        model_canonical=route_plan.canonical_model,
+                        upstream_model=route_plan.upstream_model,
+                    )
                     if primary_route_attempt is not None
                     else {}
                 ),
@@ -18564,7 +18941,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             for route_attempt in route_plan.attempts:
                 active_route_attempt = route_attempt
                 upstream_format = route_attempt.selected_upstream_format
-                route_attempt_event_fields = _route_attempt_event_fields(route_attempt)
+                route_attempt_event_fields = _route_attempt_event_fields(
+                    route_attempt,
+                    provider_id=route_plan.provider_id,
+                    model_requested=route_plan.model_requested,
+                    model_canonical=route_plan.canonical_model,
+                    upstream_model=route_plan.upstream_model,
+                )
                 proxy_request_context.update(route_attempt_event_fields)
                 if isinstance(adapter_event_context, dict):
                     adapter_event_context.update(route_attempt_event_fields)
@@ -20296,6 +20679,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     ) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         headers_sent_downstream = bool(headers_already_sent)
+        route_failure_event_fields = _route_failure_event_fields(event_context)
+        _write_proxy_event = globals()["write_proxy_event"]
+
+        def write_proxy_event(event: str, **fields: Any) -> None:
+            enriched = dict(fields)
+            enriched.update(route_failure_event_fields)
+            _write_proxy_event(event, **enriched)
+
         admission = _active_gateway_request()
         request_scoped_seam = _handler_downstream_stream_commit(self)
         if request_scoped_seam is not None:
@@ -20567,6 +20958,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             inbound_format=inbound_format,
         )
         relay_redact_identity = _retry_identity_from_context(event_context)
+        route_failure_event_fields = _route_failure_event_fields(event_context)
+        _write_proxy_event = globals()["write_proxy_event"]
+
+        def write_proxy_event(event: str, **fields: Any) -> None:
+            enriched = dict(fields)
+            enriched.update(route_failure_event_fields)
+            _write_proxy_event(event, **enriched)
+
         admission = _active_gateway_request()
         headers_sent = bool(headers_already_sent)
         chat_mode = inbound_format == "chat_completions"
@@ -20636,7 +21035,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 # Stopped only because a terminal event was already committed.
                 return status
             exc = write_error if write_error is not None else OSError("downstream closed")
-            event_fields = _public_event_context(event_context)
+            event_fields = _bounded_failure_event_context(event_context)
             for key in (
                 "request_id",
                 "model",
@@ -20659,6 +21058,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
                 close_phase=close_phase,
+                failure_phase="downstream_write",
+                failure_side="downstream_write",
+                failure_class="downstream_client_closed",
+                client_disconnected=True,
+                terminal=seam.terminal_committed,
+                terminal_seen=seam._sse_stats.terminal_event_seen,
+                downstream_output_started=seam._downstream_output_started,
+                retry_forbidden=True,
+                retry_safety_class=(
+                    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                    if seam._downstream_content_exposed or seam._downstream_output_started
+                    else RETRY_SAFETY_SUPPRESSED_POST_WRITE
+                ),
                 **event_fields,
             )
             return 499
@@ -20741,6 +21153,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 headers_sent_downstream=headers_sent,
                 downstream_sse_started=headers_sent,
                 close_phase=close_phase,
+                **route_failure_event_fields,
                 **seam.stats(),
             )
 
@@ -20792,6 +21205,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     inbound_format=inbound_format,
                     error=telemetry_error or error_type,
                     detail=sanitized_detail,
+                    **route_failure_event_fields,
                 )
             if inbound_format == "chat_completions":
                 terminal_payload = _chat_completion_error_payload(
@@ -21121,6 +21535,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             inbound_format=inbound_format,
         )
         relay_redact_identity = _retry_identity_from_context(event_context)
+        route_failure_event_fields = _route_failure_event_fields(event_context)
+        _write_proxy_event = globals()["write_proxy_event"]
+
+        def write_proxy_event(event: str, **fields: Any) -> None:
+            enriched = dict(fields)
+            enriched.update(route_failure_event_fields)
+            _write_proxy_event(event, **enriched)
 
         def observe_diagnostic_sse_line(line: bytes) -> None:
             _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
@@ -21181,7 +21602,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         def finish_downstream_stream_closed(exc: OSError) -> int:
             self.close_connection = True
-            event_fields = _public_event_context(event_context)
+            event_fields = _bounded_failure_event_context(event_context)
             for key in ("request_id", "model", "upstream", "status", "error", "detail"):
                 event_fields.pop(key, None)
             write_proxy_event(
@@ -21194,6 +21615,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 inbound_format=inbound_format,
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
+                failure_phase="downstream_write",
+                failure_side="downstream_write",
+                failure_class="downstream_client_closed",
+                client_disconnected=True,
+                terminal=seam.terminal_committed,
+                terminal_seen=seam._sse_stats.terminal_event_seen,
+                downstream_output_started=seam._downstream_output_started,
+                retry_forbidden=True,
+                retry_safety_class=(
+                    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                    if seam._downstream_content_exposed or seam._downstream_output_started
+                    else RETRY_SAFETY_SUPPRESSED_POST_WRITE
+                ),
                 **event_fields,
             )
             _capture_usage(
@@ -22895,7 +23329,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             is_reasoning_done = isinstance(item, Mapping) and item.get("type") == "reasoning"
                             if (
                                 _responses_event_commits_downstream_output(usage_payload, upstream_name)
-                                and (upstream_name == "official" or is_reasoning_done)
+                                and (
+                                    upstream_name == "official"
+                                    or is_reasoning_done
+                                    or _is_reasoning_summary_stream_event(usage_payload)
+                                )
                             ):
                                 downstream_output_started = True
                         buffer_current_line = (
@@ -23049,6 +23487,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if defer_stream_errors and not downstream_output_started:
                     raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
                 self.close_connection = True
+                retry_forbidden = bool(
+                    downstream_output_started
+                    or completed_tool_output_items
+                    or seam._downstream_content_exposed
+                )
                 write_proxy_event(
                     "upstream_stream_incomplete",
                     request_id=request_id,
@@ -23059,6 +23502,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     inbound_format=inbound_format,
                     terminal_seen=saw_terminal_event,
                     downstream_output_started=downstream_output_started,
+                    terminal=False,
+                    failure_class=RETRY_FAILURE_QUICK_TRANSIENT,
+                    failure_phase="stream_body",
+                    failure_side="upstream_read",
+                    retry_forbidden=retry_forbidden,
+                    retry_safety_class=(
+                        RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+                        if retry_forbidden
+                        else RETRY_SAFETY_SUPPRESSED_POST_WRITE
+                    ),
                     completed_tool_calls=len(completed_tool_output_items),
                     pending_downstream_lines=len(pending_downstream_lines),
                     pending_downstream_bytes=sum(len(pending_line) for pending_line in pending_downstream_lines),

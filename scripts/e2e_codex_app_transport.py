@@ -14,7 +14,7 @@ import time
 
 
 # Issue #62's runtime inventory raises the evidence floor to the last stable
-# CLI contract already accepted by the Beta2 candidate.
+# CLI contract already accepted by the Beta3 candidate.
 _CODEX_CLI_VERSION_FLOOR = (0, 145, 0)
 _VERSION_PROBE_TIMEOUT_SECONDS = 10
 _VERSION_PROBE_OUTPUT_LIMIT = 64 * 1024

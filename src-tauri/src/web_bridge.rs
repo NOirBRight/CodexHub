@@ -495,6 +495,23 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             .map_err(|error| format!("invalid model argument: {error}"))?;
             to_value(models::save_model_metadata_override(model))
         }
+        "save_official_multi_agent_version" => {
+            let model_id = request
+                .args
+                .get("model_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "model_id argument is required".to_string())?;
+            let version = request
+                .args
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            to_value(models::save_official_multi_agent_version(model_id, version))
+        }
+        "list_official_multi_agent_overrides" => {
+            to_value(models::list_official_multi_agent_overrides())
+        }
         "sync_history" => {
             let target_provider = request
                 .args

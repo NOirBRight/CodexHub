@@ -1,0 +1,93 @@
+{
+  "schema": "codexhub.issue-370.stream-classification-summary.v1",
+  "source": "synthetic_redacted_fixture",
+  "sensitive_output_retained": false,
+  "phase_fields_source_of_truth": [
+    "connect_tls",
+    "time_to_first_byte_or_event",
+    "inter_event_gap",
+    "terminal_event",
+    "client_cancellation",
+    "gateway_deadline_phase"
+  ],
+  "timing_fields": {
+    "upstream_connect_timing": "not_observed_by_stream_seam",
+    "upstream_tls_timing": "not_observed_by_stream_seam",
+    "sse_first_byte_elapsed_ms": "bounded_emitted_runtime_field",
+    "sse_first_event_elapsed_ms": "bounded_emitted_runtime_field",
+    "sse_last_inter_event_gap_ms": "bounded_emitted_runtime_field",
+    "sse_max_inter_event_gap_ms": "bounded_emitted_runtime_field",
+    "sse_terminal_elapsed_ms": "bounded_emitted_runtime_field"
+  },
+  "cases": [
+    {
+      "class": "slow_first_event_valid_completion",
+      "status": 200,
+      "failure_class": null,
+      "terminal": true,
+      "downstream_output_started": true,
+      "retry_forbidden": false,
+      "fixture_delay_ms": 40
+    },
+    {
+      "class": "long_inter_event_gap_valid_completion",
+      "status": 200,
+      "failure_class": null,
+      "terminal": true,
+      "downstream_output_started": true,
+      "retry_forbidden": false,
+      "fixture_inter_event_gap_ms": 60
+    },
+    {
+      "class": "explicit_upstream_502",
+      "status": 502,
+      "failure_class": "quick_transient",
+      "terminal": false,
+      "downstream_output_started": false,
+      "retry_forbidden": true,
+      "retry_safety_class": "suppressed_post_write",
+      "failure_phase": "response_headers"
+    },
+    {
+      "class": "downstream_499_after_visible_output",
+      "status": 499,
+      "failure_class": "downstream_client_closed",
+      "terminal": false,
+      "downstream_output_started": true,
+      "retry_forbidden": true,
+      "retry_safety_class": "suppressed_post_exposure",
+      "failure_phase": "downstream_write"
+    },
+    {
+      "class": "malformed_incomplete_sse_without_terminal",
+      "status": 502,
+      "failure_class": "quick_transient",
+      "terminal": false,
+      "downstream_output_started": true,
+      "retry_forbidden": true,
+      "retry_safety_class": "suppressed_post_exposure",
+      "failure_phase": "stream_body",
+      "event": "upstream_stream_incomplete"
+    },
+    {
+      "class": "valid_response_completed",
+      "status": 200,
+      "failure_class": null,
+      "terminal": true,
+      "downstream_output_started": true,
+      "retry_forbidden": false,
+      "terminal_event": "response.completed"
+    }
+  ],
+  "live_provider_case": {
+    "models_discovered": [
+      "DeepSeek V4 Flash 0731",
+      "GLM-5.2"
+    ],
+    "status": "authenticated_cli_comparison_complete",
+    "evidence": "live-cli-comparison.json",
+    "desktop_status": "not_run",
+    "credentials_retained": false,
+    "raw_output_retained": false
+  }
+}

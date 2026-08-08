@@ -1,0 +1,145 @@
+{
+  "schema": "codexhub.issue251.code_mode_evidence.v1",
+  "sanitized": true,
+  "evidence_status": "protocol_controlled_local_replay",
+  "provenance": {
+    "capture_kind": "deterministic_in_memory_protocol_fixture",
+    "upstream_control": "fixture_only",
+    "live_cli_request": false,
+    "credentials_used": false,
+    "production_route_changed": false
+  },
+  "candidate_binding": {
+    "base_sha": "2cc3b1ecd287b8ee15d14715d084d0eb18df12c8",
+    "candidate_sha": "7006542a773fc20c10e4bbcadd593393a259ceb2",
+    "binding_required_before_gate": true,
+    "pending_reason": null
+  },
+  "declarations": [
+    {
+      "type": "function",
+      "name": "read",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "custom",
+      "name": "apply_patch",
+      "description": "Codex-owned freeform edit",
+      "format": {
+        "type": "text"
+      }
+    },
+    {
+      "type": "function",
+      "name": "verify",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "workflow": {
+    "steps": ["read", "apply_patch", "verify"],
+    "apply_patch_scope": "target_scoped",
+    "execution_owner": "codex_client",
+    "gateway_executes_tools": false,
+    "route_identity_must_remain_fixed": true,
+    "interruption_control": "incomplete_stream_is_fail_closed",
+    "history_order": ["item_read", "item_patch", "item_verify"]
+  },
+  "opaque_values": {
+    "input": "opaque-input",
+    "output": "opaque-output",
+    "arguments": "{}"
+  },
+  "cases": [
+    {
+      "id": "native_custom",
+      "protocol": "responses_structured",
+      "capabilities": "responses_structured",
+      "request_token": "issue251-native",
+      "route_identity": {
+        "provider": "fixture_provider",
+        "model": "fixture_model",
+        "endpoint": "fixture_native_endpoint",
+        "protocol": "responses_structured"
+      },
+      "expected_disposition": "native",
+      "stream_mode": "native",
+      "replay_mode": "identity"
+    },
+    {
+      "id": "adapted_custom",
+      "protocol": "chat_tools",
+      "capabilities": "chat_tools",
+      "request_token": "issue251-adapted",
+      "route_identity": {
+        "provider": "fixture_provider",
+        "model": "fixture_model",
+        "endpoint": "fixture_adapted_endpoint",
+        "protocol": "chat_tools"
+      },
+      "expected_disposition": "adapt",
+      "stream_mode": "adapted",
+      "replay_mode": "inverse"
+    }
+  ],
+  "history": {
+    "items": [
+      {
+        "type": "function_call",
+        "id": "item_read",
+        "call_id": "call_read",
+        "name": "read",
+        "arguments": "{}"
+      },
+      {
+        "type": "custom_tool_call",
+        "id": "item_patch",
+        "call_id": "call_patch",
+        "name": "apply_patch",
+        "input": "opaque-input"
+      },
+      {
+        "type": "function_call",
+        "id": "item_verify",
+        "call_id": "call_verify",
+        "name": "verify",
+        "arguments": "{}"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "function_call_output",
+        "id": "result_read",
+        "call_id": "call_read",
+        "output": "opaque-output"
+      },
+      {
+        "type": "custom_tool_call_output",
+        "id": "result_patch",
+        "call_id": "call_patch",
+        "output": "opaque-output"
+      },
+      {
+        "type": "function_call_output",
+        "id": "result_verify",
+        "call_id": "call_verify",
+        "output": "opaque-output"
+      }
+    ]
+  },
+  "controls": [
+    "unknown_alias",
+    "malformed_envelope",
+    "missing_identity",
+    "duplicate_identity",
+    "incomplete_stream",
+    "stream_after_terminal"
+  ]
+}

@@ -2,7 +2,7 @@
 
 `scripts/Run-RealClientE2E.ps1` is the release-only Windows gate for proving
 that one candidate Debug build routes compatible clients through both canonical
-routes. HTTP/configuration preflight alone is never an E2E pass. Beta2 uses the
+routes. HTTP/configuration preflight alone is never an E2E pass. Beta3 uses the
 explicit `-CliOnly` scope described below; the full GUI matrix remains available
 for a later release qualification.
 
@@ -284,7 +284,7 @@ Cloud Native Responses path; the previous Volc Chat Completions
 path remains available as ordinary, non-release regression coverage and is not represented as
 Native Responses evidence in this matrix.
 
-### Beta2 CLI-only verification
+### Beta3 CLI-only verification
 
 Pass `-CliOnly` when the current release gate is limited to command-line
 clients. This mode runs exactly the eight automated cases for Codex CLI,
@@ -492,7 +492,7 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -ManualEvidenceTimeoutSeconds 900
 ```
 
-For the Beta2 CLI-only gate, add `-CliOnly` to the command. GUI seed
+For the Beta3 CLI-only gate, add `-CliOnly` to the command. GUI seed
 directories, GUI executables, and manual evidence are not needed in that
 scope; the runner must exit `0` with `verification_scope` `cli_only` and eight
 passed cases.

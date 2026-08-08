@@ -1,0 +1,72 @@
+{
+  "raw_reasoning_delta": {
+    "type": "response.reasoning_text.delta",
+    "item_id": "rs_external_redacted",
+    "output_index": 0,
+    "content_index": 0,
+    "delta": "redacted raw reasoning"
+  },
+  "summary_part_added": {
+    "type": "response.reasoning_summary_part.added",
+    "item_id": "rs_external_redacted",
+    "output_index": 0,
+    "summary_index": 0,
+    "part": {
+      "type": "summary_text",
+      "text": ""
+    }
+  },
+  "summary_delta": {
+    "type": "response.reasoning_summary_text.delta",
+    "item_id": "rs_external_redacted",
+    "output_index": 0,
+    "summary_index": 0,
+    "delta": "redacted summary progress"
+  },
+  "summary_done": {
+    "type": "response.reasoning_summary_text.done",
+    "item_id": "rs_external_redacted",
+    "output_index": 0,
+    "summary_index": 0,
+    "text": "redacted summary progress"
+  },
+  "reasoning_done": {
+    "type": "response.output_item.done",
+    "output_index": 0,
+    "item": {
+      "id": "rs_external_redacted",
+      "type": "reasoning",
+      "status": "completed",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "redacted summary"
+        },
+        {
+          "type": "summary_text",
+          "text": 7
+        },
+        {
+          "type": "provider_summary",
+          "text": "provider-local"
+        }
+      ],
+      "content": [
+        {
+          "type": "reasoning_text",
+          "text": "redacted raw reasoning"
+        }
+      ],
+      "raw_content": "redacted raw reasoning",
+      "reasoning_content": "redacted raw reasoning",
+      "thinking": "redacted raw reasoning",
+      "encrypted_content": "provider-local encrypted state"
+    }
+  },
+  "official_reasoning": {
+    "type": "reasoning",
+    "id": "rs_official_redacted",
+    "summary": [],
+    "encrypted_content": "gAAAAredacted-official-encrypted-content"
+  }
+}

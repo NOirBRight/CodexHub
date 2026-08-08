@@ -22,14 +22,22 @@ BACKFILL_SQLITE_TIMEOUT_SECONDS = 5.0
 BACKFILL_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 SENSITIVE_FIELD_NAMES = {
+    "access_token",
     "api-key",
     "api_key",
     "apikey",
     "authorization",
     "cookie",
+    "credential",
+    "credentials",
     "openai-api-key",
+    "prompt",
     "proxy-authorization",
+    "reasoning_text",
+    "response_id",
     "set-cookie",
+    "tool_arguments",
+    "tool_results",
     "x-api-key",
 }
 

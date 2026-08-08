@@ -5,6 +5,7 @@ export interface Model {
   upstream_model?: string | null;
   aliases?: string[];
   tool_surface_strategy?: ToolSurfaceStrategy | null;
+  multi_agent_version?: "v1" | "v2" | null;
   source_kind?: string | null;
   locked?: boolean;
   codex_enabled?: boolean;

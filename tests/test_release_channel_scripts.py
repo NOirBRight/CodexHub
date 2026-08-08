@@ -20,7 +20,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.1.8-beta.2.2"
+    expected = "0.1.8-beta.3"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -356,7 +356,7 @@ def test_release_plan_places_both_flavors_in_one_immutable_release(tmp_path):
 def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
     repo, main_commit, _ = _release_repo(tmp_path)
 
-    result = _plan(repo, "normal", "0.1.8-beta.2.2", main_commit)
+    result = _plan(repo, "normal", "0.1.8-beta.3", main_commit)
 
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
@@ -364,18 +364,18 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
         "name": "latest.json",
         "asset_url": (
             "https://github.com/NOirBRight/CodexHub/releases/download/"
-            "v0.1.8-beta.2.2/CodexHub_0.1.8-beta.2.2_x64-setup.exe"
+            "v0.1.8-beta.3/CodexHub_0.1.8-beta.3_x64-setup.exe"
         ),
     }
-    assert plan["immutable_release"]["tag"] == "v0.1.8-beta.2.2"
+    assert plan["immutable_release"]["tag"] == "v0.1.8-beta.3"
     assert plan["immutable_release"]["prerelease"] is True
     assert plan["immutable_release"]["assets"] == [
-        "CodexHub_0.1.8-beta.2.2_x64-setup.exe",
-        "CodexHub_0.1.8-beta.2.2_x64-setup.exe.sig",
+        "CodexHub_0.1.8-beta.3_x64-setup.exe",
+        "CodexHub_0.1.8-beta.3_x64-setup.exe.sig",
         "latest.json",
-        f"CodexHub_0.1.8-beta.2.2_portable_{main_commit[:8]}.zip",
-        "CodexHub_0.1.8-beta.2.2_debug_x64-setup.exe",
-        "CodexHub_0.1.8-beta.2.2_debug_x64-setup.exe.sig",
+        f"CodexHub_0.1.8-beta.3_portable_{main_commit[:8]}.zip",
+        "CodexHub_0.1.8-beta.3_debug_x64-setup.exe",
+        "CodexHub_0.1.8-beta.3_debug_x64-setup.exe.sig",
         "latest-debug.json",
     ]
 

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "source": "synthetic_redacted",
+  "cases": [
+    {
+      "name": "slow_first_event_valid_completion",
+      "kind": "responses_sse",
+      "upstream": "official",
+      "relay_fixture": "gateway",
+      "delay_ms": [40, 0, 0, 0],
+      "events": [
+        {"type": "response.created", "response": {"id": "resp_redacted", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "delta": "visible answer"},
+        {"type": "response.completed", "response": {"status": "completed"}}
+      ],
+      "expected": {
+        "status": 200,
+        "failure_class": null,
+        "terminal": true,
+        "downstream_output_started": true,
+        "retry_forbidden": false
+      }
+    },
+    {
+      "name": "long_inter_event_gap_valid_completion",
+      "kind": "responses_sse",
+      "upstream": "official",
+      "relay_fixture": "gateway",
+      "delay_ms": [0, 0, 60, 0],
+      "events": [
+        {"type": "response.created", "response": {"id": "resp_redacted", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "delta": "visible answer"},
+        {"type": "response.completed", "response": {"status": "completed"}}
+      ],
+      "expected": {
+        "status": 200,
+        "failure_class": null,
+        "terminal": true,
+        "downstream_output_started": true,
+        "retry_forbidden": false
+      }
+    },
+    {
+      "name": "explicit_upstream_502",
+      "kind": "http_error",
+      "upstream": "ollama_cloud",
+      "status": 502,
+      "expected": {
+        "status": 502,
+        "failure_class": "quick_transient",
+        "terminal": false,
+        "downstream_output_started": false,
+        "retry_forbidden": true,
+        "retry_safety_class": "suppressed_post_write",
+        "failure_phase": "response_headers"
+      }
+    },
+    {
+      "name": "downstream_499_after_visible_output",
+      "kind": "downstream_write_failure",
+      "upstream": "ollama_cloud",
+      "relay_fixture": "transparent",
+      "fail_on_write_index": 2,
+      "events": [
+        {"type": "response.created", "response": {"id": "resp_redacted", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "delta": "visible answer"},
+        {"type": "response.completed", "response": {"status": "completed"}}
+      ],
+      "expected": {
+        "status": 499,
+        "failure_class": "downstream_client_closed",
+        "terminal": false,
+        "downstream_output_started": true,
+        "retry_forbidden": true,
+        "retry_safety_class": "suppressed_post_exposure",
+        "failure_phase": "downstream_write"
+      }
+    },
+    {
+      "name": "malformed_incomplete_sse_without_terminal",
+      "kind": "responses_sse",
+      "upstream": "official",
+      "relay_fixture": "gateway",
+      "events": [
+        {"type": "response.created", "response": {"id": "resp_redacted", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "delta": "partial visible answer"}
+      ],
+      "trailing_bytes": "data: {\"type\":\"response.completed\"",
+      "expected": {
+        "status": 502,
+        "failure_class": "quick_transient",
+        "terminal": false,
+        "downstream_output_started": true,
+        "retry_forbidden": true,
+        "retry_safety_class": "suppressed_post_exposure",
+        "failure_phase": "stream_body"
+      }
+    },
+    {
+      "name": "valid_response_completed",
+      "kind": "responses_sse",
+      "upstream": "official",
+      "relay_fixture": "gateway",
+      "events": [
+        {"type": "response.created", "response": {"id": "resp_redacted", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "delta": "visible answer"},
+        {"type": "response.completed", "response": {"status": "completed"}}
+      ],
+      "expected": {
+        "status": 200,
+        "failure_class": null,
+        "terminal": true,
+        "downstream_output_started": true,
+        "retry_forbidden": false
+      }
+    }
+  ]
+}
