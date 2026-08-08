@@ -1,7 +1,7 @@
 # Official Collaboration V1/V2 capability matrix
 
 Issue: #369<br>
-Candidate: `3faafe1ca8ed979cbaaa42aff21ffc78a7d6c1e8`<br>
+Candidate: `ce3384aa6129351069d7f9d5dc330be4cf38152e`<br>
 Codex CLI/Desktop: `0.146.1` (source-contract floor `0.146.0`)<br>
 Captured: `2026-08-08`
 
@@ -12,7 +12,7 @@ The bounded CLI evidence index is
 Validate it with:
 
 ```powershell
-py -3.13 scripts/validate_issue_369_matrix.py --candidate-sha 3faafe1ca8ed979cbaaa42aff21ffc78a7d6c1e8
+py -3.13 scripts/validate_issue_369_matrix.py --candidate-sha ce3384aa6129351069d7f9d5dc330be4cf38152e
 ```
 
 Each `v1`/`v2` object retains the coarse lifecycle and terminal status, plus the
