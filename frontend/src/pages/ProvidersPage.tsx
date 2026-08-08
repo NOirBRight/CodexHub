@@ -903,7 +903,7 @@ function ProvidersPageImpl({
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
-                onRefresh={() => void refreshOfficialModels()}
+                onRefresh={() => refreshOfficialModels()}
                 onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
@@ -1496,7 +1496,7 @@ function OfficialDetail({
   onCopyLoginCommand: () => void;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;

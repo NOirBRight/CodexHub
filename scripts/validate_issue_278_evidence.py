@@ -74,8 +74,11 @@ def validate_summary(value: dict[str, Any], *, candidate_sha: str | None = None)
     _require(value.get("qualification_status") in {"unqualified", "not_run", "failed", "passed"}, "qualification_status_invalid")
     bound_sha = value.get("candidate_sha")
     _require(bound_sha is None or (isinstance(bound_sha, str) and SHA1.fullmatch(bound_sha) is not None), "candidate_sha_invalid")
+    if value.get("qualification_status") in {"passed", "failed"}:
+        _require(bound_sha is not None, "candidate_sha_required")
     if candidate_sha is not None:
-        _require(SHA1.fullmatch(candidate_sha) is not None and bound_sha == candidate_sha, "candidate_sha_mismatch")
+        _require(isinstance(candidate_sha, str) and SHA1.fullmatch(candidate_sha) is not None, "candidate_sha_invalid")
+        _require(bound_sha == candidate_sha, "candidate_sha_mismatch")
 
     route = value.get("route")
     _require(isinstance(route, dict), "route_invalid")

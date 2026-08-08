@@ -275,7 +275,12 @@ def _check_no_hint_case(case: Mapping[str, Any]) -> None:
     _check_history(wire.get("history"), [])
 
 
-def validate_fixture(value: Mapping[str, Any], *, require_final_candidate: bool = False) -> dict[str, str]:
+def validate_fixture(
+    value: Mapping[str, Any],
+    *,
+    require_final_candidate: bool = False,
+    candidate_sha: str | None = None,
+) -> dict[str, str]:
     _require(value.get("schema") == SCHEMA, "schema_invalid")
     _require(value.get("artifact_kind") == "issue63_tool_search_lifecycle_fixture", "artifact_kind_invalid")
     _require(value.get("evidence_status") == "synthetic_fixture_only", "evidence_status_invalid")
@@ -285,6 +290,11 @@ def validate_fixture(value: Mapping[str, Any], *, require_final_candidate: bool 
     candidate = value.get("candidate")
     _require(isinstance(candidate, Mapping), "candidate_identity_missing")
     revision = candidate.get("revision")
+    if candidate_sha is not None:
+        _require(
+            isinstance(candidate_sha, str) and re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is not None,
+            "candidate_sha_invalid",
+        )
     if revision == PLACEHOLDER_REVISION:
         _require(
             candidate.get("revision_status") == "placeholder_pending_final_candidate",
@@ -294,6 +304,8 @@ def validate_fixture(value: Mapping[str, Any], *, require_final_candidate: bool 
     else:
         _require(isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "candidate_revision_invalid")
         _require(candidate.get("revision_status") == "final_candidate", "candidate_revision_status_invalid")
+    if candidate_sha is not None:
+        _require(revision == candidate_sha, "candidate_sha_mismatch")
 
     route = value.get("route")
     _require(isinstance(route, Mapping), "route_identity_missing")
@@ -342,11 +354,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reject the documented placeholder revision",
     )
+    parser.add_argument(
+        "--candidate-sha",
+        help="require the fixture candidate revision to equal this lowercase 40-hex SHA",
+    )
     args = parser.parse_args(argv)
     try:
         statuses = validate_fixture(
             _load_fixture(args.fixture),
             require_final_candidate=args.require_final_candidate,
+            candidate_sha=args.candidate_sha,
         )
     except EvidenceValidationError as error:
         print(f"ISSUE_63_EVIDENCE_INVALID:{error}")

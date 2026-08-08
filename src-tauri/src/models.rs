@@ -334,14 +334,6 @@ pub fn save_official_multi_agent_version(
     if pinned_official_code_mode_multi_agent_version(&canonical).is_none() {
         return Err("this Official model has no qualified Collaboration V1/V2 selector".to_string());
     }
-    let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
-        .or_else(|| {
-            builtin_model_metadata()
-                .into_iter()
-                .find(|model| model.id == canonical)
-                .and_then(|model| model.multi_agent_version)
-        })
-        .ok_or_else(|| "Official catalog baseline has no Collaboration version".to_string())?;
     let version = version.map(|value| value.trim().to_ascii_lowercase());
     if let Some(value) = version.as_deref() {
         if value != "v1" && value != "v2" {
@@ -353,6 +345,14 @@ pub fn save_official_multi_agent_version(
     // stale effective catalog can otherwise cause the sync process to discard
     // an older sidecar entry as if the user had manually cleared it.
     generate_catalog()?;
+    let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
+        .or_else(|| {
+            builtin_model_metadata()
+                .into_iter()
+                .find(|model| model.id == canonical)
+                .and_then(|model| model.multi_agent_version)
+        })
+        .ok_or_else(|| "Official catalog baseline has no Collaboration version".to_string())?;
 
     let path = paths.catalog_overrides_path();
     let mut payload = if path.exists() {

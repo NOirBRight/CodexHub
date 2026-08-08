@@ -163,7 +163,6 @@ type OfficialCollaborationCapability = {
 // capability matrix.  A selector is exposed only for an accepted GO row;
 // model/provider names alone never qualify a row.
 const OFFICIAL_COLLABORATION_CAPABILITIES: Record<string, OfficialCollaborationCapability> = {
-  "gpt-5.6-sol": { baseline: "v2", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
   "gpt-5.6-terra": { baseline: "v2", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
   "gpt-5.6-luna": { baseline: "v1", verdict: "GO", candidate: "c115551a2246e141a0a6e33c41c9ae40bd02be73" },
 };
