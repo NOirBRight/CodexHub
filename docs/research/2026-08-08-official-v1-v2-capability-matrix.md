@@ -10,8 +10,20 @@ The machine-readable, sanitized evidence is
 Validate it with:
 
 ```powershell
-py -3.13 scripts/validate_issue_369_matrix.py
+py -3.13 scripts/validate_issue_369_matrix.py --candidate-sha adba39866581cd33be813c717a3a0598b15f5858
 ```
+
+Each `v1`/`v2` object retains the coarse lifecycle and terminal status, plus the
+sanitized required phase fields `spawn_identity_kind`, `message_agent_message`,
+`follow_up`, `wait_result`, `list_interrupt`, `stream_history`,
+`restart_readback`, and `terminal_error_replayable`. Phase values are bounded to
+`observed`, `not_observed`, or `not_applicable`; an unobserved phase is never
+represented by an empty value or a guessed success. When an identity kind is
+observed, it is limited to the protocol kinds `agent_id` and `task_path`; the
+current rows keep it `not_observed` because no live identity capture is bound.
+No returned identity, call ID, item ID, or task path is retained. V1's follow-up and list/interrupt fields are
+`not_applicable`; V2's list/interrupt field remains `not_observed` until both
+operations are captured.
 
 ## Decision rule
 
@@ -27,8 +39,8 @@ third-party row.
 | Canonical model | Visibility | Managed baseline | V1 probe | V2 probe | Verdict | Selector |
 | --- | --- | --- | --- | --- | --- | --- |
 | `gpt-5.6-sol` | list | `v2` | CLI 0.146.1 did not expose the V1 native surface, terminal 200 | complete native spawn/list/follow-up/wait/list, terminal 200 | `UNQUALIFIED` | no |
-| `gpt-5.6-terra` | list | `v2` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
-| `gpt-5.6-luna` | list | `v1` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
+| `gpt-5.6-terra` | list | `v2` | coarse spawn/send/wait/close observed; stream/history and restart/readback not observed | coarse spawn/list/send/follow-up/wait/list observed; interrupt, stream/history, restart/readback not observed | `PARTIAL` | no |
+| `gpt-5.6-luna` | list | `v1` | coarse spawn/send/wait/close observed; stream/history and restart/readback not observed | coarse spawn/list/send/follow-up/wait/list observed; interrupt, stream/history, restart/readback not observed | `PARTIAL` | no |
 | `gpt-5.5` | list | `null` | no accepted baseline selection | full probe reported no native Collaboration surface | `UNQUALIFIED` | no |
 | `gpt-5.3-codex-spark` | list | `null` | no accepted baseline selection | simple response only; no complete lifecycle evidence | `UNQUALIFIED` | no |
 | `gpt-5.2` | absent/unknown | absent | not testable | not testable | `UNQUALIFIED` | no |
@@ -39,19 +51,41 @@ third-party row.
 The V1 and V2 probes used the exact selected model and an isolated Beta3
 Gateway. Evidence retains only lifecycle phase names, terminal status, and
 bounded event counts; it retains no prompt, reasoning, tool payload, opaque
-identity, credential, or session data. A successful child result alone was not
-accepted for rows marked `GO`: the accepted rows also have the full lifecycle
-probe and a terminal `200` response.
+identity, credential, or session data. A successful child result alone is not
+accepted for `GO`: every required phase, including stream/history,
+restart/readback, terminal/error, and replayability, must be observed. The
+current Terra and Luna rows therefore remain `PARTIAL` and picker-ineligible.
+
+## Required CLI reruns before `GO`
+
+Run each missing phase against a fresh isolated catalog/runtime and retain only
+the bounded fields listed above. The command shape is intentionally explicit;
+the catalog used for each invocation must select the named version:
+
+```powershell
+codex exec --json --ephemeral --model gpt-5.6-terra `
+  "Using the isolated V1 catalog selection, run spawn/send/wait/close, capture stream/history, restart, and read back the sanitized lifecycle; report only bounded phase statuses."
+codex exec --json --ephemeral --model gpt-5.6-terra `
+  "Using the isolated V2 catalog selection, run spawn/list/send/follow-up/wait/interrupt/list, capture stream/history, restart, and read back the sanitized lifecycle; report only bounded phase statuses."
+codex exec --json --ephemeral --model gpt-5.6-luna `
+  "Using the isolated V1 catalog selection, run spawn/send/wait/close, capture stream/history, restart, and read back the sanitized lifecycle; report only bounded phase statuses."
+codex exec --json --ephemeral --model gpt-5.6-luna `
+  "Using the isolated V2 catalog selection, run spawn/list/send/follow-up/wait/interrupt/list, capture stream/history, restart, and read back the sanitized lifecycle; report only bounded phase statuses."
+```
+
+Do not promote a row to `GO` or expose its selector until those reruns produce
+`observed` for every applicable required field and the matrix is revalidated
+against the exact candidate SHA.
 
 ## UI and persistence consequence
 
-`frontend/src/lib/officialModels.ts` consumes the two exact `GO` rows above.
-Sol and Terra retain their catalog V2 baselines. Terra and Luna have accepted
-selectors; Sol remains baseline-only until a complete V1 surface is observed.
-Luna retains its catalog V1 baseline and may receive an explicit model-level V2 override. The override is
-keyed by the exact Official identity and is persisted by the managed catalog
-sidecar; refresh, restart, catalog regeneration, and session overlay writes do
-not erase it. Clearing the selector removes only that model's override.
+`frontend/src/lib/officialModels.ts` must consume only exact `GO` rows. Sol and
+Terra retain their catalog V2 baselines; Luna retains its catalog V1 baseline.
+Terra and Luna are currently `PARTIAL`, so no selector is exposed and no
+model-level override is authorized until the required reruns pass. Any future
+override remains keyed by the exact Official identity and must survive refresh,
+restart, catalog regeneration, and session overlay writes; clearing it removes
+only that model's override.
 
 No selector is exposed for `UNQUALIFIED`, `NO-GO`, hidden, or stale rows. This
 matrix does not authorize third-party Collaboration V2, fallback, or
