@@ -13659,6 +13659,15 @@ class RoutingTests(unittest.TestCase):
             "secret",
             codex_proxy._safe_route_endpoint_url("user:secret@example.test/v1"),
         )
+        redacted_path = codex_proxy._safe_route_endpoint_url(
+            "https://example.test/v1/sk-live-secret/responses"
+        )
+        self.assertNotIn("sk-live-secret", redacted_path)
+        self.assertIn("sha256:", redacted_path)
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("https://example.test/v1/responses"),
+            "https://example.test/v1/responses",
+        )
 
     def test_official_body_removes_plaintext_reasoning_encrypted_content(self):
         upstream = choose_upstream("gpt-5.5")

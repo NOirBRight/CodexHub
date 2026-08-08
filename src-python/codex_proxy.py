@@ -13735,6 +13735,30 @@ def _safe_route_endpoint_url(endpoint_url: str) -> str:
         parsed = urlsplit(value)
     except ValueError:
         return ""
+    def safe_path(path: str) -> str:
+        # A provider may legitimately put a credential or signed token in its
+        # base URL path.  Keep the common fixed API paths readable, but never
+        # persist an arbitrary path segment verbatim in telemetry.
+        safe_paths = {
+            "/responses",
+            "/response",
+            "/chat/completions",
+            "/v1/responses",
+            "/v1/response",
+            "/v1/chat/completions",
+        }
+        if path in safe_paths:
+            return path
+        if not path:
+            return ""
+        segments = path.split("/")
+        return "/".join(
+            "" if index == 0 and segment == "" else (
+                "" if segment == "" else f"sha256:{hashlib.sha256(segment.encode('utf-8')).hexdigest()[:16]}"
+            )
+            for index, segment in enumerate(segments)
+        )
+
     # ``urlsplit`` accepts schemeless network-path references such as
     # ``//user:secret@example.test/v1``.  They still have a usable hostname,
     # so sanitize them through the same host/port path below.  For malformed
@@ -13743,7 +13767,7 @@ def _safe_route_endpoint_url(endpoint_url: str) -> str:
     # credentials.
     if not parsed.netloc:
         path = parsed.path if value.startswith("/") and not value.startswith("//") else ""
-        return path.split("?", 1)[0].split("#", 1)[0][:300]
+        return safe_path(path.split("?", 1)[0].split("#", 1)[0])[:300]
     hostname = parsed.hostname or ""
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
@@ -13753,7 +13777,7 @@ def _safe_route_endpoint_url(endpoint_url: str) -> str:
             netloc = f"{netloc}:{parsed.port}"
     except ValueError:
         pass
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))[:300]
+    return urlunsplit((parsed.scheme, netloc, safe_path(parsed.path), "", ""))[:300]
 
 
 def _capability_state(value: Any, *, default: CapabilityState) -> CapabilityState:

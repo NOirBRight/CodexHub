@@ -1661,6 +1661,9 @@ def _negative_control_statuses(*, candidate_sha: str | None = None) -> dict[str,
         "unknown_alias": "unknown_alias",
         "duplicate_identity": "invalid_custom_stream_identity",
         "malformed_envelope": "invalid_envelope",
+        "missing_identity": "invalid_custom_stream_identity",
+        "incomplete_stream": "incomplete_stream",
+        "stream_after_terminal": "stream_after_terminal",
     }
     statuses = {name: "not_verified" for name in expected}
     try:
@@ -1943,14 +1946,20 @@ def main(argv: list[str] | None = None) -> int:
         # them independently could produce contradictory status/evidence if
         # the local runtime changes between invocations.
         controls = _negative_control_statuses(candidate_sha=args.candidate_sha or None)
+        if status == "passed" and not args.candidate_sha:
+            status = "failed"
+            failure = "candidate_sha_required"
+        else:
+            failure = None
         if status == "passed" and set(controls.values()) != {"passed"}:
             status = "failed"
+            failure = "negative_controls_unverified"
         summary = _summary(
             args.candidate_sha,
             version,
             cases=cases,
             status=status,
-            failure=("negative_controls_unverified" if status == "failed" and set(controls.values()) != {"passed"} else None),
+            failure=failure,
             negative_controls=controls,
         )
         exit_code = 0 if status == "passed" else 1

@@ -16,7 +16,10 @@
   "negative_controls": {
     "unknown_alias": "not_verified",
     "duplicate_identity": "not_verified",
-    "malformed_envelope": "not_verified"
+    "malformed_envelope": "not_verified",
+    "missing_identity": "not_verified",
+    "incomplete_stream": "not_verified",
+    "stream_after_terminal": "not_verified"
   },
   "sanitization": {
     "raw_bodies_retained": false,

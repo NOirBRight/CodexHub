@@ -206,6 +206,9 @@ def test_negative_controls_are_bound_to_candidate_sha(monkeypatch: pytest.Monkey
                     "unknown_alias": "unknown_alias",
                     "duplicate_identity": "invalid_custom_stream_identity",
                     "malformed_envelope": "invalid_envelope",
+                    "missing_identity": "invalid_custom_stream_identity",
+                    "incomplete_stream": "incomplete_stream",
+                    "stream_after_terminal": "stream_after_terminal",
                 }
             }
         ],
@@ -221,6 +224,9 @@ def test_negative_controls_are_bound_to_candidate_sha(monkeypatch: pytest.Monkey
         "unknown_alias": "passed",
         "duplicate_identity": "passed",
         "malformed_envelope": "passed",
+        "missing_identity": "passed",
+        "incomplete_stream": "passed",
+        "stream_after_terminal": "passed",
     }
     assert calls and calls[0][-2:] == ["--candidate-sha", "b" * 40]
 
@@ -252,6 +258,9 @@ def test_validator_requires_structured_provenance_for_explicit_case() -> None:
                     "unknown_alias": "passed",
                     "duplicate_identity": "passed",
                     "malformed_envelope": "passed",
+                    "missing_identity": "passed",
+                    "incomplete_stream": "passed",
+                    "stream_after_terminal": "passed",
                 },
                 "cases": [case],
             }
@@ -287,6 +296,9 @@ def test_validator_rejects_forged_provenance_digest() -> None:
                     "unknown_alias": "passed",
                     "duplicate_identity": "passed",
                     "malformed_envelope": "passed",
+                    "missing_identity": "passed",
+                    "incomplete_stream": "passed",
+                    "stream_after_terminal": "passed",
                 },
                 "cases": [case],
             }

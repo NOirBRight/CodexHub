@@ -3031,8 +3031,8 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
 
 fn catalog_source_kind(object: &Map<String, Value>) -> Option<String> {
     // The provider/upstream tuple is the authoritative catalog identity.  A
-    // top-level `source_kind = "official"` is only a presentation hint and
-    // must not promote a row whose metadata identifies a third-party route.
+    // top-level `source_kind` without that tuple is only a presentation hint
+    // and must not promote a same-slug row into the Official surface.
     if let Some(metadata) = object
         .get("codex_proxy_metadata")
         .and_then(Value::as_object)
@@ -3045,10 +3045,7 @@ fn catalog_source_kind(object: &Map<String, Value>) -> Option<String> {
             "external".to_string()
         });
     }
-    object
-        .get("source_kind")
-        .and_then(Value::as_str)
-        .and_then(nonblank)
+    None
 }
 
 fn string_array(value: &Value) -> Option<Vec<String>> {
@@ -5145,6 +5142,18 @@ for line in sys.stdin:
         });
         let model = super::catalog_model_from_item(&official).expect("catalog row");
         assert_eq!(model.source_kind.as_deref(), Some("official"));
+    }
+
+    #[test]
+    fn catalog_model_identity_requires_provider_metadata() {
+        let same_slug_without_identity = json!({
+            "slug": "gpt-5.6-luna",
+            "source_kind": "official",
+            "upstream_model": "gpt-5.6-luna"
+        });
+        let model = super::catalog_model_from_item(&same_slug_without_identity)
+            .expect("catalog row");
+        assert_eq!(model.source_kind, None);
     }
 
     #[test]

@@ -591,9 +591,17 @@ def validate_summary(value: dict[str, Any], *, candidate_sha: str | None = None)
         "sanitization_invalid",
     )
     controls = value.get("negative_controls")
+    expected_controls = {
+        "unknown_alias",
+        "duplicate_identity",
+        "malformed_envelope",
+        "missing_identity",
+        "incomplete_stream",
+        "stream_after_terminal",
+    }
     _require(
         isinstance(controls, dict)
-        and set(controls) == {"unknown_alias", "duplicate_identity", "malformed_envelope"}
+        and set(controls) == expected_controls
         and all(status in {"passed", "not_verified"} for status in controls.values()),
         "negative_controls_invalid",
     )
