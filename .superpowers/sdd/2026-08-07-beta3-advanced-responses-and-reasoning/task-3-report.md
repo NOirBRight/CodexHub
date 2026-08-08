@@ -41,7 +41,7 @@ reach telemetry.
 
 ## Verification
 
-- `py -3.13 -m pytest -q tests/test_routing.py -k "timeout or stream or incomplete or cancellation or 502 or reasoning"` — **187 passed, 427 deselected, 91 subtests passed** (18.38s).
+- `py -3.13 -m pytest -q tests/test_routing.py -k "timeout or stream or incomplete or cancellation or 502 or reasoning"` — **188 passed, 428 deselected, 91 subtests passed** (18.53s).
 - `py -3.13 -m pytest -q tests/test_proxy_event_logging.py` — **17 passed** (1.35s).
 - `py -3.13 -m pytest -q --ignore=tests/test_real_client_e2e.py` — **2149 passed, 1 skipped, 473 subtests passed** (153.73s).
 - `py -3.13 scripts/report_quality_gates.py` — report-only findings, **0 parse errors**.

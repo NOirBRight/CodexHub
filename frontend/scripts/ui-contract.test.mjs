@@ -2457,6 +2457,7 @@ test("official refresh action is placed in the Models toolbar", async () => {
 
   assert.doesNotMatch(officialDetail, /IconButton title="Refresh official models"/);
   assert.match(officialDetail, /onRefresh=\{onRefresh\}/);
+  assert.match(officialDetail, /await onRefresh\(\{ quiet: true, throwOnError: true \}\)/);
   assert.match(officialDetail, /refreshBusy=\{busy === "official-refresh"\}/);
   assert.match(modelSection, /onRefresh\?: \(\) => void;/);
   assert.match(modelSection, /refreshBusy\?: boolean;/);

@@ -903,7 +903,7 @@ function ProvidersPageImpl({
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
-                onRefresh={() => refreshOfficialModels()}
+                onRefresh={(options) => refreshOfficialModels(options)}
                 onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
@@ -1496,7 +1496,7 @@ function OfficialDetail({
   onCopyLoginCommand: () => void;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
   onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
@@ -1659,7 +1659,7 @@ function OfficialDetail({
         next[canonical] = version;
       }
       onOfficialCollaborationOverridesChanged(next);
-      await onRefresh();
+      await onRefresh({ quiet: true, throwOnError: true });
       updateToast(toastId, {
         action: null,
         text: `${t("providers.collaborationVersionSaved")} ${t("providers.officialCatalogRestartRequired")}`,
