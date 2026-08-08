@@ -2,7 +2,7 @@
   "schema": "codexhub.issue369.official-v1-v2-cli-matrix.v1",
   "evidence_status": "authenticated_cli_sanitized",
   "qualification_status": "qualified_visible_rows_only",
-  "candidate_revision": "c115551a2246e141a0a6e33c41c9ae40bd02be73",
+  "candidate_revision": "adba39866581cd33be813c717a3a0598b15f5858",
   "cli": {
     "version": "0.146.1",
     "source_contract_floor": "0.146.0",

@@ -11,7 +11,7 @@ tool results, or real wire identifiers.
 ## Candidate binding
 
 The fixture binds to the reviewed Beta3 implementation candidate
-`c115551a2246e141a0a6e33c41c9ae40bd02be73` and has
+`adba39866581cd33be813c717a3a0598b15f5858` and has
 `candidate.revision_status=final_candidate`. Rerun the bounded validator
 before the release gate:
 
@@ -82,12 +82,12 @@ python scripts/validate_issue_63_evidence.py
 ```
 
 Success prints `ISSUE_63_EVIDENCE_FIXTURE_OK` and one status for each case.
-`--require-final-candidate` intentionally fails while the candidate SHA is
-the documented placeholder. The validator checks the schema, redaction
-allow-list, route ownership, native identity preservation, adapted envelope
-round-trip, SSE event ordering, discovered declaration, follow-up links,
-history order, and no-hint classification. It has no HTTP, subprocess, CLI,
-credential, or Provider integration.
+`--require-final-candidate` passes for the checked-in bound fixture; the
+validator checks the schema, redaction allow-list, route ownership, native
+identity preservation, adapted envelope round-trip, SSE event ordering,
+discovered declaration, follow-up links, history order, and no-hint
+classification. It has no HTTP, subprocess, CLI, credential, or Provider
+integration.
 
 ## Qualification boundary
 

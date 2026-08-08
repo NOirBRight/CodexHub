@@ -1,7 +1,7 @@
 # Issue #251: bounded Code Mode evidence
 
 Status: local, protocol-controlled replay bound to the reviewed Beta3
-implementation candidate `c115551a2246e141a0a6e33c41c9ae40bd02be73`. This
+implementation candidate `adba39866581cd33be813c717a3a0598b15f5858`. This
 artifact is the bounded evidence for #251 (with #279's codec); the separate
 real CLI workflow evidence is recorded by #280 before Issue closure.
 
@@ -9,7 +9,7 @@ real CLI workflow evidence is recorded by #280 before Issue closure.
 
 The fixture retains its implementation base
 `2cc3b1ecd287b8ee15d14715d084d0eb18df12c8` and binds the evidence to
-`candidate_sha: c115551a2246e141a0a6e33c41c9ae40bd02be73`. Run the validator
+`candidate_sha: adba39866581cd33be813c717a3a0598b15f5858`. Run the validator
 with the same SHA during the candidate gate:
 
 ```powershell

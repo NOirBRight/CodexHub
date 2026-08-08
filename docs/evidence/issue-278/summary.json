@@ -1,0 +1,110 @@
+{
+  "schema": "codexhub.issue278.cli-tool-search.v1",
+  "evidence_status": "observed_synthetic_upstream",
+  "qualification_status": "passed",
+  "candidate_sha": "adba39866581cd33be813c717a3a0598b15f5858",
+  "cli_version": "codex-cli 0.146.1",
+  "route": {
+    "selected_model": "opaque-selected-model",
+    "selected_provider": "opaque-selected-provider",
+    "cross_provider_requests": 0,
+    "hosted_search_substitution": false
+  },
+  "cases": [
+    {
+      "id": "native_explicit",
+      "disposition": "native",
+      "planner_eligible": true,
+      "tool_search_visible": true,
+      "selection": "selected",
+      "classification": "completed",
+      "sse_event_types": [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_text.delta"
+      ],
+      "history_order_digest": "sha256:5fcf00b3526aa073eae21f41f24912e822eb7f3d91a272daebdc1ae7957c1311",
+      "identity_preserved": true,
+      "gateway_owned_tool_execution_count": 0,
+      "cli_event_shape_count": 9,
+      "upstream_request_count": 6
+    },
+    {
+      "id": "native_no_hint",
+      "disposition": "native",
+      "planner_eligible": true,
+      "tool_search_visible": true,
+      "selection": "model_not_selected",
+      "classification": "model_not_selected",
+      "sse_event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "history_order_digest": "sha256:f2822a0318d8be60f47e1364fd5ef125438107b3c1d68b0c79990005399b76ce",
+      "identity_preserved": true,
+      "gateway_owned_tool_execution_count": 0,
+      "cli_event_shape_count": 4,
+      "upstream_request_count": 1
+    },
+    {
+      "id": "adapted_explicit",
+      "disposition": "adapt",
+      "planner_eligible": true,
+      "tool_search_visible": true,
+      "selection": "selected",
+      "classification": "completed",
+      "sse_event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed",
+        "response.output_text.delta"
+      ],
+      "history_order_digest": "sha256:5fcf00b3526aa073eae21f41f24912e822eb7f3d91a272daebdc1ae7957c1311",
+      "identity_preserved": true,
+      "gateway_owned_tool_execution_count": 0,
+      "cli_event_shape_count": 9,
+      "upstream_request_count": 6
+    },
+    {
+      "id": "adapted_no_hint",
+      "disposition": "adapt",
+      "planner_eligible": true,
+      "tool_search_visible": true,
+      "selection": "model_not_selected",
+      "classification": "model_not_selected",
+      "sse_event_types": [
+        "response.created",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "history_order_digest": "sha256:f2822a0318d8be60f47e1364fd5ef125438107b3c1d68b0c79990005399b76ce",
+      "identity_preserved": true,
+      "gateway_owned_tool_execution_count": 0,
+      "cli_event_shape_count": 4,
+      "upstream_request_count": 1
+    }
+  ],
+  "negative_controls": {
+    "unknown_alias": "passed",
+    "duplicate_identity": "passed",
+    "malformed_envelope": "passed"
+  },
+  "sanitization": {
+    "raw_bodies_retained": false,
+    "prompts_retained": false,
+    "credentials_retained": false,
+    "ids_opaque_or_hashed": true
+  }
+}

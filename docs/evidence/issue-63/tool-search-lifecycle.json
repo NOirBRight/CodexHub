@@ -5,7 +5,7 @@
   "qualification_status": "unqualified",
   "candidate": {
     "branch": "codex/0.1.8-beta3-reasoning",
-    "revision": "c115551a2246e141a0a6e33c41c9ae40bd02be73",
+    "revision": "adba39866581cd33be813c717a3a0598b15f5858",
     "revision_status": "final_candidate",
     "cli_version": "0.146.0",
     "source_contract_status": "not_observed"

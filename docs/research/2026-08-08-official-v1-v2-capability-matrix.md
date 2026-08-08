@@ -1,8 +1,8 @@
 # Official Collaboration V1/V2 capability matrix
 
-Issue: #369  
-Candidate: `c115551a2246e141a0a6e33c41c9ae40bd02be73`  
-Codex CLI/Desktop: `0.146.1` (source-contract floor `0.146.0`)  
+Issue: #369<br>
+Candidate: `adba39866581cd33be813c717a3a0598b15f5858`<br>
+Codex CLI/Desktop: `0.146.1` (source-contract floor `0.146.0`)<br>
 Captured: `2026-08-08`
 
 The machine-readable, sanitized evidence is
@@ -26,7 +26,7 @@ third-party row.
 
 | Canonical model | Visibility | Managed baseline | V1 probe | V2 probe | Verdict | Selector |
 | --- | --- | --- | --- | --- | --- | --- |
-| `gpt-5.6-sol` | list | `v2` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
+| `gpt-5.6-sol` | list | `v2` | CLI 0.146.1 did not expose the V1 native surface, terminal 200 | complete native spawn/list/follow-up/wait/list, terminal 200 | `UNQUALIFIED` | no |
 | `gpt-5.6-terra` | list | `v2` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
 | `gpt-5.6-luna` | list | `v1` | complete native spawn/send/wait/close, terminal 200 | complete native spawn/list/send/follow-up/wait/list, terminal 200 | `GO` | yes |
 | `gpt-5.5` | list | `null` | no accepted baseline selection | full probe reported no native Collaboration surface | `UNQUALIFIED` | no |
@@ -45,9 +45,10 @@ probe and a terminal `200` response.
 
 ## UI and persistence consequence
 
-`frontend/src/lib/officialModels.ts` consumes the three exact `GO` rows above.
-Sol and Terra retain their catalog V2 baselines. Luna retains its catalog V1
-baseline and may receive an explicit model-level V2 override. The override is
+`frontend/src/lib/officialModels.ts` consumes the two exact `GO` rows above.
+Sol and Terra retain their catalog V2 baselines. Terra and Luna have accepted
+selectors; Sol remains baseline-only until a complete V1 surface is observed.
+Luna retains its catalog V1 baseline and may receive an explicit model-level V2 override. The override is
 keyed by the exact Official identity and is persisted by the managed catalog
 sidecar; refresh, restart, catalog regeneration, and session overlay writes do
 not erase it. Clearing the selector removes only that model's override.
