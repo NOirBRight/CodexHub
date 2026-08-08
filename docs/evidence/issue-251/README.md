@@ -2,7 +2,7 @@
 
 Status: deterministic replay plus bounded Codex CLI evidence bound to the
 reviewed Beta3 implementation candidate
-`ce3384aa6129351069d7f9d5dc330be4cf38152e`. This artifact is the contract
+`207fad4bf762c3b87129b009fecfe05d1eeaead9`. This artifact is the contract
 evidence for #251 (with #279's codec); the four-case #278/#280 runner summary
 records the corresponding native and adapted Code Mode workflows.
 
@@ -10,7 +10,7 @@ records the corresponding native and adapted Code Mode workflows.
 
 The fixture retains its implementation base
 `2cc3b1ecd287b8ee15d14715d084d0eb18df12c8` and binds the evidence to
-`candidate_sha: ce3384aa6129351069d7f9d5dc330be4cf38152e`. Run the validator
+`candidate_sha: 207fad4bf762c3b87129b009fecfe05d1eeaead9`. Run the validator
 with the same SHA during the candidate gate:
 
 ```powershell
@@ -91,5 +91,5 @@ bounded #278/#280 CLI summary with:
 ```powershell
 python scripts/validate_issue_278_evidence.py `
   --summary docs/evidence/issue-278/summary.json `
-  --candidate-sha ce3384aa6129351069d7f9d5dc330be4cf38152e
+  --candidate-sha 207fad4bf762c3b87129b009fecfe05d1eeaead9
 ```
