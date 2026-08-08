@@ -1,0 +1,369 @@
+{
+  "schema": "codexhub.issue63.tool-search-lifecycle.v1",
+  "artifact_kind": "issue63_tool_search_lifecycle_fixture",
+  "evidence_status": "synthetic_fixture_only",
+  "qualification_status": "unqualified",
+  "candidate": {
+    "branch": "codex/0.1.8-beta3-reasoning",
+    "revision": "REPLACE_WITH_FINAL_BETA3_SHA",
+    "revision_status": "placeholder_pending_final_candidate",
+    "cli_version": "0.146.0",
+    "source_contract_status": "not_observed"
+  },
+  "redaction": {
+    "identifiers": "opaque_fixture_aliases",
+    "query": "opaque_query_sentinel",
+    "discovered_tool": "opaque_discovered_declaration",
+    "raw_prompt_or_result": "not_retained",
+    "credentials_or_headers": "not_retained",
+    "network": "none"
+  },
+  "route": {
+    "selected_route": "opaque_selected_route",
+    "route_identity_preserved": true,
+    "cross_provider_requests": 0,
+    "hosted_search_substitution": false
+  },
+  "cases": [
+    {
+      "id": "native_explicit_hint",
+      "protocol": "responses_structured",
+      "disposition": "native",
+      "implementation_status": "existing_runtime_native_path",
+      "planner": {
+        "eligible": true,
+        "tool_search_visible": true,
+        "hint": "explicit",
+        "selection": "selected"
+      },
+      "outcome": "completed",
+      "canonical_lifecycle": {
+        "declaration": {
+          "type": "tool_search",
+          "execution": "client"
+        },
+        "search_call": {
+          "type": "tool_search_call",
+          "id": "item-native-search",
+          "call_id": "call-native-search",
+          "execution": "client",
+          "arguments": {
+            "query": "opaque_query_sentinel"
+          }
+        },
+        "search_output": {
+          "type": "tool_search_output",
+          "id": "item-native-search-output",
+          "call_id": "call-native-search",
+          "execution": "client",
+          "tools": [
+            {
+              "type": "function",
+              "name": "opaque_discovered_tool",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          ]
+        },
+        "follow_up_call": {
+          "type": "function_call",
+          "id": "item-native-follow-up",
+          "call_id": "call-native-follow-up",
+          "name": "opaque_discovered_tool",
+          "arguments": "{}"
+        },
+        "follow_up_result": {
+          "type": "function_call_output",
+          "id": "item-native-follow-up-output",
+          "call_id": "call-native-follow-up",
+          "output": "opaque_result_sentinel"
+        },
+        "history": [
+          "item-native-search",
+          "item-native-search-output",
+          "item-native-follow-up",
+          "item-native-follow-up-output"
+        ]
+      },
+      "wire": {
+        "declaration": {
+          "type": "tool_search",
+          "execution": "client"
+        },
+        "search_call": {
+          "type": "tool_search_call",
+          "id": "item-native-search",
+          "call_id": "call-native-search",
+          "execution": "client",
+          "arguments": {
+            "query": "opaque_query_sentinel"
+          }
+        },
+        "search_output": {
+          "type": "tool_search_output",
+          "id": "item-native-search-output",
+          "call_id": "call-native-search",
+          "execution": "client",
+          "tools": [
+            {
+              "type": "function",
+              "name": "opaque_discovered_tool",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          ]
+        },
+        "follow_up_call": {
+          "type": "function_call",
+          "id": "item-native-follow-up",
+          "call_id": "call-native-follow-up",
+          "name": "opaque_discovered_tool",
+          "arguments": "{}"
+        },
+        "follow_up_result": {
+          "type": "function_call_output",
+          "id": "item-native-follow-up-output",
+          "call_id": "call-native-follow-up",
+          "output": "opaque_result_sentinel"
+        },
+        "sse": {
+          "search": [
+            {
+              "event": "response.output_item.done",
+              "item": "item-native-search"
+            },
+            {
+              "event": "response.completed",
+              "response": "response-native-search"
+            }
+          ],
+          "follow_up": [
+            {
+              "event": "response.output_item.added",
+              "item": "item-native-follow-up"
+            },
+            {
+              "event": "response.function_call_arguments.delta",
+              "item": "item-native-follow-up"
+            },
+            {
+              "event": "response.function_call_arguments.done",
+              "item": "item-native-follow-up"
+            },
+            {
+              "event": "response.output_item.done",
+              "item": "item-native-follow-up"
+            },
+            {
+              "event": "response.completed",
+              "response": "response-native-follow-up"
+            }
+          ]
+        },
+        "history": [
+          "item-native-search",
+          "item-native-search-output",
+          "item-native-follow-up",
+          "item-native-follow-up-output"
+        ]
+      }
+    },
+    {
+      "id": "adapted_explicit_hint",
+      "protocol": "chat_tools",
+      "disposition": "adapt",
+      "implementation_status": "contract_fixture_only",
+      "planner": {
+        "eligible": true,
+        "tool_search_visible": true,
+        "hint": "explicit",
+        "selection": "selected"
+      },
+      "outcome": "completed",
+      "canonical_lifecycle": {
+        "declaration": {
+          "type": "tool_search",
+          "execution": "client"
+        },
+        "search_call": {
+          "type": "tool_search_call",
+          "id": "item-adapted-search",
+          "call_id": "call-adapted-search",
+          "execution": "client",
+          "arguments": {
+            "query": "opaque_query_sentinel"
+          }
+        },
+        "search_output": {
+          "type": "tool_search_output",
+          "id": "item-adapted-search-output",
+          "call_id": "call-adapted-search",
+          "execution": "client",
+          "tools": [
+            {
+              "type": "function",
+              "name": "opaque_discovered_tool",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          ]
+        },
+        "follow_up_call": {
+          "type": "function_call",
+          "id": "item-adapted-follow-up",
+          "call_id": "call-adapted-follow-up",
+          "name": "opaque_discovered_tool",
+          "arguments": "{}"
+        },
+        "follow_up_result": {
+          "type": "function_call_output",
+          "id": "item-adapted-follow-up-output",
+          "call_id": "call-adapted-follow-up",
+          "output": "opaque_result_sentinel"
+        },
+        "history": [
+          "item-adapted-search",
+          "item-adapted-search-output",
+          "item-adapted-follow-up",
+          "item-adapted-follow-up-output"
+        ]
+      },
+      "adapter": {
+        "request_scope": "opaque_request_scope",
+        "source_name": "tool_search",
+        "wire_alias": "opaque_tool_search_alias",
+        "input_key": "opaque_search_input",
+        "output_key": "opaque_search_output",
+        "inverse": "injective_and_reversible_contract"
+      },
+      "wire": {
+        "declaration": {
+          "type": "function",
+          "name": "opaque_tool_search_alias",
+          "parameters": {
+            "type": "object"
+          }
+        },
+        "search_call": {
+          "type": "function_call",
+          "id": "item-adapted-search",
+          "call_id": "call-adapted-search",
+          "name": "opaque_tool_search_alias",
+          "arguments": "{\"opaque_search_input\":{\"query\":\"opaque_query_sentinel\"}}"
+        },
+        "search_output": {
+          "type": "function_call_output",
+          "id": "item-adapted-search-output",
+          "call_id": "call-adapted-search",
+          "output": "{\"opaque_search_output\":{\"tools\":[{\"type\":\"function\",\"name\":\"opaque_discovered_tool\",\"parameters\":{\"type\":\"object\"}}]}}"
+        },
+        "follow_up_call": {
+          "type": "function_call",
+          "id": "item-adapted-follow-up",
+          "call_id": "call-adapted-follow-up",
+          "name": "opaque_discovered_tool",
+          "arguments": "{}"
+        },
+        "follow_up_result": {
+          "type": "function_call_output",
+          "id": "item-adapted-follow-up-output",
+          "call_id": "call-adapted-follow-up",
+          "output": "opaque_result_sentinel"
+        },
+        "sse": {
+          "search": [
+            {
+              "event": "response.output_item.added",
+              "item": "item-adapted-search"
+            },
+            {
+              "event": "response.function_call_arguments.delta",
+              "item": "item-adapted-search"
+            },
+            {
+              "event": "response.function_call_arguments.done",
+              "item": "item-adapted-search"
+            },
+            {
+              "event": "response.output_item.done",
+              "item": "item-adapted-search"
+            },
+            {
+              "event": "response.completed",
+              "response": "response-adapted-search"
+            }
+          ],
+          "follow_up": [
+            {
+              "event": "response.output_item.added",
+              "item": "item-adapted-follow-up"
+            },
+            {
+              "event": "response.function_call_arguments.delta",
+              "item": "item-adapted-follow-up"
+            },
+            {
+              "event": "response.function_call_arguments.done",
+              "item": "item-adapted-follow-up"
+            },
+            {
+              "event": "response.output_item.done",
+              "item": "item-adapted-follow-up"
+            },
+            {
+              "event": "response.completed",
+              "response": "response-adapted-follow-up"
+            }
+          ]
+        },
+        "history": [
+          "item-adapted-search",
+          "item-adapted-search-output",
+          "item-adapted-follow-up",
+          "item-adapted-follow-up-output"
+        ]
+      }
+    },
+    {
+      "id": "native_no_hint",
+      "protocol": "responses_structured",
+      "disposition": "native",
+      "implementation_status": "classification_fixture_only",
+      "planner": {
+        "eligible": true,
+        "tool_search_visible": true,
+        "hint": "none",
+        "selection": "not_selected",
+        "classification": "model_not_selected"
+      },
+      "outcome": "no_search_selected",
+      "upstream_sampling": "selected_route_only",
+      "wire": {
+        "search_lifecycle": [],
+        "history": []
+      }
+    },
+    {
+      "id": "adapted_no_hint",
+      "protocol": "chat_tools",
+      "disposition": "adapt",
+      "implementation_status": "classification_fixture_only",
+      "planner": {
+        "eligible": true,
+        "tool_search_visible": true,
+        "hint": "none",
+        "selection": "not_selected",
+        "classification": "model_not_selected"
+      },
+      "outcome": "no_search_selected",
+      "upstream_sampling": "selected_route_only",
+      "wire": {
+        "search_lifecycle": [],
+        "history": []
+      }
+    }
+  ]
+}
