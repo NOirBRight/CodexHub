@@ -11,7 +11,7 @@
   },
   "candidate_binding": {
     "base_sha": "2cc3b1ecd287b8ee15d14715d084d0eb18df12c8",
-    "candidate_sha": "c7f5f13949a767f62601d0b7d0e146cdb10c4098",
+    "candidate_sha": "7006542a773fc20c10e4bbcadd593393a259ceb2",
     "binding_required_before_gate": true,
     "pending_reason": null
   },
