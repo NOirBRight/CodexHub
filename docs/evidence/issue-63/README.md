@@ -13,7 +13,7 @@ retained.
 ## Candidate binding
 
 The fixture binds to the reviewed Beta3 implementation candidate
-`adba39866581cd33be813c717a3a0598b15f5858` and has
+`3faafe1ca8ed979cbaaa42aff21ffc78a7d6c1e8` and has
 `candidate.revision_status=final_candidate`. Rerun the bounded validator
 before the release gate:
 
@@ -85,7 +85,7 @@ Run the standard-library validators from the repository root:
 python scripts/validate_issue_63_evidence.py
 python scripts/validate_issue_278_evidence.py `
   --summary docs/evidence/issue-278/summary.json `
-  --candidate-sha adba39866581cd33be813c717a3a0598b15f5858
+  --candidate-sha 3faafe1ca8ed979cbaaa42aff21ffc78a7d6c1e8
 ```
 
 Success prints `ISSUE_63_EVIDENCE_FIXTURE_OK` and one status for each case.

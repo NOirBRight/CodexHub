@@ -2,7 +2,7 @@
   "schema": "codexhub.issue278.cli-tool-search.v1",
   "evidence_status": "observed_synthetic_upstream",
   "qualification_status": "passed",
-  "candidate_sha": "adba39866581cd33be813c717a3a0598b15f5858",
+  "candidate_sha": "3faafe1ca8ed979cbaaa42aff21ffc78a7d6c1e8",
   "cli_version": "codex-cli 0.146.1",
   "route": {
     "selected_model": "opaque-selected-model",
