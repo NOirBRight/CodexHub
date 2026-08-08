@@ -75,6 +75,7 @@ def test_required_unavailable_fails_before_request_encoding() -> None:
         build_tool_compatibility_plan(
             [{"type": "tool_search", "execution": "client"}],
             selected_protocol="chat_tools",
+            protocol_capabilities=ProtocolCapabilities(),
             required=True,
         )
 

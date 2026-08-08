@@ -272,7 +272,9 @@ export function useProviderCatalogActions({
     }
   }
 
-  async function refreshOfficialModels(options?: { quiet?: boolean }) {
+  async function refreshOfficialModels(
+    options?: { quiet?: boolean; throwOnError?: boolean },
+  ): Promise<boolean> {
     const quiet = options?.quiet ?? false;
     if (!quiet) {
       setBusy("official-refresh");
@@ -292,7 +294,7 @@ export function useProviderCatalogActions({
       if (quiet) {
         await refreshGatewayState();
         setModelDiscoveryError(null);
-        return;
+        return true;
       }
       const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined, {
         catalogAlreadyPublished: true,
@@ -315,13 +317,18 @@ export function useProviderCatalogActions({
         });
         setError(null);
       }
+      return !syncResult?.failed;
     } catch (err) {
       if (quiet) {
         officialModelRefreshStartedRef.current = false;
         setModelDiscoveryError(messageFromError(err));
+        if (options?.throwOnError) {
+          throw err;
+        }
       } else {
         updateToastWithError(toastId!, err);
       }
+      return false;
     } finally {
       if (!quiet) {
         setBusy(null);

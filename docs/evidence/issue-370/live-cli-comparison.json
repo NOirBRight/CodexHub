@@ -1,0 +1,85 @@
+{
+  "schema": "codexhub.issue-370.live-cli-comparison.v1",
+  "source": "authenticated_codex_cli_0.146.1",
+  "collection_policy": "timestamps and bounded classifications only",
+  "content_retained": false,
+  "credentials_retained": false,
+  "provider_output_retained": false,
+  "runs": [
+    {
+      "model": "DeepSeek V4 Flash 0731",
+      "cli_started_utc": "2026-08-07T16:46:44.7357166Z",
+      "cli_duration_ms": 20229,
+      "cli_exit_code": 0,
+      "cli_terminal_event": "turn.completed",
+      "cli_event_timeline": [
+        {
+          "event": "thread.started",
+          "utc": "2026-08-07T16:46:45.8879839Z",
+          "gap_ms": 1152
+        },
+        {
+          "event": "turn.started",
+          "utc": "2026-08-07T16:46:45.9266906Z",
+          "gap_ms": 39
+        },
+        {
+          "event": "item.completed",
+          "item_type": "agent_message",
+          "utc": "2026-08-07T16:47:00.1017435Z",
+          "gap_ms": 14175
+        },
+        {
+          "event": "turn.completed",
+          "utc": "2026-08-07T16:47:01.1369434Z",
+          "gap_ms": 1035
+        }
+      ],
+      "gateway_request_started_utc": "2026-08-07T16:46:51Z",
+      "gateway_reasoning_summary_utc": "2026-08-07T16:47:00Z",
+      "gateway_completed_utc": "2026-08-07T16:47:00Z",
+      "gateway_status": 200,
+      "gateway_failure_class": null,
+      "gateway_terminal_event": "request_complete"
+    },
+    {
+      "model": "GLM-5.2",
+      "cli_started_utc": "2026-08-07T16:50:22.9798772Z",
+      "cli_duration_ms": 136587,
+      "cli_exit_code": 0,
+      "cli_terminal_event": "turn.completed",
+      "cli_event_timeline": [
+        {
+          "event": "thread.started",
+          "utc": "2026-08-07T16:50:23.6879477Z",
+          "gap_ms": 698
+        },
+        {
+          "event": "turn.started",
+          "utc": "2026-08-07T16:50:23.7085520Z",
+          "gap_ms": 27
+        },
+        {
+          "event": "item.completed",
+          "item_type": "agent_message",
+          "utc": "2026-08-07T16:52:35.6750124Z",
+          "gap_ms": 131965
+        },
+        {
+          "event": "turn.completed",
+          "utc": "2026-08-07T16:52:36.8848775Z",
+          "gap_ms": 1210
+        }
+      ],
+      "gateway_request_started_utc": "2026-08-07T16:50:35Z",
+      "gateway_reasoning_summary_utc": "2026-08-07T16:52:36Z",
+      "gateway_completed_utc": "2026-08-07T16:52:36Z",
+      "gateway_status": 200,
+      "gateway_failure_class": null,
+      "gateway_terminal_event": "request_complete"
+    }
+  ],
+  "raw_sse_frame_timestamps_retained": false,
+  "raw_sse_limitation": "codex exec --json does not expose raw SSE frame timestamps; the collector intentionally discarded raw and unparsed output lines",
+  "desktop_status": "not_run"
+}

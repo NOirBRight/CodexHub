@@ -149,6 +149,29 @@ def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label
         )
 
 
+def _require_omittable_responses_transport_fields(payload: Mapping[str, Any]) -> None:
+    """Accept only Responses transport defaults that have no Chat meaning."""
+
+    safe_defaults: dict[str, Any] = {
+        "client_metadata": {},
+        "include": [],
+        "prompt_cache_key": "",
+        "store": False,
+        "text": {},
+    }
+    for key, default in safe_defaults.items():
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if value is None:
+            continue
+        if value != default:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                f"Cannot translate Responses {key!r} without losing its semantics.",
+            )
+
+
 def _function_arguments(value: Mapping[str, Any], label: str) -> str:
     if "arguments" not in value:
         return ""
@@ -245,7 +268,11 @@ def responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
     return "\n".join(fragment for fragment in text_fragments if fragment)
 
 
-def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
+def responses_input_to_chat_messages(
+    value: Any,
+    *,
+    loaded_tools: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     if isinstance(value, str):
         return [{"role": "user", "content": value}]
     if value is None:
@@ -265,7 +292,7 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
             )
         item_type = item.get("type")
         if item_type == "message" or (item_type is None and ("role" in item or "content" in item)):
-            _require_supported_fields(item, {"type", "role", "content"}, "Responses message input item")
+            _require_supported_fields(item, {"id", "type", "role", "content"}, "Responses message input item")
             role = item.get("role")
             if role == "developer":
                 role = "system"
@@ -279,7 +306,7 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
         if item_type == "function_call":
             _require_supported_fields(
                 item,
-                {"type", "call_id", "name", "arguments"},
+                {"id", "type", "call_id", "name", "arguments"},
                 "Responses function-call input item",
             )
             call_id = item.get("call_id")
@@ -312,7 +339,7 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
         if item_type == "function_call_output":
             _require_supported_fields(
                 item,
-                {"type", "call_id", "output"},
+                {"id", "type", "call_id", "output"},
                 "Responses function-call output item",
             )
             call_id = item.get("call_id")
@@ -328,6 +355,46 @@ def responses_input_to_chat_messages(value: Any) -> list[dict[str, Any]]:
                     "Cannot translate a non-string Responses function-call output to Chat Completions.",
                 )
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+            continue
+        if item_type == "tool_search_call":
+            _require_supported_fields(
+                item,
+                {"id", "type", "execution", "call_id", "status", "arguments"},
+                "Responses client tool-search call input item",
+            )
+            if item.get("execution") != "client":
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate a non-client tool-search call to Chat Completions.",
+                )
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedProtocolTranslationError(
+                    "unpaired_tool_call",
+                    "Cannot translate a tool-search call without a non-empty call_id.",
+                )
+            # Chat Completions has no tool-search item.  The loaded definitions
+            # are carried in the next request's tools array instead.
+            continue
+        if item_type == "tool_search_output":
+            _require_supported_fields(
+                item,
+                {"id", "type", "execution", "call_id", "status", "tools"},
+                "Responses client tool-search output input item",
+            )
+            if item.get("execution") != "client":
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate a non-client tool-search output to Chat Completions.",
+                )
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedProtocolTranslationError(
+                    "unpaired_tool_call",
+                    "Cannot translate a tool-search output without a non-empty call_id.",
+                )
+            if loaded_tools is not None:
+                loaded_tools.extend(responses_tools_to_chat_tools(item.get("tools")))
             continue
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -396,10 +463,28 @@ def responses_tool_choice_to_chat_tool_choice(value: Any) -> Any:
     return {"type": "function", "function": {"name": name}}
 
 
-def responses_request_to_chat_completion_body(body: bytes) -> bytes:
+def responses_request_to_chat_completion_body(
+    body: bytes,
+    *,
+    drop_client_metadata: bool = False,
+    drop_client_transport_fields: bool = False,
+    drop_reasoning: bool = False,
+) -> bytes:
     payload = json.loads(body.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         return body
+    # ``client_metadata`` is Codex transport bookkeeping.  It has no
+    # Chat Completions representation, and the Gateway may explicitly drop
+    # it when crossing into a third-party Chat endpoint.  Keep the strict
+    # default for direct converter callers so accidental semantic loss still
+    # fails closed unless the route selected this documented policy.
+    if drop_client_transport_fields:
+        for key in ("client_metadata", "include", "prompt_cache_key", "store", "text"):
+            payload.pop(key, None)
+    elif drop_client_metadata:
+        payload.pop("client_metadata", None)
+    if drop_reasoning:
+        payload.pop("reasoning", None)
     _require_supported_fields(
         payload,
         {
@@ -416,9 +501,18 @@ def responses_request_to_chat_completion_body(body: bytes) -> bytes:
             "parallel_tool_calls",
             "max_output_tokens",
             "reasoning",
+            # These Responses-only transport controls are accepted only when
+            # they carry their explicit no-op defaults; semantic values are
+            # rejected below instead of silently dropped.
+            "client_metadata",
+            "include",
+            "prompt_cache_key",
+            "store",
+            "text",
         },
         "Responses request",
     )
+    _require_omittable_responses_transport_fields(payload)
     if payload.get("reasoning") is not None:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -438,10 +532,16 @@ def responses_request_to_chat_completion_body(body: bytes) -> bytes:
         )
 
     messages: list[dict[str, Any]] = []
+    loaded_tools: list[dict[str, Any]] = []
     instructions = payload.get("instructions")
     if isinstance(instructions, str) and instructions.strip():
         messages.append({"role": "system", "content": instructions})
-    messages.extend(responses_input_to_chat_messages(payload.get("input")))
+    messages.extend(
+        responses_input_to_chat_messages(
+            payload.get("input"),
+            loaded_tools=loaded_tools,
+        )
+    )
     if not messages:
         messages.append({"role": "user", "content": ""})
 
@@ -462,6 +562,7 @@ def responses_request_to_chat_completion_body(body: bytes) -> bytes:
         chat_payload["max_tokens"] = payload["max_output_tokens"]
 
     tools = responses_tools_to_chat_tools(payload.get("tools"))
+    tools.extend(loaded_tools)
     if tools:
         chat_payload["tools"] = tools
     tool_choice = responses_tool_choice_to_chat_tool_choice(payload.get("tool_choice"))

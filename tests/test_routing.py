@@ -55,6 +55,16 @@ def _load_glm_apply_patch_history_native_ids_fixture():
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
+def _load_issue_370_reasoning_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "issue_370_reasoning_stream.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _load_issue_370_stream_classification_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "issue_370_stream_classification.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def _load_model_switch_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "real_client_e2e" / "model-switch-v1-v2.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -5131,6 +5141,27 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(fields["sse_terminal_event_seen"])
         self.assertEqual(fields["sse_eof_disposition"], "incomplete")
         self.assertEqual(fields["sse_incomplete_bytes_discarded"], 37)
+
+    def test_passthrough_semantics_record_bounded_stream_timing_and_unobserved_connect_phases(self):
+        now = [100.0]
+        stats = codex_proxy.PassthroughSseSemanticStats(clock=lambda: now[0])
+
+        stats.observe_bytes(
+            b'data: {"type":"response.created","response":{"id":"redacted"}}\n\n'
+        )
+        now[0] += 5.25
+        stats.observe_bytes(
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        )
+        fields = stats.fields()
+
+        self.assertEqual(fields["sse_first_byte_elapsed_ms"], 0)
+        self.assertEqual(fields["sse_first_event_elapsed_ms"], 0)
+        self.assertEqual(fields["sse_last_inter_event_gap_ms"], 5250)
+        self.assertEqual(fields["sse_max_inter_event_gap_ms"], 5250)
+        self.assertEqual(fields["sse_terminal_elapsed_ms"], 5250)
+        self.assertEqual(fields["upstream_connect_timing"], "not_observed")
+        self.assertEqual(fields["upstream_tls_timing"], "not_observed")
 
     def test_passthrough_semantics_releases_size_limit_exception_traceback(self):
         stats = codex_proxy.PassthroughSseSemanticStats(max_frame_bytes=8)
@@ -12805,6 +12836,20 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["reasoning"]["effort"], "max")
 
+    def test_chat_completions_route_preserves_responses_reasoning_for_strict_translation(self):
+        upstream = {
+            "name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "tool_protocol": "chat_tools",
+            "tool_surface_strategy": "deferred_core",
+        }
+        body = b'{"model":"glm-5.2","reasoning":{"effort":"medium"},"input":"hi"}'
+
+        transformed = compatible_request_body(body, upstream)
+
+        self.assertEqual(json.loads(transformed)["reasoning"], {"effort": "medium"})
+
     def test_ollama_body_maps_xhigh_string_reasoning_to_max(self):
         upstream = choose_upstream("glm-5.2")
         body = b'{"model":"glm-5.2","reasoning":"xhigh","input":"hi"}'
@@ -13597,6 +13642,33 @@ class RoutingTests(unittest.TestCase):
             "https://chatgpt.com/backend-api/codex/responses/resp_123/input_items",
         )
 
+    def test_route_failure_endpoint_identity_never_retains_userinfo(self):
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("https://user:secret@example.test/v1"),
+            "https://example.test/v1",
+        )
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("//user:secret@example.test/v1"),
+            "//example.test/v1",
+        )
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("http://user:secret@[bad/v1"),
+            "",
+        )
+        self.assertNotIn(
+            "secret",
+            codex_proxy._safe_route_endpoint_url("user:secret@example.test/v1"),
+        )
+        redacted_path = codex_proxy._safe_route_endpoint_url(
+            "https://example.test/v1/sk-live-secret/responses"
+        )
+        self.assertNotIn("sk-live-secret", redacted_path)
+        self.assertIn("sha256:", redacted_path)
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("https://example.test/v1/responses"),
+            "https://example.test/v1/responses",
+        )
+
     def test_official_body_removes_plaintext_reasoning_encrypted_content(self):
         upstream = choose_upstream("gpt-5.5")
         body = json.dumps(
@@ -13670,6 +13742,42 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(payload["input"], [{"type": "message", "role": "user", "content": "continue"}])
         self.assertNotIn("rs_external_not_on_openai", transformed.decode("utf-8"))
         self.assertNotIn("foreign summary", transformed.decode("utf-8"))
+
+    def test_external_reasoning_item_does_not_cross_official_store_false_route_boundary(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        external_item = fixture["reasoning_done"]["item"]
+        official_encrypted = "gAAAAredacted-official-encrypted-content"
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "store": False,
+                "stream": True,
+                "input": [
+                    external_item,
+                    {
+                        "type": "reasoning",
+                        "id": "rs_official_redacted",
+                        "summary": [],
+                        "encrypted_content": official_encrypted,
+                    },
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            }
+        ).encode("utf-8")
+
+        transformed = compatible_request_body(
+            body,
+            choose_upstream("gpt-5.5"),
+            behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        payload = json.loads(transformed)
+        input_items = payload["input"]
+
+        self.assertEqual([item["type"] for item in input_items], ["reasoning", "message"])
+        self.assertEqual(input_items[0]["encrypted_content"], official_encrypted)
+        self.assertNotIn("rs_external_redacted", transformed.decode("utf-8"))
+        self.assertNotIn("redacted summary", transformed.decode("utf-8"))
+        self.assertNotIn("provider-local", transformed.decode("utf-8"))
 
     def test_official_passthrough_keeps_portable_reasoning_and_tool_history_order(self):
         upstream = choose_upstream("gpt-5.5")
@@ -13974,7 +14082,58 @@ class RoutingTests(unittest.TestCase):
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
         self.assertNotIn("encrypted_content", payload["item"])
-        self.assertEqual(payload["item"]["summary"], [])
+        self.assertEqual(payload["item"]["summary"], [{"type": "summary_text", "text": "third party summary"}])
+
+    def test_external_reasoning_stream_forwards_summary_and_suppresses_raw_events(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        raw_line = b"data: " + json.dumps(fixture["raw_reasoning_delta"], separators=(",", ":")).encode("utf-8") + b"\n"
+        summary_part_line = b"data: " + json.dumps(fixture["summary_part_added"], separators=(",", ":")).encode("utf-8") + b"\n"
+        summary_line = b"data: " + json.dumps(fixture["summary_delta"], separators=(",", ":")).encode("utf-8") + b"\n"
+
+        self.assertTrue(codex_proxy._is_raw_reasoning_stream_event(fixture["raw_reasoning_delta"]))
+        self.assertFalse(codex_proxy._is_raw_reasoning_stream_event(fixture["summary_delta"]))
+        self.assertTrue(codex_proxy._is_reasoning_summary_stream_event(fixture["summary_delta"]))
+        self.assertEqual(compatible_sse_line(raw_line, "ollama_cloud", event_context={}), b"")
+
+        forwarded_part = compatible_sse_line(summary_part_line, "ollama_cloud", event_context={})
+        self.assertIn(b"response.reasoning_summary_part.added", forwarded_part)
+
+        forwarded = compatible_sse_line(summary_line, "ollama_cloud", event_context={})
+        self.assertIn(b"response.reasoning_summary_text.delta", forwarded)
+        self.assertIn(b'"delta":"redacted summary progress"', forwarded)
+
+    def test_external_reasoning_done_keeps_only_text_summaries(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        line = b"data: " + json.dumps(fixture["reasoning_done"], separators=(",", ":")).encode("utf-8") + b"\n"
+
+        forwarded = compatible_sse_line(line, "ollama_cloud", event_context={})
+        payload = json.loads(forwarded.removeprefix(b"data: "))
+        item = payload["item"]
+
+        self.assertEqual(item["summary"], [{"type": "summary_text", "text": "redacted summary"}])
+        for forbidden in ("content", "raw_content", "reasoning_content", "thinking", "encrypted_content"):
+            self.assertNotIn(forbidden, item)
+        self.assertNotIn(b"provider-local", forwarded)
+
+    def test_external_reasoning_summary_progress_releases_buffer_but_empty_terminal_is_not_visible(self):
+        fixture = _load_issue_370_reasoning_fixture()
+        response = FakeSseResponse(
+            [
+                b"data: " + json.dumps(fixture["summary_delta"], separators=(",", ":")).encode("utf-8") + b"\n\n",
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                b"",
+            ]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(handler, response, "ollama_cloud", relay_fixture=RELAY_GATEWAY)
+
+        data = b"".join(handler.wfile.writes)
+        self.assertEqual(status, 502)
+        self.assertIn(b"response.reasoning_summary_text.delta", data)
+        self.assertIn(b'"delta":"redacted summary progress"', data)
+        self.assertNotIn(b"response.completed", data)
+        self.assertIn(b"upstream_empty_completed_response", data)
 
     def test_external_sse_relay_removes_plaintext_reasoning_encrypted_content(self):
         handler = FakeHandler()
@@ -13993,7 +14152,7 @@ class RoutingTests(unittest.TestCase):
         data_line = handler.wfile.writes[0].decode("utf-8")
         payload = json.loads(data_line.removeprefix("data: "))
         self.assertNotIn("encrypted_content", payload["item"])
-        self.assertEqual(payload["item"]["summary"], [])
+        self.assertEqual(payload["item"]["summary"], [{"type": "summary_text", "text": "third party summary"}])
 
     def test_external_sse_relay_copies_reasoning_content_to_summary_for_codex_app(self):
         handler = FakeHandler()
@@ -14041,42 +14200,24 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(b"response.completed", data)
         self.assertIn(b"upstream_empty_completed_response", data)
 
-    def test_external_responses_sse_relay_drops_named_reasoning_summary_event_frame(self):
+    def test_external_responses_sse_relay_preserves_standard_reasoning_summary_progress(self):
+        response = FakeSseResponse([
+            b'event: response.reasoning_summary_text.delta\n',
+            b'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_ext","output_index":0,"summary_index":0,"delta":"progress"}\n\n',
+            b'data: {"type":"response.output_text.delta","delta":"answer"}\n\n',
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+            b"",
+        ])
         handler = FakeHandler()
-        response = FakeSseResponse(
-            [
-                b"event: response.reasoning_summary_text.delta\n",
-                b'data: {"type":"response.reasoning_summary_text.delta","delta":"hidden"}\n',
-                b"\n",
-                b"event: response.output_text.delta\n",
-                b'data: {"type":"response.output_text.delta","delta":"ok"}\n',
-                b"\n",
-                b"event: response.completed\n",
-                b'data: {"type":"response.completed","response":{"status":"completed"}}\n',
-                b"\n",
-                b"",
-            ]
-        )
-
         status = relay_upstream_response(
-            handler,
-            response,
-            "ollama_cloud",
+            handler, response, "ollama_cloud",
             relay_fixture=RELAY_GATEWAY,
-            request_id="req_named_reasoning_summary",
-            model="ollama-cloud/glm-5.2",
-            upstream_format="responses",
-            inbound_format="responses",
-            caller_stream=True,
+            upstream_format="responses", inbound_format="responses", caller_stream=True,
         )
-
+        assert status == 200
         data = b"".join(handler.wfile.writes)
-        self.assertEqual(status, 200)
-        self.assertNotIn(b"event: response.reasoning_summary_text.delta", data)
-        self.assertNotIn(b"hidden", data)
-        self.assertIn(b"event: response.output_text.delta", data)
-        self.assertIn(b'"delta":"ok"', data)
-        self.assertIn(b"event: response.completed", data)
+        assert b"response.reasoning_summary_text.delta" in data
+        assert b'"delta":"progress"' in data
 
     def test_external_sse_relay_downgrades_invalid_function_call_name(self):
         handler = FakeHandler()
@@ -16326,6 +16467,359 @@ class RoutingTests(unittest.TestCase):
         self.assertIn(b"response.completed", data)
         self.assertNotIn(b"upstream_stream_idle_timeout", data)
 
+    def test_issue_370_stream_classification_fixtures(self):
+        fixture = _load_issue_370_stream_classification_fixture()
+        relay_fixtures = {
+            "gateway": RELAY_GATEWAY,
+            "transparent": RELAY_TRANSPARENT,
+        }
+
+        for case in fixture["cases"]:
+            case = dict(case)
+            if "relay_fixture" in case:
+                case["relay_fixture"] = relay_fixtures[case["relay_fixture"]]
+            with self.subTest(case=case["name"]):
+                expected = case["expected"]
+                self.write_proxy_event.reset_mock()
+                if case["kind"] == "http_error":
+                    request = codex_proxy.Request(
+                        "https://example.test/v1/responses",
+                        data=b"{}",
+                        method="POST",
+                    )
+                    error = HTTPError(
+                        request.full_url,
+                        case["status"],
+                        "Upstream Gateway Error",
+                        {},
+                        io.BytesIO(b'{"error":{"type":"server_error"}}'),
+                    )
+                    private_context = {
+                        "request_id": f"req-{case['name']}",
+                        "model": "ollama-cloud/glm-5.2",
+                        "provider_id": "provider-private-id",
+                        "prompt": "PRIVATE_PROMPT",
+                        "reasoning_text": "PRIVATE_REASONING",
+                        "response_id": "resp_private",
+                        "tool_arguments": {"private": True},
+                        "tool_results": "PRIVATE_TOOL_RESULT",
+                        "credentials": {"Authorization": "Bearer private"},
+                    }
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
+                                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "2",
+                            },
+                            clear=False,
+                        ),
+                        patch("codex_proxy.urlopen", side_effect=error) as open_once,
+                        patch("codex_proxy.time.sleep"),
+                    ):
+                        with self.assertRaises(HTTPError) as raised:
+                            codex_proxy._open_upstream_response(
+                                request,
+                                upstream_name=case["upstream"],
+                                upstream_format="responses",
+                                timeout=1,
+                                event_context=private_context,
+                            )
+
+                    handler = FakeHandler()
+                    status = relay_upstream_response(
+                        handler,
+                        raised.exception,
+                        case["upstream"],
+                        relay_fixture=RELAY_TRANSPARENT,
+                        request_id=private_context["request_id"],
+                        model=private_context["model"],
+                        upstream_format="responses",
+                        inbound_format="responses",
+                        caller_stream=False,
+                        event_context=private_context,
+                    )
+                    self.assertEqual(open_once.call_count, 1)
+                    seam = handler._downstream_stream_commit
+                    terminal = seam.terminal_committed
+                    downstream_output_started = seam._downstream_output_started
+                    failure_event = next(
+                        call.kwargs
+                        for call in self.write_proxy_event.call_args_list
+                        if call.args and call.args[0] == "upstream_retry_suppressed"
+                    )
+                    failure_class = failure_event["failure_class"]
+                    retry_forbidden = failure_event["retry_forbidden"]
+                    retry_safety_class = failure_event["retry_safety_class"]
+                    failure_phase = failure_event["failure_phase"]
+                    self.assertFalse(
+                        {
+                            "prompt",
+                            "reasoning_text",
+                            "response_id",
+                            "tool_arguments",
+                            "tool_results",
+                            "credentials",
+                        }
+                        & failure_event.keys()
+                    )
+                    self.assertEqual(failure_event["provider_id"], case["upstream"])
+                else:
+                    events = [
+                        b"data: "
+                        + json.dumps(event, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                        + b"\n\n"
+                        for event in case.get("events", [])
+                    ]
+                    delays = case.get("delay_ms", [])
+                    sequenced_lines = [
+                        (
+                            (delays[index] if index < len(delays) else 0) / 1000,
+                            line,
+                        )
+                        for index, line in enumerate(events)
+                    ]
+                    trailing_bytes = case.get("trailing_bytes")
+                    if isinstance(trailing_bytes, str):
+                        sequenced_lines.append((0, trailing_bytes.encode("utf-8")))
+                    sequenced_lines.append(
+                        (
+                            (delays[len(events)] if len(delays) > len(events) else 0) / 1000,
+                            b"",
+                        )
+                    )
+                    handler = FakeHandler()
+                    if case["kind"] == "downstream_write_failure":
+                        fail_index = int(case["fail_on_write_index"])
+                        handler.wfile = FakeWFile(
+                            fail_on_write=lambda _data, index, fail_index=fail_index: index >= fail_index
+                        )
+                    upstream_name = case["upstream"]
+                    model = (
+                        "openai/gpt-5.5"
+                        if upstream_name == "official"
+                        else "ollama-cloud/glm-5.2"
+                    )
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "1",
+                            "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.15",
+                        },
+                        clear=False,
+                    ):
+                        status = relay_upstream_response(
+                            handler,
+                            FakeSequencedDelayedSseResponse(sequenced_lines),
+                            upstream_name,
+                            relay_fixture=case["relay_fixture"],
+                            request_id=f"req-{case['name']}",
+                            model=model,
+                            upstream_format="responses",
+                            inbound_format="responses",
+                            caller_stream=True,
+                        )
+                    seam = handler._downstream_stream_commit
+                    terminal = seam.terminal_committed
+                    downstream_output_started = seam._downstream_output_started
+                    event_names = [
+                        call.args[0]
+                        for call in self.write_proxy_event.call_args_list
+                        if call.args
+                    ]
+                    failure_event = next(
+                        (
+                            call.kwargs
+                            for call in self.write_proxy_event.call_args_list
+                            if call.args
+                            and call.args[0]
+                            in {
+                                "downstream_stream_closed",
+                                "upstream_stream_incomplete",
+                            }
+                        ),
+                        None,
+                    )
+                    failure_class = (
+                        failure_event.get("failure_class")
+                        if failure_event is not None
+                        else None
+                    )
+                    retry_forbidden = bool(
+                        failure_event and failure_event.get("retry_forbidden", False)
+                    )
+                    retry_safety_class = (
+                        failure_event.get("retry_safety_class")
+                        if failure_event is not None
+                        else None
+                    )
+                    failure_phase = (
+                        failure_event.get("failure_phase")
+                        if failure_event is not None
+                        else None
+                    )
+                    if status == 200:
+                        self.assertNotIn("upstream_stream_incomplete", event_names)
+                        self.assertNotIn("downstream_stream_closed", event_names)
+                        downstream = b"".join(handler.wfile.writes)
+                        self.assertIn(b'"type":"response.completed"', downstream)
+
+                self.assertEqual(status, expected["status"])
+                self.assertEqual(failure_class, expected["failure_class"])
+                self.assertEqual(terminal, expected["terminal"])
+                self.assertEqual(
+                    downstream_output_started,
+                    expected["downstream_output_started"],
+                )
+                self.assertEqual(retry_forbidden, expected["retry_forbidden"])
+                if "retry_safety_class" in expected:
+                    self.assertEqual(retry_safety_class, expected["retry_safety_class"])
+                if "failure_phase" in expected:
+                    self.assertEqual(failure_phase, expected["failure_phase"])
+
+    def test_issue_370_incomplete_stream_suppresses_retry_after_completed_tool_call(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_private","status":"in_progress"}}\n\n',
+                b'data: {"type":"response.output_item.done","item":{"id":"item_private","type":"function_call","status":"completed","call_id":"call_private","name":"shell_command","arguments":"{\\"command\\":\\"PRIVATE_TOOL_ARGUMENT\\"}"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "official",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-incomplete-tool-side-effect",
+            model="openai/gpt-5.5",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(event["completed_tool_calls"], 1)
+        self.assertTrue(event["retry_forbidden"])
+        self.assertEqual(event["failure_phase"], "stream_body")
+        self.assertEqual(
+            event["retry_safety_class"],
+            codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+        )
+        self.assertNotIn(b"PRIVATE_TOOL_ARGUMENT", b"".join(handler.wfile.writes))
+
+    def test_issue_370_incomplete_third_party_stream_without_output_is_post_write(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_no_output","status":"in_progress"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-incomplete-no-output",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(status, 502)
+        self.assertFalse(event["downstream_output_started"])
+        self.assertFalse(event["retry_forbidden"])
+        self.assertEqual(event["failure_class"], codex_proxy.RETRY_FAILURE_QUICK_TRANSIENT)
+        self.assertEqual(event["failure_phase"], "stream_body")
+        self.assertEqual(
+            event["retry_safety_class"],
+            codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+        )
+
+    def test_issue_370_failure_events_retain_exact_route_identity(self):
+        route_context = {
+            "route_provider_id": "ollama-cloud",
+            "route_model_requested": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_model_canonical": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_upstream_model": "deepseek-v4-flash-0731",
+            "route_endpoint_url": "https://ollama.example/v1/responses",
+            "route_attempt_provider_id": "ollama-cloud",
+            "route_attempt_model_requested": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_attempt_model_canonical": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_attempt_upstream_model": "deepseek-v4-flash-0731",
+            "route_attempt_endpoint_url": "https://ollama.example/v1/responses",
+        }
+
+        incomplete_handler = FakeHandler()
+        incomplete_status = relay_upstream_response(
+            incomplete_handler,
+            FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"resp_route"}}\n\n',
+                    b"",
+                ]
+            ),
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-route-incomplete",
+            model="ollama-cloud/deepseek-v4-flash-0731",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=route_context,
+        )
+        incomplete_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(incomplete_status, 502)
+        for key, value in route_context.items():
+            self.assertEqual(incomplete_event[key], value)
+
+        self.write_proxy_event.reset_mock()
+        closed_handler = FakeHandler()
+        closed_handler.wfile = FakeWFile(fail_on_write=lambda _data, _index: True)
+        closed_status = relay_upstream_response(
+            closed_handler,
+            FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"resp_route"}}\n\n',
+                    b"",
+                ]
+            ),
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-route-closed",
+            model="ollama-cloud/deepseek-v4-flash-0731",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=route_context,
+        )
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(closed_status, 499)
+        for key, value in route_context.items():
+            self.assertEqual(closed_event[key], value)
+
     def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()
         response = FakeSequencedDelayedSseResponse(
@@ -16401,7 +16895,7 @@ class RoutingTests(unittest.TestCase):
 
         payload = json.loads(handler.wfile.writes[0])
         self.assertNotIn("encrypted_content", payload["output"][0])
-        self.assertEqual(payload["output"][0]["summary"], [])
+        self.assertEqual(payload["output"][0]["summary"], [{"type": "summary_text", "text": "third party summary"}])
 
     def test_external_non_sse_relay_copies_reasoning_content_to_summary_for_codex_app(self):
         handler = FakeHandler()
@@ -17691,6 +18185,71 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(history_events[0]["outcome"], "adapted")
         self.assertEqual(history_events[0]["count"], 1)
         for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
+    def test_responses_structured_collaboration_v2_adapts_apply_patch_history_without_v1_repair(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [
+                        {
+                            "type": "custom_tool_call",
+                            "status": "completed",
+                            "call_id": "call_apply_patch",
+                            "name": "apply_patch",
+                            "input": patch_text,
+                        },
+                        {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call_apply_patch",
+                            "output": "Success. Updated target.txt",
+                        },
+                    ],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={
+                "request_id": "<sanitized-request-id>",
+                "collaboration_protocol": "collaboration_v2",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["function_call", "function_call_output"],
+        )
+        self.assertEqual(payload["input"][0]["call_id"], "call_apply_patch")
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(
+            payload["input"][0]["arguments"],
+            json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")),
+        )
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": "call_apply_patch",
+                "output": "Success. Updated target.txt",
+            },
+        )
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
             self.assertNotIn(forbidden, history_events[0])
 
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
@@ -20768,6 +21327,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_search_first",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": query},
             },
             {
@@ -20782,6 +21342,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_search_second",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": query},
             },
             {
@@ -20878,12 +21439,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_bounded_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_bounded_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_bounded_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_bounded_second", "tools": []},
@@ -20921,12 +21484,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_body_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_body_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_body_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_body_second", "tools": []},
@@ -20998,6 +21563,22 @@ Execution constraints:
         self.assertNotIn(distinct_query, telemetry_text)
         self.assertNotIn("_bounded_tool_search_query_digests", telemetry_text)
 
+    def test_bounded_search_suppression_does_not_steal_provider_function_named_tool_search(self):
+        bounded_query = "mcp__synthetic__ordinary_tool_search"
+        event_context = {"_bounded_tool_search_query_digests": frozenset({
+            codex_proxy._tool_search_query_digest(bounded_query)
+        })}
+        item = {
+            "type": "function_call",
+            "id": "ordinary-provider-item",
+            "call_id": "ordinary-provider-call",
+            "name": "tool_search",
+            "arguments": json.dumps({"query": bounded_query}),
+        }
+        transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+        self.assertFalse(changed)
+        self.assertEqual(transformed, item)
+
     def test_deferred_tool_search_sse_suppresses_third_bounded_query_and_keeps_distinct_callable(self):
         bounded_query = "mcp__synthetic__sse_bounded"
         distinct_query = "mcp__synthetic__sse_distinct"
@@ -21006,12 +21587,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_sse_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_sse_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_sse_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_sse_second", "tools": []},
@@ -21086,12 +21669,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_stream_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_stream_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_stream_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_stream_second", "tools": []},
@@ -21218,12 +21803,14 @@ Execution constraints:
                 {
                     "type": "tool_search_call",
                     "call_id": "call_diagnostic_first",
+                    "execution": "client",
                     "arguments": {"query": bounded_query},
                 },
                 {"type": "tool_search_output", "call_id": "call_diagnostic_first", "tools": []},
                 {
                     "type": "tool_search_call",
                     "call_id": "call_diagnostic_second",
+                    "execution": "client",
                     "arguments": {"query": bounded_query},
                 },
                 {"type": "tool_search_output", "call_id": "call_diagnostic_second", "tools": []},
@@ -21417,6 +22004,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_found",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": "synthetic_weather_lookup", "limit": 1},
             },
             {
@@ -22103,7 +22691,7 @@ Execution constraints:
             {
                 "model": "glm-5.2",
                 "input": [
-                    {"type": "tool_search_call", "call_id": "call_search", "arguments": {"query": "spawn_agent multi_agent subagent"}},
+                    {"type": "tool_search_call", "call_id": "call_search", "execution": "client", "arguments": {"query": "spawn_agent multi_agent subagent"}},
                     {"type": "tool_search_output", "call_id": "call_search", "tools": codex_proxy.MULTI_AGENT_DISCOVERY_TOOLS},
                 ],
                 "tools": [{"type": "function", "name": "tool_search", "parameters": {"type": "object"}}],
@@ -26957,6 +27545,57 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertIn(b"response.completed", body)
         self.assertNotIn(b"upstream_empty_completed_response", body)
 
+    def test_external_provider_tool_search_call_only_sse_is_not_treated_as_empty_completed(self):
+        fake = FakeHandler()
+        search_item = {
+            "type": "tool_search_call",
+            "id": "search-item",
+            "call_id": "search-call",
+            "execution": "client",
+            "arguments": {"query": "fixture search"},
+        }
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b"data: "
+                + json.dumps({"type": "response.output_item.done", "item": search_item}).encode("utf-8")
+                + b"\n\n",
+                b"data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_1",
+                            "status": "completed",
+                            "output": [search_item],
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n\n",
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            fake,
+            response,
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-tool-search-only",
+            model="glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            usage_capture={},
+            defer_stream_errors=True,
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"tool_search_call", body)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"upstream_empty_completed_response", body)
+
     def test_external_sse_keeps_codex_apps_flat_alias(self):
         payload = {
             "type": "response.output_item.done",
@@ -26988,11 +27627,104 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         }
         line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
 
-        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_sse_line(
+            line,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                "_tool_search_client_owned": True,
+            },
+        )
         call = json.loads(transformed.removeprefix(b"data: "))["item"]
 
         self.assertEqual(call["type"], "tool_search_call")
         self.assertEqual(call["arguments"], {"query": "spawn_agent", "limit": 8})
+
+    def test_external_sse_does_not_steal_provider_function_named_tool_search(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_provider_search",
+                "name": "tool_search",
+                "arguments": json.dumps({"query": "provider-owned"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(
+            line,
+            "ollama_cloud",
+            event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
+        )
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call, payload["item"])
+
+    def test_bounded_search_does_not_steal_provider_tool_search_item(self):
+        bounded_query = "provider-owned-tool-search"
+        event_context = {
+            "_bounded_tool_search_query_digests": frozenset({
+                codex_proxy._tool_search_query_digest(bounded_query),
+            })
+        }
+        item = {
+            "type": "tool_search_call",
+            "execution": "provider",
+            "id": "provider-item",
+            "call_id": "provider-call",
+            "arguments": {"query": bounded_query},
+        }
+
+        transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+
+        self.assertFalse(changed)
+        self.assertEqual(transformed, item)
+
+    def test_bounded_search_requires_explicit_client_execution_marker(self):
+        bounded_query = "provider-owned-tool-search-without-ownership"
+        event_context = {
+            "_bounded_tool_search_query_digests": frozenset({
+                codex_proxy._tool_search_query_digest(bounded_query),
+            })
+        }
+        for execution in (None, "unknown"):
+            item = {
+                "type": "tool_search_call",
+                "id": f"provider-item-{execution or 'missing'}",
+                "call_id": "provider-call",
+                "arguments": {"query": bounded_query},
+            }
+            if execution is not None:
+                item["execution"] = execution
+
+            transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+
+            self.assertFalse(changed)
+            self.assertEqual(transformed, item)
+
+    def test_bounded_empty_search_ledger_requires_explicit_client_execution_marker(self):
+        query = "provider-owned-empty-search-without-ownership"
+        history = [
+            {"type": "tool_search_call", "call_id": "missing", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "missing", "tools": []},
+            {"type": "tool_search_call", "call_id": "unknown", "execution": "unknown", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "unknown", "tools": []},
+        ]
+
+        self.assertEqual(codex_proxy._bounded_empty_tool_search_terminal_calls(history), {})
+
+        client_history = [
+            {"type": "tool_search_call", "call_id": "client-1", "execution": "client", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "client-1", "tools": []},
+            {"type": "tool_search_call", "call_id": "client-2", "execution": "client", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "client-2", "tools": []},
+        ]
+        self.assertEqual(
+            codex_proxy._bounded_empty_tool_search_terminal_calls(client_history),
+            {"client-2": (query, 2)},
+        )
 
     def test_kimi_k2_6_external_request_removes_unsupported_reasoning(self):
         body = json.dumps(

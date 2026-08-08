@@ -140,6 +140,9 @@ function ProvidersPageImpl({
       normalizedSettings?.official_model_sort_order ?? [],
     );
   });
+  const [officialCollaborationOverrides, setOfficialCollaborationOverrides] = useState<
+    Record<string, "v1" | "v2">
+  >({});
   const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
@@ -204,6 +207,20 @@ function ProvidersPageImpl({
     toast: { showToast, updateToast },
     updateToastWithError,
   });
+
+  useEffect(() => {
+    let active = true;
+    void api.listOfficialMultiAgentOverrides()
+      .then((overrides) => {
+        if (active) {
+          setOfficialCollaborationOverrides(overrides);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
@@ -878,13 +895,15 @@ function ProvidersPageImpl({
                 busy={busy}
                 gatewayContextById={gatewayContextById}
                 models={officialModels}
+                officialCollaborationOverrides={officialCollaborationOverrides}
+                onOfficialCollaborationOverridesChanged={setOfficialCollaborationOverrides}
                 officialDisabledModels={officialDisabledModels}
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
-                onRefresh={() => void refreshOfficialModels()}
+                onRefresh={(options) => refreshOfficialModels(options)}
                 onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
@@ -1443,6 +1462,8 @@ function OfficialDetail({
   dirty,
   gatewayContextById,
   models,
+  officialCollaborationOverrides,
+  onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
@@ -1468,12 +1489,14 @@ function OfficialDetail({
   dirty: boolean;
   gatewayContextById: Map<string, number>;
   models: Model[];
+  officialCollaborationOverrides: Readonly<Record<string, "v1" | "v2">>;
+  onOfficialCollaborationOverridesChanged: (overrides: Record<string, "v1" | "v2">) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
-  onRefresh: () => void;
+  onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
   onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
@@ -1621,6 +1644,36 @@ function OfficialDetail({
     }
   }
 
+  async function changeOfficialCollaborationVersion(modelId: string, version: "v1" | "v2" | null) {
+    const toastId = showToast(
+      t("providers.savingCollaborationVersion", { version: version ?? t("providers.catalogBaseline") }),
+      "loading",
+    );
+    try {
+      await api.saveOfficialMultiAgentVersion(modelId, version);
+      const canonical = normalizeOfficialModelId(modelId) ?? modelId;
+      const next = { ...officialCollaborationOverrides };
+      if (version === null) {
+        delete next[canonical];
+      } else {
+        next[canonical] = version;
+      }
+      onOfficialCollaborationOverridesChanged(next);
+      await onRefresh({ quiet: true, throwOnError: true });
+      updateToast(toastId, {
+        action: null,
+        text: `${t("providers.collaborationVersionSaved")} ${t("providers.officialCatalogRestartRequired")}`,
+        tone: "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.collaborationVersionSaveFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    }
+  }
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-3 border-b border-line p-4">
@@ -1703,12 +1756,16 @@ function OfficialDetail({
         }
         interactionDisabled={authState !== "authorized"}
         models={models}
+        officialCollaborationOverrides={officialCollaborationOverrides}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
         onReorder={onReorder}
         onTestModel={testOfficialModel}
         refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
+        onOfficialCollaborationVersionChange={(modelId, version) =>
+          void changeOfficialCollaborationVersion(modelId, version)
+        }
         modelTestDisabled={authState !== "authorized"}
       />
       <div className="flex items-center justify-end border-t border-line px-5 py-3">

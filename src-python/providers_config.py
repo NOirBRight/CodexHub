@@ -64,6 +64,11 @@ class ModelConfig:
     default_reasoning_level: str | None = None
     tool_surface_strategy: str | None = None
     native_responses_tool_codec: str | None = None
+    # Optional, endpoint-provided lifecycle facts.  These are deliberately
+    # kept separate from the protocol name: a Responses endpoint is
+    # conservative until it explicitly declares which native tool lifecycles
+    # it can carry.
+    tool_protocol_capabilities: dict[str, Any] | None = None
     _bundled_tool_surface_strategy: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -85,6 +90,7 @@ class ProviderConfig:
     upstream_format: str = "auto"
     available_upstream_formats: tuple[str, ...] = ()
     tool_protocol: str = "auto"
+    tool_protocol_capabilities: dict[str, Any] | None = None
     tool_surface_strategy: str = "eager"
     native_responses_tool_codec: str = "none"
     _tool_surface_strategy_explicit: bool = field(
@@ -231,6 +237,7 @@ def build_external_model_index(
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
+                "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
@@ -313,6 +320,7 @@ def build_ollama_cloud_model_index(
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
                 "tool_protocol": provider.tool_protocol,
+                "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
                 "upstream_model": _upstream_model_name(model),
@@ -444,6 +452,9 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 native_responses_tool_codec=_native_responses_tool_codec_field(
                     raw_model.get("native_responses_tool_codec"), default=None
                 ),
+                tool_protocol_capabilities=_mapping_field(
+                    raw_model.get("tool_protocol_capabilities")
+                ),
                 sort_order=_int_field(raw_model.get("sort_order"), 0),
                 enabled=_bool_field(raw_model.get("enabled"), True),
                 codex_enabled=_bool_field(raw_model.get("codex_enabled"), True),
@@ -467,6 +478,9 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             upstream_format=_upstream_format_field(raw_provider.get("upstream_format")),
             available_upstream_formats=_upstream_formats_field(raw_provider.get("available_upstream_formats")),
             tool_protocol=_tool_protocol_field(raw_provider.get("tool_protocol")),
+            tool_protocol_capabilities=_mapping_field(
+                raw_provider.get("tool_protocol_capabilities")
+            ),
             tool_surface_strategy=provider_tool_surface_strategy,
             native_responses_tool_codec=provider_native_responses_tool_codec,
             reports_cached_input_tokens=_bool_field(raw_provider.get("reports_cached_input_tokens"), False),
@@ -655,6 +669,10 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_string_list_line("available_upstream_formats", provider.available_upstream_formats))
         if provider.tool_protocol and provider.tool_protocol != "auto":
             chunks.append(_toml_string_line("tool_protocol", provider.tool_protocol))
+        if provider.tool_protocol_capabilities is not None:
+            chunks.append(
+                _toml_value_line("tool_protocol_capabilities", provider.tool_protocol_capabilities)
+            )
         provider_tool_surface_strategy = _tool_surface_strategy_field(
             provider.tool_surface_strategy, default="eager"
         )
@@ -718,6 +736,14 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                     _toml_string_line(
                         "native_responses_tool_codec",
                         model_native_responses_tool_codec,
+                        indent="  ",
+                    )
+                )
+            if model.tool_protocol_capabilities is not None:
+                chunks.append(
+                    _toml_value_line(
+                        "tool_protocol_capabilities",
+                        model.tool_protocol_capabilities,
                         indent="  ",
                     )
                 )
@@ -835,6 +861,16 @@ def _string_tuple_field(value: Any, default: tuple[str, ...]) -> tuple[str, ...]
     return items or default
 
 
+def _mapping_field(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Read an optional TOML inline table without sharing parser state."""
+
+    if value is None:
+        return None if default is None else dict(default)
+    if not isinstance(value, dict):
+        raise ValueError("tool_protocol_capabilities must be a table")
+    return dict(value)
+
+
 def _upstream_format_field(value: Any) -> str:
     upstream_format = _string_field(value, "auto").strip().lower()
     return upstream_format if upstream_format in UPSTREAM_FORMATS else "auto"
@@ -927,6 +963,19 @@ def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: Model
     return provider_codec
 
 
+def _resolved_tool_protocol_capabilities(
+    provider: ProviderConfig,
+    model: ModelConfig,
+) -> dict[str, Any] | None:
+    """Return model-scoped facts, falling back to provider-scoped facts."""
+
+    if model.tool_protocol_capabilities is not None:
+        return dict(model.tool_protocol_capabilities)
+    if provider.tool_protocol_capabilities is not None:
+        return dict(provider.tool_protocol_capabilities)
+    return None
+
+
 def _int_field(value: Any, default: int) -> int:
     if isinstance(value, bool):
         return default
@@ -965,6 +1014,28 @@ def _bool_field(value: Any, default: bool) -> bool:
         if lowered in {"false", "0"}:
             return False
     return default
+
+
+def _toml_inline_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_inline_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        fields = ", ".join(
+            f"{json.dumps(str(key), ensure_ascii=False)} = {_toml_inline_value(item)}"
+            for key, item in value.items()
+        )
+        return "{" + fields + "}"
+    raise ValueError("tool_protocol_capabilities contains an unsupported TOML value")
+
+
+def _toml_value_line(key: str, value: Any, indent: str = "") -> str:
+    return f"{indent}{key} = {_toml_inline_value(value)}"
 
 
 def _toml_string_line(key: str, value: str, indent: str = "") -> str:

@@ -1,0 +1,30 @@
+{
+  "schema": "codexhub.issue278.cli-tool-search.v1",
+  "evidence_status": "observed_synthetic_upstream",
+  "qualification_status": "unqualified",
+  "candidate_sha": null,
+  "cli_version": "not_run",
+  "route": {
+    "selected_model": "opaque-selected-model",
+    "selected_provider": "opaque-selected-provider",
+    "cross_provider_requests": 0,
+    "hosted_search_substitution": false,
+    "identity_observation": "observed_request_route",
+    "identity_digests": []
+  },
+  "cases": [],
+  "negative_controls": {
+    "unknown_alias": "not_verified",
+    "duplicate_identity": "not_verified",
+    "malformed_envelope": "not_verified",
+    "missing_identity": "not_verified",
+    "incomplete_stream": "not_verified",
+    "stream_after_terminal": "not_verified"
+  },
+  "sanitization": {
+    "raw_bodies_retained": false,
+    "prompts_retained": false,
+    "credentials_retained": false,
+    "ids_opaque_or_hashed": true
+  }
+}

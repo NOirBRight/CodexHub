@@ -268,7 +268,9 @@ pub(crate) fn list_models_with_presence() -> Result<Option<Vec<Model>>, String> 
         return Ok(None);
     }
 
-    read_catalog_models(&catalog_path).map(Some)
+    let mut models = read_catalog_models(&catalog_path)?;
+    apply_catalog_multi_agent_overrides(&paths, &mut models);
+    Ok(Some(models))
 }
 
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
@@ -287,6 +289,8 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
         overrides,
         &known_official_models,
     );
+    let mut merged = merged;
+    apply_catalog_multi_agent_overrides(&paths, &mut merged);
     Ok(merged.into_iter().filter(model_is_catalog_visible).collect())
 }
 
@@ -313,6 +317,241 @@ pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
     }
     write_models_json(&paths.metadata_overrides_path(), &overrides)?;
     Ok(model)
+}
+
+/// Persist one explicit Official Collaboration V1/V2 choice in the existing
+/// catalog ownership sidecar and immediately rematerialize the effective
+/// catalog.  The identity is exact (`openai`/`official`/canonical model slug)
+/// and only the pinned Code Mode models are eligible.
+pub fn save_official_multi_agent_version(
+    model_id: String,
+    version: Option<String>,
+) -> Result<Model, String> {
+    let paths = ModelPaths::runtime()?;
+    let known_official_models = config::known_official_model_ids(&config::ConfigPaths::runtime()?);
+    let canonical = config::normalize_official_model_id(&model_id, &known_official_models)
+        .ok_or_else(|| "official model identity is invalid".to_string())?;
+    if qualified_official_code_mode_multi_agent_version(&canonical).is_none() {
+        return Err("this Official model has no qualified Collaboration V1/V2 selector".to_string());
+    }
+    let version = version.map(|value| value.trim().to_ascii_lowercase());
+    if let Some(value) = version.as_deref() {
+        if value != "v1" && value != "v2" {
+            return Err("Collaboration version must be v1 or v2".to_string());
+        }
+    }
+
+    // Reconcile the current generated catalog before reading the sidecar.  A
+    // stale effective catalog can otherwise cause the sync process to discard
+    // an older sidecar entry as if the user had manually cleared it.
+    generate_catalog()?;
+    let current_models = list_models_with_presence()?.unwrap_or_default();
+    let visible_official_row = current_models.iter().any(|model| {
+        let model_id = model
+            .id
+            .strip_prefix("openai/")
+            .unwrap_or(model.id.as_str());
+        model.source_kind.as_deref() == Some("official")
+            && model_id == canonical
+            && model_has_exact_official_upstream(model, &canonical)
+            && model_is_catalog_visible(model)
+    });
+    if !visible_official_row {
+        return Err("selected Official model is not a visible qualified catalog row".to_string());
+    }
+    let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
+        .or_else(|| {
+            builtin_model_metadata()
+                .into_iter()
+                .find(|model| model.id == canonical)
+                .and_then(|model| model.multi_agent_version)
+        })
+        .ok_or_else(|| "Official catalog baseline has no Collaboration version".to_string())?;
+
+    let path = paths.catalog_overrides_path();
+    let mut payload = if path.exists() {
+        let text = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read catalog overrides: {error}"))?;
+        serde_json::from_str::<Value>(&text)
+            .map_err(|error| format!("catalog overrides are invalid: {error}"))?
+    } else {
+        json!({"schema_version": 1, "overrides": []})
+    };
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "catalog overrides are invalid".to_string())?;
+    if object.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("catalog overrides have an unsupported schema".to_string());
+    }
+    update_catalog_override_payload(&mut payload, &canonical, version.as_deref())?;
+
+    // The catalog sync process intentionally removes a sidecar entry when the
+    // current effective row equals the managed baseline.  Publish the desired
+    // effective value first, then publish the sidecar, so a newly selected V2
+    // value cannot be lost during the same save operation.  Clearing uses the
+    // pinned managed baseline and therefore leaves no stale user value in the
+    // generated catalog.
+    set_catalog_multi_agent_version(
+        &paths,
+        &canonical,
+        version.as_deref().unwrap_or(baseline_version.as_str()),
+    )?;
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to serialize catalog overrides: {error}"))?;
+    safe_file::write_text_atomic(&path, &format!("{text}\n"))
+        .map_err(|error| format!("failed to write catalog overrides: {error}"))?;
+
+    let models = list_models_with_presence()?.unwrap_or_default();
+    models
+        .into_iter()
+        .find(|model| model.id == canonical)
+        .ok_or_else(|| "selected Official model is not present in the generated catalog".to_string())
+}
+
+fn update_catalog_override_payload(
+    payload: &mut Value,
+    canonical_model_id: &str,
+    version: Option<&str>,
+) -> Result<(), String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "catalog overrides are invalid".to_string())?;
+    if object.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("catalog overrides have an unsupported schema".to_string());
+    }
+    let entries = object
+        .get_mut("overrides")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "catalog overrides are invalid".to_string())?;
+    let mut matched = false;
+    for entry in entries.iter_mut() {
+        let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
+            && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
+            && entry.get("upstream_model").and_then(Value::as_str)
+                == Some(canonical_model_id);
+        if !is_exact_identity {
+            continue;
+        }
+        matched = true;
+        let fields = entry
+            .as_object_mut()
+            .and_then(|object| object.get_mut("fields"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "catalog override fields are invalid".to_string())?;
+        match version {
+            Some(value) => {
+                fields.insert(
+                    "multi_agent_version".to_string(),
+                    Value::String(value.to_string()),
+                );
+            }
+            None => {
+                fields.remove("multi_agent_version");
+            }
+        }
+    }
+    if !matched {
+        if let Some(value) = version {
+            entries.push(json!({
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": canonical_model_id,
+                "fields": {"multi_agent_version": value},
+            }));
+        }
+    }
+    entries.retain(|entry| {
+        let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
+            && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
+            && entry.get("upstream_model").and_then(Value::as_str)
+                == Some(canonical_model_id);
+        !(is_exact_identity
+            && entry
+                .get("fields")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty))
+    });
+    entries.sort_by(|left, right| {
+        let left_key = left
+            .get("upstream_model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let right_key = right
+            .get("upstream_model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        left_key.cmp(right_key)
+    });
+    Ok(())
+}
+
+/// Return only valid, exact Official model-level Collaboration overrides.
+/// The sidecar is user-owned input, so malformed or third-party entries are
+/// ignored rather than being allowed to influence the Official catalog.
+pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, String> {
+    let paths = ModelPaths::runtime()?;
+    let visible_models = list_models_with_presence()?.unwrap_or_default();
+    let visible_qualified_ids: HashSet<String> = visible_models
+        .iter()
+        .filter_map(|model| {
+            if model.source_kind.as_deref() != Some("official")
+                || !model_is_catalog_visible(model)
+            {
+                return None;
+            }
+            let canonical = model
+                .id
+                .strip_prefix("openai/")
+                .unwrap_or(model.id.as_str())
+                .to_string();
+            (qualified_official_code_mode_multi_agent_version(&canonical)
+                .is_some()
+                && model_has_exact_official_upstream(model, &canonical))
+            .then_some(canonical)
+        })
+        .collect();
+    let path = paths.catalog_overrides_path();
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read catalog overrides: {error}"))?;
+    let payload = serde_json::from_str::<Value>(&text)
+        .map_err(|error| format!("catalog overrides are invalid: {error}"))?;
+    if payload.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("catalog overrides have an unsupported schema".to_string());
+    }
+    let Some(entries) = payload.get("overrides").and_then(Value::as_array) else {
+        return Err("catalog overrides are invalid".to_string());
+    };
+    let mut result = HashMap::new();
+    for entry in entries {
+        if entry.get("provider").and_then(Value::as_str) != Some("openai")
+            || entry.get("upstream_name").and_then(Value::as_str) != Some("official")
+        {
+            continue;
+        }
+        let Some(model_id) = entry.get("upstream_model").and_then(Value::as_str) else {
+            continue;
+        };
+        let canonical = model_id.strip_prefix("openai/").unwrap_or(model_id);
+        if qualified_official_code_mode_multi_agent_version(canonical).is_none()
+            || !visible_qualified_ids.contains(canonical)
+        {
+            continue;
+        }
+        let Some(version) = entry
+            .get("fields")
+            .and_then(Value::as_object)
+            .and_then(|fields| fields.get("multi_agent_version"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "v1" || *value == "v2")
+        else {
+            continue;
+        };
+        result.insert(canonical.to_string(), version.to_string());
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1160,6 +1399,12 @@ fn subscription_models_to_metadata_models(
             )),
             upstream_model: Some(subscription_model.slug.clone()),
             tool_surface_strategy: None,
+            multi_agent_version: subscription_model
+                .raw
+                .get("multi_agent_version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| defaults.and_then(|model| model.multi_agent_version.clone())),
             aliases: Vec::new(),
             source_kind: Some("official".to_string()),
             locked: true,
@@ -2043,6 +2288,168 @@ impl ModelPaths {
             .join("proxy")
             .join("model-metadata-overrides.json")
     }
+
+    fn catalog_overrides_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join("codexhub-model-catalog-overrides.json")
+    }
+
+    fn managed_catalog_baseline_path(&self) -> PathBuf {
+        self.codex_dir
+            .join("model-catalogs")
+            .join("codexhub-model-catalog-baseline.json")
+    }
+}
+
+fn qualified_official_code_mode_multi_agent_version(slug: &str) -> Option<&'static str> {
+    // Sol/Terra retain catalog baselines, but only an accepted GO matrix row
+    // may be exposed as a user-selectable model override.
+    match slug {
+        "gpt-5.6-luna" => Some("v1"),
+        _ => None,
+    }
+}
+
+fn model_has_exact_official_upstream(model: &Model, canonical_model_id: &str) -> bool {
+    model
+        .upstream_model
+        .as_deref()
+        .map(|value| value.strip_prefix("openai/").unwrap_or(value) == canonical_model_id)
+        .unwrap_or(false)
+}
+
+fn set_catalog_multi_agent_version(
+    paths: &ModelPaths,
+    canonical_model_id: &str,
+    version: &str,
+) -> Result<(), String> {
+    let path = paths.generated_catalog_path();
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read generated catalog: {error}"))?;
+    let mut payload: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("generated catalog is invalid: {error}"))?;
+    let models = payload
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "generated catalog does not contain a models array".to_string())?;
+
+    let mut found = false;
+    for item in models {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(metadata) = object
+            .get("codex_proxy_metadata")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let is_exact_official_identity = metadata.get("provider").and_then(Value::as_str)
+            == Some("openai")
+            && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
+            && metadata.get("upstream_model").and_then(Value::as_str)
+                == Some(canonical_model_id);
+        if !is_exact_official_identity {
+            continue;
+        }
+        object.insert(
+            "multi_agent_version".to_string(),
+            Value::String(version.to_string()),
+        );
+        found = true;
+    }
+
+    if !found {
+        return Err(format!(
+            "selected Official model is not present in generated catalog: {canonical_model_id}"
+        ));
+    }
+
+    let serialized = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to serialize generated catalog: {error}"))?;
+    safe_file::write_text_atomic(&path, &format!("{serialized}\n"))
+        .map_err(|error| format!("failed to publish generated catalog: {error}"))
+}
+
+fn read_managed_catalog_multi_agent_version(
+    paths: &ModelPaths,
+    canonical_model_id: &str,
+) -> Option<String> {
+    let path = paths.managed_catalog_baseline_path();
+    let text = fs::read_to_string(path).ok()?;
+    let payload = serde_json::from_str::<Value>(&text).ok()?;
+    let models = payload.get("models").and_then(Value::as_array)?;
+    models.iter().find_map(|item| {
+        let object = item.as_object()?;
+        let metadata = object.get("codex_proxy_metadata").and_then(Value::as_object)?;
+        let exact_identity = metadata.get("provider").and_then(Value::as_str) == Some("openai")
+            && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
+            && metadata.get("upstream_model").and_then(Value::as_str)
+                == Some(canonical_model_id);
+        if !exact_identity {
+            return None;
+        }
+        object
+            .get("multi_agent_version")
+            .and_then(Value::as_str)
+            .filter(|value| *value == "v1" || *value == "v2")
+            .map(str::to_string)
+    })
+}
+
+fn apply_catalog_multi_agent_overrides(paths: &ModelPaths, models: &mut [Model]) {
+    let Ok(text) = fs::read_to_string(paths.catalog_overrides_path()) else {
+        return;
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let Some(entries) = payload.get("overrides").and_then(Value::as_array) else {
+        return;
+    };
+    let mut values = HashMap::<String, String>::new();
+    for entry in entries {
+        if entry.get("provider").and_then(Value::as_str) != Some("openai")
+            || entry.get("upstream_name").and_then(Value::as_str) != Some("official")
+        {
+            continue;
+        }
+        let Some(model_id) = entry.get("upstream_model").and_then(Value::as_str) else {
+            continue;
+        };
+        let canonical_model_id = model_id.strip_prefix("openai/").unwrap_or(model_id);
+        if qualified_official_code_mode_multi_agent_version(canonical_model_id).is_none() {
+            continue;
+        }
+        let Some(version) = entry
+            .get("fields")
+            .and_then(Value::as_object)
+            .and_then(|fields| fields.get("multi_agent_version"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "v1" || *value == "v2")
+        else {
+            continue;
+        };
+        values.insert(canonical_model_id.to_string(), version.to_string());
+    }
+    for model in models.iter_mut() {
+        if model.source_kind.as_deref() != Some("official") {
+            continue;
+        }
+        let canonical = model
+            .id
+            .strip_prefix("openai/")
+            .unwrap_or(model.id.as_str());
+        if model_is_catalog_visible(model)
+            && model_has_exact_official_upstream(model, canonical)
+            && qualified_official_code_mode_multi_agent_version(canonical).is_some()
+        {
+            if let Some(version) = values.get(canonical) {
+                model.multi_agent_version = Some(version.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2121,7 +2528,9 @@ fn generate_catalog_with_runner(
         ));
     }
 
-    read_catalog_models(&catalog_path)
+    let mut models = read_catalog_models(&catalog_path)?;
+    apply_catalog_multi_agent_overrides(paths, &mut models);
+    Ok(models)
 }
 
 fn read_catalog_models(path: &Path) -> Result<Vec<Model>, String> {
@@ -2262,6 +2671,9 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         tool_surface_strategy: override_model
             .tool_surface_strategy
             .or(base.tool_surface_strategy.take()),
+        multi_agent_version: override_model
+            .multi_agent_version
+            .or(base.multi_agent_version.take()),
         aliases,
         source_kind: override_model.source_kind.or(base.source_kind.take()),
         locked: base.locked || override_model.locked,
@@ -2430,6 +2842,7 @@ fn official_resolved_metadata(id: &str, display_name: &str) -> Model {
         display_name: Some(display_name.to_string()),
         source_kind: Some("official".to_string()),
         locked: true,
+        multi_agent_version: pinned_official_code_mode_multi_agent_version(id).map(str::to_string),
         input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
         ..Model::default()
     };
@@ -2473,6 +2886,7 @@ fn official_metadata(id: &str, display_name: &str, context_window: u32) -> Model
         display_name: Some(display_name.to_string()),
         source_kind: Some("official".to_string()),
         locked: true,
+        multi_agent_version: pinned_official_code_mode_multi_agent_version(id).map(str::to_string),
         context_window: Some(context_window),
         input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
         supported_reasoning_levels: Some(vec![
@@ -2566,6 +2980,10 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
                     .and_then(nonblank)
             }),
         tool_surface_strategy: None,
+        multi_agent_version: object
+            .get("multi_agent_version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         aliases: object
             .get("aliases")
             .and_then(string_array)
@@ -2594,10 +3012,7 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true),
-        source_kind: object
-            .get("source_kind")
-            .and_then(Value::as_str)
-            .and_then(nonblank),
+        source_kind: catalog_source_kind(object),
         locked: object
             .get("locked")
             .and_then(Value::as_bool)
@@ -2614,6 +3029,25 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
         pricing: None,
         metadata_provenance: None,
     })
+}
+
+fn catalog_source_kind(object: &Map<String, Value>) -> Option<String> {
+    // The provider/upstream tuple is the authoritative catalog identity.  A
+    // top-level `source_kind` without that tuple is only a presentation hint
+    // and must not promote a same-slug row into the Official surface.
+    if let Some(metadata) = object
+        .get("codex_proxy_metadata")
+        .and_then(Value::as_object)
+    {
+        let provider = metadata.get("provider").and_then(Value::as_str);
+        let upstream_name = metadata.get("upstream_name").and_then(Value::as_str);
+        return Some(if provider == Some("openai") && upstream_name == Some("official") {
+            "official".to_string()
+        } else {
+            "external".to_string()
+        });
+    }
+    None
 }
 
 fn string_array(value: &Value) -> Option<Vec<String>> {
@@ -2728,7 +3162,8 @@ mod tests {
     use super::{
         desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
-        list_models, load_json_file, merge_metadata_with_overrides, ollama_show_endpoint,
+        list_models, list_official_multi_agent_overrides, load_json_file,
+        merge_metadata_with_overrides, ollama_show_endpoint,
         provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
@@ -3698,6 +4133,268 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn catalog_multi_agent_overrides_require_official_pinned_identity() {
+        let root = temp_root("catalog-multi-agent-override-identity");
+        let paths = test_paths(&root);
+        let override_path = paths.catalog_overrides_path();
+        fs::create_dir_all(override_path.parent().unwrap()).unwrap();
+        fs::write(
+            &override_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "overrides": [
+                    {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna",
+                        "fields": {"multi_agent_version": "v2"}
+                    },
+                    {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.5",
+                        "fields": {"multi_agent_version": "v2"}
+                    },
+                    {
+                        "provider": "volc",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna",
+                        "fields": {"multi_agent_version": "v2"}
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut models = vec![
+            Model {
+                id: "gpt-5.6-luna".to_string(),
+                source_kind: Some("official".to_string()),
+                upstream_model: Some("gpt-5.6-luna".to_string()),
+                multi_agent_version: Some("v1".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "gpt-5.6-luna".to_string(),
+                source_kind: Some("external".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "gpt-5.5".to_string(),
+                source_kind: Some("official".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "gpt-5.6-luna".to_string(),
+                source_kind: Some("official".to_string()),
+                upstream_model: Some("gpt-5.6-terra".to_string()),
+                multi_agent_version: Some("v1".to_string()),
+                ..Model::default()
+            },
+            Model {
+                id: "gpt-5.6-luna".to_string(),
+                source_kind: Some("official".to_string()),
+                multi_agent_version: Some("v1".to_string()),
+                ..Model::default()
+            },
+        ];
+
+        super::apply_catalog_multi_agent_overrides(&paths, &mut models);
+
+        assert_eq!(models[0].multi_agent_version.as_deref(), Some("v2"));
+        assert_eq!(models[1].multi_agent_version, None);
+        assert_eq!(models[2].multi_agent_version, None);
+        assert_eq!(models[3].multi_agent_version.as_deref(), Some("v1"));
+        assert_eq!(models[4].multi_agent_version.as_deref(), Some("v1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_official_multi_agent_overrides_requires_exact_upstream_identity() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-catalog-multi-agent-upstream-identity");
+        let codex_home = root.join("codex-home");
+        let paths = test_paths(&root);
+        let catalog_path = paths.generated_catalog_path();
+        let override_path = paths.catalog_overrides_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &override_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "overrides": [{
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-5.6-luna",
+                    "fields": {"multi_agent_version": "v2"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let missing = list_official_multi_agent_overrides();
+
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-terra"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let wrong = list_official_multi_agent_overrides();
+
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let valid = list_official_multi_agent_overrides();
+
+        restore_env("CODEX_HOME", previous);
+        assert!(missing.expect("missing upstream model should be ignored").is_empty());
+        assert!(wrong.expect("wrong upstream model should be ignored").is_empty());
+        assert_eq!(
+            valid
+                .expect("exact upstream model should be listed")
+                .get("gpt-5.6-luna")
+                .map(String::as_str),
+            Some("v2")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn set_catalog_multi_agent_version_changes_only_exact_official_identity() {
+        let root = temp_root("catalog-multi-agent-effective-write");
+        let paths = test_paths(&root);
+        let catalog_path = paths.generated_catalog_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "models": [
+                    {
+                        "slug": "gpt-5.6-luna",
+                        "multi_agent_version": "v1",
+                        "codex_proxy_metadata": {
+                            "provider": "openai",
+                            "upstream_name": "official",
+                            "upstream_model": "gpt-5.6-luna"
+                        }
+                    },
+                    {
+                        "slug": "volc/gpt-5.6-luna",
+                        "multi_agent_version": "v1",
+                        "codex_proxy_metadata": {
+                            "provider": "volc",
+                            "upstream_name": "volcengine",
+                            "upstream_model": "gpt-5.6-luna"
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        super::set_catalog_multi_agent_version(&paths, "gpt-5.6-luna", "v2")
+            .expect("exact Official row should be writable");
+
+        let payload: Value = serde_json::from_str(
+            &fs::read_to_string(&catalog_path).expect("published catalog"),
+        )
+        .unwrap();
+        assert_eq!(payload["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(payload["models"][1]["multi_agent_version"], "v1");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_override_update_preserves_other_fields_and_exact_identity() {
+        let mut payload = json!({
+            "schema_version": 1,
+            "overrides": [
+                {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-5.6-luna",
+                    "fields": {
+                        "multi_agent_version": "v1",
+                        "tool_mode": "code_mode_only"
+                    }
+                },
+                {
+                    "provider": "ollama",
+                    "upstream_name": "third-party",
+                    "upstream_model": "gpt-5.6-luna",
+                    "fields": {"multi_agent_version": "v1"}
+                }
+            ]
+        });
+
+        super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
+            .expect("exact Official override should update");
+        assert_eq!(payload["overrides"][0]["fields"]["multi_agent_version"], "v2");
+        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
+        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+
+        super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", None)
+            .expect("clearing should remove only the model-level field");
+        assert!(payload["overrides"][0]["fields"]
+            .get("multi_agent_version")
+            .is_none());
+        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
+        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+    }
+
+    #[test]
+    fn catalog_override_update_rejects_invalid_payload_before_mutation() {
+        let mut payload = json!({"schema_version": 1, "overrides": {}});
+        let before = payload.clone();
+        let error = super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
+            .expect_err("non-array overrides must fail closed");
+        assert_eq!(error, "catalog overrides are invalid");
+        assert_eq!(payload, before);
+    }
+
+    #[test]
     fn codex_0_144_2_model_list_without_numeric_context_fields_preserves_that_absence() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/codex_0_144_2_model_list_without_context_fields.json"
@@ -4418,6 +5115,47 @@ for line in sys.stdin:
         assert!(!error.contains("OPENAI_API_KEY"));
         assert!(!error.contains("sk-"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_model_identity_ignores_spoofed_source_kind() {
+        let spoofed = json!({
+            "slug": "gpt-5.6-luna",
+            "source_kind": "official",
+            "upstream_model": "gpt-5.6-luna",
+            "codex_proxy_metadata": {
+                "provider": "ollama_cloud",
+                "upstream_name": "custom",
+                "upstream_model": "gpt-5.6-luna"
+            }
+        });
+        let model = super::catalog_model_from_item(&spoofed).expect("catalog row");
+        assert_eq!(model.source_kind.as_deref(), Some("external"));
+
+        let official = json!({
+            "slug": "gpt-5.6-luna",
+            "source_kind": "external",
+            "upstream_model": "gpt-5.6-luna",
+            "codex_proxy_metadata": {
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": "gpt-5.6-luna"
+            }
+        });
+        let model = super::catalog_model_from_item(&official).expect("catalog row");
+        assert_eq!(model.source_kind.as_deref(), Some("official"));
+    }
+
+    #[test]
+    fn catalog_model_identity_requires_provider_metadata() {
+        let same_slug_without_identity = json!({
+            "slug": "gpt-5.6-luna",
+            "source_kind": "official",
+            "upstream_model": "gpt-5.6-luna"
+        });
+        let model = super::catalog_model_from_item(&same_slug_without_identity)
+            .expect("catalog row");
+        assert_eq!(model.source_kind, None);
     }
 
     #[test]

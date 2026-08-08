@@ -1,7 +1,9 @@
 # ADR-0002: Runtime-derived tool compatibility on an immutable selected route
 
 Date: 2026-08-04
-Status: Accepted for 0.1.8 Beta2; implementation remains a follow-up
+Status: Accepted for 0.1.8 Beta2; the generic implementation is delivered in
+Beta3, while generic third-party Collaboration V2 lifecycle work remains a
+later Beta4 follow-up.
 
 ## Context
 
@@ -128,9 +130,17 @@ this ADR must keep the same route and codec.
 
 Tool behavior is derived from the runtime declaration type and selected
 upstream protocol, with hosted support taken only from the already-selected
-Provider. There is no model-name allowlist, model qualification gate, or
-production dispatch branch for GLM/K2.7 (or any other model name). A model
-slug is never a codec selector.
+Provider. Runtime compatibility has no model-name allowlist, model
+qualification gate, or production dispatch branch for GLM/K2.7 (or any other
+model name). A model slug is never a route or codec selector.
+
+The one release-UI exception is the Official Collaboration V1/V2 picker:
+Issue #369 may consume an exact-runtime, candidate-bound capability matrix to
+decide whether an optional, model-level selector is visible for a list-visible
+Official row. This is a fail-closed presentation/override gate, not runtime
+eligibility, routing, fallback, tool dispatch, or evidence inferred from a
+model name. Missing, stale, partial, or non-GO evidence leaves the selector
+hidden and does not change the catalog baseline.
 
 Unknown custom endpoints use these same conservative type/protocol rules. A
 maintained-Provider regression, fixture, or release qualification result is
@@ -155,10 +165,12 @@ model fallback, a second Provider, an alternate codec retry, or output repair.
 
 ### Choose a model or Provider from a compatibility matrix
 
-Rejected. The user has already selected the Provider/model, and a
-`ToolCompatibilityPlan` is not a routing authority. Model-name allowlists,
-qualification gates, and GLM/K2.7-specific production branches would make
-compatibility dispatch policy rather than structural adaptation.
+Rejected for runtime dispatch. The user has already selected the
+Provider/model, and a `ToolCompatibilityPlan` is not a routing authority.
+Model-name allowlists, qualification gates, and GLM/K2.7-specific production
+branches would make compatibility dispatch policy rather than structural
+adaptation. The narrowly scoped #369 Official picker gate is a
+candidate-bound UI decision and does not select a route or codec.
 
 ### Proxy a hosted tool through another Provider
 

@@ -103,6 +103,7 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     "max_source",
     "confidence",
     "verified_at",
+    "multi_agent_version",
   ] as const;
   const merged = new Map<string, Model>();
   for (const model of catalog.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
@@ -150,6 +151,54 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     merged.set(canonicalId, mergedModel);
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
+}
+
+type OfficialCollaborationCapability = {
+  baseline: "v1" | "v2";
+  verdict: "GO" | "PARTIAL" | "NO-GO" | "UNQUALIFIED";
+  candidate: string;
+};
+
+// This is the checked-in decision table produced by the exact CLI 0.146.1
+// capability matrix.  A selector is exposed only for an accepted GO row;
+// model/provider names alone never qualify a row.
+const OFFICIAL_COLLABORATION_CAPABILITIES: Record<string, OfficialCollaborationCapability> = {
+  "gpt-5.6-luna": { baseline: "v1", verdict: "GO", candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2" },
+};
+
+export function officialCollaborationVersionOptions(
+  model: Model,
+  explicitOverrides: Readonly<Record<string, "v1" | "v2">> = {},
+) {
+  const canonical = normalizeOfficialModelId(model.id);
+  const capability = canonical ? OFFICIAL_COLLABORATION_CAPABILITIES[canonical] : undefined;
+  if (
+    !capability ||
+    !canonical ||
+    capability.verdict !== "GO" ||
+    !isOfficialModel(model) ||
+    model.source_kind !== "official" ||
+    normalizeOfficialModelId(model.upstream_model ?? "") !== canonical ||
+    !isCatalogModelListable(model)
+  ) {
+    return null;
+  }
+  const explicit = explicitOverrides[canonical];
+  // The catalog row carries the current managed baseline.  Once a user
+  // override is active the row's value is effective, so use the reviewed
+  // baseline only for that explicit state to keep the two values distinct.
+  const baseline = explicit ? capability.baseline : model.multi_agent_version;
+  if (baseline !== "v1" && baseline !== "v2") {
+    return null;
+  }
+  // The managed catalog baseline is authoritative until the user selects a
+  // model-level override.  A stale generated row must not silently promote a
+  // different Collaboration version after restart or catalog refresh.
+  const effective = explicit ?? baseline;
+  if (effective !== "v1" && effective !== "v2") {
+    return null;
+  }
+  return { baseline, effective, explicit: explicit ?? null, candidate: capability.candidate } as const;
 }
 
 export function resolveOfficialModelContextWindow(
