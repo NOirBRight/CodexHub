@@ -6,7 +6,10 @@ import { SortableList } from "../SortableList";
 import { useVerticalOverflow } from "../../hooks/useVerticalOverflow";
 import i18n from "../../i18n";
 import { cx, displayModel } from "../../lib/format";
-import { resolveOfficialModelContextWindow } from "../../lib/officialModels";
+import {
+  officialCollaborationVersionOptions,
+  resolveOfficialModelContextWindow,
+} from "../../lib/officialModels";
 import { normalizeOfficialModelId } from "../../lib/settings";
 import { reasoningLevelOptions, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
@@ -36,6 +39,7 @@ export function ModelSection({
   reorderable = true,
   refreshBusy,
   onToggleOfficialModel,
+  onOfficialCollaborationVersionChange,
   onToggle,
   onUpdate,
 }: {
@@ -60,6 +64,7 @@ export function ModelSection({
   reorderable?: boolean;
   refreshBusy?: boolean;
   onToggleOfficialModel?: (modelId: string, enabled: boolean) => void;
+  onOfficialCollaborationVersionChange?: (modelId: string, version: "v1" | "v2" | null) => void;
   onToggle?: (modelId: string, enabled: boolean) => void;
   onUpdate?: (modelId: string, patch: Partial<Model>) => void;
 }) {
@@ -138,6 +143,47 @@ export function ModelSection({
           label={formatContextWindow(contextWindow)}
           title={modelLimitDetails(model, contextWindow)}
         />
+        {disabled && onOfficialCollaborationVersionChange && (() => {
+          const collaboration = officialCollaborationVersionOptions(model);
+          if (!collaboration) {
+            return null;
+          }
+          const overridden = collaboration.effective !== collaboration.baseline;
+          return (
+            <label
+              className={cx(
+                "inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold",
+                overridden
+                  ? "border-action/40 bg-blue-50 text-action"
+                  : "border-line bg-panel text-slate-600",
+              )}
+              title={t("providers.collaborationVersionDetails", {
+                baseline: collaboration.baseline,
+                effective: collaboration.effective,
+              })}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <span>{t("providers.collaborationVersion")}</span>
+              <select
+                className="h-5 bg-transparent text-[11px] font-semibold outline-none"
+                value={collaboration.effective}
+                aria-label={t("providers.collaborationVersionForModel", { model: model.id })}
+                onChange={(event) => {
+                  event.stopPropagation();
+                  onOfficialCollaborationVersionChange(
+                    model.id,
+                    event.target.value === "v1" || event.target.value === "v2"
+                      ? event.target.value
+                      : null,
+                  );
+                }}
+              >
+                <option value="v1">V1</option>
+                <option value="v2">V2</option>
+              </select>
+            </label>
+          );
+        })()}
         {disabled && onToggleOfficialModel && (
           <SwitchControl
             checked={modelEnabled}

@@ -81,6 +81,8 @@ pub struct Model {
     pub upstream_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_surface_strategy: Option<ToolSurfaceStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub source_kind: Option<String>,
@@ -121,6 +123,7 @@ impl Default for Model {
             display_name: None,
             upstream_model: None,
             tool_surface_strategy: None,
+            multi_agent_version: None,
             aliases: Vec::new(),
             source_kind: None,
             locked: false,
@@ -642,6 +645,14 @@ fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 }
 
 #[tauri::command]
+fn save_official_multi_agent_version(
+    model_id: String,
+    version: Option<String>,
+) -> Result<Model, String> {
+    models::save_official_multi_agent_version(model_id, version)
+}
+
+#[tauri::command]
 async fn sync_history(target_provider: Option<String>) -> Result<String, String> {
     run_blocking("sync_history", move || {
         history::sync_history(target_provider.as_deref())
@@ -1134,6 +1145,7 @@ fn run_gui() {
             refresh_model_metadata,
             list_model_metadata,
             save_model_metadata_override,
+            save_official_multi_agent_version,
             sync_history,
             reconcile_after_route_switch,
             migrate_official_history_to_unified,

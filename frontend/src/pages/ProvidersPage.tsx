@@ -1621,6 +1621,28 @@ function OfficialDetail({
     }
   }
 
+  async function changeOfficialCollaborationVersion(modelId: string, version: "v1" | "v2" | null) {
+    const toastId = showToast(
+      t("providers.savingCollaborationVersion", { version: version ?? t("providers.catalogBaseline") }),
+      "loading",
+    );
+    try {
+      await api.saveOfficialMultiAgentVersion(modelId, version);
+      await onRefresh();
+      updateToast(toastId, {
+        action: null,
+        text: `${t("providers.collaborationVersionSaved")} ${t("providers.officialCatalogRestartRequired")}`,
+        tone: "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.collaborationVersionSaveFailed", { message: messageFromError(err) }),
+        tone: "error",
+      });
+    }
+  }
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-3 border-b border-line p-4">
@@ -1709,6 +1731,9 @@ function OfficialDetail({
         onTestModel={testOfficialModel}
         refreshBusy={busy === "official-refresh"}
         onToggleOfficialModel={onToggleModel}
+        onOfficialCollaborationVersionChange={(modelId, version) =>
+          void changeOfficialCollaborationVersion(modelId, version)
+        }
         modelTestDisabled={authState !== "authorized"}
       />
       <div className="flex items-center justify-end border-t border-line px-5 py-3">

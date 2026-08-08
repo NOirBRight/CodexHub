@@ -737,6 +737,7 @@ class CatalogSyncTests(unittest.TestCase):
         official = [
             {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"},
         ]
+        identity = ("openai", "official", "gpt-5.6-luna")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             generated = root / "model-catalogs" / catalog_sync.GENERATED_CATALOG_FILENAME
@@ -812,6 +813,43 @@ class CatalogSyncTests(unittest.TestCase):
             repeated_overrides = json.loads(overrides.read_text(encoding="utf-8"))
             self.assertEqual(repeated["models"][0]["multi_agent_version"], "v2")
             self.assertEqual(len(repeated_overrides["overrides"]), 1)
+
+            # Model-level save publishes the effective row before the sync
+            # reads the sidecar.  Verify both clear and re-select preserve the
+            # intended value across the same restart/sync boundary.
+            cleared = json.loads(generated.read_text(encoding="utf-8"))
+            cleared["models"][0]["multi_agent_version"] = "v1"
+            generated.write_text(json.dumps(cleared), encoding="utf-8")
+            overrides.write_text(
+                json.dumps(catalog_sync._write_catalog_override_state({})),
+                encoding="utf-8",
+            )
+            run_sync()
+            self.assertEqual(
+                json.loads(generated.read_text(encoding="utf-8"))["models"][0]["multi_agent_version"],
+                "v1",
+            )
+
+            selected = json.loads(generated.read_text(encoding="utf-8"))
+            selected["models"][0]["multi_agent_version"] = "v2"
+            generated.write_text(json.dumps(selected), encoding="utf-8")
+            overrides.write_text(
+                json.dumps(
+                    catalog_sync._write_catalog_override_state(
+                        {identity: {"multi_agent_version": "v2"}}
+                    )
+                ),
+                encoding="utf-8",
+            )
+            run_sync()
+            self.assertEqual(
+                json.loads(generated.read_text(encoding="utf-8"))["models"][0]["multi_agent_version"],
+                "v2",
+            )
+            self.assertEqual(
+                json.loads(overrides.read_text(encoding="utf-8"))["overrides"][0]["fields"],
+                {"multi_agent_version": "v2"},
+            )
 
             # A hidden source row is not an ownership authority.  The next
             # sync must fail closed instead of copying its v2 value onto the

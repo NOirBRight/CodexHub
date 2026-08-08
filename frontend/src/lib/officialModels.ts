@@ -103,6 +103,7 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     "max_source",
     "confidence",
     "verified_at",
+    "multi_agent_version",
   ] as const;
   const merged = new Map<string, Model>();
   for (const model of catalog.filter((item) => isOfficialModel(item) && isCatalogModelListable(item))) {
@@ -150,6 +151,39 @@ export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
     merged.set(canonicalId, mergedModel);
   }
   return filterCodexVisibleOfficialModels(Array.from(merged.values()));
+}
+
+const OFFICIAL_COLLABORATION_BASELINES: Record<string, "v1" | "v2"> = {
+  "gpt-5.6-sol": "v2",
+  "gpt-5.6-terra": "v2",
+  "gpt-5.6-luna": "v1",
+};
+
+// This allow-list is the reviewed output of the exact CLI 0.146.1 matrix.
+// Keep it model-scoped: an unqualified or hidden catalog row never receives a
+// V1/V2 selector merely because it shares a display name or provider.
+const QUALIFIED_OFFICIAL_COLLABORATION_MODELS = new Set([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+]);
+
+export function officialCollaborationVersionOptions(model: Model) {
+  const canonical = normalizeOfficialModelId(model.id);
+  const baseline = canonical ? OFFICIAL_COLLABORATION_BASELINES[canonical] : undefined;
+  if (
+    !baseline ||
+    !canonical ||
+    !QUALIFIED_OFFICIAL_COLLABORATION_MODELS.has(canonical) ||
+    !isCatalogModelListable(model)
+  ) {
+    return null;
+  }
+  const effective = model.multi_agent_version ?? baseline;
+  if (effective !== "v1" && effective !== "v2") {
+    return null;
+  }
+  return { baseline, effective } as const;
 }
 
 export function resolveOfficialModelContextWindow(

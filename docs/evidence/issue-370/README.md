@@ -45,7 +45,7 @@ Commands were run from the repository root with Python 3.13:
 
 ```powershell
 py -3.13 -m pytest -q tests/test_routing.py -k "timeout or stream or incomplete or cancellation or 502 or reasoning"
-# 187 passed, 427 deselected, 91 subtests passed in 18.38s
+# 188 passed, 427 deselected, 91 subtests passed in 18.38s
 
 py -3.13 -m pytest -q tests/test_proxy_event_logging.py
 # 17 passed in 1.35s
@@ -86,7 +86,9 @@ Both streams completed despite the reasoning interval; neither emitted a
 Gateway transport-failure class. Codex `exec --json` does not expose individual
 raw SSE frame timestamps, so the evidence records every exposed CLI JSON event
 gap and the Gateway request/reasoning-summary/completion timestamps instead of
-retaining provider frames. The interactive Desktop observation remains unrun.
+retaining provider frames. The interactive Desktop observation remains unrun;
+Beta3's authorized manual verification surface is the authenticated CLI, so
+this is not a release gate.
 No prompt, reasoning text, response/tool identifier, tool payload, credential,
 or raw model output was retained.
 
@@ -98,4 +100,5 @@ upstream-error, and downstream-cancellation paths retain explicit bounded
 classes and phase context. No blanket timeout increase, retry masking, raw
 reasoning capture, or post-side-effect replay is justified by this evidence.
 The authenticated CLI comparison supports that verdict; only the interactive
-Desktop observation remains unrun.
+Desktop observation remains unrun and is outside the authorized Beta3
+verification surface.
