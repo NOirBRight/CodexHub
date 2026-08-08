@@ -10979,8 +10979,23 @@ def compatible_request_body(
         ):
             changed = True
         runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
-    if raw_provider_probe or collaboration_v2:
+    if raw_provider_probe:
         pass
+    elif collaboration_v2:
+        # V2 must not run V1 semantic repair, but a third-party structured
+        # Responses endpoint still cannot consume Codex's freeform
+        # ``apply_patch`` history items. Keep this wire-only inverse adapter
+        # active so the next request does not leak ``custom_tool_call`` into
+        # an endpoint that only accepts function-call history.
+        input_items = payload.get("input")
+        if isinstance(input_items, list):
+            adapted_items, _adapted_call_ids, history_changed = _adapt_apply_patch_custom_tool_history(
+                input_items,
+                event_context=event_context,
+            )
+            if history_changed:
+                payload["input"] = adapted_items
+                changed = True
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it

@@ -18055,6 +18055,71 @@ class RoutingTests(unittest.TestCase):
         for forbidden in ("id", "call_id", "name", "input", "output", "patch", "arguments"):
             self.assertNotIn(forbidden, history_events[0])
 
+    def test_responses_structured_collaboration_v2_adapts_apply_patch_history_without_v1_repair(self):
+        patch_text = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [
+                        {
+                            "type": "custom_tool_call",
+                            "status": "completed",
+                            "call_id": "call_apply_patch",
+                            "name": "apply_patch",
+                            "input": patch_text,
+                        },
+                        {
+                            "type": "custom_tool_call_output",
+                            "call_id": "call_apply_patch",
+                            "output": "Success. Updated target.txt",
+                        },
+                    ],
+                    "tools": [{"type": "custom", "name": "apply_patch"}],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={
+                "request_id": "<sanitized-request-id>",
+                "collaboration_protocol": "collaboration_v2",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [item["type"] for item in payload["input"]],
+            ["function_call", "function_call_output"],
+        )
+        self.assertEqual(payload["input"][0]["call_id"], "call_apply_patch")
+        self.assertEqual(payload["input"][0]["name"], "apply_patch")
+        self.assertEqual(
+            payload["input"][0]["arguments"],
+            json.dumps({"patch": patch_text}, ensure_ascii=True, separators=(",", ":")),
+        )
+        self.assertEqual(
+            payload["input"][1],
+            {
+                "type": "function_call_output",
+                "call_id": "call_apply_patch",
+                "output": "Success. Updated target.txt",
+            },
+        )
+        history_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "third_party_apply_patch_freeform_history_adapter"
+        ]
+        self.assertEqual(len(history_events), 1)
+        self.assertEqual(history_events[0]["outcome"], "adapted")
+        self.assertEqual(history_events[0]["count"], 1)
+        for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
+            self.assertNotIn(forbidden, history_events[0])
+
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
         fixture = _load_glm_apply_patch_history_native_ids_fixture()
         apply_patch_tool = {
