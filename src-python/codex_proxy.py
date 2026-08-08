@@ -13740,6 +13740,8 @@ def _safe_route_endpoint_url(endpoint_url: str) -> str:
         # base URL path.  Keep the common fixed API paths readable, but never
         # persist an arbitrary path segment verbatim in telemetry.
         safe_paths = {
+            "/v1",
+            "/v2",
             "/responses",
             "/response",
             "/chat/completions",
