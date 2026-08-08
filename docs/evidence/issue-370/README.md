@@ -45,7 +45,7 @@ Commands were run from the repository root with Python 3.13:
 
 ```powershell
 py -3.13 -m pytest -q tests/test_routing.py -k "timeout or stream or incomplete or cancellation or 502 or reasoning"
-# 188 passed, 427 deselected, 91 subtests passed in 18.38s
+# 188 passed, 428 deselected, 91 subtests passed in 18.53s
 
 py -3.13 -m pytest -q tests/test_proxy_event_logging.py
 # 17 passed in 1.35s
