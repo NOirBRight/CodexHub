@@ -522,6 +522,24 @@ def _name_of(value: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _is_explicit_function_tool_search(declaration: Mapping[str, Any]) -> bool:
+    if declaration.get("type") != "function" or declaration.get("name") != "tool_search":
+        return False
+    if declaration.get("execution") != "client":
+        return False
+    if declaration.get("description") != "Discover deferred Codex tools by keyword. Use this before calling a tool that is not already visible.":
+        return False
+    parameters = declaration.get("parameters")
+    required = parameters.get("required") if isinstance(parameters, Mapping) else None
+    return (
+        isinstance(parameters, Mapping)
+        and parameters.get("type") == "object"
+        and isinstance(required, (list, tuple))
+        and tuple(required) == ("query",)
+        and parameters.get("additionalProperties") is False
+    )
+
+
 def _namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tuple[Mapping[str, Any], ...], str | None, bool]:
     namespace = declaration.get("name")
     namespace = namespace if isinstance(namespace, str) and namespace else None
@@ -550,6 +568,12 @@ def classify_declaration(declaration: Mapping[str, Any]) -> str:
     if item_type == "namespace":
         return NAMESPACE
     if item_type == "function":
+        # A function-shaped discovery entry is only client-owned when the
+        # explicit execution marker is present. A provider function that merely
+        # happens to be named ``tool_search`` must remain an ordinary function;
+        # otherwise the Gateway would silently take ownership of its lifecycle.
+        if _is_explicit_function_tool_search(declaration):
+            return TOOL_SEARCH
         return PLAIN_FUNCTION
     if item_type == "custom":
         return CUSTOM_FREEFORM
@@ -562,6 +586,13 @@ def classify_declaration(declaration: Mapping[str, Any]) -> str:
 
 def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
     family = classify_declaration(declaration)
+    # ``tool_search`` has two equivalent declaration spellings in the
+    # Responses/Chat boundary: the native client-owned item and the explicit
+    # function-shaped fallback used by older providers.  Treat those
+    # spellings as one request declaration so finalization cannot inject a
+    # second search entry with a different alias.
+    if family == TOOL_SEARCH:
+        return (family, "tool_search")
     return (
         family,
         declaration.get("type"),
@@ -599,6 +630,8 @@ def _tool_choice_matches_declaration(
             return False
         if family == PLAIN_FUNCTION:
             return choice_name == name
+        if family == TOOL_SEARCH and choice_name == "tool_search":
+            return True
         if family == NAMESPACE:
             choice_namespace = tool_choice.get("namespace")
             return (
@@ -698,7 +731,15 @@ def _declaration_valid_for_family(declaration: Mapping[str, Any], family: str) -
             and isinstance(declaration.get("format"), Mapping)
         )
     if family == TOOL_SEARCH:
-        return declaration.get("type") == "tool_search" and declaration.get("execution") == "client"
+        return (
+            (
+                declaration.get("type") == "tool_search"
+                and declaration.get("execution") == "client"
+            )
+            or (
+                _is_explicit_function_tool_search(declaration)
+            )
+        )
     if family == SELECTED_PROVIDER_HOSTED:
         return isinstance(declaration.get("type"), str)
     return isinstance(declaration.get("type"), str)
@@ -1906,6 +1947,24 @@ class ToolCompatibilityPlan:
         if entry is None:
             entry = self._standard_entry_for_item(item, surface=surface)
         if entry is None:
+            # Older Responses providers emit the client-owned search as a
+            # plain ``function_call`` named ``tool_search`` even when the
+            # request declaration was adapted to an opaque alias.  Resolve
+            # that exact legacy spelling to the one adapted search entry;
+            # unrelated provider functions with the same name are not
+            # eligible because ``_legacy_tool_search_record`` only considers
+            # an explicit adapted search declaration.
+            legacy_record = self._legacy_tool_search_record(item)
+            if legacy_record is not None:
+                entry = next(
+                    (
+                        candidate
+                        for candidate in self.entries
+                        if candidate.declaration_index == legacy_record.declaration_index
+                    ),
+                    None,
+                )
+        if entry is None:
             entry = self._unknown_entry_for_item(item, surface=surface)
         return entry
 
@@ -2415,12 +2474,79 @@ class ToolCompatibilityPlan:
             result.pop("namespace", None)
             result["type"] = "tool_search_call"
             result["execution"] = "client"
-            if "arguments" in result and result.get("arguments") not in {None, ""}:
+            if "arguments" in result and result.get("arguments") is not None and result.get("arguments") != "":
                 envelope = _json_object_with_key(result["arguments"], TOOL_SEARCH_INPUT_KEY)
                 result["arguments"] = envelope[TOOL_SEARCH_INPUT_KEY]
             elif not allow_incomplete:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope", surface="response")
         return result, record, True
+
+    def _legacy_tool_search_record(self, item: Mapping[str, Any]) -> AliasRecord | None:
+        """Return the one adapted search record for legacy function-shaped SSE.
+
+        Older third-party Responses routes emit the original ``tool_search``
+        function name rather than the request-scoped alias.  Accept that shape
+        only when this request has exactly one explicit client search entry;
+        an unrelated provider function with the same name remains plain.
+        """
+
+        if item.get("type") != "function_call" or item.get("name") != "tool_search":
+            return None
+        # A request may legitimately contain a provider-owned ordinary
+        # function with the same spelling as Codex's client search.  Once
+        # that declaration exists, the unqualified legacy wire item is
+        # ambiguous and must remain provider-owned instead of being silently
+        # rebound to the adapted search alias.
+        if any(
+            entry.family == PLAIN_FUNCTION and entry.original_name == "tool_search"
+            for entry in self.entries
+        ):
+            return None
+        candidates = [
+            entry
+            for entry in self.entries
+            if entry.family == TOOL_SEARCH
+            and entry.original_name == "tool_search"
+            and entry.disposition == ADAPT
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _decode_call_compat(
+        self,
+        item: Mapping[str, Any],
+        *,
+        allow_incomplete: bool = False,
+    ) -> tuple[dict[str, Any], AliasRecord | None, bool]:
+        legacy_record = self._legacy_tool_search_record(item)
+        if legacy_record is None:
+            return self._decode_call(item, allow_incomplete=allow_incomplete)
+        transformed = _copy_mapping(item)
+        transformed["name"] = legacy_record.aliases[0]
+        arguments = transformed.get("arguments")
+        if arguments is not None and arguments != "":
+            if isinstance(arguments, str):
+                try:
+                    arguments_value = json.loads(arguments)
+                except (TypeError, ValueError) as exc:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "malformed_envelope",
+                        surface="response",
+                    ) from exc
+            elif isinstance(arguments, Mapping):
+                arguments_value = arguments
+            else:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "malformed_envelope",
+                    surface="response",
+                )
+            transformed["arguments"] = json.dumps(
+                {TOOL_SEARCH_INPUT_KEY: arguments_value},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        return self._decode_call(transformed, allow_incomplete=allow_incomplete)
 
     def _validate_registered_item_identity(self, item: Mapping[str, Any], *, surface: str) -> None:
         """Ensure a bound adapter call keeps its wire family and alias."""
@@ -2698,8 +2824,9 @@ class ToolCompatibilityPlan:
                     seen_call_ids.add(call_id)
             if item_type == "function_call":
                 record = self.registry.record_for_alias(item.get("name"))
-                if record is not None:
-                    decoded, _record, item_changed = self._decode_call(item)
+                legacy_record = self._legacy_tool_search_record(item)
+                if record is not None or legacy_record is not None:
+                    decoded, _record, item_changed = self._decode_call_compat(item)
                 else:
                     native_entry = self._native_entry_for_item(item)
                     if native_entry is not None:
@@ -3224,7 +3351,7 @@ class CompatibilityStreamState:
 
     def _check_alias_in_item(self, item: Mapping[str, Any], *, allow_incomplete: bool = True) -> tuple[dict[str, Any], AliasRecord | None, bool]:
         if item.get("type") == "function_call":
-            decoded, record, changed = self.plan._decode_call(item, allow_incomplete=allow_incomplete)
+            decoded, record, changed = self.plan._decode_call_compat(item, allow_incomplete=allow_incomplete)
             if record is not None and record.family == NAMESPACE:
                 supplied_namespace = item.get("namespace")
                 if supplied_namespace is not None and supplied_namespace != record.namespace:
@@ -3863,6 +3990,34 @@ class CompatibilityStreamState:
             self._wire_payloads[item_id] = payload
             return result
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
+            # A legacy provider may omit the ``added`` lifecycle and emit the
+            # adapted client-owned search as a plain function call.  Decode
+            # that exact spelling before the normal registry/stream-owner
+            # checks so the client still receives the native terminal search
+            # item and the provider cannot claim an arbitrary function.
+            legacy_record = self.plan._legacy_tool_search_record(item)
+            if legacy_record is not None:
+                decoded_item, _record, _changed = self.plan._decode_call_compat(
+                    item,
+                    allow_incomplete=False,
+                )
+                entry = next(
+                    (
+                        candidate
+                        for candidate in self.plan.entries
+                        if candidate.declaration_index == legacy_record.declaration_index
+                    ),
+                    None,
+                )
+                if entry is None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "unknown_alias",
+                        surface="stream",
+                    )
+                self._record_legacy_unowned_native_done(decoded_item, entry)
+                result["item"] = decoded_item
+                return result
             self.plan._validate_registered_item_identity(item, surface="stream")
             self._validate_output_item_added(item)
             self.plan._reject_unknown_standard_item(item, surface="stream")
@@ -4098,6 +4253,11 @@ class CompatibilityStreamState:
         result["type"] = "tool_search_call"
         result.pop("name", None)
         result.pop("namespace", None)
+        # ``status`` is a Chat/Responses function-call field.  Codex CLI's
+        # native client-owned tool_search item does not carry it; retaining
+        # the adapted transport marker makes the item fail the native shape
+        # check before MCP discovery.
+        result.pop("status", None)
         result["execution"] = "client"
         result["arguments"] = {} if native_arguments is None else _thaw(native_arguments)
         return result
@@ -4119,6 +4279,8 @@ class CompatibilityStreamState:
             self.plan._validate_registered_item_identity(item, surface="stream")
             self.plan._reject_unknown_standard_item(item, surface="stream")
             record = self.plan.registry.record_for_alias(item.get("name"))
+            if record is None:
+                record = self.plan._legacy_tool_search_record(item)
             if record is None or record.family not in {CUSTOM_FREEFORM, TOOL_SEARCH}:
                 return [self.decode_event(value)]
             if record.family == CUSTOM_FREEFORM:
@@ -4155,6 +4317,10 @@ class CompatibilityStreamState:
 
         if event_type == "response.output_item.added" and isinstance(item, Mapping):
             record = self.plan.registry.record_for_alias(item.get("name"))
+            if record is None:
+                legacy_entry = self.plan._legacy_tool_search_record(item)
+                if legacy_entry is not None and legacy_entry.aliases:
+                    record = self.plan.registry.record_for_alias(legacy_entry.aliases[0])
             if record is not None and record.family == TOOL_SEARCH:
                 if item.get("type") != "function_call":
                     raise self._stream_error("ambiguous_call_identity")
@@ -4246,9 +4412,30 @@ class CompatibilityStreamState:
             try:
                 envelope = _json_object_with_key(arguments, TOOL_SEARCH_INPUT_KEY)
             except ToolCompatibilityError as exc:
-                raise self._stream_error(exc.classification) from exc
+                # Legacy providers use the original ``tool_search`` name and
+                # send the native query object directly instead of the
+                # adapter envelope.  Accept only that request-bound spelling;
+                # an aliased function must still carry the exact envelope.
+                added_item = search_pending.added_event.get("item")
+                legacy_wire = isinstance(added_item, Mapping) and added_item.get("name") == "tool_search"
+                if not legacy_wire:
+                    raise self._stream_error(exc.classification) from exc
+                try:
+                    native_arguments = json.loads(arguments)
+                except (TypeError, ValueError) as parse_error:
+                    raise self._stream_error("malformed_envelope") from parse_error
+                if not isinstance(native_arguments, Mapping):
+                    raise self._stream_error("invalid_envelope")
+                envelope = {TOOL_SEARCH_INPUT_KEY: native_arguments}
             search_pending.arguments_done_event = value
             search_pending.native_arguments = envelope[TOOL_SEARCH_INPUT_KEY]
+            # Preserve the legacy provider's plain arguments-done event.  The
+            # outer bounded-query guard can then suppress only the repeated
+            # query while allowing a distinct search to remain visible; the
+            # adapted alias envelope itself is still kept provider-local.
+            added_item = search_pending.added_event.get("item")
+            if isinstance(added_item, Mapping) and added_item.get("name") == "tool_search":
+                return [value]
             return []
 
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
@@ -4307,15 +4494,18 @@ class CompatibilityStreamState:
                 or self._native_wire_identity(item) != expected_wire[2]
                 or search_pending.arguments_done_event is None
                 or item.get("call_id") != search_pending.call_id
-                or item.get("name") != search_pending.record.alias
+                or item.get("name") not in {search_pending.record.alias, "tool_search"}
                 or item.get("arguments") != search_pending.arguments_done_event.get("arguments")
             ):
                 raise self._stream_error("incomplete_stream")
             native_added = _copy_mapping(search_pending.added_event)
+            native_added.pop("output_index", None)
             native_added["item"] = self._native_tool_search_item(
                 native_added["item"],
                 search_pending.native_arguments,
             )
+            value = _copy_mapping(value)
+            value.pop("output_index", None)
             value["item"] = self._native_tool_search_item(item, search_pending.native_arguments)
             self._wire_payloads[search_pending.item_id] = self._semantic_wire_payload(
                 item,
@@ -4323,7 +4513,14 @@ class CompatibilityStreamState:
             )
             self._native_done.add(search_pending.item_id)
             del self._buffered_tool_search[search_pending.item_id]
-            return [native_added, value]
+            # Codex CLI 0.146 consumes the client-owned search lifecycle as
+            # a terminal output item.  The adapted function envelope is an
+            # upstream-only transport detail; forwarding an ``added`` event
+            # causes the native client to treat the search call as an
+            # ordinary provider function and skip MCP discovery.  Preserve
+            # the state transition above, but expose only the native terminal
+            # item downstream.
+            return [value]
 
         return [self.decode_event(value)]
 

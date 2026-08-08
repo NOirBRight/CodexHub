@@ -9,10 +9,19 @@ downstream output or a completed tool call has been exposed.
 
 The Gateway's existing phase fields remain authoritative: connect/TLS,
 time-to-first-byte/event, inter-event gap, terminal event, client
-cancellation, and Gateway deadline phase. The redacted fixture
+cancellation, and Gateway deadline phase. Stream outcomes now also carry the
+bounded timing fields `sse_first_byte_elapsed_ms`,
+`sse_first_event_elapsed_ms`, `sse_last_inter_event_gap_ms`,
+`sse_max_inter_event_gap_ms`, and `sse_terminal_elapsed_ms`. Successful
+DNS/TCP/TLS duration is explicitly recorded as `not_observed` by the stream
+seam; concrete connect/TLS failures are classified at the upstream-open
+boundary. The redacted fixture
 [`stream-classification-summary.json`](stream-classification-summary.json)
-records only bounded status, class, terminal, output, retry-safety, and event
-counts. It contains no prompt, reasoning text, response or tool identifiers,
+records the timing-field inventory alongside bounded status, class, terminal,
+output, retry-safety, and event counts. The fixture deliberately retains no
+nondeterministic timing values: connect/TLS are marked not observed at the
+stream seam and the SSE elapsed fields are marked as bounded runtime fields.
+It contains no prompt, reasoning text, response or tool identifiers,
 tool arguments/results, credentials, or raw provider output.
 
 The six required classes are covered:

@@ -8,7 +8,36 @@ content.  The runner never records this process' messages.
 from __future__ import annotations
 
 import json
+import os
 import sys
+
+
+def _ledger_path() -> str | None:
+    for index, value in enumerate(sys.argv[1:]):
+        if value == "--ledger" and index + 2 <= len(sys.argv[1:]):
+            candidate = sys.argv[index + 2]
+            if candidate:
+                return candidate
+    return os.environ.get("ISSUE_278_MCP_LEDGER")
+
+
+def _record(method: str) -> None:
+    path = _ledger_path()
+    if not path:
+        return
+    try:
+        try:
+            current = json.loads(open(path, encoding="utf-8").read())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        key = "tools_list_count" if method == "tools/list" else "tools_call_count"
+        current[key] = int(current.get(key, 0)) + 1
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(current, stream, separators=(",", ":"))
+    except (OSError, TypeError, ValueError):
+        return
 
 
 def _reply(message_id: object, result: dict) -> None:
@@ -37,6 +66,7 @@ def main() -> int:
                 },
             )
         elif method == "tools/list":
+            _record(method)
             _reply(
                 message_id,
                 {
@@ -50,6 +80,7 @@ def main() -> int:
                 },
             )
         elif method == "tools/call":
+            _record(method)
             _reply(message_id, {"content": [{"type": "text", "text": "FIXTURE_TOOL_RESULT"}], "isError": False})
         elif message_id is not None:
             _reply(message_id, {})

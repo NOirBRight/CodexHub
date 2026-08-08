@@ -5,6 +5,46 @@ import protocol_translation
 
 
 class ProtocolTranslationTests(unittest.TestCase):
+    def test_responses_client_tool_search_output_loads_chat_tools(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "tool_search_call",
+                    "execution": "client",
+                    "call_id": "search_123",
+                    "status": "completed",
+                    "arguments": {"query": "fixture"},
+                },
+                {
+                    "type": "tool_search_output",
+                    "execution": "client",
+                    "call_id": "search_123",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "fixture_discovered_tool",
+                            "description": "A discovered fixture tool.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+            ],
+        }
+
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8")
+            )
+        )
+
+        self.assertNotIn("tool_search_call", json.dumps(translated))
+        self.assertEqual(
+            translated["tools"][0]["function"]["name"],
+            "fixture_discovered_tool",
+        )
+
     def test_chat_history_with_missing_tool_ids_fails_closed(self):
         for message in (
             {
@@ -900,6 +940,99 @@ class ProtocolTranslationTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_responses_cli_transport_metadata_with_semantics_fails_closed(self):
+        body = json.dumps(
+            {
+                "model": "example-model",
+                "input": "Hello",
+                "client_metadata": {"opaque": "value"},
+                "include": ["reasoning.encrypted_content"],
+                "prompt_cache_key": "opaque-cache-key",
+                "store": False,
+                "text": {"verbosity": "low"},
+            }
+        ).encode("utf-8")
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.responses_request_to_chat_completion_body(body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_responses_cli_transport_metadata_safe_defaults_are_omitted_for_chat(self):
+        body = json.dumps(
+            {
+                "model": "example-model",
+                "input": "Hello",
+                "client_metadata": {},
+                "include": [],
+                "prompt_cache_key": "",
+                "store": False,
+                "text": {},
+            }
+        ).encode("utf-8")
+
+        translated = json.loads(protocol_translation.responses_request_to_chat_completion_body(body))
+        self.assertEqual(
+            translated,
+            {
+                "model": "example-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+    def test_responses_client_metadata_can_be_dropped_only_by_explicit_gateway_policy(self):
+        body = json.dumps(
+            {
+                "model": "example-model",
+                "input": "Hello",
+                "client_metadata": {"opaque": "value"},
+            }
+        ).encode("utf-8")
+
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                body,
+                drop_client_metadata=True,
+            )
+        )
+
+        self.assertEqual(
+            translated,
+            {
+                "model": "example-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+    def test_responses_client_transport_fields_can_be_dropped_for_chat_adapter(self):
+        body = json.dumps(
+            {
+                "model": "example-model",
+                "input": "Hello",
+                "client_metadata": {"opaque": "value"},
+                "include": ["reasoning.encrypted_content"],
+                "prompt_cache_key": "cache-key",
+                "store": False,
+                "text": {"verbosity": "low"},
+                "reasoning": {"effort": "medium"},
+            }
+        ).encode("utf-8")
+
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                body,
+                drop_client_transport_fields=True,
+                drop_reasoning=True,
+            )
+        )
+
+        self.assertEqual(
+            translated,
+            {
+                "model": "example-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
 
     def test_responses_body_translates_to_chat_completion(self):
         body = json.dumps(

@@ -5142,6 +5142,27 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["sse_eof_disposition"], "incomplete")
         self.assertEqual(fields["sse_incomplete_bytes_discarded"], 37)
 
+    def test_passthrough_semantics_record_bounded_stream_timing_and_unobserved_connect_phases(self):
+        now = [100.0]
+        stats = codex_proxy.PassthroughSseSemanticStats(clock=lambda: now[0])
+
+        stats.observe_bytes(
+            b'data: {"type":"response.created","response":{"id":"redacted"}}\n\n'
+        )
+        now[0] += 5.25
+        stats.observe_bytes(
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        )
+        fields = stats.fields()
+
+        self.assertEqual(fields["sse_first_byte_elapsed_ms"], 0)
+        self.assertEqual(fields["sse_first_event_elapsed_ms"], 0)
+        self.assertEqual(fields["sse_last_inter_event_gap_ms"], 5250)
+        self.assertEqual(fields["sse_max_inter_event_gap_ms"], 5250)
+        self.assertEqual(fields["sse_terminal_elapsed_ms"], 5250)
+        self.assertEqual(fields["upstream_connect_timing"], "not_observed")
+        self.assertEqual(fields["upstream_tls_timing"], "not_observed")
+
     def test_passthrough_semantics_releases_size_limit_exception_traceback(self):
         stats = codex_proxy.PassthroughSseSemanticStats(max_frame_bytes=8)
 
@@ -12815,6 +12836,20 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["reasoning"]["effort"], "max")
 
+    def test_chat_completions_route_preserves_responses_reasoning_for_strict_translation(self):
+        upstream = {
+            "name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "chat_completions",
+            "tool_protocol": "chat_tools",
+            "tool_surface_strategy": "deferred_core",
+        }
+        body = b'{"model":"glm-5.2","reasoning":{"effort":"medium"},"input":"hi"}'
+
+        transformed = compatible_request_body(body, upstream)
+
+        self.assertEqual(json.loads(transformed)["reasoning"], {"effort": "medium"})
+
     def test_ollama_body_maps_xhigh_string_reasoning_to_max(self):
         upstream = choose_upstream("glm-5.2")
         body = b'{"model":"glm-5.2","reasoning":"xhigh","input":"hi"}'
@@ -13605,6 +13640,24 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(
             _responses_url(upstream, "/v1/responses/resp_123/input_items"),
             "https://chatgpt.com/backend-api/codex/responses/resp_123/input_items",
+        )
+
+    def test_route_failure_endpoint_identity_never_retains_userinfo(self):
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("https://user:secret@example.test/v1"),
+            "https://example.test/v1",
+        )
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("//user:secret@example.test/v1"),
+            "//example.test/v1",
+        )
+        self.assertEqual(
+            codex_proxy._safe_route_endpoint_url("http://user:secret@[bad/v1"),
+            "",
+        )
+        self.assertNotIn(
+            "secret",
+            codex_proxy._safe_route_endpoint_url("user:secret@example.test/v1"),
         )
 
     def test_official_body_removes_plaintext_reasoning_encrypted_content(self):
@@ -16687,6 +16740,76 @@ class RoutingTests(unittest.TestCase):
             event["retry_safety_class"],
             codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_WRITE,
         )
+
+    def test_issue_370_failure_events_retain_exact_route_identity(self):
+        route_context = {
+            "route_provider_id": "ollama-cloud",
+            "route_model_requested": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_model_canonical": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_upstream_model": "deepseek-v4-flash-0731",
+            "route_endpoint_url": "https://ollama.example/v1/responses",
+            "route_attempt_provider_id": "ollama-cloud",
+            "route_attempt_model_requested": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_attempt_model_canonical": "ollama-cloud/deepseek-v4-flash-0731",
+            "route_attempt_upstream_model": "deepseek-v4-flash-0731",
+            "route_attempt_endpoint_url": "https://ollama.example/v1/responses",
+        }
+
+        incomplete_handler = FakeHandler()
+        incomplete_status = relay_upstream_response(
+            incomplete_handler,
+            FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"resp_route"}}\n\n',
+                    b"",
+                ]
+            ),
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-route-incomplete",
+            model="ollama-cloud/deepseek-v4-flash-0731",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=route_context,
+        )
+        incomplete_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(incomplete_status, 502)
+        for key, value in route_context.items():
+            self.assertEqual(incomplete_event[key], value)
+
+        self.write_proxy_event.reset_mock()
+        closed_handler = FakeHandler()
+        closed_handler.wfile = FakeWFile(fail_on_write=lambda _data, _index: True)
+        closed_status = relay_upstream_response(
+            closed_handler,
+            FakeSseResponse(
+                [
+                    b'data: {"type":"response.created","response":{"id":"resp_route"}}\n\n',
+                    b"",
+                ]
+            ),
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-route-closed",
+            model="ollama-cloud/deepseek-v4-flash-0731",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            event_context=route_context,
+        )
+        closed_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "downstream_stream_closed"
+        )
+        self.assertEqual(closed_status, 499)
+        for key, value in route_context.items():
+            self.assertEqual(closed_event[key], value)
 
     def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()
@@ -21195,6 +21318,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_search_first",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": query},
             },
             {
@@ -21209,6 +21333,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_search_second",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": query},
             },
             {
@@ -21305,12 +21430,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_bounded_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_bounded_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_bounded_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_bounded_second", "tools": []},
@@ -21348,12 +21475,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_body_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_body_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_body_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_body_second", "tools": []},
@@ -21425,6 +21554,22 @@ Execution constraints:
         self.assertNotIn(distinct_query, telemetry_text)
         self.assertNotIn("_bounded_tool_search_query_digests", telemetry_text)
 
+    def test_bounded_search_suppression_does_not_steal_provider_function_named_tool_search(self):
+        bounded_query = "mcp__synthetic__ordinary_tool_search"
+        event_context = {"_bounded_tool_search_query_digests": frozenset({
+            codex_proxy._tool_search_query_digest(bounded_query)
+        })}
+        item = {
+            "type": "function_call",
+            "id": "ordinary-provider-item",
+            "call_id": "ordinary-provider-call",
+            "name": "tool_search",
+            "arguments": json.dumps({"query": bounded_query}),
+        }
+        transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+        self.assertFalse(changed)
+        self.assertEqual(transformed, item)
+
     def test_deferred_tool_search_sse_suppresses_third_bounded_query_and_keeps_distinct_callable(self):
         bounded_query = "mcp__synthetic__sse_bounded"
         distinct_query = "mcp__synthetic__sse_distinct"
@@ -21433,12 +21578,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_sse_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_sse_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_sse_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_sse_second", "tools": []},
@@ -21513,12 +21660,14 @@ Execution constraints:
             {
                 "type": "tool_search_call",
                 "call_id": "call_stream_first",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_stream_first", "tools": []},
             {
                 "type": "tool_search_call",
                 "call_id": "call_stream_second",
+                "execution": "client",
                 "arguments": {"query": bounded_query},
             },
             {"type": "tool_search_output", "call_id": "call_stream_second", "tools": []},
@@ -21645,12 +21794,14 @@ Execution constraints:
                 {
                     "type": "tool_search_call",
                     "call_id": "call_diagnostic_first",
+                    "execution": "client",
                     "arguments": {"query": bounded_query},
                 },
                 {"type": "tool_search_output", "call_id": "call_diagnostic_first", "tools": []},
                 {
                     "type": "tool_search_call",
                     "call_id": "call_diagnostic_second",
+                    "execution": "client",
                     "arguments": {"query": bounded_query},
                 },
                 {"type": "tool_search_output", "call_id": "call_diagnostic_second", "tools": []},
@@ -21844,6 +21995,7 @@ Execution constraints:
                 "type": "tool_search_call",
                 "call_id": "call_found",
                 "status": "completed",
+                "execution": "client",
                 "arguments": {"query": "synthetic_weather_lookup", "limit": 1},
             },
             {
@@ -22530,7 +22682,7 @@ Execution constraints:
             {
                 "model": "glm-5.2",
                 "input": [
-                    {"type": "tool_search_call", "call_id": "call_search", "arguments": {"query": "spawn_agent multi_agent subagent"}},
+                    {"type": "tool_search_call", "call_id": "call_search", "execution": "client", "arguments": {"query": "spawn_agent multi_agent subagent"}},
                     {"type": "tool_search_output", "call_id": "call_search", "tools": codex_proxy.MULTI_AGENT_DISCOVERY_TOOLS},
                 ],
                 "tools": [{"type": "function", "name": "tool_search", "parameters": {"type": "object"}}],
@@ -27384,6 +27536,57 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertIn(b"response.completed", body)
         self.assertNotIn(b"upstream_empty_completed_response", body)
 
+    def test_external_provider_tool_search_call_only_sse_is_not_treated_as_empty_completed(self):
+        fake = FakeHandler()
+        search_item = {
+            "type": "tool_search_call",
+            "id": "search-item",
+            "call_id": "search-call",
+            "execution": "client",
+            "arguments": {"query": "fixture search"},
+        }
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b"data: "
+                + json.dumps({"type": "response.output_item.done", "item": search_item}).encode("utf-8")
+                + b"\n\n",
+                b"data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_1",
+                            "status": "completed",
+                            "output": [search_item],
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n\n",
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            fake,
+            response,
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-tool-search-only",
+            model="glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+            usage_capture={},
+            defer_stream_errors=True,
+        )
+
+        body = b"".join(fake.wfile.writes)
+        self.assertEqual(status, 200)
+        self.assertIn(b"tool_search_call", body)
+        self.assertIn(b"response.completed", body)
+        self.assertNotIn(b"upstream_empty_completed_response", body)
+
     def test_external_sse_keeps_codex_apps_flat_alias(self):
         payload = {
             "type": "response.output_item.done",
@@ -27415,11 +27618,104 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         }
         line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
 
-        transformed = compatible_sse_line(line, "ollama_cloud", event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT})
+        transformed = compatible_sse_line(
+            line,
+            "ollama_cloud",
+            event_context={
+                "request_id": "req",
+                "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                "_tool_search_client_owned": True,
+            },
+        )
         call = json.loads(transformed.removeprefix(b"data: "))["item"]
 
         self.assertEqual(call["type"], "tool_search_call")
         self.assertEqual(call["arguments"], {"query": "spawn_agent", "limit": 8})
+
+    def test_external_sse_does_not_steal_provider_function_named_tool_search(self):
+        payload = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_provider_search",
+                "name": "tool_search",
+                "arguments": json.dumps({"query": "provider-owned"}),
+            },
+        }
+        line = b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+
+        transformed = compatible_sse_line(
+            line,
+            "ollama_cloud",
+            event_context={"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT},
+        )
+        call = json.loads(transformed.removeprefix(b"data: "))["item"]
+
+        self.assertEqual(call, payload["item"])
+
+    def test_bounded_search_does_not_steal_provider_tool_search_item(self):
+        bounded_query = "provider-owned-tool-search"
+        event_context = {
+            "_bounded_tool_search_query_digests": frozenset({
+                codex_proxy._tool_search_query_digest(bounded_query),
+            })
+        }
+        item = {
+            "type": "tool_search_call",
+            "execution": "provider",
+            "id": "provider-item",
+            "call_id": "provider-call",
+            "arguments": {"query": bounded_query},
+        }
+
+        transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+
+        self.assertFalse(changed)
+        self.assertEqual(transformed, item)
+
+    def test_bounded_search_requires_explicit_client_execution_marker(self):
+        bounded_query = "provider-owned-tool-search-without-ownership"
+        event_context = {
+            "_bounded_tool_search_query_digests": frozenset({
+                codex_proxy._tool_search_query_digest(bounded_query),
+            })
+        }
+        for execution in (None, "unknown"):
+            item = {
+                "type": "tool_search_call",
+                "id": f"provider-item-{execution or 'missing'}",
+                "call_id": "provider-call",
+                "arguments": {"query": bounded_query},
+            }
+            if execution is not None:
+                item["execution"] = execution
+
+            transformed, changed = codex_proxy._suppress_bounded_tool_search_calls(item, event_context)
+
+            self.assertFalse(changed)
+            self.assertEqual(transformed, item)
+
+    def test_bounded_empty_search_ledger_requires_explicit_client_execution_marker(self):
+        query = "provider-owned-empty-search-without-ownership"
+        history = [
+            {"type": "tool_search_call", "call_id": "missing", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "missing", "tools": []},
+            {"type": "tool_search_call", "call_id": "unknown", "execution": "unknown", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "unknown", "tools": []},
+        ]
+
+        self.assertEqual(codex_proxy._bounded_empty_tool_search_terminal_calls(history), {})
+
+        client_history = [
+            {"type": "tool_search_call", "call_id": "client-1", "execution": "client", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "client-1", "tools": []},
+            {"type": "tool_search_call", "call_id": "client-2", "execution": "client", "arguments": {"query": query}},
+            {"type": "tool_search_output", "call_id": "client-2", "tools": []},
+        ]
+        self.assertEqual(
+            codex_proxy._bounded_empty_tool_search_terminal_calls(client_history),
+            {"client-2": (query, 2)},
+        )
 
     def test_kimi_k2_6_external_request_removes_unsupported_reasoning(self):
         body = json.dumps(

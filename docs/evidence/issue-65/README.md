@@ -63,6 +63,24 @@ may use equivalent names, but it is native only when the complete lifecycle
 and semantics are equivalent. Native declarations are never put in a generic
 envelope.
 
+### Client-owned search and Adapter distinction
+
+The `A_ns`, `A_custom`, and (in the later #277 implementation) `A_search`
+predicates are semantic contracts, not aliases inferred from a spelling. A
+request-scoped Adapter is allowed only after the declaration has already been
+classified as client-owned and the selected protocol has a complete,
+injective, reversible lifecycle mapping. In particular, a plain Provider
+function whose name happens to be `tool_search`, or a `tool_search_call` whose
+`execution` marker is missing or not exactly `client`, remains a Provider item
+and is never rewritten as Codex client search. The Gateway must fail closed or
+leave that item untouched; it may not claim ownership from the name alone.
+
+The adapted representation used by #277 is therefore an upstream transport
+shape only. It is not a generic function fallback, does not transfer tool
+execution to the Gateway, and is inverse-mapped back to the native
+client-owned search lifecycle only when the request-local registry proves the
+mapping.
+
 ## Compatibility table
 
 | Runtime family and selected-protocol condition | Execution owner; native shape; model-visible exposure | Request encoding | Inverse call/result/history | SSE assembly | Ambiguity boundary | Optional disposition | Required disposition |

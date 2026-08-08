@@ -37,9 +37,10 @@ records the planner declaration, search/result, discovered declaration and
 follow-up call/result, then the Code Mode
 `shell_command -> apply_patch -> shell_command` call/result pairs. The history
 section records request/response counts, wire protocol sequence, response shape
-markers, and recomputable order/identity digests. The validator checks these
-stages and recomputes every digest, so planner booleans alone cannot qualify a
-forged summary.
+markers, recomputable order/identity digests, and bounded terminal diagnostics
+(stage, pending-input class, opaque pending-call digest, and protocol error
+code). The validator checks these stages and recomputes every digest, so
+planner booleans alone cannot qualify a forged summary.
 
 Focused checks:
 

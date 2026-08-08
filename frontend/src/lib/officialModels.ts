@@ -176,12 +176,21 @@ export function officialCollaborationVersionOptions(
     !capability ||
     !canonical ||
     capability.verdict !== "GO" ||
+    !isOfficialModel(model) ||
+    model.source_kind !== "official" ||
+    normalizeOfficialModelId(model.upstream_model ?? "") !== canonical ||
     !isCatalogModelListable(model)
   ) {
     return null;
   }
-  const baseline = capability.baseline;
   const explicit = explicitOverrides[canonical];
+  // The catalog row carries the current managed baseline.  Once a user
+  // override is active the row's value is effective, so use the reviewed
+  // baseline only for that explicit state to keep the two values distinct.
+  const baseline = explicit ? capability.baseline : model.multi_agent_version;
+  if (baseline !== "v1" && baseline !== "v2") {
+    return null;
+  }
   // The managed catalog baseline is authoritative until the user selects a
   // model-level override.  A stale generated row must not silently promote a
   // different Collaboration version after restart or catalog refresh.

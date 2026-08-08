@@ -8,7 +8,9 @@
     "selected_model": "opaque-selected-model",
     "selected_provider": "opaque-selected-provider",
     "cross_provider_requests": 0,
-    "hosted_search_substitution": false
+    "hosted_search_substitution": false,
+    "identity_observation": "observed_request_route",
+    "identity_digests": []
   },
   "cases": [],
   "negative_controls": {

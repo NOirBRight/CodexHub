@@ -758,13 +758,13 @@ def test_adapted_tool_search_stream_emits_only_native_client_lifecycle():
             },
         }
     )
-    assert [event["type"] for event in decoded] == [
-        "response.output_item.added",
-        "response.output_item.done",
-    ]
-    assert all(event["item"]["type"] == "tool_search_call" for event in decoded)
-    assert all(event["item"]["execution"] == "client" for event in decoded)
-    assert decoded[-1]["item"]["arguments"] == {"query": "opaque"}
+    # CLI 0.146 consumes the client-owned search as a bounded terminal item;
+    # forwarding a synthetic ``added`` event would make it look like an
+    # ordinary provider function and bypass client discovery.
+    assert [event["type"] for event in decoded] == ["response.output_item.done"]
+    assert decoded[0]["item"]["type"] == "tool_search_call"
+    assert decoded[0]["item"]["execution"] == "client"
+    assert decoded[0]["item"]["arguments"] == {"query": "opaque"}
 
 
 @pytest.mark.parametrize("item_type", ["tool_search_call", "tool_search_output"])

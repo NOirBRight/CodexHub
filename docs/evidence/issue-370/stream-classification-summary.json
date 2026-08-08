@@ -10,6 +10,15 @@
     "client_cancellation",
     "gateway_deadline_phase"
   ],
+  "timing_fields": {
+    "upstream_connect_timing": "not_observed_by_stream_seam",
+    "upstream_tls_timing": "not_observed_by_stream_seam",
+    "sse_first_byte_elapsed_ms": "bounded_emitted_runtime_field",
+    "sse_first_event_elapsed_ms": "bounded_emitted_runtime_field",
+    "sse_last_inter_event_gap_ms": "bounded_emitted_runtime_field",
+    "sse_max_inter_event_gap_ms": "bounded_emitted_runtime_field",
+    "sse_terminal_elapsed_ms": "bounded_emitted_runtime_field"
+  },
   "cases": [
     {
       "class": "slow_first_event_valid_completion",
