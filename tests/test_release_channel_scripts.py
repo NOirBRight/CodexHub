@@ -364,7 +364,7 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
         "name": "latest.json",
         "asset_url": (
             "https://github.com/NOirBRight/CodexHub/releases/download/"
-        "v0.1.8-beta.3/CodexHub_0.1.8-beta.3_x64-setup.exe"
+            "v0.1.8-beta.3/CodexHub_0.1.8-beta.3_x64-setup.exe"
         ),
     }
     assert plan["immutable_release"]["tag"] == "v0.1.8-beta.3"
