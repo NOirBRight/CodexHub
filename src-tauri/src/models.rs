@@ -450,13 +450,15 @@ fn update_catalog_override_payload(
             }
         }
     }
-    if version.is_some() && !matched {
-        entries.push(json!({
-            "provider": "openai",
-            "upstream_name": "official",
-            "upstream_model": canonical_model_id,
-            "fields": {"multi_agent_version": version.unwrap()},
-        }));
+    if !matched {
+        if let Some(value) = version {
+            entries.push(json!({
+                "provider": "openai",
+                "upstream_name": "official",
+                "upstream_model": canonical_model_id,
+                "fields": {"multi_agent_version": value},
+            }));
+        }
     }
     entries.retain(|entry| {
         let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
