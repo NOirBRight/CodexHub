@@ -16652,6 +16652,42 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertNotIn(b"PRIVATE_TOOL_ARGUMENT", b"".join(handler.wfile.writes))
 
+    def test_issue_370_incomplete_third_party_stream_without_output_is_post_write(self):
+        handler = FakeHandler()
+        response = FakeSseResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_no_output","status":"in_progress"}}\n\n',
+                b"",
+            ]
+        )
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "ollama_cloud",
+            relay_fixture=RELAY_GATEWAY,
+            request_id="req-incomplete-no-output",
+            model="ollama-cloud/glm-5.2",
+            upstream_format="responses",
+            inbound_format="responses",
+            caller_stream=True,
+        )
+
+        event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "upstream_stream_incomplete"
+        )
+        self.assertEqual(status, 502)
+        self.assertFalse(event["downstream_output_started"])
+        self.assertFalse(event["retry_forbidden"])
+        self.assertEqual(event["failure_class"], codex_proxy.RETRY_FAILURE_QUICK_TRANSIENT)
+        self.assertEqual(event["failure_phase"], "stream_body")
+        self.assertEqual(
+            event["retry_safety_class"],
+            codex_proxy.RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+        )
+
     def test_responses_sse_custom_tool_input_deltas_keep_idle_timer_alive(self):
         handler = FakeHandler()
         response = FakeSequencedDelayedSseResponse(

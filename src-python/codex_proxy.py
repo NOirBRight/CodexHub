@@ -23071,7 +23071,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     retry_safety_class=(
                         RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
                         if retry_forbidden
-                        else RETRY_SAFETY_SAFE_PREWRITE
+                        else RETRY_SAFETY_SUPPRESSED_POST_WRITE
                     ),
                     completed_tool_calls=len(completed_tool_output_items),
                     pending_downstream_lines=len(pending_downstream_lines),
