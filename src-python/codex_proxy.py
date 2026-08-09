@@ -119,6 +119,7 @@ from catalog import (
     should_include_model,
 )
 from catalog_sync import (
+    CONTEXT_WINDOW_OUTPUT_FALLBACK_SOURCE,
     GENERATED_CATALOG_PATH,
     LEGACY_GENERATED_CATALOG_PATH,
     POLICY_PATH,
@@ -3024,18 +3025,27 @@ def _resolve_ollama_cloud_model(
         ) from exc
 
 
-def catalog_max_output_tokens(model_id: str) -> int | None:
+def _catalog_output_limit(model_id: str) -> tuple[int | None, bool]:
     slug = canonical_model_id(model_id)
     model = generated_catalog_by_slug().get(_catalog_identity_slug(slug))
     if not model:
         cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
-        return cap if isinstance(cap, int) and cap > 0 else None
+        return (cap if isinstance(cap, int) and cap > 0 else None), False
     value = model.get("max_output_tokens")
     catalog_value = value if isinstance(value, int) and value > 0 else None
     cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
     if isinstance(cap, int) and cap > 0:
-        return min(catalog_value, cap) if catalog_value is not None else cap
-    return catalog_value
+        return (min(catalog_value, cap) if catalog_value is not None else cap), False
+    metadata = model.get("codex_proxy_metadata")
+    context_fallback = (
+        isinstance(metadata, Mapping)
+        and metadata.get("max_output_source") == CONTEXT_WINDOW_OUTPUT_FALLBACK_SOURCE
+    )
+    return catalog_value, context_fallback
+
+
+def catalog_max_output_tokens(model_id: str) -> int | None:
+    return _catalog_output_limit(model_id)[0]
 
 
 def policy_denies_model(model_id: Any, policy: Any) -> bool:
@@ -11848,10 +11858,19 @@ def compatible_request_body(
     ):
         changed = True
     model_id = payload.get("model")
-    max_output_tokens = catalog_max_output_tokens(model_id) if isinstance(model_id, str) else None
+    max_output_tokens, context_window_fallback = (
+        _catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
+    )
     if max_output_tokens is not None:
         requested_max_output_tokens = payload.get("max_output_tokens")
-        if not isinstance(requested_max_output_tokens, int) or requested_max_output_tokens > max_output_tokens:
+        if context_window_fallback and (
+            not isinstance(requested_max_output_tokens, int)
+            or requested_max_output_tokens >= max_output_tokens
+        ):
+            if "max_output_tokens" in payload:
+                del payload["max_output_tokens"]
+                changed = True
+        elif not isinstance(requested_max_output_tokens, int) or requested_max_output_tokens > max_output_tokens:
             payload["max_output_tokens"] = max_output_tokens
             changed = True
 

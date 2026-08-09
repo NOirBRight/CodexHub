@@ -103,6 +103,7 @@ OLLAMA_PRIORITY_BASE = 100
 DIRECT_OFFICIAL_CONTEXT_MAX_AGE_SECONDS = 12 * 60 * 60
 DIRECT_OFFICIAL_CACHE_STATUS_SOURCE = "direct_official_cache"
 OFFICIAL_PROXY_PROVIDER_ALIAS = "openai"
+CONTEXT_WINDOW_OUTPUT_FALLBACK_SOURCE = "context_window_fallback"
 
 
 OLLAMA_MODEL_LIMIT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -2360,6 +2361,9 @@ def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: 
         effective_context_window = model.get("context_window")
         if isinstance(effective_context_window, int) and effective_context_window > 0:
             model["max_output_tokens"] = effective_context_window
+            proxy_metadata = dict(model.get("codex_proxy_metadata", {}))
+            proxy_metadata["max_output_source"] = CONTEXT_WINDOW_OUTPUT_FALLBACK_SOURCE
+            model["codex_proxy_metadata"] = proxy_metadata
 
     input_modalities = dynamic_metadata.get("input_modalities")
     if isinstance(input_modalities, list) and input_modalities:
