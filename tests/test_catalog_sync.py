@@ -398,6 +398,32 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["codex_proxy_metadata"]["context_source"], "providers_toml")
         self.assertEqual(model["codex_proxy_metadata"]["max_output_source"], "providers_toml")
 
+    def test_build_catalog_runtime_versioned_ollama_defaults_missing_output_limit_to_context_window(self):
+        slug = "deepseek-v4-flash:0731"
+        metadata = catalog_sync.ollama_provider_model_metadata(
+            [
+                {
+                    "upstream_model": slug,
+                    "context_window": 1_048_576,
+                }
+            ]
+        )
+
+        catalog = build_codex_catalog(
+            [],
+            [slug],
+            self.policy,
+            "0.146.0",
+            ollama_model_metadata=metadata,
+            use_ollama_policy_allowlist=False,
+        )
+
+        model = next(model for model in catalog["models"] if model["slug"] == slug)
+        self.assertEqual(model["slug"], slug)
+        self.assertEqual(model["context_window"], 1_048_576)
+        self.assertEqual(model.get("max_output_tokens"), 1_048_576)
+        self.assertEqual(model["codex_proxy_metadata"]["provider"], "ollama-cloud")
+
     def test_build_catalog_applies_official_model_sort_order(self):
         official = [
             {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list"},
