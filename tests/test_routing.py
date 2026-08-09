@@ -18584,7 +18584,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("encrypted_content", payload["input"][0])
         self.assertNotIn(encrypted_content, transformed.decode("utf-8"))
 
-    def test_collaboration_v2_chat_drops_responses_reasoning_history_before_translation(self):
+    def test_collaboration_v2_chat_adapts_responses_only_history_before_translation(self):
         summary_text = "PRIVATE_REASONING_SUMMARY"
         encrypted_content = "gAAAA-private-reasoning"
         event_context = {
@@ -18602,6 +18602,13 @@ class RoutingTests(unittest.TestCase):
                             "summary": [{"type": "summary_text", "text": summary_text}],
                             "encrypted_content": encrypted_content,
                         },
+                        {
+                            "id": "msg_final",
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "final_answer",
+                            "content": [{"type": "output_text", "text": "Earlier answer."}],
+                        },
                         {"type": "message", "role": "user", "content": "continue"},
                     ],
                     "tools": [_model_switch_tool_surface("collaboration_v2")],
@@ -18612,7 +18619,7 @@ class RoutingTests(unittest.TestCase):
                 "name": "kimi",
                 "upstream_model": "kimi-k3",
                 "upstream_format": "chat_completions",
-                "tool_protocol": "chat_tools",
+                "tool_protocol": "none",
             },
             event_context=event_context,
             inject_codex_tools=False,
@@ -18621,7 +18628,15 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(
             payload["input"],
-            [{"type": "message", "role": "user", "content": "continue"}],
+            [
+                {
+                    "id": "msg_final",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Earlier answer."}],
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
         )
         chat_payload = json.loads(
             _responses_request_to_chat_completion_body(
@@ -18630,7 +18645,13 @@ class RoutingTests(unittest.TestCase):
                 drop_reasoning=True,
             )
         )
-        self.assertEqual(chat_payload["messages"], [{"role": "user", "content": "continue"}])
+        self.assertEqual(
+            chat_payload["messages"],
+            [
+                {"role": "assistant", "content": "Earlier answer."},
+                {"role": "user", "content": "continue"},
+            ],
+        )
         serialized = json.dumps(chat_payload, ensure_ascii=False)
         self.assertNotIn(summary_text, serialized)
         self.assertNotIn(encrypted_content, serialized)
@@ -18642,6 +18663,52 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(removal_event["count"], 1)
         for forbidden in ("id", "summary", "content", "text", "encrypted_content"):
             self.assertNotIn(forbidden, removal_event)
+        phase_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "v2_chat_message_phase_removed"
+        )
+        self.assertEqual(phase_event["count"], 1)
+        for forbidden in ("id", "phase", "content", "text"):
+            self.assertNotIn(forbidden, phase_event)
+
+    def test_collaboration_v2_responses_preserves_message_phase(self):
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [
+                        {
+                            "id": "msg_final",
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "final_answer",
+                            "content": [{"type": "output_text", "text": "Earlier answer."}],
+                        },
+                        {"type": "message", "role": "user", "content": "Continue."},
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={
+                "request_id": "request-v2-responses-message-phase",
+                "collaboration_protocol": "collaboration_v2",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["phase"], "final_answer")
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "v2_chat_message_phase_removed"
+                for call in self.write_proxy_event.call_args_list
+            )
+        )
 
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
         fixture = _load_glm_apply_patch_history_native_ids_fixture()
