@@ -9603,6 +9603,39 @@ def _drop_v2_chat_reasoning_history(
     return True
 
 
+def _drop_v2_chat_message_phase(
+    payload: dict[str, Any],
+    *,
+    event_context: Mapping[str, Any] | None,
+    upstream_name: str | None,
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    removed_count = 0
+    rewritten_items: list[Any] = []
+    for item in input_items:
+        if isinstance(item, Mapping) and item.get("type") == "message" and "phase" in item:
+            rewritten = dict(item)
+            rewritten.pop("phase")
+            rewritten_items.append(rewritten)
+            removed_count += 1
+        else:
+            rewritten_items.append(item)
+    if not removed_count:
+        return False
+
+    payload["input"] = rewritten_items
+    _write_adapter_event(
+        event_context,
+        "v2_chat_message_phase_removed",
+        upstream=upstream_name,
+        count=removed_count,
+    )
+    return True
+
+
 def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -11504,6 +11537,15 @@ def compatible_request_body(
         if (
             upstream.get("upstream_format") == "chat_completions"
             and _drop_v2_chat_reasoning_history(
+                payload,
+                event_context=event_context,
+                upstream_name=upstream_name,
+            )
+        ):
+            changed = True
+        if (
+            upstream.get("upstream_format") == "chat_completions"
+            and _drop_v2_chat_message_phase(
                 payload,
                 event_context=event_context,
                 upstream_name=upstream_name,
