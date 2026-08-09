@@ -1678,10 +1678,11 @@ def chat_stream_chunks_to_response_events(
                 continue
             _validate_chat_stream_source(source)
             content = source.get("content")
-            if isinstance(content, str) and content:
-                if message_output_index is None:
-                    message_output_index = allocate_output_index()
-                text_parts.append(content)
+            if isinstance(content, str):
+                if content:
+                    if message_output_index is None:
+                        message_output_index = allocate_output_index()
+                    text_parts.append(content)
             elif content is not None:
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
@@ -2793,18 +2794,19 @@ class ChatToResponsesStreamConverter:
             if isinstance(delta, Mapping):
                 _validate_chat_stream_source(delta)
                 content = delta.get("content")
-                if isinstance(content, str) and content:
-                    self.text_parts.append(content)
-                    events.extend(self._message_start_events())
-                    events.append(
-                        {
-                            "type": "response.output_text.delta",
-                            "item_id": self.item_id,
-                            "output_index": self.message_output_index if self.message_output_index is not None else 0,
-                            "content_index": 0,
-                            "delta": content,
-                        }
-                    )
+                if isinstance(content, str):
+                    if content:
+                        self.text_parts.append(content)
+                        events.extend(self._message_start_events())
+                        events.append(
+                            {
+                                "type": "response.output_text.delta",
+                                "item_id": self.item_id,
+                                "output_index": self.message_output_index if self.message_output_index is not None else 0,
+                                "content_index": 0,
+                                "delta": content,
+                            }
+                        )
                 elif content is not None:
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
