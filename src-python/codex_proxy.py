@@ -9344,7 +9344,7 @@ def _rewrite_internal_input_items(
     return changed
 
 
-def _rewrite_v2_unsupported_custom_tool_history(
+def _rewrite_v2_unsupported_tool_history(
     payload: dict[str, Any],
     *,
     upstream: Mapping[str, Any],
@@ -11463,7 +11463,7 @@ def compatible_request_body(
             if history_changed:
                 payload["input"] = adapted_items
                 changed = True
-        if _rewrite_v2_unsupported_custom_tool_history(
+        if _rewrite_v2_unsupported_tool_history(
             payload,
             upstream=upstream,
             tool_protocol=tool_protocol,
