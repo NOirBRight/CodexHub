@@ -2449,9 +2449,6 @@ def build_external_provider_model(
         model["max_output_tokens"] = max_output_tokens
     else:
         model.pop("max_output_tokens", None)
-        effective_context_window = model.get("context_window")
-        if isinstance(effective_context_window, int) and effective_context_window > 0:
-            model["max_output_tokens"] = effective_context_window
 
     inherited_metadata = model.get("codex_proxy_metadata")
     proxy_metadata = {
@@ -2481,6 +2478,10 @@ def build_external_provider_model(
             (str(external_model["provider_alias"]), str(external_model["upstream_model"]))
         ),
     )
+    if "max_output_tokens" not in model:
+        effective_context_window = model.get("context_window")
+        if isinstance(effective_context_window, int) and effective_context_window > 0:
+            model["max_output_tokens"] = effective_context_window
     stamp_catalog_owner_metadata(model)
     return model
 
