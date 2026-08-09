@@ -534,8 +534,6 @@ OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
 UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
     "minimax-m3": 131072,
-    "deepseek-v4-pro": 65536,
-    "deepseek-v4-flash": 65536,
 }
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -11184,6 +11182,9 @@ def compatible_request_body(
         if not changed:
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+    if _strip_reasoning_encrypted_content(payload):
+        changed = True
 
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = (
