@@ -3329,6 +3329,27 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["mutation_summary"], [codex_proxy.RouteMutation.MODEL_ALIAS.value])
 
     def test_model_switch_gateway_request_response_path_uses_selected_model_in_both_directions(self):
+        versioned_slug = "deepseek-v4-flash:0731"
+        versioned_catalog = catalog_sync.build_codex_catalog(
+            [],
+            [versioned_slug],
+            catalog_sync.CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={},
+            ),
+            "0.146.0",
+            ollama_model_metadata={
+                versioned_slug: {
+                    "context_window": 1_048_576,
+                    "context_source": "providers_toml",
+                }
+            },
+            use_ollama_policy_allowlist=False,
+        )
+        versioned_catalog_by_slug = {
+            model["slug"]: model for model in versioned_catalog["models"]
+        }
         fixture = _load_model_switch_fixture()
         self.assertEqual(fixture["schema_version"], "codexhub.model-switch.v1")
         self.assertEqual(fixture["expected"], {
@@ -3439,6 +3460,10 @@ class RoutingTests(unittest.TestCase):
                 event_offset = len(self.write_proxy_event.call_args_list)
                 with (
                     patch("codex_proxy.choose_upstream", return_value=upstream),
+                    patch(
+                        "codex_proxy.generated_catalog_by_slug",
+                        return_value=versioned_catalog_by_slug,
+                    ),
                     patch("codex_proxy.codex_access_token", return_value="fixture-access-token"),
                     patch("codex_proxy.codex_account_id", return_value="fixture-account-id"),
                     patch(
@@ -3452,6 +3477,8 @@ class RoutingTests(unittest.TestCase):
                 open_upstream.assert_called_once()
                 forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
                 self.assertEqual(forwarded["model"], model)
+                if model == versioned_slug:
+                    self.assertEqual(forwarded.get("max_output_tokens"), 1_048_576)
 
                 events = [
                     (event_call.args[0], event_call.kwargs)

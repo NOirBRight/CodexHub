@@ -2355,6 +2355,12 @@ def apply_ollama_model_limits(model: dict[str, Any], slug: str, model_metadata: 
     if isinstance(dynamic_max_output_tokens, int) and dynamic_max_output_tokens > 0:
         model["max_output_tokens"] = dynamic_max_output_tokens
 
+    effective_max_output_tokens = model.get("max_output_tokens")
+    if not isinstance(effective_max_output_tokens, int) or effective_max_output_tokens <= 0:
+        effective_context_window = model.get("context_window")
+        if isinstance(effective_context_window, int) and effective_context_window > 0:
+            model["max_output_tokens"] = effective_context_window
+
     input_modalities = dynamic_metadata.get("input_modalities")
     if isinstance(input_modalities, list) and input_modalities:
         model["input_modalities"] = [str(value) for value in input_modalities if str(value)]
