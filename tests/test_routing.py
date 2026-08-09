@@ -12874,13 +12874,13 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(json.loads(transformed)["max_output_tokens"], 65536)
 
-    def test_ollama_body_applies_upstream_output_token_cap(self):
+    def test_ollama_body_uses_catalog_output_limit_without_deepseek_gateway_cap(self):
         upstream = choose_upstream("deepseek-v4-pro")
         body = b'{"model":"deepseek-v4-pro","input":"hi"}'
 
         transformed = compatible_request_body(body, upstream)
 
-        self.assertEqual(json.loads(transformed)["max_output_tokens"], 65536)
+        self.assertEqual(json.loads(transformed)["max_output_tokens"], 393216)
 
     def test_ollama_body_applies_minimax_output_token_cap(self):
         upstream = choose_upstream("minimax-m3")
@@ -18251,6 +18251,43 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(history_events[0]["count"], 1)
         for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
             self.assertNotIn(forbidden, history_events[0])
+
+    def test_external_collaboration_v2_strips_official_reasoning_encrypted_content(self):
+        encrypted_content = "gAAAA-official-secret"
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": [
+                        {
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": "Portable summary."}],
+                            "encrypted_content": encrypted_content,
+                        },
+                        {"type": "message", "role": "user", "content": "continue"},
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={
+                "request_id": "<sanitized-request-id>",
+                "collaboration_protocol": "collaboration_v2",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(payload["input"][0]["type"], "reasoning")
+        self.assertEqual(
+            payload["input"][0]["summary"],
+            [{"type": "summary_text", "text": "Portable summary."}],
+        )
+        self.assertNotIn("encrypted_content", payload["input"][0])
+        self.assertNotIn(encrypted_content, transformed.decode("utf-8"))
 
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
         fixture = _load_glm_apply_patch_history_native_ids_fixture()

@@ -534,8 +534,6 @@ OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
 UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
     "minimax-m3": 131072,
-    "deepseek-v4-pro": 65536,
-    "deepseek-v4-flash": 65536,
 }
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -9269,6 +9267,126 @@ def _rewrite_internal_input_items(
     return changed
 
 
+def _rewrite_v2_unsupported_custom_tool_history(
+    payload: dict[str, Any],
+    *,
+    upstream: Mapping[str, Any],
+    tool_protocol: str,
+    compatibility_plan: RuntimeToolCompatibilityPlan | None,
+    event_context: Mapping[str, Any] | None,
+    upstream_name: str | None,
+) -> bool:
+    """Keep V2 Collaboration calls native without leaking other custom items.
+
+    Collaboration V2 is a boundary for the ``collaboration`` namespace, not a
+    blanket exemption from the third-party input-item adapter.  Codex Desktop
+    can place unrelated ``custom_tool_call`` history (for example ``exec``)
+    beside V2 calls.  Responses providers generally expose only the plain
+    function lifecycle unless an explicit custom lifecycle capability is
+    supplied, so those opaque items must become transcript messages before the
+    request reaches the provider.
+    """
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    capabilities = (
+        compatibility_plan.capabilities
+        if compatibility_plan is not None
+        else _runtime_tool_protocol_capabilities(tool_protocol, upstream)
+    )
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        tools = []
+    declared_custom_names = {
+        tool.get("name")
+        for tool in tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "custom"
+        and isinstance(tool.get("name"), str)
+    }
+
+    def plan_owns_custom_call(item: Mapping[str, Any]) -> bool:
+        if compatibility_plan is None:
+            return False
+        name = item.get("name")
+        alias_record = compatibility_plan.registry.record_for_alias(name)
+        if alias_record is not None and alias_record.family == "custom_freeform":
+            return True
+        call_id = item.get("call_id")
+        call_record = compatibility_plan.registry.record_for_call(call_id)
+        if call_record is not None and call_record.family == "custom_freeform":
+            return True
+        return any(
+            entry.family == "custom_freeform"
+            and entry.original_name == name
+            for entry in compatibility_plan.entries
+        )
+
+    def preserve_custom_call(item: Mapping[str, Any]) -> bool:
+        # Preserve only a custom lifecycle that belongs to this request's
+        # immutable compatibility plan.  A provider capability fact alone does
+        # not establish ownership of an undeclared historical item (and must
+        # not let a plain-function name collision bypass sanitization).
+        if compatibility_plan is not None:
+            return plan_owns_custom_call(item)
+        return (
+            capabilities.custom_lifecycle
+            and item.get("name") in declared_custom_names
+        )
+
+    preserved_call_ids = {
+        item.get("call_id")
+        for item in input_items
+        if isinstance(item, Mapping)
+        and item.get("type") == "custom_tool_call"
+        and isinstance(item.get("call_id"), str)
+        and preserve_custom_call(item)
+    }
+
+    rewritten_items: list[Any] = []
+    changed = False
+    rewritten_count = 0
+    for item in input_items:
+        if not isinstance(item, Mapping):
+            rewritten_items.append(item)
+            continue
+        item_type = item.get("type")
+        if item_type == "custom_tool_call" and not preserve_custom_call(item):
+            replacement = _compatible_internal_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+                changed = True
+                rewritten_count += 1
+            else:
+                rewritten_items.append(item)
+            continue
+        if (
+            item_type == "custom_tool_call_output"
+            and item.get("call_id") not in preserved_call_ids
+        ):
+            replacement = _compatible_internal_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+                changed = True
+                rewritten_count += 1
+            else:
+                rewritten_items.append(item)
+            continue
+        rewritten_items.append(item)
+
+    if not changed:
+        return False
+    payload["input"] = rewritten_items
+    _write_adapter_event(
+        event_context,
+        "v2_custom_tool_history_rewritten",
+        upstream=upstream_name,
+        count=rewritten_count,
+    )
+    return True
+
+
 def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -11065,6 +11183,9 @@ def compatible_request_body(
             return body
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
+    if _strip_reasoning_encrypted_content(payload):
+        changed = True
+
     raw_provider_probe = _is_raw_provider_probe_context(event_context)
     tool_protocol = (
         tool_protocol_override
@@ -11155,6 +11276,15 @@ def compatible_request_body(
             if history_changed:
                 payload["input"] = adapted_items
                 changed = True
+        if _rewrite_v2_unsupported_custom_tool_history(
+            payload,
+            upstream=upstream,
+            tool_protocol=tool_protocol,
+            compatibility_plan=runtime_tool_plan,
+            event_context=event_context,
+            upstream_name=upstream_name,
+        ):
+            changed = True
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it

@@ -2801,6 +2801,39 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertEqual(model["default_reasoning_level"], "max")
 
+    def test_external_model_defaults_missing_output_limit_to_context_window(self):
+        external_model = {
+            "alias": "volc/deepseek-v4-flash:0731",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "deepseek-v4-flash:0731",
+            "context_window": 1_048_576,
+        }
+        fallback_template = {
+            "context_window": 128_000,
+            "max_context_window": 128_000,
+            "max_output_tokens": 65_536,
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, fallback_template)
+
+        self.assertEqual(model["context_window"], 1_048_576)
+        self.assertEqual(model["max_output_tokens"], 1_048_576)
+
+    def test_external_model_preserves_verified_output_limit_before_context_default(self):
+        external_model = {
+            "alias": "volc/glm-5.2",
+            "provider_alias": "volc",
+            "upstream_name": "volcengine",
+            "upstream_model": "glm-5.2",
+            "context_window": 1_024_000,
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertEqual(model["context_window"], 1_024_000)
+        self.assertEqual(model["max_output_tokens"], 8_192)
+
     def test_external_reasoning_default_ultra_falls_back_without_mapping_to_max(self):
         external_model = {
             "alias": "volc/glm-5.2",
