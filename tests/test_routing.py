@@ -18584,6 +18584,65 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("encrypted_content", payload["input"][0])
         self.assertNotIn(encrypted_content, transformed.decode("utf-8"))
 
+    def test_collaboration_v2_chat_drops_responses_reasoning_history_before_translation(self):
+        summary_text = "PRIVATE_REASONING_SUMMARY"
+        encrypted_content = "gAAAA-private-reasoning"
+        event_context = {
+            "request_id": "request-v2-chat-reasoning-history",
+            "collaboration_protocol": "collaboration_v2",
+        }
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "kimi-k3",
+                    "input": [
+                        {
+                            "id": "rs_private",
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": summary_text}],
+                            "encrypted_content": encrypted_content,
+                        },
+                        {"type": "message", "role": "user", "content": "continue"},
+                    ],
+                    "tools": [_model_switch_tool_surface("collaboration_v2")],
+                    "stream": True,
+                }
+            ).encode("utf-8"),
+            {
+                "name": "kimi",
+                "upstream_model": "kimi-k3",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context=event_context,
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            payload["input"],
+            [{"type": "message", "role": "user", "content": "continue"}],
+        )
+        chat_payload = json.loads(
+            _responses_request_to_chat_completion_body(
+                transformed,
+                drop_client_transport_fields=True,
+                drop_reasoning=True,
+            )
+        )
+        self.assertEqual(chat_payload["messages"], [{"role": "user", "content": "continue"}])
+        serialized = json.dumps(chat_payload, ensure_ascii=False)
+        self.assertNotIn(summary_text, serialized)
+        self.assertNotIn(encrypted_content, serialized)
+        removal_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "v2_chat_reasoning_history_removed"
+        )
+        self.assertEqual(removal_event["count"], 1)
+        for forbidden in ("id", "summary", "content", "text", "encrypted_content"):
+            self.assertNotIn(forbidden, removal_event)
+
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
         fixture = _load_glm_apply_patch_history_native_ids_fixture()
         apply_patch_tool = {
