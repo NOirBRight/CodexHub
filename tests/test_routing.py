@@ -539,6 +539,7 @@ class RoutingTests(unittest.TestCase):
                 "gemini-3-flash-preview",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
+                "deepseek-v4-flash:0731",
                 "volc/glm-5.2",
                 "minimax-cn/MiniMax-M3",
                 "minimax-cn/minimax-m3",
@@ -579,6 +580,15 @@ class RoutingTests(unittest.TestCase):
                 "gemini-3-flash-preview": {"slug": "gemini-3-flash-preview", "max_output_tokens": 65536},
                 "deepseek-v4-pro": {"slug": "deepseek-v4-pro", "max_output_tokens": 393216},
                 "deepseek-v4-flash": {"slug": "deepseek-v4-flash", "max_output_tokens": 393216},
+                "deepseek-v4-flash:0731": {
+                    "slug": "deepseek-v4-flash:0731",
+                    "context_window": 1048576,
+                    "max_output_tokens": 1048576,
+                    "codex_proxy_metadata": {
+                        "provider": "ollama-cloud",
+                        "max_output_source": "context_window_fallback",
+                    },
+                },
                 "volc/glm-5.2": {"slug": "volc/glm-5.2", "max_output_tokens": 4096},
                 "minimax-cn/MiniMax-M3": {"slug": "minimax-cn/MiniMax-M3", "max_output_tokens": 524288},
                 "minimax-cn/minimax-m3": {"slug": "minimax-cn/minimax-m3", "max_output_tokens": 524288},
@@ -3457,6 +3467,21 @@ class RoutingTests(unittest.TestCase):
                     separators=(",", ":"),
                 ).encode("utf-8")
 
+                def open_model_switch_upstream(request, **_kwargs):
+                    forwarded_payload = json.loads(request.data.decode("utf-8"))
+                    if (
+                        model == versioned_slug
+                        and forwarded_payload.get("max_output_tokens", 0) > 65_536
+                    ):
+                        raise HTTPError(
+                            request.full_url,
+                            400,
+                            "max_tokens exceeds model maximum output tokens",
+                            {},
+                            io.BytesIO(b'{"error":"max_tokens exceeds model maximum output tokens"}'),
+                        )
+                    return FakeContextResponse(upstream_response)
+
                 event_offset = len(self.write_proxy_event.call_args_list)
                 with (
                     patch("codex_proxy.choose_upstream", return_value=upstream),
@@ -3468,7 +3493,7 @@ class RoutingTests(unittest.TestCase):
                     patch("codex_proxy.codex_account_id", return_value="fixture-account-id"),
                     patch(
                         "codex_proxy._open_upstream_response",
-                        return_value=FakeContextResponse(upstream_response),
+                        side_effect=open_model_switch_upstream,
                     ) as open_upstream,
                 ):
                     CodexProxyHandler.do_POST(handler)
@@ -3478,7 +3503,7 @@ class RoutingTests(unittest.TestCase):
                 forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
                 self.assertEqual(forwarded["model"], model)
                 if model == versioned_slug:
-                    self.assertEqual(forwarded.get("max_output_tokens"), 1_048_576)
+                    self.assertNotIn("max_output_tokens", forwarded)
 
                 events = [
                     (event_call.args[0], event_call.kwargs)
@@ -12900,6 +12925,33 @@ class RoutingTests(unittest.TestCase):
         transformed = compatible_request_body(body, upstream)
 
         self.assertEqual(json.loads(transformed)["max_output_tokens"], 65536)
+
+    def test_ollama_body_keeps_context_fallback_limit_off_wire_unless_caller_uses_smaller_limit(self):
+        upstream = {
+            **choose_upstream("glm-5.2"),
+            "model_id": "deepseek-v4-flash:0731",
+            "upstream_model": "deepseek-v4-flash:0731",
+        }
+        cases = (
+            (b'{"model":"deepseek-v4-flash:0731","input":"hi"}', None),
+            (
+                b'{"model":"deepseek-v4-flash:0731","max_output_tokens":1048576,"input":"hi"}',
+                None,
+            ),
+            (
+                b'{"model":"deepseek-v4-flash:0731","max_output_tokens":65536,"input":"hi"}',
+                65536,
+            ),
+        )
+
+        for body, expected_wire_limit in cases:
+            with self.subTest(expected_wire_limit=expected_wire_limit):
+                transformed = compatible_request_body(body, upstream)
+                payload = json.loads(transformed)
+                if expected_wire_limit is None:
+                    self.assertNotIn("max_output_tokens", payload)
+                else:
+                    self.assertEqual(payload["max_output_tokens"], expected_wire_limit)
 
     def test_ollama_body_uses_catalog_output_limit_without_deepseek_gateway_cap(self):
         upstream = choose_upstream("deepseek-v4-pro")

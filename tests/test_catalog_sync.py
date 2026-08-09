@@ -423,6 +423,10 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["context_window"], 1_048_576)
         self.assertEqual(model.get("max_output_tokens"), 1_048_576)
         self.assertEqual(model["codex_proxy_metadata"]["provider"], "ollama-cloud")
+        self.assertEqual(
+            model["codex_proxy_metadata"]["max_output_source"],
+            "context_window_fallback",
+        )
 
     def test_build_catalog_applies_official_model_sort_order(self):
         official = [
