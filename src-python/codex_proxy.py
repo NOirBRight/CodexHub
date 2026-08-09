@@ -5244,6 +5244,73 @@ def _chat_stream_shape_summary(chunks: list[Mapping[str, Any] | str]) -> dict[st
     return summary
 
 
+CHAT_RAW_REASONING_FIELDS = frozenset({"reasoning", "reasoning_content"})
+
+
+def _suppress_chat_reasoning_extensions(
+    chunks: list[Mapping[str, Any] | str],
+    *,
+    event_context: Mapping[str, Any] | None,
+    upstream_name: str | None,
+) -> tuple[list[Mapping[str, Any] | str], bool]:
+    """Drop third-party Chat reasoning extensions before Responses conversion."""
+    rewritten_chunks: list[Mapping[str, Any] | str] = []
+    field_count = 0
+    chunk_count = 0
+
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            rewritten_chunks.append(chunk)
+            continue
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            rewritten_chunks.append(chunk)
+            continue
+
+        rewritten_choices: list[Any] = []
+        chunk_changed = False
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                rewritten_choices.append(choice)
+                continue
+            rewritten_choice: Mapping[str, Any] = choice
+            for source_name in ("delta", "message"):
+                source = choice.get(source_name)
+                if not isinstance(source, Mapping):
+                    continue
+                fields = CHAT_RAW_REASONING_FIELDS.intersection(source)
+                if not fields:
+                    continue
+                if rewritten_choice is choice:
+                    rewritten_choice = dict(choice)
+                rewritten_source = dict(source)
+                for field in fields:
+                    rewritten_source.pop(field, None)
+                rewritten_choice[source_name] = rewritten_source
+                field_count += len(fields)
+                chunk_changed = True
+            rewritten_choices.append(rewritten_choice)
+
+        if chunk_changed:
+            rewritten_chunk = dict(chunk)
+            rewritten_chunk["choices"] = rewritten_choices
+            rewritten_chunks.append(rewritten_chunk)
+            chunk_count += 1
+        else:
+            rewritten_chunks.append(chunk)
+
+    if not field_count:
+        return chunks, False
+    _write_adapter_event(
+        event_context,
+        "chat_reasoning_extensions_suppressed",
+        upstream=upstream_name,
+        field_count=field_count,
+        chunk_count=chunk_count,
+    )
+    return rewritten_chunks, True
+
+
 def _chat_stream_is_empty_lifecycle_final(
     summary: Mapping[str, Any],
     event_context: Mapping[str, Any] | None,
@@ -9277,7 +9344,7 @@ def _rewrite_internal_input_items(
     return changed
 
 
-def _rewrite_v2_unsupported_custom_tool_history(
+def _rewrite_v2_unsupported_tool_history(
     payload: dict[str, Any],
     *,
     upstream: Mapping[str, Any],
@@ -9286,7 +9353,7 @@ def _rewrite_v2_unsupported_custom_tool_history(
     event_context: Mapping[str, Any] | None,
     upstream_name: str | None,
 ) -> bool:
-    """Keep V2 Collaboration calls native without leaking other custom items.
+    """Keep V2 Collaboration calls native while adapting stale tool history.
 
     Collaboration V2 is a boundary for the ``collaboration`` namespace, not a
     blanket exemption from the third-party input-item adapter.  Codex Desktop
@@ -9294,7 +9361,9 @@ def _rewrite_v2_unsupported_custom_tool_history(
     beside V2 calls.  Responses providers generally expose only the plain
     function lifecycle unless an explicit custom lifecycle capability is
     supplied, so those opaque items must become transcript messages before the
-    request reaches the provider.
+    request reaches the provider. A uniquely paired plain-function lifecycle
+    from an older tool surface is likewise retained as a read-only transcript
+    when the current immutable plan has no owner for its identity.
     """
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -9354,12 +9423,112 @@ def _rewrite_v2_unsupported_custom_tool_history(
         and preserve_custom_call(item)
     }
 
+    def plan_owns_plain_function_call(item: Mapping[str, Any]) -> bool:
+        if compatibility_plan is None:
+            return True
+        name = item.get("name")
+        call_id = item.get("call_id")
+        if compatibility_plan.registry.record_for_alias(name) is not None:
+            return True
+        if compatibility_plan.registry.record_for_call(call_id) is not None:
+            return True
+        return any(
+            entry.family == "plain_function"
+            and entry.original_name == name
+            for entry in compatibility_plan.entries
+        )
+
+    def has_valid_optional_item_identity(item: Mapping[str, Any]) -> bool:
+        identities = []
+        for field in ("id", "item_id"):
+            if field not in item:
+                continue
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                return False
+            identities.append(value)
+        return len(set(identities)) <= 1
+
+    def is_well_formed_stale_function_call(item: Mapping[str, Any]) -> bool:
+        allowed_fields = {
+            "type",
+            "id",
+            "item_id",
+            "status",
+            "call_id",
+            "name",
+            "arguments",
+        }
+        return (
+            set(item).issubset(allowed_fields)
+            and _is_standard_responses_function_call(item)
+            and item.get("status") == "completed"
+            and isinstance(item.get("arguments"), str)
+            and has_valid_optional_item_identity(item)
+        )
+
+    def is_well_formed_stale_function_output(item: Mapping[str, Any]) -> bool:
+        allowed_fields = {
+            "type",
+            "id",
+            "item_id",
+            "status",
+            "call_id",
+            "output",
+        }
+        return (
+            set(item).issubset(allowed_fields)
+            and item.get("type") == "function_call_output"
+            and item.get("status") in (None, "completed")
+            and isinstance(item.get("output"), str)
+            and has_valid_optional_item_identity(item)
+        )
+
+    positions_by_call_id: dict[str, list[int]] = {}
+    for index, item in enumerate(input_items):
+        if not isinstance(item, Mapping):
+            continue
+        call_id = item.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            positions_by_call_id.setdefault(call_id, []).append(index)
+
+    stale_function_pair_indexes: set[int] = set()
+    stale_function_pair_count = 0
+    for call_index, item in enumerate(input_items):
+        if (
+            not isinstance(item, Mapping)
+            or not is_well_formed_stale_function_call(item)
+            or plan_owns_plain_function_call(item)
+        ):
+            continue
+        call_id = item["call_id"]
+        positions = positions_by_call_id.get(call_id, [])
+        if len(positions) != 2 or positions[0] != call_index:
+            continue
+        output_index = positions[1]
+        output_item = input_items[output_index]
+        if (
+            not isinstance(output_item, Mapping)
+            or not is_well_formed_stale_function_output(output_item)
+        ):
+            continue
+        stale_function_pair_indexes.update((call_index, output_index))
+        stale_function_pair_count += 1
+
     rewritten_items: list[Any] = []
     changed = False
-    rewritten_count = 0
-    for item in input_items:
+    custom_rewritten_count = 0
+    for index, item in enumerate(input_items):
         if not isinstance(item, Mapping):
             rewritten_items.append(item)
+            continue
+        if index in stale_function_pair_indexes:
+            replacement = _compatible_internal_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+                changed = True
+            else:
+                rewritten_items.append(item)
             continue
         item_type = item.get("type")
         if item_type == "custom_tool_call" and not preserve_custom_call(item):
@@ -9367,7 +9536,7 @@ def _rewrite_v2_unsupported_custom_tool_history(
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
-                rewritten_count += 1
+                custom_rewritten_count += 1
             else:
                 rewritten_items.append(item)
             continue
@@ -9379,7 +9548,7 @@ def _rewrite_v2_unsupported_custom_tool_history(
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
-                rewritten_count += 1
+                custom_rewritten_count += 1
             else:
                 rewritten_items.append(item)
             continue
@@ -9388,12 +9557,20 @@ def _rewrite_v2_unsupported_custom_tool_history(
     if not changed:
         return False
     payload["input"] = rewritten_items
-    _write_adapter_event(
-        event_context,
-        "v2_custom_tool_history_rewritten",
-        upstream=upstream_name,
-        count=rewritten_count,
-    )
+    if custom_rewritten_count:
+        _write_adapter_event(
+            event_context,
+            "v2_custom_tool_history_rewritten",
+            upstream=upstream_name,
+            count=custom_rewritten_count,
+        )
+    if stale_function_pair_count:
+        _write_adapter_event(
+            event_context,
+            "v2_stale_function_history_rewritten",
+            upstream=upstream_name,
+            pair_count=stale_function_pair_count,
+        )
     return True
 
 
@@ -11286,7 +11463,7 @@ def compatible_request_body(
             if history_changed:
                 payload["input"] = adapted_items
                 changed = True
-        if _rewrite_v2_unsupported_custom_tool_history(
+        if _rewrite_v2_unsupported_tool_history(
             payload,
             upstream=upstream,
             tool_protocol=tool_protocol,
@@ -19610,11 +19787,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **proxy_request_context,
             )
             if downstream_sse_started:
-                if (
-                    is_apply_patch_adapter_error
-                    and inbound_format == "responses"
-                    and selected_native_responses_tool_codec == "strict_apply_patch"
-                ):
+                if inbound_format == "responses":
                     if not self._write_sse_event(
                         "response.failed",
                         _responses_failed_event_for_stream_error(
@@ -19630,16 +19803,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ):
                         finish_downstream_write_failure()
                         return
-                    write_proxy_event(
-                        "third_party_apply_patch_terminal",
-                        request_id=request_id,
-                        model=canonical_model_id(model) if model else None,
-                        upstream=upstream_name,
-                        codec=selected_native_responses_tool_codec,
-                        disposition="response.failed",
-                        failure_class=RETRY_FAILURE_PERMANENT,
-                        retry_count=0,
-                    )
+                    if (
+                        is_apply_patch_adapter_error
+                        and selected_native_responses_tool_codec == "strict_apply_patch"
+                    ):
+                        write_proxy_event(
+                            "third_party_apply_patch_terminal",
+                            request_id=request_id,
+                            model=canonical_model_id(model) if model else None,
+                            upstream=upstream_name,
+                            codec=selected_native_responses_tool_codec,
+                            disposition="response.failed",
+                            failure_class=RETRY_FAILURE_PERMANENT,
+                            retry_count=0,
+                        )
                     self.close_connection = True
                 else:
                     if not self._write_downstream_sse_error(
@@ -22755,6 +22932,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         )
                     _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                     return 502
+                if upstream_name != "official" and not want_chat_output:
+                    chunks, _ = _suppress_chat_reasoning_extensions(
+                        chunks,
+                        event_context=event_context,
+                        upstream_name=upstream_name,
+                    )
                 chat_summary = _chat_stream_shape_summary(chunks)
                 _write_adapter_event(
                     event_context,

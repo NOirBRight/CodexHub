@@ -1372,6 +1372,45 @@ class ProtocolTranslationTests(unittest.TestCase):
             converter.events_for_chunk(chunk)
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
+    def test_chat_stream_empty_string_content_is_ignored_in_both_modes(self):
+        empty_chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": None,
+                }
+            ]
+        }
+        text_chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "ok"},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+
+        events = protocol_translation.chat_stream_chunks_to_response_events(
+            [empty_chunk, text_chunk, "[DONE]"]
+        )
+        self.assertEqual(events[-1]["type"], "response.completed")
+        self.assertEqual(
+            events[-1]["response"]["output"][0]["content"][0]["text"],
+            "ok",
+        )
+
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        converter.events_for_chunk(empty_chunk)
+        converter.events_for_chunk(text_chunk)
+        incremental_events = converter.events_for_done()
+        self.assertEqual(incremental_events[-1]["type"], "response.completed")
+        self.assertEqual(
+            incremental_events[-1]["response"]["output"][0]["content"][0]["text"],
+            "ok",
+        )
+
     def test_chat_stream_rejects_multiple_or_nonzero_choices_before_translation(self):
         chunks = (
             {

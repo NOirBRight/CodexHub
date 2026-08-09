@@ -7633,7 +7633,7 @@ class RoutingTests(unittest.TestCase):
                         {
                             "index": 0,
                             "delta": {
-                                "reasoning_content": "SECRET_CHAT_UNSUPPORTED_DELTA"
+                                "audio": {"data": "SECRET_CHAT_UNSUPPORTED_DELTA"}
                             },
                             "finish_reason": None,
                         }
@@ -7959,7 +7959,7 @@ class RoutingTests(unittest.TestCase):
             headers={"X-Codex-Client-Id": "opencode"},
         )
         frames = [
-            b'data: {"choices":[{"index":0,"delta":{"reasoning_content":"SECRET_BUFFERED_CONVERSION"},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"index":0,"delta":{"audio":{"data":"SECRET_BUFFERED_CONVERSION"}},"finish_reason":null}]}\n\n',
             b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
             b"data: [DONE]\n\n",
             b"",
@@ -15214,7 +15214,7 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("arguments_not_exact", rendered_payload)
         self.assertNotIn(private_patch, rendered_payload)
 
-    def test_apply_patch_adapter_rejection_sse_terminal_is_codec_scoped_and_preserves_response_id(self):
+    def test_apply_patch_adapter_rejection_sse_uses_failed_terminal_with_codec_scoped_telemetry(self):
         private_patch = "*** Begin Patch\n*** Update File: secret.txt\n"
         malformed_item = {
             "id": "fc_apply_patch",
@@ -15236,10 +15236,10 @@ class RoutingTests(unittest.TestCase):
             }
         ).encode("utf-8")
         cases = (
-            ("unselected", "none", b"event: error\n"),
-            ("selected", "strict_apply_patch", b"event: response.failed\n"),
+            ("unselected", "none"),
+            ("selected", "strict_apply_patch"),
         )
-        for case, codec, expected_prefix in cases:
+        for case, codec in cases:
             with self.subTest(case=case):
                 self.write_proxy_event.reset_mock()
                 response = FakeSseResponse(
@@ -15273,20 +15273,9 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(fake.status, 200)
                 frames = b"".join(fake.wfile.writes).split(b"\n\n")
                 terminal_frames = [
-                    frame for frame in frames if frame.startswith(expected_prefix)
+                    frame for frame in frames if frame.startswith(b"event: response.failed\n")
                 ]
                 self.assertEqual(len(terminal_frames), 1)
-
-                if codec == "none":
-                    self.assertFalse(
-                        any(
-                            frame.startswith(b"event: response.failed\n")
-                            for frame in frames
-                        )
-                    )
-                    self.assertNotIn("third_party_apply_patch_terminal", event_names)
-                    continue
-
                 self.assertFalse(
                     any(frame.startswith(b"event: error\n") for frame in frames)
                 )
@@ -15310,6 +15299,9 @@ class RoutingTests(unittest.TestCase):
                 self.assertFalse(payload["response"]["error"]["retryable"])
                 self.assertNotIn("arguments_not_exact", json.dumps(payload))
                 self.assertNotIn(private_patch, json.dumps(payload))
+                if codec == "none":
+                    self.assertNotIn("third_party_apply_patch_terminal", event_names)
+                    continue
                 terminal_event = next(
                     call.kwargs
                     for call in self.write_proxy_event.call_args_list
@@ -15381,7 +15373,7 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertFalse(payload["codexhub_error"]["retryable"])
 
-    def test_unrelated_protocol_translation_sse_keeps_stream_error_envelope(self):
+    def test_unrelated_protocol_translation_sse_uses_responses_failed_terminal(self):
         translation_error = codex_proxy.UpstreamProtocolTranslationError(
             codex_proxy.UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
@@ -15419,20 +15411,27 @@ class RoutingTests(unittest.TestCase):
         relay_upstream.assert_called_once()
         self.assertEqual(fake.status, 200)
         frames = b"".join(fake.wfile.writes).split(b"\n\n")
-        error_frame = next(frame for frame in frames if frame.startswith(b"event: error\n"))
-        error_line = next(line for line in error_frame.splitlines() if line.startswith(b"data: "))
-        payload = json.loads(error_line.removeprefix(b"data: "))
-        self.assertEqual(payload["type"], "upstream_stream_error")
-        self.assertEqual(payload["status"], 400)
-        self.assertEqual(payload["error"], "unsupported_protocol_semantics")
-        self.assertEqual(payload["retry_owner"], "client")
-        self.assertEqual(payload["failure_class"], codex_proxy.RETRY_FAILURE_PERMANENT)
-        self.assertFalse(payload["retryable"])
-        self.assertEqual(payload["codexhub_error"]["code"], "upstream.error")
-        self.assertEqual(
-            payload["codexhub_error"]["details"]["type"],
-            "upstream_stream_error",
+        self.assertFalse(any(frame.startswith(b"event: error\n") for frame in frames))
+        failed_frames = [
+            frame for frame in frames if frame.startswith(b"event: response.failed\n")
+        ]
+        self.assertEqual(len(failed_frames), 1)
+        failed_line = next(
+            line for line in failed_frames[0].splitlines() if line.startswith(b"data: ")
         )
+        payload = json.loads(failed_line.removeprefix(b"data: "))
+        self.assertEqual(payload["type"], "response.failed")
+        self.assertEqual(payload["response"]["status"], "failed")
+        self.assertEqual(
+            payload["response"]["error"]["code"],
+            "unsupported_protocol_semantics",
+        )
+        self.assertEqual(payload["response"]["error"]["status"], 400)
+        self.assertEqual(
+            payload["response"]["error"]["failure_class"],
+            codex_proxy.RETRY_FAILURE_PERMANENT,
+        )
+        self.assertFalse(payload["response"]["error"]["retryable"])
 
     def test_apply_patch_adapter_rejects_conflicting_item_fields_and_custom_call_id_collisions(self):
         fixture = _load_glm_apply_patch_retry_fixture()
@@ -16137,6 +16136,97 @@ class RoutingTests(unittest.TestCase):
         output = completed["response"]["output"][0]
         self.assertEqual(output["type"], "message")
         self.assertEqual(output["content"][0]["text"], "hello")
+
+    def test_chat_completions_sse_relay_suppresses_kimi_reasoning_and_completes_responses(self):
+        handler = FakeHandler()
+        chunks = [
+            {
+                "id": "chatcmpl_kimi_reasoning",
+                "object": "chat.completion.chunk",
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_kimi_reasoning",
+                "object": "chat.completion.chunk",
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": "SECRET_KIMI_REASONING"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_kimi_reasoning",
+                "object": "chat.completion.chunk",
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "ok"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_kimi_reasoning",
+                "object": "chat.completion.chunk",
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode("utf-8") for chunk in chunks]
+            + [b"data: [DONE]\n\n", b""]
+        )
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "kimi",
+            relay_fixture=RELAY_GATEWAY,
+            upstream_format="chat_completions",
+            inbound_format="responses",
+            event_context={"request_id": "req-kimi-reasoning"},
+        )
+
+        written = b"".join(handler.wfile.writes)
+        payloads = [
+            json.loads(write.decode("utf-8").removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        completed = next(payload for payload in payloads if payload["type"] == "response.completed")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "ok",
+        )
+        self.assertNotIn(b"SECRET_KIMI_REASONING", written)
+        self.assertFalse(any(payload["type"] == "response.failed" for payload in payloads))
+        suppression_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "chat_reasoning_extensions_suppressed"
+        )
+        self.assertEqual(suppression_event["field_count"], 1)
+        self.assertEqual(suppression_event["chunk_count"], 1)
+        for forbidden in ("content", "reasoning", "reasoning_content", "text"):
+            self.assertNotIn(forbidden, suppression_event)
 
     def test_transparent_chat_to_responses_stream_treats_terminal_commit_failure_as_downstream_close(self):
         handler = FakeHandler()
@@ -18330,6 +18420,132 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(history_events[0]["count"], 1)
         for forbidden in ("call_id", "name", "input", "output", "patch", "arguments"):
             self.assertNotIn(forbidden, history_events[0])
+
+    def test_collaboration_v2_rewrites_unique_stale_plain_function_history_as_transcript(self):
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "kimi-k3",
+                    "input": [
+                        {
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": "call_stale_wait",
+                            "name": "wait",
+                            "arguments": json.dumps({"cell_id": "stale-cell"}),
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_stale_wait",
+                            "output": "stale result",
+                        },
+                        {
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": "call_current_shell",
+                            "name": "shell_command",
+                            "arguments": json.dumps({"command": "Write-Output ok"}),
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_current_shell",
+                            "output": "ok",
+                        },
+                        {"type": "message", "role": "user", "content": "continue"},
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "shell_command",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"command": {"type": "string"}},
+                            },
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+            {
+                "name": "kimi",
+                "upstream_model": "kimi-k3",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
+            },
+            event_context={
+                "request_id": "request-stale-wait",
+                "collaboration_protocol": "collaboration_v2",
+            },
+            inject_codex_tools=False,
+        )
+        payload = json.loads(transformed)
+
+        self.assertEqual(
+            [(item["type"], item["role"]) for item in payload["input"]],
+            [("message", "developer"), ("message", "developer"), ("message", "user")],
+        )
+        self.assertIn("function: wait", payload["input"][0]["content"])
+        self.assertIn("call_id: call_stale_wait", payload["input"][0]["content"])
+        self.assertIn("call_id: call_stale_wait", payload["input"][1]["content"])
+        self.assertNotIn("shell_command", json.dumps(payload["input"]))
+        rewrite_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "v2_stale_function_history_rewritten"
+        )
+        self.assertEqual(rewrite_event["pair_count"], 1)
+        for forbidden in ("call_id", "name", "arguments", "output"):
+            self.assertNotIn(forbidden, rewrite_event)
+
+    def test_collaboration_v2_stale_function_history_must_be_unique_and_complete(self):
+        stale_call = {
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_stale_wait",
+            "name": "wait",
+            "arguments": json.dumps({"cell_id": "stale-cell"}),
+        }
+        stale_output = {
+            "type": "function_call_output",
+            "call_id": "call_stale_wait",
+            "output": "stale result",
+        }
+        cases = {
+            "unpaired": [stale_call],
+            "duplicate_output": [stale_call, stale_output, stale_output],
+            "malformed_call": [{key: value for key, value in stale_call.items() if key != "arguments"}, stale_output],
+            "unknown_call_field": [{**stale_call, "unexpected": True}, stale_output],
+            "unknown_output_field": [stale_call, {**stale_output, "unexpected": True}],
+            "non_string_output": [stale_call, {**stale_output, "output": {"unexpected": True}}],
+        }
+
+        for name, history in cases.items():
+            with self.subTest(name=name), self.assertRaises(codex_proxy.UpstreamProtocolTranslationError):
+                compatible_request_body(
+                    json.dumps(
+                        {
+                            "model": "kimi-k3",
+                            "input": history,
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "shell_command",
+                                    "parameters": {"type": "object", "properties": {}},
+                                }
+                            ],
+                        }
+                    ).encode("utf-8"),
+                    {
+                        "name": "kimi",
+                        "upstream_model": "kimi-k3",
+                        "upstream_format": "chat_completions",
+                        "tool_protocol": "none",
+                    },
+                    event_context={
+                        "request_id": f"request-stale-wait-{name}",
+                        "collaboration_protocol": "collaboration_v2",
+                    },
+                    inject_codex_tools=False,
+                )
 
     def test_external_collaboration_v2_strips_official_reasoning_encrypted_content(self):
         encrypted_content = "gAAAA-official-secret"
