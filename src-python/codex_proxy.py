@@ -9574,6 +9574,35 @@ def _rewrite_v2_unsupported_tool_history(
     return True
 
 
+def _drop_v2_chat_reasoning_history(
+    payload: dict[str, Any],
+    *,
+    event_context: Mapping[str, Any] | None,
+    upstream_name: str | None,
+) -> bool:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return False
+
+    rewritten_items = [
+        item
+        for item in input_items
+        if not (isinstance(item, Mapping) and item.get("type") == "reasoning")
+    ]
+    removed_count = len(input_items) - len(rewritten_items)
+    if not removed_count:
+        return False
+
+    payload["input"] = rewritten_items
+    _write_adapter_event(
+        event_context,
+        "v2_chat_reasoning_history_removed",
+        upstream=upstream_name,
+        count=removed_count,
+    )
+    return True
+
+
 def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
@@ -11470,6 +11499,15 @@ def compatible_request_body(
             compatibility_plan=runtime_tool_plan,
             event_context=event_context,
             upstream_name=upstream_name,
+        ):
+            changed = True
+        if (
+            upstream.get("upstream_format") == "chat_completions"
+            and _drop_v2_chat_reasoning_history(
+                payload,
+                event_context=event_context,
+                upstream_name=upstream_name,
+            )
         ):
             changed = True
     else:
