@@ -9438,6 +9438,52 @@ def _rewrite_v2_unsupported_custom_tool_history(
             for entry in compatibility_plan.entries
         )
 
+    def has_valid_optional_item_identity(item: Mapping[str, Any]) -> bool:
+        identities = []
+        for field in ("id", "item_id"):
+            if field not in item:
+                continue
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                return False
+            identities.append(value)
+        return len(set(identities)) <= 1
+
+    def is_well_formed_stale_function_call(item: Mapping[str, Any]) -> bool:
+        allowed_fields = {
+            "type",
+            "id",
+            "item_id",
+            "status",
+            "call_id",
+            "name",
+            "arguments",
+        }
+        return (
+            set(item).issubset(allowed_fields)
+            and _is_standard_responses_function_call(item)
+            and item.get("status") == "completed"
+            and isinstance(item.get("arguments"), str)
+            and has_valid_optional_item_identity(item)
+        )
+
+    def is_well_formed_stale_function_output(item: Mapping[str, Any]) -> bool:
+        allowed_fields = {
+            "type",
+            "id",
+            "item_id",
+            "status",
+            "call_id",
+            "output",
+        }
+        return (
+            set(item).issubset(allowed_fields)
+            and item.get("type") == "function_call_output"
+            and item.get("status") in (None, "completed")
+            and isinstance(item.get("output"), str)
+            and has_valid_optional_item_identity(item)
+        )
+
     positions_by_call_id: dict[str, list[int]] = {}
     for index, item in enumerate(input_items):
         if not isinstance(item, Mapping):
@@ -9451,10 +9497,7 @@ def _rewrite_v2_unsupported_custom_tool_history(
     for call_index, item in enumerate(input_items):
         if (
             not isinstance(item, Mapping)
-            or not _is_standard_responses_function_call(item)
-            or item.get("status") != "completed"
-            or item.get("namespace") is not None
-            or not isinstance(item.get("arguments"), str)
+            or not is_well_formed_stale_function_call(item)
             or plan_owns_plain_function_call(item)
         ):
             continue
@@ -9466,8 +9509,7 @@ def _rewrite_v2_unsupported_custom_tool_history(
         output_item = input_items[output_index]
         if (
             not isinstance(output_item, Mapping)
-            or output_item.get("type") != "function_call_output"
-            or "output" not in output_item
+            or not is_well_formed_stale_function_output(output_item)
         ):
             continue
         stale_function_pair_indexes.update((call_index, output_index))

@@ -18513,6 +18513,9 @@ class RoutingTests(unittest.TestCase):
             "unpaired": [stale_call],
             "duplicate_output": [stale_call, stale_output, stale_output],
             "malformed_call": [{key: value for key, value in stale_call.items() if key != "arguments"}, stale_output],
+            "unknown_call_field": [{**stale_call, "unexpected": True}, stale_output],
+            "unknown_output_field": [stale_call, {**stale_output, "unexpected": True}],
+            "non_string_output": [stale_call, {**stale_output, "output": {"unexpected": True}}],
         }
 
         for name, history in cases.items():
