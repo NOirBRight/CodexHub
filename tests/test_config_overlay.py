@@ -76,6 +76,8 @@ class ConfigOverlayTests(unittest.TestCase):
         concurrency_key: str = "max_concurrent_threads_per_session",
         feature_mode: str = "structured_v2",
         include_defaults: bool = True,
+        agents_enabled: bool = True,
+        structured_v2_enabled: bool = True,
     ) -> str:
         lines = [
             'model = "volc/glm-5.2"',
@@ -88,31 +90,32 @@ class ConfigOverlayTests(unittest.TestCase):
             "hooks = true",
         ]
         if feature_mode == "scalar_v1":
-            lines.append("multi_agent_v2 = false")
+            lines.append("multi_agent_v2 = false # explicit user-owned V1 choice")
         elif feature_mode not in {"missing", "structured_v2"}:
             raise ValueError(f"unsupported feature mode: {feature_mode}")
         lines.extend(
             [
                 "",
-                "[agents]",
-                "enabled = true",
-                f"{concurrency_key} = 7",
-                'future_scheduler_policy = "preserve-me"',
+                "[agents] # user-owned collaboration settings",
+                f"enabled  = {'true' if agents_enabled else 'false'} # preserve spacing and comment",
+                f"{concurrency_key} = 7  # preserve canonical or legacy spelling",
+                "",
+                "future_scheduler_policy = 'preserve-me'",
             ]
         )
         if include_defaults:
             lines.extend(
                 [
-                    'default_subagent_model = "openai/gpt-5.6-terra"',
-                    'default_subagent_reasoning_effort = "xhigh"',
+                    "default_subagent_model = 'openai/gpt-5.6-terra'",
+                    'default_subagent_reasoning_effort = "xhigh" # user choice',
                 ]
             )
         lines.extend(
             [
                 "",
-                "[agents.reviewer]",
+                "[agents.reviewer] # nested user role",
                 'description = "Reviews lifecycle changes"',
-                'config_file = "agents/reviewer.toml"',
+                "config_file = 'agents/reviewer.toml' # keep relative text",
                 'future_role_key = "preserve-me-too"',
                 "",
                 "[agents.reviewer.runtime]",
@@ -123,12 +126,27 @@ class ConfigOverlayTests(unittest.TestCase):
             lines.extend(
                 [
                     "",
-                    "[features.multi_agent_v2]",
-                    "enabled = true",
+                    "[features.multi_agent_v2] # structured user choice",
+                    f"enabled = {'true' if structured_v2_enabled else 'false'}",
                     "non_code_mode_only = false",
                 ]
             )
         return "\n".join([*lines, ""])
+
+    def _table_family_text(self, text: str, root: str) -> str:
+        headers = list(re.finditer(r"(?m)^\s*\[([^\]]+)\]", text))
+        start_position = next(
+            match.start()
+            for match in headers
+            if match.group(1).strip() == root
+        )
+        end_position = len(text)
+        for match in headers:
+            section = match.group(1).strip()
+            if match.start() > start_position and section != root and not section.startswith(f"{root}."):
+                end_position = match.start()
+                break
+        return text[start_position:end_position].rstrip("\r\n")
 
     def _assert_agents_semantics_preserved(self, original: str, active: str) -> None:
         original_config = tomllib.loads(original)
@@ -151,6 +169,20 @@ class ConfigOverlayTests(unittest.TestCase):
         original_v2 = original_config["features"].get("multi_agent_v2")
         active_v2 = active_config["features"].get("multi_agent_v2")
         self.assertEqual(active_v2, original_v2)
+        self.assertEqual(
+            self._table_family_text(active, "agents"),
+            self._table_family_text(original, "agents"),
+        )
+        if isinstance(original_v2, dict):
+            self.assertEqual(
+                self._table_family_text(active, "features.multi_agent_v2"),
+                self._table_family_text(original, "features.multi_agent_v2"),
+            )
+        elif original_v2 is not None:
+            original_v2_line = next(
+                line for line in original.splitlines() if line.lstrip().startswith("multi_agent_v2")
+            )
+            self.assertIn(original_v2_line, active.splitlines())
         self.assertEqual(active.count("[agents]"), 1)
         self.assertEqual(active.count("[agents.reviewer]"), 1)
         self.assertEqual(active.count("[agents.reviewer.runtime]"), 1)
@@ -312,12 +344,34 @@ class ConfigOverlayTests(unittest.TestCase):
 
     def test_agents_config_survives_apply_restart_readback_and_restore(self):
         cases = (
-            ("canonical_missing_v2", "max_concurrent_threads_per_session", "missing", False),
-            ("legacy_alias_v1", "max_threads", "scalar_v1", True),
-            ("canonical_structured_v2", "max_concurrent_threads_per_session", "structured_v2", True),
+            ("canonical_missing_v2", "max_concurrent_threads_per_session", "missing", False, False, False),
+            ("legacy_alias_v1", "max_threads", "scalar_v1", True, True, False),
+            (
+                "canonical_structured_v2_enabled",
+                "max_concurrent_threads_per_session",
+                "structured_v2",
+                True,
+                True,
+                True,
+            ),
+            (
+                "canonical_structured_v2_disabled",
+                "max_concurrent_threads_per_session",
+                "structured_v2",
+                True,
+                False,
+                False,
+            ),
         )
 
-        for name, concurrency_key, feature_mode, include_defaults in cases:
+        for (
+            name,
+            concurrency_key,
+            feature_mode,
+            include_defaults,
+            agents_enabled,
+            structured_v2_enabled,
+        ) in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
                 tmp = Path(tmpdir)
                 config_path = tmp / "config.toml"
@@ -327,6 +381,8 @@ class ConfigOverlayTests(unittest.TestCase):
                     concurrency_key=concurrency_key,
                     feature_mode=feature_mode,
                     include_defaults=include_defaults,
+                    agents_enabled=agents_enabled,
+                    structured_v2_enabled=structured_v2_enabled,
                 )
                 config_path.write_text(original, encoding="utf-8", newline="")
 
