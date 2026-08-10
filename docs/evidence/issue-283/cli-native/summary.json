@@ -1,0 +1,98 @@
+{
+  "candidate_sha": "5bb5ce50fc736d79d5ca1b37fd75720c9bc5b12b",
+  "cli_analysis": {
+    "agent_messages": [],
+    "errors": [],
+    "event_count": 4,
+    "event_types": {
+      "error": 1,
+      "thread.started": 1,
+      "turn.failed": 1,
+      "turn.started": 1
+    },
+    "function_call_outputs": [],
+    "function_calls": [],
+    "shapes": [
+      {
+        "type": "thread.started"
+      },
+      {
+        "type": "turn.started"
+      },
+      {
+        "type": "error"
+      },
+      {
+        "type": "turn.failed"
+      }
+    ],
+    "terminal_event": "turn.failed"
+  },
+  "cli_exit_code": 1,
+  "cli_terminal_message": "{\"error\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"detail\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"codexhub_error\": {\"code\": \"upstream.error\", \"message\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"source\": \"custom\", \"retryable\": false, \"details\": {\"error\": \"tool_compatibility_boundary\", \"type\": \"tool_compatibility_boundary\", \"status\": 400, \"failure_class\": \"permanent\"}}}",
+  "cli_version": "codex-cli 0.146.1",
+  "gateway_log_summary": {
+    "error_details": [
+      {
+        "code": null,
+        "details": null,
+        "event": "request_error",
+        "message": null
+      }
+    ],
+    "errors": [
+      "request_error"
+    ],
+    "event_count": 5,
+    "event_types": {
+      "request_complete": 1,
+      "request_error": 1,
+      "request_start": 1,
+      "runtime_tool_compatibility_planned": 2
+    },
+    "fallback_count": 0,
+    "has_v1_observation": false,
+    "has_v2_observation": true
+  },
+  "isolated_home_sha256": "79495ba502ab8d88abc0f34543615a1642a9b28f10d2a589ba329445cb3797e8",
+  "phase_observations": {
+    "errors": [
+      "request_error"
+    ],
+    "fallback_count": 0,
+    "observed_namespaces": [],
+    "observed_tools": [],
+    "phases": {
+      "child_result_delivery": false,
+      "followup_task": false,
+      "interrupt_agent": "not_applicable:child_completed_without_interrupt",
+      "list_agents": false,
+      "parent_completion": false,
+      "send_message": false,
+      "spawn_agent": false,
+      "wait_agent": false
+    },
+    "v1_namespace_seen": false,
+    "v1_tools_seen": []
+  },
+  "qualification_status": "failed",
+  "route": {
+    "gateway_port": 52877,
+    "selected_model": "custom/fixture-v2",
+    "selected_provider": "custom",
+    "shim_port": 64174,
+    "upstream_fixture_port": 52878,
+    "upstream_provider_id": "custom"
+  },
+  "sanitization": {
+    "absolute_paths_retained": false,
+    "credentials_retained": false,
+    "opaque_ids_retained": false,
+    "raw_prompts_retained": false
+  },
+  "schema": "codexhub.issue283.cli-v2-lifecycle.v1",
+  "shim_notes": [
+    "CLI-facing shim synthesized an OpenAI-compatible /v1/models list because the candidate gateway serves the CodexHub catalog shape.",
+    "The shim injected the optional agent_type property into the collaboration.spawn_agent tool declaration; the installed CLI 0.146.1 build omits it, causing the gateway boundary classifier to reject the request otherwise."
+  ]
+}

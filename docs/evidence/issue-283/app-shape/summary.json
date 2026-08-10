@@ -1,0 +1,263 @@
+{
+  "app_stderr_excerpt": null,
+  "app_version": "codex-cli 0.147.0-alpha.6.5",
+  "candidate_sha": "5bb5ce50fc736d79d5ca1b37fd75720c9bc5b12b",
+  "gateway_log_summary": {
+    "error_details": [],
+    "errors": [],
+    "event_count": 9,
+    "event_types": {
+      "request_complete": 3,
+      "request_start": 3,
+      "runtime_tool_compatibility_planned": 3
+    },
+    "fallback_count": 0,
+    "has_v1_observation": false,
+    "has_v2_observation": true
+  },
+  "qualification_status": "passed",
+  "route": {
+    "gateway_port": 49744,
+    "selected_model": "custom/fixture-v2",
+    "selected_provider": "custom",
+    "shim_port": 49755,
+    "upstream_fixture_port": 49745,
+    "upstream_provider_id": "custom"
+  },
+  "same_home_restart_check": {
+    "config_sha256_after": "c273470b21ef557864ebfc67fd675a18a167793f199c75d27d24d552455ab567",
+    "config_sha256_before": "c273470b21ef557864ebfc67fd675a18a167793f199c75d27d24d552455ab567",
+    "file_snapshot": {
+      "added": [],
+      "after_count": 89,
+      "before_count": 89,
+      "changed": [],
+      "removed": [],
+      "unchanged_count": 89
+    },
+    "passed": true
+  },
+  "sanitization": {
+    "absolute_paths_retained": false,
+    "credentials_retained": false,
+    "opaque_ids_retained": false,
+    "raw_prompts_retained": false
+  },
+  "schema": "codexhub.issue283.app-v2-request-shape.v1",
+  "shim_notes": [
+    "App-facing shim synthesized an OpenAI-compatible /v1/models list because the candidate gateway serves the CodexHub catalog shape.",
+    "The shim recorded each App /v1/responses request body before forwarding it to the gateway and before injecting the optional agent_type property into collaboration.spawn_agent.",
+    "The optional agent_type injection is the same test-only accommodation used in Track A; the App build still omits agent_type in the tool declaration it emits."
+  ],
+  "terminal_notification": {
+    "method": "turn/completed",
+    "received": true
+  },
+  "v2_boundary_check": {
+    "captured_request_count": 3,
+    "passed": true,
+    "request_shapes": [
+      {
+        "has_fork_context": false,
+        "model": "custom/fixture-v2",
+        "namespaces": [
+          "collaboration"
+        ],
+        "tool_count": 10,
+        "tool_summary": [
+          {
+            "name": "shell_command",
+            "type": "function"
+          },
+          {
+            "name": "update_plan",
+            "type": "function"
+          },
+          {
+            "name": "request_user_input",
+            "type": "function"
+          },
+          {
+            "name": "apply_patch",
+            "type": "custom"
+          },
+          {
+            "name": "view_image",
+            "type": "function"
+          },
+          {
+            "child_names": [
+              "followup_task",
+              "interrupt_agent",
+              "list_agents",
+              "send_message",
+              "spawn_agent",
+              "wait_agent"
+            ],
+            "name": "collaboration",
+            "type": "namespace"
+          },
+          {
+            "name": "get_goal",
+            "type": "function"
+          },
+          {
+            "name": "create_goal",
+            "type": "function"
+          },
+          {
+            "name": "update_goal",
+            "type": "function"
+          },
+          {
+            "name": null,
+            "type": "web_search"
+          }
+        ],
+        "v1_tools_observed": [],
+        "v2_tools_observed": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message",
+          "spawn_agent",
+          "wait_agent"
+        ]
+      },
+      {
+        "has_fork_context": false,
+        "model": "custom/fixture-v2",
+        "namespaces": [
+          "collaboration"
+        ],
+        "tool_count": 10,
+        "tool_summary": [
+          {
+            "name": "shell_command",
+            "type": "function"
+          },
+          {
+            "name": "update_plan",
+            "type": "function"
+          },
+          {
+            "name": "request_user_input",
+            "type": "function"
+          },
+          {
+            "name": "apply_patch",
+            "type": "custom"
+          },
+          {
+            "name": "view_image",
+            "type": "function"
+          },
+          {
+            "child_names": [
+              "followup_task",
+              "interrupt_agent",
+              "list_agents",
+              "send_message",
+              "spawn_agent",
+              "wait_agent"
+            ],
+            "name": "collaboration",
+            "type": "namespace"
+          },
+          {
+            "name": "get_goal",
+            "type": "function"
+          },
+          {
+            "name": "create_goal",
+            "type": "function"
+          },
+          {
+            "name": "update_goal",
+            "type": "function"
+          },
+          {
+            "name": null,
+            "type": "web_search"
+          }
+        ],
+        "v1_tools_observed": [],
+        "v2_tools_observed": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message",
+          "spawn_agent",
+          "wait_agent"
+        ]
+      },
+      {
+        "has_fork_context": false,
+        "model": "custom/fixture-v2",
+        "namespaces": [
+          "collaboration"
+        ],
+        "tool_count": 10,
+        "tool_summary": [
+          {
+            "name": "shell_command",
+            "type": "function"
+          },
+          {
+            "name": "update_plan",
+            "type": "function"
+          },
+          {
+            "name": "request_user_input",
+            "type": "function"
+          },
+          {
+            "name": "apply_patch",
+            "type": "custom"
+          },
+          {
+            "name": "view_image",
+            "type": "function"
+          },
+          {
+            "child_names": [
+              "followup_task",
+              "interrupt_agent",
+              "list_agents",
+              "send_message",
+              "spawn_agent",
+              "wait_agent"
+            ],
+            "name": "collaboration",
+            "type": "namespace"
+          },
+          {
+            "name": "get_goal",
+            "type": "function"
+          },
+          {
+            "name": "create_goal",
+            "type": "function"
+          },
+          {
+            "name": "update_goal",
+            "type": "function"
+          },
+          {
+            "name": null,
+            "type": "web_search"
+          }
+        ],
+        "v1_tools_observed": [],
+        "v2_tools_observed": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message",
+          "spawn_agent",
+          "wait_agent"
+        ]
+      }
+    ]
+  }
+}
