@@ -1,0 +1,1873 @@
+{
+  "candidate_revision": "be10f62f44b22fa8c84510238250ae11fb3ecab4",
+  "capture_scope": {
+    "content_or_credentials_retained": false,
+    "existing_user_home_read": false,
+    "existing_user_task_read": false,
+    "home": "new_isolated_home_per_runtime",
+    "isolated_observations": [
+      "cli_v1_request",
+      "cli_v2_request_call_result_agent_message_and_restart",
+      "desktop_v1_request",
+      "desktop_v2_request_call_result_agent_message_and_restart",
+      "desktop_app_thread_items_notifications_and_restart"
+    ],
+    "known_crash_task_read": false,
+    "opaque_identity_retained": false,
+    "upstream": "loopback_protocol_controlled_responses"
+  },
+  "captured_on": "2026-08-10",
+  "deferred_to_issue_283": [
+    "full_six_tool_two_child_lifecycle",
+    "cross_home_negative_cases",
+    "malformed_agent_message_and_identity_negative_cases"
+  ],
+  "gateway_boundary": {
+    "adaptation_requirements": [
+      "injective_request_scoped_aliases",
+      "preserve_namespace_and_child_name",
+      "preserve_call_and_item_identity",
+      "preserve_order_and_stream_boundaries",
+      "preserve_agent_message_author_and_recipient",
+      "preserve_rollout_and_same_home_replay_semantics"
+    ],
+    "allowed": "reversible_wire_adaptation_only",
+    "forbidden": [
+      "agent_execution",
+      "agent_scheduling",
+      "identity_fabrication",
+      "v2_to_v1_downgrade",
+      "model_or_provider_fallback",
+      "history_rewrite"
+    ],
+    "native_namespace": "pass_without_semantic_mutation"
+  },
+  "protocol_layers": {
+    "client_dispatch": {
+      "meaning": "client_tool_dispatch_group",
+      "recipient_namespace": "collaboration",
+      "wire_discriminator_by_itself": false
+    },
+    "desktop_app": {
+      "item_notifications": {
+        "agentMessage": [
+          "item/started",
+          "item/agentMessage/delta",
+          "item/completed"
+        ],
+        "collabAgentToolCall": [
+          "item/started",
+          "item/completed"
+        ],
+        "subAgentActivity": [
+          "item/started",
+          "item/completed"
+        ]
+      },
+      "same_home_thread_resume_and_read": "observed",
+      "thread_items": {
+        "agentMessage": [
+          "type",
+          "id",
+          "text",
+          "phase",
+          "memoryCitation"
+        ],
+        "collabAgentToolCall": [
+          "type",
+          "id",
+          "tool",
+          "status",
+          "senderThreadId",
+          "receiverThreadIds",
+          "prompt",
+          "model",
+          "reasoningEffort",
+          "agentsStates"
+        ],
+        "subAgentActivity": [
+          "type",
+          "id",
+          "kind",
+          "agentThreadId",
+          "agentPath"
+        ]
+      },
+      "turn_terminal_notification": "turn/completed",
+      "wire_item_equivalent": false
+    },
+    "model_input_agent_message": {
+      "content_variants": {
+        "encrypted_content": [
+          "type",
+          "encrypted_content"
+        ],
+        "input_text": [
+          "type",
+          "text"
+        ]
+      },
+      "fields": [
+        "type",
+        "id",
+        "author",
+        "recipient",
+        "content"
+      ],
+      "function_result": false,
+      "source_optional_field": "internal_chat_message_metadata_passthrough",
+      "task_identity_fields": [
+        "author",
+        "recipient"
+      ],
+      "type": "agent_message"
+    },
+    "responses_declaration_and_call": {
+      "call_namespace_field": true,
+      "call_type": "function_call",
+      "declaration_type": "namespace",
+      "namespace": "collaboration",
+      "tool_choice": "auto"
+    },
+    "rollout_metadata": {
+      "sent_as_request_metadata": false,
+      "session_meta_field": "multi_agent_version",
+      "turn_context_field": "multi_agent_version",
+      "values": [
+        "v1",
+        "v2"
+      ]
+    }
+  },
+  "protocols": {
+    "collaboration_v1": {
+      "call": {
+        "fields": [
+          "type",
+          "id",
+          "name",
+          "namespace",
+          "arguments",
+          "call_id"
+        ],
+        "identity_fields": [
+          "id",
+          "call_id"
+        ],
+        "type": "function_call"
+      },
+      "declaration": {
+        "child_fields": [
+          "type",
+          "name",
+          "description",
+          "strict",
+          "parameters"
+        ],
+        "child_output_schema_field": "absent",
+        "child_strict": false,
+        "child_type": "function",
+        "fields": [
+          "type",
+          "name",
+          "description",
+          "tools"
+        ],
+        "normalized_parameter_schemas": {
+          "close_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "type": "object"
+          },
+          "resume_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "send_input": {
+            "additionalProperties": false,
+            "properties": {
+              "interrupt": {
+                "type": "boolean"
+              },
+              "items": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "audio_url": {
+                      "type": "string"
+                    },
+                    "image_url": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "message": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "type": "object"
+          },
+          "spawn_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "agent_type": {
+                "type": "string"
+              },
+              "fork_context": {
+                "type": "boolean"
+              },
+              "items": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "audio_url": {
+                      "type": "string"
+                    },
+                    "image_url": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "message": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "type": "string"
+              },
+              "service_tier": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "wait_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "targets": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "timeout_ms": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "targets"
+            ],
+            "type": "object"
+          }
+        },
+        "tool_names": [
+          "close_agent",
+          "resume_agent",
+          "send_input",
+          "spawn_agent",
+          "wait_agent"
+        ],
+        "type": "namespace"
+      },
+      "namespace": "multi_agent_v1",
+      "owner": "codex_client",
+      "result": {
+        "fields": [
+          "type",
+          "id",
+          "call_id",
+          "output"
+        ],
+        "identity_fields": [
+          "id",
+          "call_id"
+        ],
+        "output_wire_encoding": "json_text_string",
+        "spawn_identity": "agent_id",
+        "tool_output_schemas": {
+          "close_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "previous_status": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "pending_init",
+                      "running",
+                      "interrupted",
+                      "shutdown",
+                      "not_found"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "completed": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "completed"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "errored": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "errored"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "previous_status"
+            ],
+            "type": "object"
+          },
+          "resume_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "pending_init",
+                      "running",
+                      "interrupted",
+                      "shutdown",
+                      "not_found"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "completed": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "completed"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "errored": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "errored"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "send_input": {
+            "additionalProperties": false,
+            "properties": {
+              "submission_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "submission_id"
+            ],
+            "type": "object"
+          },
+          "spawn_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "nickname": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "agent_id",
+              "nickname"
+            ],
+            "type": "object"
+          },
+          "wait_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "pending_init",
+                        "running",
+                        "interrupted",
+                        "shutdown",
+                        "not_found"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "completed": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "completed"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "errored": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "errored"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              "timed_out": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "status",
+              "timed_out"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function_call_output"
+      },
+      "target_identity": "agent_id"
+    },
+    "collaboration_v2": {
+      "call": {
+        "fields": [
+          "type",
+          "id",
+          "name",
+          "namespace",
+          "arguments",
+          "call_id"
+        ],
+        "identity_fields": [
+          "id",
+          "call_id"
+        ],
+        "type": "function_call"
+      },
+      "canonical_task_identity": "agent_path_serialized_as_task_name",
+      "continuation_id_field": "not_present",
+      "declaration": {
+        "child_fields": [
+          "type",
+          "name",
+          "description",
+          "strict",
+          "parameters"
+        ],
+        "child_output_schema_field": "absent",
+        "child_strict": false,
+        "child_type": "function",
+        "fields": [
+          "type",
+          "name",
+          "description",
+          "tools"
+        ],
+        "normalized_parameter_schemas": {
+          "followup_task": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "encrypted": true,
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "type": "object"
+          },
+          "interrupt_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "type": "object"
+          },
+          "list_agents": {
+            "additionalProperties": false,
+            "properties": {
+              "path_prefix": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "send_message": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "encrypted": true,
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "type": "object"
+          },
+          "spawn_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "agent_type": {
+                "type": "string"
+              },
+              "fork_turns": {
+                "type": "string"
+              },
+              "message": {
+                "encrypted": true,
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "type": "string"
+              },
+              "task_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "task_name",
+              "message"
+            ],
+            "type": "object"
+          },
+          "wait_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "timeout_ms": {
+                "type": "number"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        },
+        "tool_names": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message",
+          "spawn_agent",
+          "wait_agent"
+        ],
+        "type": "namespace"
+      },
+      "namespace": "collaboration",
+      "owner": "codex_client",
+      "result": {
+        "fields": [
+          "type",
+          "id",
+          "call_id",
+          "output"
+        ],
+        "identity_fields": [
+          "id",
+          "call_id"
+        ],
+        "output_wire_encoding": {
+          "followup_task": "plain_text",
+          "interrupt_agent": "json_text_string",
+          "list_agents": "json_text_string",
+          "send_message": "plain_text",
+          "spawn_agent": "json_text_string",
+          "wait_agent": "json_text_string"
+        },
+        "spawn_identity": "task_name",
+        "spawn_output_fields_default": [
+          "task_name"
+        ],
+        "tool_output_schemas": {
+          "followup_task": null,
+          "interrupt_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "previous_status": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "pending_init",
+                      "running",
+                      "interrupted",
+                      "shutdown",
+                      "not_found"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "completed": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "completed"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "errored": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "errored"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "previous_status"
+            ],
+            "type": "object"
+          },
+          "list_agents": {
+            "additionalProperties": false,
+            "properties": {
+              "agents": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "agent_name": {
+                      "type": "string"
+                    },
+                    "agent_status": {
+                      "oneOf": [
+                        {
+                          "enum": [
+                            "pending_init",
+                            "running",
+                            "interrupted",
+                            "shutdown",
+                            "not_found"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "completed": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "completed"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "errored": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "errored"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "agent_name",
+                    "agent_status"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "agents"
+            ],
+            "type": "object"
+          },
+          "send_message": null,
+          "spawn_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "task_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "task_name"
+            ],
+            "type": "object"
+          },
+          "wait_agent": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "timed_out": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "message",
+              "timed_out"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function_call_output"
+      },
+      "target_identity": "relative_or_canonical_task_name"
+    }
+  },
+  "qualification_status": "accepted_request_call_result_agent_message_and_readback",
+  "runtimes": [
+    {
+      "binary_sha256": "ae9d865f3d346a1a2a60c4e84775622d74e3e7ef53e0dede9c68b81eab306cca",
+      "client": "codex_cli",
+      "client_version": "0.146.1",
+      "observations": {
+        "desktop_thread_items_and_notifications": "not_applicable",
+        "tool_choice_auto": "observed",
+        "v1_namespace_declaration": "observed",
+        "v2_agent_message_input": "observed",
+        "v2_function_call_and_output": "observed",
+        "v2_namespace_declaration": "observed",
+        "v2_rollout_version_metadata": "observed",
+        "v2_same_home_restart_readback": "observed"
+      },
+      "runtime_version": "0.146.1",
+      "source_commit": "79b4f03d35962b005b007a015113b38930711665",
+      "source_files": {
+        "agent_message_and_rollout": {
+          "git_blob": "c692d040d292cf223777cae42dd577b03e85aab5",
+          "path": "codex-rs/protocol/src/protocol.rs"
+        },
+        "desktop_event_mapping": {
+          "git_blob": "b32b15272ba4791db5a253ecc50555bf29b4ef14",
+          "path": "codex-rs/app-server-protocol/src/protocol/event_mapping.rs"
+        },
+        "desktop_thread_items": {
+          "git_blob": "f3a3a65d20516ac9dc99ef0c981eaf399e151cfa",
+          "path": "codex-rs/app-server-protocol/src/protocol/v2/item.rs"
+        },
+        "multi_agent_output_serialization": {
+          "git_blob": "9bb7f76f9de0d799766d050c5811e33d3a7635ea",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_common.rs"
+        },
+        "multi_agent_tool_schemas": {
+          "git_blob": "2eb82e175b454db0fc8fb8bba61b37d07ab69d30",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_spec.rs"
+        },
+        "responses_items": {
+          "git_blob": "51e22d10fd57af6bffd7a11b60dc2d422a7ad607",
+          "path": "codex-rs/protocol/src/models.rs"
+        },
+        "responses_request_and_tool_choice": {
+          "git_blob": "b13242062022d9d37302a060dd493977d9c0c1f1",
+          "path": "codex-rs/core/src/client.rs"
+        },
+        "responses_stream_parser": {
+          "git_blob": "441d7bb3bfa743f2fc3fe089cfdb88ddec887aac",
+          "path": "codex-rs/codex-api/src/sse/responses.rs"
+        },
+        "tool_planning_and_namespace_override": {
+          "git_blob": "5ff9e392f3ebec0a510efd11305752133944ceda",
+          "path": "codex-rs/core/src/tools/spec_plan.rs"
+        },
+        "v2_interrupt_handler": {
+          "git_blob": "a418dec4a86550715080b95a3191ce3c72836e8f",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs"
+        },
+        "v2_list_handler": {
+          "git_blob": "99e54e1ce91cbd0f182f52fd8ff16f9268f96233",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs"
+        },
+        "v2_message_handler": {
+          "git_blob": "62defe65c4114ffcdc661b98836d9964f09a7c64",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs"
+        },
+        "v2_spawn_handler": {
+          "git_blob": "67f8057e435b8522a82825f055c75ed420401975",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs"
+        },
+        "v2_wait_handler": {
+          "git_blob": "4e2eced26037d4c876a8b9fcd28912fb4344953b",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs"
+        },
+        "version_selection_and_namespace_default": {
+          "git_blob": "216af994bc03e136c4797453525df473f579adf5",
+          "path": "codex-rs/core/src/config/mod.rs"
+        }
+      },
+      "source_tag": "rust-v0.146.1"
+    },
+    {
+      "binary_sha256": "fb5c760e14cf8fe86e12e49e8a3e7f237af06082d6b9fe1e411e463b7229c916",
+      "client": "codex_desktop",
+      "client_version": "26.803.5235.0",
+      "observations": {
+        "desktop_thread_items_and_notifications": "observed",
+        "tool_choice_auto": "observed",
+        "v1_namespace_declaration": "observed",
+        "v2_agent_message_input": "observed",
+        "v2_function_call_and_output": "observed",
+        "v2_namespace_declaration": "observed",
+        "v2_rollout_version_metadata": "observed",
+        "v2_same_home_restart_readback": "observed"
+      },
+      "runtime_version": "0.147.0-alpha.6.5",
+      "source_commit": "618b8e9111da9f57fe380b09d0f6516e3f343536",
+      "source_files": {
+        "agent_message_and_rollout": {
+          "git_blob": "93313c63c2dd185e02d20fff9eff31d43b461277",
+          "path": "codex-rs/protocol/src/protocol.rs"
+        },
+        "desktop_event_mapping": {
+          "git_blob": "b32b15272ba4791db5a253ecc50555bf29b4ef14",
+          "path": "codex-rs/app-server-protocol/src/protocol/event_mapping.rs"
+        },
+        "desktop_thread_items": {
+          "git_blob": "a98ec3f3b2e19f4fef57ae7a5451a54dc471fb9b",
+          "path": "codex-rs/app-server-protocol/src/protocol/v2/item.rs"
+        },
+        "multi_agent_output_serialization": {
+          "git_blob": "f8569c441ed24a01760a51674687787014dfde28",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_common.rs"
+        },
+        "multi_agent_tool_schemas": {
+          "git_blob": "757e111cc2d060f84b2618896426001225bba4ef",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_spec.rs"
+        },
+        "responses_items": {
+          "git_blob": "2c2a6d6b7aa49eee6309e5a9ba9e7587a1047d4e",
+          "path": "codex-rs/protocol/src/models.rs"
+        },
+        "responses_request_and_tool_choice": {
+          "git_blob": "d6b25864dfa4620682d163cf9b65a4747d8fcfa9",
+          "path": "codex-rs/core/src/client.rs"
+        },
+        "responses_stream_parser": {
+          "git_blob": "44ed78737ba4ecf9e777c9d38199005ea4e2c2cc",
+          "path": "codex-rs/codex-api/src/sse/responses.rs"
+        },
+        "tool_planning_and_namespace_override": {
+          "git_blob": "1047190cc37f34ec4cfcae348af170da2bacc4c7",
+          "path": "codex-rs/core/src/tools/spec_plan.rs"
+        },
+        "v2_interrupt_handler": {
+          "git_blob": "a418dec4a86550715080b95a3191ce3c72836e8f",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/interrupt_agent.rs"
+        },
+        "v2_list_handler": {
+          "git_blob": "99e54e1ce91cbd0f182f52fd8ff16f9268f96233",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/list_agents.rs"
+        },
+        "v2_message_handler": {
+          "git_blob": "eb1790480eeeb5d524cfb132846812ce073c674f",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs"
+        },
+        "v2_spawn_handler": {
+          "git_blob": "a6b5c46eec06931354fdc3109909fd574865611d",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs"
+        },
+        "v2_wait_handler": {
+          "git_blob": "4e2eced26037d4c876a8b9fcd28912fb4344953b",
+          "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs"
+        },
+        "version_selection_and_namespace_default": {
+          "git_blob": "844184314f2fa3a2fe2f8238e8d351aaa1050a5e",
+          "path": "codex-rs/core/src/config/mod.rs"
+        }
+      },
+      "source_tag": "rust-v0.147.0-alpha.6.5"
+    }
+  ],
+  "schema": "codexhub.issue392.collaboration-runtime-contract.v1",
+  "selection_contract": {
+    "child_policy": "exact_type_name_strict_parameter_shape_and_no_output_schema",
+    "description_policy": "require_string_but_exclude_dynamic_text_from_matching",
+    "direct_function_policy": "not_a_frozen_runtime_collaboration_marker",
+    "markers": {
+      "collaboration_v1": {
+        "argument_contract": {
+          "close_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "previous_status": {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "pending_init",
+                        "running",
+                        "interrupted",
+                        "shutdown",
+                        "not_found"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "completed": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "completed"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "errored": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "errored"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "previous_status"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            },
+            "optional": [],
+            "request_output_schema_field": "absent",
+            "required": [
+              "target"
+            ]
+          },
+          "resume_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "pending_init",
+                        "running",
+                        "interrupted",
+                        "shutdown",
+                        "not_found"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "completed": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "completed"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "errored": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "errored"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            },
+            "optional": [],
+            "request_output_schema_field": "absent",
+            "required": [
+              "id"
+            ]
+          },
+          "send_input": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "submission_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "submission_id"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "interrupt": {
+                  "type": "boolean"
+                },
+                "items": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "audio_url": {
+                        "type": "string"
+                      },
+                      "image_url": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            },
+            "optional": [
+              "interrupt",
+              "items",
+              "message"
+            ],
+            "request_output_schema_field": "absent",
+            "required": [
+              "target"
+            ]
+          },
+          "spawn_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "agent_id": {
+                  "type": "string"
+                },
+                "nickname": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "agent_id",
+                "nickname"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "agent_type": {
+                  "type": "string"
+                },
+                "fork_context": {
+                  "type": "boolean"
+                },
+                "items": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "audio_url": {
+                        "type": "string"
+                      },
+                      "image_url": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "reasoning_effort": {
+                  "type": "string"
+                },
+                "service_tier": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "optional": [
+              "agent_type",
+              "fork_context",
+              "items",
+              "message",
+              "model",
+              "reasoning_effort",
+              "service_tier"
+            ],
+            "request_output_schema_field": "absent",
+            "required": []
+          },
+          "wait_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "additionalProperties": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "pending_init",
+                          "running",
+                          "interrupted",
+                          "shutdown",
+                          "not_found"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "completed": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "completed"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "errored": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "errored"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "object"
+                },
+                "timed_out": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "timed_out"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "targets": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "timeout_ms": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "targets"
+              ],
+              "type": "object"
+            },
+            "optional": [
+              "timeout_ms"
+            ],
+            "request_output_schema_field": "absent",
+            "required": [
+              "targets"
+            ]
+          }
+        },
+        "namespace": "multi_agent_v1",
+        "tool_names": [
+          "close_agent",
+          "resume_agent",
+          "send_input",
+          "spawn_agent",
+          "wait_agent"
+        ],
+        "wire_type": "namespace"
+      },
+      "collaboration_v2": {
+        "argument_contract": {
+          "followup_task": {
+            "additional_properties": false,
+            "client_result_schema": null,
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "message": {
+                  "encrypted": true,
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target",
+                "message"
+              ],
+              "type": "object"
+            },
+            "optional": [],
+            "request_output_schema_field": "absent",
+            "required": [
+              "message",
+              "target"
+            ]
+          },
+          "interrupt_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "previous_status": {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "pending_init",
+                        "running",
+                        "interrupted",
+                        "shutdown",
+                        "not_found"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "completed": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "completed"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "errored": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "errored"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "previous_status"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            },
+            "optional": [],
+            "request_output_schema_field": "absent",
+            "required": [
+              "target"
+            ]
+          },
+          "list_agents": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "agents": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_name": {
+                        "type": "string"
+                      },
+                      "agent_status": {
+                        "oneOf": [
+                          {
+                            "enum": [
+                              "pending_init",
+                              "running",
+                              "interrupted",
+                              "shutdown",
+                              "not_found"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "completed": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "completed"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "errored": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "errored"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "agent_name",
+                      "agent_status"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "agents"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "path_prefix": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "optional": [
+              "path_prefix"
+            ],
+            "request_output_schema_field": "absent",
+            "required": []
+          },
+          "send_message": {
+            "additional_properties": false,
+            "client_result_schema": null,
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "message": {
+                  "encrypted": true,
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target",
+                "message"
+              ],
+              "type": "object"
+            },
+            "optional": [],
+            "request_output_schema_field": "absent",
+            "required": [
+              "message",
+              "target"
+            ]
+          },
+          "spawn_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "task_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_name"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "agent_type": {
+                  "type": "string"
+                },
+                "fork_turns": {
+                  "type": "string"
+                },
+                "message": {
+                  "encrypted": true,
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "reasoning_effort": {
+                  "type": "string"
+                },
+                "task_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_name",
+                "message"
+              ],
+              "type": "object"
+            },
+            "optional": [
+              "agent_type",
+              "fork_turns",
+              "model",
+              "reasoning_effort"
+            ],
+            "request_output_schema_field": "absent",
+            "required": [
+              "message",
+              "task_name"
+            ]
+          },
+          "wait_agent": {
+            "additional_properties": false,
+            "client_result_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "timed_out": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "message",
+                "timed_out"
+              ],
+              "type": "object"
+            },
+            "normalized_parameter_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "timeout_ms": {
+                  "type": "number"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "optional": [
+              "timeout_ms"
+            ],
+            "request_output_schema_field": "absent",
+            "required": []
+          }
+        },
+        "namespace": "collaboration",
+        "tool_names": [
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+          "send_message",
+          "spawn_agent",
+          "wait_agent"
+        ],
+        "wire_type": "namespace"
+      }
+    },
+    "matching_policy": "complete_namespace_and_child_schema",
+    "request_metadata_version_field": "absent_in_both_frozen_runtimes",
+    "shared_tool_name_policy": "never_classify_from_child_name_alone",
+    "stage": "before_schema_repair_state_or_scheduler",
+    "tool_choice": {
+      "included_in_version_discriminator": false,
+      "observed_value": "auto",
+      "unexpected_value": "fail_closed_for_frozen_runtime_contract"
+    },
+    "unexpected_multi_agent_version_field": "fail_closed",
+    "unknown_missing_duplicate_conflicting_or_mixed": "fail_closed"
+  },
+  "wire_lifecycle": {
+    "function_call_stream": {
+      "assembly_rule": "ordered_delta_assembly_must_equal_done_arguments",
+      "event_order": [
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done"
+      ],
+      "event_shapes": {
+        "response.function_call_arguments.delta": {
+          "fields": [
+            "type",
+            "item_id",
+            "output_index",
+            "delta"
+          ]
+        },
+        "response.function_call_arguments.done": {
+          "fields": [
+            "type",
+            "item_id",
+            "output_index",
+            "arguments"
+          ]
+        },
+        "response.output_item.added": {
+          "fields": [
+            "type",
+            "output_index",
+            "item"
+          ],
+          "item_fields": [
+            "type",
+            "id",
+            "status",
+            "name",
+            "namespace",
+            "arguments",
+            "call_id"
+          ],
+          "status": "in_progress"
+        },
+        "response.output_item.done": {
+          "fields": [
+            "type",
+            "output_index",
+            "item"
+          ],
+          "item_fields": [
+            "type",
+            "id",
+            "status",
+            "name",
+            "namespace",
+            "arguments",
+            "call_id"
+          ],
+          "status": "completed"
+        }
+      }
+    },
+    "history_items": [
+      "function_call",
+      "function_call_output",
+      "agent_message"
+    ],
+    "same_home_readback": {
+      "agent_message_author_recipient_and_content_kind_preserved": true,
+      "call_and_output_ids_preserved": true,
+      "call_namespace_preserved": true,
+      "call_output_order_preserved": true,
+      "clients": [
+        "codex_cli",
+        "codex_desktop"
+      ],
+      "desktop_thread_resume_and_read": "observed",
+      "session_meta_multi_agent_version": "v2",
+      "turn_context_multi_agent_version": "v2"
+    },
+    "terminal": {
+      "event_order_boundary": "after_output_item_done",
+      "event_shapes": {
+        "response.completed": {
+          "fields": [
+            "type",
+            "response"
+          ],
+          "response_fields": [
+            "id",
+            "status",
+            "output",
+            "usage"
+          ],
+          "status": "completed"
+        },
+        "response.failed": {
+          "fields": [
+            "type",
+            "response"
+          ],
+          "response_required_fields": [
+            "id",
+            "status",
+            "error"
+          ],
+          "status": "failed"
+        },
+        "response.incomplete": {
+          "fields": [
+            "type",
+            "response"
+          ],
+          "response_required_fields": [
+            "id",
+            "status",
+            "incomplete_details"
+          ],
+          "status": "incomplete"
+        }
+      },
+      "events": [
+        "response.completed",
+        "response.incomplete",
+        "response.failed"
+      ],
+      "stream_close_without_completed": "terminal_error"
+    }
+  }
+}
