@@ -387,6 +387,14 @@ def test_outputs_stream_terminal_and_same_home_shapes_are_complete() -> None:
     assert lifecycle["terminal"]["stream_close_without_completed"] == (
         "rejected_nonzero_exit"
     )
+    assert lifecycle["terminal"]["event_boundaries"] == {
+        "response.completed": {"previous_event": "response.output_item.done"},
+        "response.incomplete": {"previous_event": "response.output_text.delta"},
+        "response.failed": {"previous_event": "response.created"},
+        "stream_close_without_terminal": {
+            "last_observed_event": "response.output_text.delta"
+        },
+    }
     for controls in lifecycle["terminal"]["controls_by_client"].values():
         assert set(controls) == {"incomplete", "failed", "truncated"}
         assert all(

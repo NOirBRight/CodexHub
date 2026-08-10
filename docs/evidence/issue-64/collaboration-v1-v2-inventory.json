@@ -79,7 +79,7 @@
     "basis": "accepted_issue392_exact_runtime_contract",
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
-      "sha256": "7ed254a4171eabf59e9d8f0ab8c0133ccf13cfad6c83b0b57b122c244c71d2e2"
+      "sha256": "f4de10e5898ed1bfe8381f825e7bd0e157057acc35e176f0662ef4aa1e6b3fb7"
     }
   },
   "protocol_layers": {

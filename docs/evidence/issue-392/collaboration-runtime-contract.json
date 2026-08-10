@@ -8368,7 +8368,20 @@
           }
         }
       },
-      "event_order_boundary": "after_output_item_done",
+      "event_boundaries": {
+        "response.completed": {
+          "previous_event": "response.output_item.done"
+        },
+        "response.failed": {
+          "previous_event": "response.created"
+        },
+        "response.incomplete": {
+          "previous_event": "response.output_text.delta"
+        },
+        "stream_close_without_terminal": {
+          "last_observed_event": "response.output_text.delta"
+        }
+      },
       "event_shapes": {
         "response.completed": {
           "field_types": {

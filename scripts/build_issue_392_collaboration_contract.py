@@ -1264,6 +1264,16 @@ def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
                 observed["completed_event_present"] is False,
                 "observation_terminal_completed_invalid",
             )
+    for terminal in ("incomplete", "failed", "truncated"):
+        _require(
+            scenarios[f"cli_terminal_{terminal}"]["observed"][
+                "served_event_envelopes"
+            ]
+            == scenarios[f"desktop_terminal_{terminal}"]["observed"][
+                "served_event_envelopes"
+            ],
+            "observation_terminal_client_shape_mismatch",
+        )
 
     app_observed = scenarios["desktop_app_v2_lifecycle"]["observed"]
     _require(isinstance(app_observed, Mapping), "observation_desktop_app_invalid")
@@ -1466,6 +1476,25 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
     failed_event = copy.deepcopy(
         terminal_controls["cli"]["failed"]["served_event_envelopes"][-1]
     )
+    incomplete_events = terminal_controls["cli"]["incomplete"][
+        "served_event_envelopes"
+    ]
+    failed_events = terminal_controls["cli"]["failed"]["served_event_envelopes"]
+    truncated_events = terminal_controls["cli"]["truncated"][
+        "served_event_envelopes"
+    ]
+    terminal_event_boundaries = {
+        "response.completed": {
+            "previous_event": cli_function_sequence[-2]["type"]
+        },
+        "response.incomplete": {
+            "previous_event": incomplete_events[-2]["type"]
+        },
+        "response.failed": {"previous_event": failed_events[-2]["type"]},
+        "stream_close_without_terminal": {
+            "last_observed_event": truncated_events[-1]["type"]
+        },
+    }
     return {
         "schema": SCHEMA,
         "qualification_status": "accepted_request_call_result_agent_message_and_readback",
@@ -1637,7 +1666,7 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
                 "assembly_rule": "ordered_delta_assembly_must_equal_done_arguments",
             },
             "terminal": {
-                "event_order_boundary": "after_output_item_done",
+                "event_boundaries": terminal_event_boundaries,
                 "events": [
                     "response.completed",
                     "response.incomplete",
