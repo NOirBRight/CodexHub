@@ -1993,12 +1993,10 @@ fn official_models_from_metadata(
     subscription_models: Option<Vec<crate::Model>>,
     published_context_windows: &BTreeMap<String, u32>,
 ) -> Vec<GatewayModel> {
-    // When the Official cost guard is enabled, a missing publication fence
-    // must not expose an Official model with an unbounded context window. The
-    // activation path also refuses to start Official routing without this
-    // fence. With the optional guard disabled, preserve the legacy metadata
-    // surface and leave an unknown window unset rather than inventing one.
-    if settings.openai_context_guard_enabled && published_context_windows.is_empty() {
+    // A missing publication fence means no safe Official snapshot is available.
+    // Official models must not be listed or routed until a safe snapshot has
+    // been published, regardless of whether the optional cost guard is enabled.
+    if published_context_windows.is_empty() {
         return Vec::new();
     }
     let mut models: Vec<GatewayModel> =
@@ -8113,8 +8111,7 @@ mod tests {
             &BTreeMap::new(),
         );
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].context_window, None);
+        assert!(models.is_empty());
 
         let guarded = official_models_from_metadata(
             &Settings {
@@ -8129,6 +8126,63 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(guarded.is_empty());
+    }
+
+    #[test]
+    fn official_gateway_models_are_available_with_guard_disabled_when_safe_snapshot_exists() {
+        let settings = Settings::default();
+        let published_contexts = published_context_windows(&[("gpt-5.6-terra", 272_000)]);
+        let models = official_models_from_metadata(
+            &settings,
+            Some(vec![Model {
+                id: "openai/gpt-5.6-terra".to_string(),
+                context_window: Some(353_400),
+                ..Model::default()
+            }]),
+            &published_contexts,
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-terra");
+        assert_eq!(models[0].context_window, Some(272_000));
+    }
+
+    #[test]
+    fn gateway_models_exclude_official_and_include_external_when_safe_snapshot_is_unavailable() {
+        let settings = Settings {
+            include_official_models: true,
+            ..Settings::default()
+        };
+        let providers = vec![Provider {
+            id: "test-provider".to_string(),
+            name: "Test Provider".to_string(),
+            base_url: "https://api.test.example/v1".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::Responses),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: None,
+            sort_order: None,
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "test-model".to_string(),
+                display_name: Some("Test Model".to_string()),
+                gateway_exported: true,
+                context_window: Some(128_000),
+                ..Model::default()
+            }],
+        }];
+
+        let models = gateway_models_from_sources(&settings, &providers, Vec::new());
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "test-provider/test-model");
+        assert_eq!(models[0].source, "Test Provider");
+        assert_eq!(models[0].source_kind, "external");
     }
 
     #[test]
