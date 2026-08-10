@@ -1247,6 +1247,35 @@ class RoutingTests(unittest.TestCase):
                 self.assertFalse(plan.official_http_passthrough)
                 self.assertFalse(plan.transparent_metered)
 
+    def test_route_plan_reports_disabled_tool_protocol_without_schema_injection(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "custom_endpoint",
+                "auth": "api_key",
+                "upstream_model": "thinking-model",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="custom-endpoint/thinking-model",
+        )
+
+        self.assertEqual(plan.primary_attempt.tool_protocol, "none")
+        self.assertEqual(
+            plan.tool_exposure.capability_state,
+            codex_proxy.CapabilityState.UNSUPPORTED,
+        )
+        self.assertEqual(
+            plan.tool_exposure.effective_mode,
+            codex_proxy.ToolExposureMode.UNSUPPORTED,
+        )
+        self.assertFalse(plan.tool_exposure.gateway_schema_injection)
+        self.assertNotIn(
+            codex_proxy.RouteMutation.HARD_CODED_SCHEMA_INJECTION,
+            plan.named_mutations,
+        )
+
     def test_route_plan_and_nested_tool_policy_are_immutable(self):
         plan = codex_proxy.route_plan_for_request(
             {

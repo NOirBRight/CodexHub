@@ -249,6 +249,67 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
             ],
         )
 
+    def test_probe_detects_chat_tools_when_named_choice_conflicts_with_thinking(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return True, 200, {"data": [{"id": "k3"}]}, None
+            if path == "/responses":
+                return False, 404, None, "not found"
+            if path == "/messages":
+                return True, 200, {"id": "msg_1", "type": "message", "content": []}, None
+            if path == "/chat/completions" and payload and payload.get("tools"):
+                if isinstance(payload.get("tool_choice"), dict):
+                    return (
+                        False,
+                        400,
+                        None,
+                        "tool_choice 'specified' is incompatible with thinking enabled",
+                    )
+                return (
+                    True,
+                    200,
+                    {
+                        "choices": [
+                            {
+                                "finish_reason": "tool_calls",
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_weather",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_weather",
+                                                "arguments": '{"location":"Paris"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                            }
+                        ]
+                    },
+                    None,
+                )
+            if path == "/chat/completions":
+                return True, 200, {"choices": [{"message": {"content": "OK"}}]}, None
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://api.example.test/coding", "test-key", "k3", 2)
+
+        self.assertTrue(result["chat_tool_ok"])
+        self.assertTrue(result["chat_tool_history_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_CHAT)
+        self.assertEqual(result["recommended_tool_protocol"], "chat_tools")
+
     def test_anthropic_message_shape_detection_is_lightweight(self) -> None:
         self.assertTrue(anthropic_text_ok({"id": "msg_1", "type": "message", "content": []}))
         self.assertTrue(anthropic_text_ok({"content": [{"type": "text", "text": "OK"}]}))
