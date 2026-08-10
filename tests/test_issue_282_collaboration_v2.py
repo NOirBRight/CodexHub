@@ -631,8 +631,13 @@ def test_v2_request_history_requires_string_call_and_result_payloads(
     assert caught.value.surface == "history"
 
 
-def _agent_message_stream_event(event_type: str, item: dict[str, object]) -> dict[str, object]:
-    return {"type": event_type, "output_index": 0, "item": item}
+def _agent_message_stream_event(
+    event_type: str,
+    item: dict[str, object],
+    *,
+    output_index: int = 0,
+) -> dict[str, object]:
+    return {"type": event_type, "output_index": output_index, "item": item}
 
 
 def test_v2_agent_message_stream_preserves_complete_lifecycle() -> None:
@@ -660,6 +665,167 @@ def test_v2_agent_message_stream_preserves_complete_lifecycle() -> None:
     assert added[0]["item"] == item
     assert done[0]["item"] == item
     assert terminal[0]["response"]["output"] == [item]
+
+
+def _agent_message_terminal_event(output: list[dict[str, object]] | None) -> dict[str, object]:
+    response: dict[str, object] = {
+        "id": "response-agent-message",
+        "object": "response",
+        "status": "completed",
+    }
+    if output is not None:
+        response["output"] = output
+    return {"type": "response.completed", "response": response}
+
+
+def _complete_agent_message_lifecycle(
+    stream,
+    item: dict[str, object],
+    *,
+    output_index: int = 0,
+) -> None:
+    stream.decode_events_for_event(
+        _agent_message_stream_event(
+            "response.output_item.added",
+            item,
+            output_index=output_index,
+        )
+    )
+    stream.decode_events_for_event(
+        _agent_message_stream_event(
+            "response.output_item.done",
+            item,
+            output_index=output_index,
+        )
+    )
+
+
+def test_v2_agent_message_stream_rejects_terminal_only_item() -> None:
+    stream = _v2_plan().new_stream()
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        stream.decode_events_for_event(
+            _agent_message_terminal_event([_v2_history()[-1]])
+        )
+
+    assert caught.value.classification == "missing_stream_identity"
+    assert caught.value.surface == "stream"
+
+
+@pytest.mark.parametrize(
+    ("terminal_output", "classification"),
+    [
+        (
+            lambda item: [item, item],
+            "duplicate_item_identity",
+        ),
+        (
+            lambda item: [
+                {
+                    **item,
+                    "id": "unknown-agent-message",
+                }
+            ],
+            "missing_stream_identity",
+        ),
+        (
+            lambda item: [],
+            "incomplete_stream",
+        ),
+        (
+            lambda item: [
+                {
+                    **item,
+                    "content": [{"type": "input_text", "text": "changed terminal"}],
+                }
+            ],
+            "ambiguous_native_identity",
+        ),
+    ],
+    ids=["duplicate-terminal-id", "unknown-terminal-id", "missing-terminal-item", "changed-terminal-content"],
+)
+def test_v2_agent_message_stream_reconciles_terminal_ownership(
+    terminal_output,
+    classification: str,
+) -> None:
+    stream = _v2_plan().new_stream()
+    item = _v2_history()[-1]
+    _complete_agent_message_lifecycle(stream, item)
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        stream.decode_events_for_event(
+            _agent_message_terminal_event(terminal_output(item))
+        )
+
+    assert caught.value.classification == classification
+    assert caught.value.surface == "stream"
+
+
+@pytest.mark.parametrize(
+    ("events", "classification"),
+    [
+        (
+            lambda item: [
+                _agent_message_stream_event(
+                    "response.output_item.added",
+                    item,
+                    output_index=0,
+                ),
+                _agent_message_stream_event(
+                    "response.output_item.done",
+                    item,
+                    output_index=1,
+                ),
+            ],
+            "ambiguous_native_identity",
+        ),
+        (
+            lambda item: [
+                _agent_message_stream_event(
+                    "response.output_item.added",
+                    item,
+                ),
+                _agent_message_stream_event(
+                    "response.output_item.done",
+                    item,
+                    output_index=0,
+                ),
+                _agent_message_terminal_event(None),
+            ],
+            "incomplete_stream",
+        ),
+    ],
+    ids=["output-index-drift", "terminal-output-index-required"],
+)
+def test_v2_agent_message_stream_rejects_index_boundary_drift(
+    events,
+    classification: str,
+) -> None:
+    stream = _v2_plan().new_stream()
+    item = _v2_history()[-1]
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        for event in events(item):
+            stream.decode_events_for_event(event)
+
+    assert caught.value.classification == classification
+    assert caught.value.surface == "stream"
+
+
+def test_v2_agent_message_stream_rejects_terminal_order_drift() -> None:
+    stream = _v2_plan().new_stream()
+    first = _v2_history()[-1]
+    second = {**first, "id": "agent-message-2"}
+    _complete_agent_message_lifecycle(stream, first, output_index=0)
+    _complete_agent_message_lifecycle(stream, second, output_index=1)
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        stream.decode_events_for_event(
+            _agent_message_terminal_event([second, first])
+        )
+
+    assert caught.value.classification == "ambiguous_native_identity"
+    assert caught.value.surface == "stream"
 
 
 @pytest.mark.parametrize(

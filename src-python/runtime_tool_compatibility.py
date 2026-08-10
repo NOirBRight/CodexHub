@@ -3230,7 +3230,10 @@ class CompatibilityStreamState:
         # later deltas and terminal events cannot borrow an arbitrary id.
         self._opaque_pending: dict[str, _OpaqueStreamItem] = {}
         self._agent_message_pending: dict[str, Any] = {}
+        self._agent_message_output_indices: dict[str, int] = {}
+        self._agent_message_added_order: list[str] = []
         self._agent_message_done: set[str] = set()
+        self._agent_message_done_order: list[str] = []
         self._terminal = False
 
     @property
@@ -3663,6 +3666,17 @@ class CompatibilityStreamState:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
 
+    @staticmethod
+    def _agent_message_output_index(event: Mapping[str, Any]) -> int:
+        output_index = event.get("output_index")
+        if type(output_index) is not int or output_index < 0:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        return output_index
+
     def _validate_terminal_native_output(self, response: Mapping[str, Any]) -> None:
         output = response.get("output")
         required_native_ids = {
@@ -3675,6 +3689,12 @@ class CompatibilityStreamState:
             # Some upstream terminal envelopes omit ``output`` after the SSE
             # lifecycle has already delivered the completed item.  _finish_terminal
             # below still rejects an actually incomplete lifecycle.
+            if required_agent_message_ids:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream",
+                    surface="stream",
+                )
             return
         if output == []:
             if required_native_ids or required_adapter_ids or required_agent_message_ids:
@@ -3683,7 +3703,8 @@ class CompatibilityStreamState:
         if not isinstance(output, list):
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
         seen_output_ids: set[str] = set()
-        for item in output:
+        terminal_agent_message_order: list[str] = []
+        for output_index, item in enumerate(output):
             if not isinstance(item, Mapping):
                 continue
             item_id = _item_identity(item)
@@ -3693,19 +3714,32 @@ class CompatibilityStreamState:
                 seen_output_ids.add(item_id)
             if item.get("type") == "agent_message":
                 self.plan._validate_collaboration_v2_items([item], surface="stream")
-                if item_id in self._agent_message_pending:
-                    if item_id not in self._agent_message_done:
-                        raise ToolCompatibilityError(
-                            "tool_compatibility_boundary",
-                            "incomplete_stream",
-                            surface="stream",
-                        )
-                    if _freeze(item) != self._agent_message_pending[item_id]:
-                        raise ToolCompatibilityError(
-                            "tool_compatibility_boundary",
-                            "ambiguous_native_identity",
-                            surface="stream",
-                        )
+                if item_id not in self._agent_message_pending:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_stream_identity",
+                        surface="stream",
+                    )
+                expected_output_index = self._agent_message_output_indices[item_id]
+                if output_index != expected_output_index:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                if item_id not in self._agent_message_done:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "incomplete_stream",
+                        surface="stream",
+                    )
+                if _freeze(item) != self._agent_message_pending[item_id]:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                terminal_agent_message_order.append(item_id)
                 continue
             pending = self._native_pending.get(item_id) if item_id is not None else None
             if pending is None:
@@ -3911,6 +3945,12 @@ class CompatibilityStreamState:
         ) - seen_output_ids
         if missing:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
+        if terminal_agent_message_order != self._agent_message_added_order:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
 
     def decode_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(event, Mapping):
@@ -3944,8 +3984,26 @@ class CompatibilityStreamState:
                         "duplicate_item_identity",
                         surface="stream",
                     )
+                output_index = self._agent_message_output_index(result)
+                if (
+                    output_index in self._agent_message_output_indices.values()
+                    or (
+                        self._agent_message_added_order
+                        and output_index
+                        <= self._agent_message_output_indices[
+                            self._agent_message_added_order[-1]
+                        ]
+                    )
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
                 self._seen_item_ids.add(item_id)
                 self._agent_message_pending[item_id] = _freeze(item)
+                self._agent_message_output_indices[item_id] = output_index
+                self._agent_message_added_order.append(item_id)
                 return result
             if event_type == "response.output_item.done":
                 if item_id not in self._agent_message_pending:
@@ -3960,6 +4018,25 @@ class CompatibilityStreamState:
                         "duplicate_item_identity",
                         surface="stream",
                     )
+                output_index = self._agent_message_output_index(result)
+                if output_index != self._agent_message_output_indices[item_id]:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                if (
+                    self._agent_message_done_order
+                    and output_index
+                    <= self._agent_message_output_indices[
+                        self._agent_message_done_order[-1]
+                    ]
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
                 if _freeze(item) != self._agent_message_pending[item_id]:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
@@ -3967,6 +4044,7 @@ class CompatibilityStreamState:
                         surface="stream",
                     )
                 self._agent_message_done.add(item_id)
+                self._agent_message_done_order.append(item_id)
                 return result
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
@@ -3977,6 +4055,12 @@ class CompatibilityStreamState:
             response = result.get("response")
             if isinstance(response, Mapping):
                 self._validate_terminal_native_output(response)
+            elif self._agent_message_pending:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "incomplete_stream",
+                    surface="stream",
+                )
             self._finish_terminal()
             if isinstance(response, Mapping):
                 decoded_output, output_changed = self.plan._decode_items(
