@@ -86,6 +86,14 @@ export function useProviderCatalogActions({
   const { showToast, updateToast } = toast;
 
   function updateProbeToast(toastId: string, result: UpstreamFormatProbeResult) {
+    if (result.model_required) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.probeModelRequired"),
+        tone: "error",
+      });
+      return;
+    }
     const detectedFormat = probeDetectedEndpointFormat(result);
     updateToast(toastId, {
       action: null,
