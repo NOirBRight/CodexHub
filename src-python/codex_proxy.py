@@ -18582,7 +18582,177 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
             return
 
-        self._send_json(404, {"error": "not found"})
+        if parsed.path == "/v1/images/generations":
+            self._proxy_official_image_generation()
+            return
+
+        self._send_json_and_close(404, {"error": "not found"})
+
+    def _proxy_official_image_generation(self) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        started_at = time.monotonic()
+        request_context = request_context_from_headers(self.headers)
+
+        def send_user_requested_shutdown() -> None:
+            _record_user_requested_shutdown()
+            self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
+
+        if not _local_request_authorized(self.headers, request_context):
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                path=self.path,
+                method="POST",
+                model=None,
+                upstream="local",
+                route_reason="official_image_generation",
+                status=401,
+                error="UnauthorizedLocalClient",
+                detail="missing or invalid local Gateway client key",
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._send_json_and_close(401, _local_gateway_auth_error_payload())
+            return
+
+        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
+        admission = shutdown_controller.admit()
+        if admission is None:
+            send_user_requested_shutdown()
+            return
+        previous_admission = _activate_gateway_request(admission)
+        upstream_name = "official"
+        status = 500
+        try:
+            admission.raise_if_cancelled()
+            upstream = official_upstream()
+            upstream_name = str(upstream["name"])
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                self._send_json_and_close(400, {"error": "invalid Content-Length"})
+                return
+            if content_length < 0:
+                self._send_json_and_close(400, {"error": "invalid Content-Length"})
+                return
+            max_body_bytes = max_request_body_bytes()
+            if content_length > max_body_bytes:
+                self._send_json_and_close(
+                    413,
+                    {
+                        "error": "request body too large",
+                        "max_request_body_bytes": max_body_bytes,
+                    },
+                )
+                return
+
+            body = self.rfile.read(content_length)
+            admission.raise_if_cancelled()
+            operational_authentication = materialize_operational_authentication(
+                self.headers,
+                upstream,
+            )
+            headers = upstream_headers(
+                self.headers,
+                upstream,
+                request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
+                operational_authentication=operational_authentication,
+            )
+            request = Request(
+                _upstream_endpoint_url(upstream, "/images/generations"),
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            event_context = {
+                "request_id": request_id,
+                "model": None,
+                **_event_context_with_request_kind(
+                    request_context,
+                    RETRY_REQUEST_MAIN_GENERATION,
+                ),
+            }
+            write_proxy_event(
+                "request_start",
+                request_id=request_id,
+                path=self.path,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                content_length=content_length,
+                **request_context,
+            )
+            try:
+                with _open_upstream_response(
+                    request,
+                    upstream_name=upstream_name,
+                    upstream_format="images",
+                    timeout=upstream_timeout_seconds(),
+                    event_context=event_context,
+                    request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                    max_attempts=1,
+                    retry_http_errors=False,
+                    transport_policy=TransportPolicy.OFFICIAL_KEEPALIVE,
+                ) as response:
+                    status = self._relay_raw_upstream_response(response, upstream_name)
+            except HTTPError as exc:
+                try:
+                    status = self._relay_raw_upstream_response(exc, upstream_name)
+                finally:
+                    exc.close()
+            write_proxy_event(
+                "request_complete",
+                request_id=request_id,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                status=status,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+        except GatewayUserRequestedShutdown:
+            send_user_requested_shutdown()
+        except (IncompleteRead, OSError, URLError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
+            detail = safe_upstream_error_detail(exc)
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                status=502,
+                error=type(exc).__name__,
+                detail=detail,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._send_json_and_close(
+                502,
+                {"error": type(exc).__name__, "detail": detail},
+            )
+        except Exception as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
+            detail = safe_upstream_error_detail(exc)
+            logger.error(
+                "unexpected image generation proxy error request_id=%s detail=%s",
+                request_id,
+                detail,
+            )
+            self._send_json_and_close(
+                500,
+                {"error": type(exc).__name__, "detail": detail},
+            )
+        finally:
+            _restore_gateway_request(previous_admission)
+            shutdown_controller.complete(admission)
 
     def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None = None) -> None:
         """Shared POST handler for inbound Responses and Chat Completions requests.
@@ -20584,6 +20754,37 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json_and_close(self, status: int, payload: dict[str, Any]) -> None:
+        body = _json_response_bytes(payload)
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self._write_non_streaming_body_relay(body)
+
+    def _relay_raw_upstream_response(self, response: Any, upstream_name: str) -> int:
+        status = getattr(response, "status", None) or getattr(response, "code", 502)
+        body = response.read()
+        admission = _active_gateway_request()
+        if admission is not None:
+            admission.raise_if_cancelled()
+        self.send_response(status)
+        for key, value in _filtered_response_headers(
+            response.headers,
+            False,
+            content_length=len(body),
+        ):
+            self.send_header(key, value)
+        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if not self._write_non_streaming_body_relay(body):
+            return 499
+        self.close_connection = True
+        return status
 
     def _send_sse_headers(self, status: int, upstream_name: str) -> bool:
         seam = _handler_downstream_stream_commit(self)
