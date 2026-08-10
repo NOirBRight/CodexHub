@@ -14755,7 +14755,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(done["item"]["arguments"])["message"], "Implement Task 1 exactly.")
         self.assertEqual(json.loads(done["item"]["arguments"])["nickname"], "implementer-task-1")
         self.assertEqual(done["item"]["arguments"], arguments_done["arguments"])
-        self.assertEqual(json.loads(done["item"]["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(done["item"]["arguments"])["agent_type"], "default")
 
 
     def test_non_sse_relay_bulk_writes_body(self):
@@ -15892,7 +15892,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(arguments["message"], "return sentinel A")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
@@ -16179,7 +16179,7 @@ class RoutingTests(unittest.TestCase):
         arguments = json.loads(argument_text)
         self.assertEqual(arguments["message"], "return sentinel B")
         self.assertEqual(arguments["nickname"], "child-b")
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 
@@ -24388,7 +24388,7 @@ Execution constraints:
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
@@ -24416,7 +24416,7 @@ Execution constraints:
             event_context={},
         )
         replay_call = json.loads(replay)["input"][0]
-        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
 
     def test_external_general_spawn_sse_normalize_to_replay_preserves_selector_without_worker_sidecar(self):
@@ -24445,7 +24445,7 @@ Execution constraints:
         )
         event = json.loads(normalized_line.removeprefix(b"data: ").strip())
         call = event["item"]
-        self.assertEqual(json.loads(call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", call)
 
         replay = compatible_request_body(
@@ -24472,7 +24472,7 @@ Execution constraints:
             event_context={},
         )
         replay_call = json.loads(replay)["input"][0]
-        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
 
     def test_external_worker_agent_type_survives_declaration_response_and_history_replay(self):
@@ -24483,7 +24483,7 @@ Execution constraints:
         )
         self.assertEqual(
             spawn_tool["parameters"]["properties"]["agent_type"],
-            {"type": "string", "enum": ["worker", "general"]},
+            {"type": "string", "enum": ["worker", "default"]},
         )
         self.assertIn("agent_type", spawn_tool["parameters"]["required"])
         self.assertNotIn("synthetic-unknown", spawn_tool["parameters"]["properties"]["agent_type"]["enum"])
@@ -24605,7 +24605,7 @@ Execution constraints:
         )
         self.assertEqual(
             spawn_tool["parameters"]["properties"]["agent_type"]["enum"],
-            ["general"],
+            ["default"],
         )
         self.assertNotIn("_worker_requested_binding", event_context)
 
@@ -26224,7 +26224,7 @@ Execution constraints:
         self.assertEqual(call["name"], "spawn_agent")
         self.assertEqual(args["message"], "return ok")
         self.assertEqual(args["nickname"], "worker")
-        self.assertEqual(args["agent_type"], "general")
+        self.assertEqual(args["agent_type"], "default")
 
     def test_external_response_normalizes_concatenated_multi_agent_alias(self):
         body = json.dumps(
@@ -26686,7 +26686,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 arguments = json.loads(call["arguments"])
                 self.assertEqual(arguments["message"], "return sentinel")
                 self.assertEqual(arguments["nickname"], "child-a")
-                self.assertEqual(arguments["agent_type"], "general")
+                self.assertEqual(arguments["agent_type"], "default")
 
     def test_external_sse_normalizes_concatenated_multi_agent_alias_fragments(self):
         events = [
@@ -26767,7 +26767,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 
