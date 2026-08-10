@@ -155,6 +155,36 @@ def _v2_plan(*, native: bool = False):
     )
 
 
+def _ordinary_function_declaration() -> dict[str, object]:
+    return {
+        "type": "function",
+        "name": "ordinary_lookup",
+        "description": "An unrelated ordinary function.",
+        "strict": False,
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _mixed_v2_plan(*, native: bool = False):
+    capabilities = ProtocolCapabilities.responses_structured(
+        namespace_lifecycle=native,
+        function_lifecycle=True,
+        accepts_namespace_adapter=True,
+    )
+    return build_tool_compatibility_plan(
+        [_declaration(COLLABORATION_V2), _ordinary_function_declaration()],
+        selected_protocol="responses_structured",
+        tool_choice="auto",
+        protocol_capabilities=capabilities,
+        request_token="issue-282-mixed",
+    )
+
+
 def test_exact_runtime_namespaces_classify_and_descriptions_are_dynamic() -> None:
     for version in (COLLABORATION_V1, COLLABORATION_V2):
         body = _request(version)
@@ -681,6 +711,92 @@ def test_v2_history_results_are_owned_and_validated_fail_closed(
 
     assert caught.value.classification == classification
     assert caught.value.surface == "history"
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_history_preserves_unrelated_function_call_and_result(native: bool) -> None:
+    plan = _mixed_v2_plan(native=native)
+    collaboration_call, collaboration_result = _v2_history()[:2]
+    ordinary_call = {
+        "type": "function_call",
+        "id": "ordinary-call-item",
+        "call_id": "ordinary-call",
+        "name": "ordinary_lookup",
+        "arguments": '{"query":"opaque"}',
+    }
+    ordinary_result = {
+        "type": "function_call_output",
+        "id": "ordinary-result-item",
+        "call_id": "ordinary-call",
+        "output": '{"value":"opaque"}',
+    }
+    history = [
+        collaboration_call,
+        ordinary_call,
+        ordinary_result,
+        collaboration_result,
+    ]
+    payload = {
+        "tool_choice": "auto",
+        "tools": [_declaration(COLLABORATION_V2), _ordinary_function_declaration()],
+        "input": history,
+    }
+    ordinary_wire = [
+        json.dumps(item, separators=(",", ":")).encode()
+        for item in (ordinary_call, ordinary_result)
+    ]
+
+    encoded = plan.encode_payload(payload)
+
+    assert [
+        json.dumps(item, separators=(",", ":")).encode()
+        for item in encoded["input"][1:3]
+    ] == ordinary_wire
+    if native:
+        assert encoded == payload
+    else:
+        assert encoded["input"][0]["name"] == plan.entries[0].aliases[0]
+        assert "namespace" not in encoded["input"][0]
+
+    decoded = plan.decode_payload({"input": encoded["input"]})
+    assert decoded["input"] == history
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted-alias", "native-namespace"])
+def test_v2_unknown_result_claiming_collaboration_identity_fails_closed(native: bool) -> None:
+    plan = _mixed_v2_plan(native=native)
+    ordinary_call = {
+        "type": "function_call",
+        "id": "ordinary-call-item",
+        "call_id": "ordinary-call",
+        "name": "ordinary_lookup",
+        "arguments": '{"query":"opaque"}',
+    }
+    identity = (
+        {"namespace": "collaboration", "name": "followup_task"}
+        if native
+        else {"name": plan.entries[0].aliases[0]}
+    )
+    unknown_result = {
+        "type": "function_call_output",
+        "id": "SECRET_RESULT_ITEM",
+        "call_id": "ordinary-call",
+        "output": '{"secret":"SECRET_RESULT_CONTENT"}',
+        **identity,
+    }
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        plan.encode_payload(
+            {
+                "tool_choice": "auto",
+                "tools": [_declaration(COLLABORATION_V2), _ordinary_function_declaration()],
+                "input": [ordinary_call, unknown_result],
+            }
+        )
+
+    assert caught.value.classification == "unknown_call_identity"
+    assert caught.value.surface == "history"
+    assert "SECRET" not in str(caught.value)
 
 
 def _agent_message_stream_event(

@@ -1275,6 +1275,36 @@ class ToolCompatibilityPlan:
                     surface=surface,
                 )
             return
+
+        def claims_collaboration_v2_identity(item: Mapping[str, Any]) -> bool:
+            if item.get("namespace") == "collaboration":
+                return True
+            record = self.registry.record_for_alias(item.get("name"))
+            return bool(
+                record is not None
+                and record.family == NAMESPACE
+                and record.version == "v2"
+                and record.namespace == "collaboration"
+            )
+
+        # Results do not repeat the function identity.  Preclassify local call
+        # ownership so only results paired with an unrelated call bypass V2
+        # validation; result identities without a local owner remain closed.
+        collaboration_call_ids: set[str] = set()
+        unrelated_call_ids: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping) or item.get("type") != "function_call":
+                continue
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            target = (
+                collaboration_call_ids
+                if claims_collaboration_v2_identity(item)
+                else unrelated_call_ids
+            )
+            target.add(call_id)
+
         calls: dict[str, str] = {}
         seen_result_call_ids: set[str] = set()
         seen_item_ids: set[str] = set()
@@ -1288,11 +1318,7 @@ class ToolCompatibilityPlan:
                 except CollaborationContractError as exc:
                     self._raise_collaboration_contract(exc, surface=surface)
                 item_id = item.get("id")
-            elif (
-                item_type == "function_call"
-                and item.get("namespace") == "collaboration"
-                and item.get("name") in _V2_NAMES
-            ):
+            elif item_type == "function_call" and claims_collaboration_v2_identity(item):
                 item_id, call_id = self._validate_collaboration_v2_call_item(
                     item,
                     surface=surface,
@@ -1312,6 +1338,22 @@ class ToolCompatibilityPlan:
                         "missing_call_identity",
                         surface=surface,
                     )
+                record = self.registry.record_for_call(call_id)
+                result_claims_collaboration_v2 = (
+                    claims_collaboration_v2_identity(item)
+                    or (
+                        record is not None
+                        and record.family == NAMESPACE
+                        and record.version == "v2"
+                        and record.namespace == "collaboration"
+                    )
+                )
+                if (
+                    call_id in unrelated_call_ids
+                    and call_id not in collaboration_call_ids
+                    and not result_claims_collaboration_v2
+                ):
+                    continue
                 if call_id not in calls:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
