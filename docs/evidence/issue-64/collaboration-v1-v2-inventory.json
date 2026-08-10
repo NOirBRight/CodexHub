@@ -79,7 +79,7 @@
     "basis": "accepted_issue392_exact_runtime_contract",
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
-      "sha256": "fd093c72294cda2b48ca87f7e9d71502ba3d7ecb076d709c0daffe47818bd981"
+      "sha256": "5688d0730e6c0270a74b512fd43b4b96094e131481fb5847bd82b6149179e6a9"
     }
   },
   "protocol_layers": {
@@ -104,6 +104,304 @@
           "item/completed"
         ]
       },
+      "notification_envelopes": [
+        {
+          "item_field_types": {
+            "agentPath": "string",
+            "agentThreadId": "string",
+            "id": "string",
+            "kind": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentPath",
+            "agentThreadId",
+            "id",
+            "kind",
+            "type"
+          ],
+          "item_kind": "started",
+          "item_type": "subAgentActivity",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentPath": "string",
+            "agentThreadId": "string",
+            "id": "string",
+            "kind": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentPath",
+            "agentThreadId",
+            "id",
+            "kind",
+            "type"
+          ],
+          "item_kind": "started",
+          "item_type": "subAgentActivity",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentsStates": "object",
+            "id": "string",
+            "model": "null",
+            "prompt": "null",
+            "reasoningEffort": "null",
+            "receiverThreadIds": "array",
+            "senderThreadId": "string",
+            "status": "string",
+            "tool": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentsStates",
+            "id",
+            "model",
+            "prompt",
+            "reasoningEffort",
+            "receiverThreadIds",
+            "senderThreadId",
+            "status",
+            "tool",
+            "type"
+          ],
+          "item_status": "inProgress",
+          "item_tool": "wait",
+          "item_type": "collabAgentToolCall",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "method": "item/agentMessage/delta",
+          "params_field_types": {
+            "delta": "string",
+            "itemId": "string",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "delta",
+            "itemId",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentsStates": "object",
+            "id": "string",
+            "model": "null",
+            "prompt": "null",
+            "reasoningEffort": "null",
+            "receiverThreadIds": "array",
+            "senderThreadId": "string",
+            "status": "string",
+            "tool": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentsStates",
+            "id",
+            "model",
+            "prompt",
+            "reasoningEffort",
+            "receiverThreadIds",
+            "senderThreadId",
+            "status",
+            "tool",
+            "type"
+          ],
+          "item_status": "completed",
+          "item_tool": "wait",
+          "item_type": "collabAgentToolCall",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "method": "item/agentMessage/delta",
+          "params_field_types": {
+            "delta": "string",
+            "itemId": "string",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "delta",
+            "itemId",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        }
+      ],
       "same_home_thread_resume_and_read": "observed",
       "thread_items": {
         "agentMessage": [
@@ -131,6 +429,185 @@
           "kind",
           "agentThreadId",
           "agentPath"
+        ]
+      },
+      "thread_read_envelope": {
+        "field_types": {
+          "agentNickname": "null",
+          "agentRole": "null",
+          "canAcceptDirectInput": "boolean",
+          "cliVersion": "string",
+          "createdAt": "number",
+          "cwd": "string",
+          "ephemeral": "boolean",
+          "extra": "null",
+          "forkedFromId": "null",
+          "gitInfo": "object",
+          "historyMode": "string",
+          "id": "string",
+          "modelProvider": "string",
+          "name": "null",
+          "parentThreadId": "null",
+          "path": "string",
+          "preview": "string",
+          "recencyAt": "number",
+          "section": "null",
+          "sectionEnteredAt": "null",
+          "sessionId": "string",
+          "source": "string",
+          "status": "object",
+          "threadSource": "null",
+          "turns": "array",
+          "updatedAt": "number"
+        },
+        "fields": [
+          "agentNickname",
+          "agentRole",
+          "canAcceptDirectInput",
+          "cliVersion",
+          "createdAt",
+          "cwd",
+          "ephemeral",
+          "extra",
+          "forkedFromId",
+          "gitInfo",
+          "historyMode",
+          "id",
+          "modelProvider",
+          "name",
+          "parentThreadId",
+          "path",
+          "preview",
+          "recencyAt",
+          "section",
+          "sectionEnteredAt",
+          "sessionId",
+          "source",
+          "status",
+          "threadSource",
+          "turns",
+          "updatedAt"
+        ],
+        "status_field_types": {
+          "type": "string"
+        },
+        "status_fields": [
+          "type"
+        ],
+        "turns": [
+          {
+            "field_types": {
+              "completedAt": "number",
+              "durationMs": "number",
+              "error": "null",
+              "id": "string",
+              "items": "array",
+              "itemsView": "string",
+              "startedAt": "number",
+              "status": "string"
+            },
+            "fields": [
+              "completedAt",
+              "durationMs",
+              "error",
+              "id",
+              "items",
+              "itemsView",
+              "startedAt",
+              "status"
+            ],
+            "items": [
+              {
+                "field_types": {
+                  "clientId": "null",
+                  "content": "array",
+                  "id": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "clientId",
+                  "content",
+                  "id",
+                  "type"
+                ],
+                "type": "userMessage"
+              },
+              {
+                "field_types": {
+                  "agentPath": "string",
+                  "agentThreadId": "string",
+                  "id": "string",
+                  "kind": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "agentPath",
+                  "agentThreadId",
+                  "id",
+                  "kind",
+                  "type"
+                ],
+                "kind": "started",
+                "type": "subAgentActivity"
+              },
+              {
+                "field_types": {
+                  "id": "string",
+                  "memoryCitation": "null",
+                  "phase": "null",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "id",
+                  "memoryCitation",
+                  "phase",
+                  "text",
+                  "type"
+                ],
+                "type": "agentMessage"
+              }
+            ],
+            "status": "completed"
+          }
+        ]
+      },
+      "thread_resume_result": {
+        "field_types": {
+          "activePermissionProfile": "object",
+          "approvalPolicy": "string",
+          "approvalsReviewer": "string",
+          "cwd": "string",
+          "initialTurnsPage": "null",
+          "instructionSources": "array",
+          "itemsBackwardsCursor": "null",
+          "model": "string",
+          "modelProvider": "string",
+          "multiAgentMode": "string",
+          "reasoningEffort": "string",
+          "runtimeWorkspaceRoots": "array",
+          "sandbox": "object",
+          "serviceTier": "null",
+          "thread": "object",
+          "turnsBackwardsCursor": "null"
+        },
+        "fields": [
+          "activePermissionProfile",
+          "approvalPolicy",
+          "approvalsReviewer",
+          "cwd",
+          "initialTurnsPage",
+          "instructionSources",
+          "itemsBackwardsCursor",
+          "model",
+          "modelProvider",
+          "multiAgentMode",
+          "reasoningEffort",
+          "runtimeWorkspaceRoots",
+          "sandbox",
+          "serviceTier",
+          "thread",
+          "turnsBackwardsCursor"
         ]
       },
       "turn_terminal_notification": "turn/completed",

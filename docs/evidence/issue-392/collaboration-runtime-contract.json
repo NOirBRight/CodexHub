@@ -5,6 +5,13 @@
     "existing_user_home_read": false,
     "existing_user_task_read": false,
     "home": "new_isolated_home_per_runtime",
+    "isolated_home_bindings_sha256": [
+      "b7da348dba582272740fa1392545e7b468a5fbe50f08d257de451631fc8490a8",
+      "1d36f56fcb0744f35ade8cdc621e9588f24c55ad5efcf556c69f12ff1a9f8b28",
+      "8da0a0440f5dba6de038e2343dcf0a90aad1e9df7107f5f734031243fd50d551",
+      "c99dd6202b2a2fddc017c522c869e619b72803c8ec1393209ab3bb8c66528007",
+      "9ff014546ee3d0495ea5d21413bd8cc5e7ecf23f1e09bf0023e2b218526b7e04"
+    ],
     "isolated_observations": [
       "cli_v1_request",
       "cli_v2_request_call_result_agent_message_and_restart",
@@ -64,6 +71,304 @@
           "item/completed"
         ]
       },
+      "notification_envelopes": [
+        {
+          "item_field_types": {
+            "agentPath": "string",
+            "agentThreadId": "string",
+            "id": "string",
+            "kind": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentPath",
+            "agentThreadId",
+            "id",
+            "kind",
+            "type"
+          ],
+          "item_kind": "started",
+          "item_type": "subAgentActivity",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentPath": "string",
+            "agentThreadId": "string",
+            "id": "string",
+            "kind": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentPath",
+            "agentThreadId",
+            "id",
+            "kind",
+            "type"
+          ],
+          "item_kind": "started",
+          "item_type": "subAgentActivity",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentsStates": "object",
+            "id": "string",
+            "model": "null",
+            "prompt": "null",
+            "reasoningEffort": "null",
+            "receiverThreadIds": "array",
+            "senderThreadId": "string",
+            "status": "string",
+            "tool": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentsStates",
+            "id",
+            "model",
+            "prompt",
+            "reasoningEffort",
+            "receiverThreadIds",
+            "senderThreadId",
+            "status",
+            "tool",
+            "type"
+          ],
+          "item_status": "inProgress",
+          "item_tool": "wait",
+          "item_type": "collabAgentToolCall",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "method": "item/agentMessage/delta",
+          "params_field_types": {
+            "delta": "string",
+            "itemId": "string",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "delta",
+            "itemId",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "agentsStates": "object",
+            "id": "string",
+            "model": "null",
+            "prompt": "null",
+            "reasoningEffort": "null",
+            "receiverThreadIds": "array",
+            "senderThreadId": "string",
+            "status": "string",
+            "tool": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "agentsStates",
+            "id",
+            "model",
+            "prompt",
+            "reasoningEffort",
+            "receiverThreadIds",
+            "senderThreadId",
+            "status",
+            "tool",
+            "type"
+          ],
+          "item_status": "completed",
+          "item_tool": "wait",
+          "item_type": "collabAgentToolCall",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/started",
+          "params_field_types": {
+            "item": "object",
+            "startedAtMs": "number",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "item",
+            "startedAtMs",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "method": "item/agentMessage/delta",
+          "params_field_types": {
+            "delta": "string",
+            "itemId": "string",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "delta",
+            "itemId",
+            "threadId",
+            "turnId"
+          ]
+        },
+        {
+          "item_field_types": {
+            "id": "string",
+            "memoryCitation": "null",
+            "phase": "null",
+            "text": "string",
+            "type": "string"
+          },
+          "item_fields": [
+            "id",
+            "memoryCitation",
+            "phase",
+            "text",
+            "type"
+          ],
+          "item_type": "agentMessage",
+          "method": "item/completed",
+          "params_field_types": {
+            "completedAtMs": "number",
+            "item": "object",
+            "threadId": "string",
+            "turnId": "string"
+          },
+          "params_fields": [
+            "completedAtMs",
+            "item",
+            "threadId",
+            "turnId"
+          ]
+        }
+      ],
       "same_home_thread_resume_and_read": "observed",
       "thread_items": {
         "agentMessage": [
@@ -91,6 +396,185 @@
           "kind",
           "agentThreadId",
           "agentPath"
+        ]
+      },
+      "thread_read_envelope": {
+        "field_types": {
+          "agentNickname": "null",
+          "agentRole": "null",
+          "canAcceptDirectInput": "boolean",
+          "cliVersion": "string",
+          "createdAt": "number",
+          "cwd": "string",
+          "ephemeral": "boolean",
+          "extra": "null",
+          "forkedFromId": "null",
+          "gitInfo": "object",
+          "historyMode": "string",
+          "id": "string",
+          "modelProvider": "string",
+          "name": "null",
+          "parentThreadId": "null",
+          "path": "string",
+          "preview": "string",
+          "recencyAt": "number",
+          "section": "null",
+          "sectionEnteredAt": "null",
+          "sessionId": "string",
+          "source": "string",
+          "status": "object",
+          "threadSource": "null",
+          "turns": "array",
+          "updatedAt": "number"
+        },
+        "fields": [
+          "agentNickname",
+          "agentRole",
+          "canAcceptDirectInput",
+          "cliVersion",
+          "createdAt",
+          "cwd",
+          "ephemeral",
+          "extra",
+          "forkedFromId",
+          "gitInfo",
+          "historyMode",
+          "id",
+          "modelProvider",
+          "name",
+          "parentThreadId",
+          "path",
+          "preview",
+          "recencyAt",
+          "section",
+          "sectionEnteredAt",
+          "sessionId",
+          "source",
+          "status",
+          "threadSource",
+          "turns",
+          "updatedAt"
+        ],
+        "status_field_types": {
+          "type": "string"
+        },
+        "status_fields": [
+          "type"
+        ],
+        "turns": [
+          {
+            "field_types": {
+              "completedAt": "number",
+              "durationMs": "number",
+              "error": "null",
+              "id": "string",
+              "items": "array",
+              "itemsView": "string",
+              "startedAt": "number",
+              "status": "string"
+            },
+            "fields": [
+              "completedAt",
+              "durationMs",
+              "error",
+              "id",
+              "items",
+              "itemsView",
+              "startedAt",
+              "status"
+            ],
+            "items": [
+              {
+                "field_types": {
+                  "clientId": "null",
+                  "content": "array",
+                  "id": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "clientId",
+                  "content",
+                  "id",
+                  "type"
+                ],
+                "type": "userMessage"
+              },
+              {
+                "field_types": {
+                  "agentPath": "string",
+                  "agentThreadId": "string",
+                  "id": "string",
+                  "kind": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "agentPath",
+                  "agentThreadId",
+                  "id",
+                  "kind",
+                  "type"
+                ],
+                "kind": "started",
+                "type": "subAgentActivity"
+              },
+              {
+                "field_types": {
+                  "id": "string",
+                  "memoryCitation": "null",
+                  "phase": "null",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "id",
+                  "memoryCitation",
+                  "phase",
+                  "text",
+                  "type"
+                ],
+                "type": "agentMessage"
+              }
+            ],
+            "status": "completed"
+          }
+        ]
+      },
+      "thread_resume_result": {
+        "field_types": {
+          "activePermissionProfile": "object",
+          "approvalPolicy": "string",
+          "approvalsReviewer": "string",
+          "cwd": "string",
+          "initialTurnsPage": "null",
+          "instructionSources": "array",
+          "itemsBackwardsCursor": "null",
+          "model": "string",
+          "modelProvider": "string",
+          "multiAgentMode": "string",
+          "reasoningEffort": "string",
+          "runtimeWorkspaceRoots": "array",
+          "sandbox": "object",
+          "serviceTier": "null",
+          "thread": "object",
+          "turnsBackwardsCursor": "null"
+        },
+        "fields": [
+          "activePermissionProfile",
+          "approvalPolicy",
+          "approvalsReviewer",
+          "cwd",
+          "initialTurnsPage",
+          "instructionSources",
+          "itemsBackwardsCursor",
+          "model",
+          "modelProvider",
+          "multiAgentMode",
+          "reasoningEffort",
+          "runtimeWorkspaceRoots",
+          "sandbox",
+          "serviceTier",
+          "thread",
+          "turnsBackwardsCursor"
         ]
       },
       "turn_terminal_notification": "turn/completed",
@@ -860,6 +1344,14 @@
       "binary_sha256": "ae9d865f3d346a1a2a60c4e84775622d74e3e7ef53e0dede9c68b81eab306cca",
       "client": "codex_cli",
       "client_version": "0.146.1",
+      "isolated_home_bindings_sha256": [
+        "b7da348dba582272740fa1392545e7b468a5fbe50f08d257de451631fc8490a8",
+        "1d36f56fcb0744f35ade8cdc621e9588f24c55ad5efcf556c69f12ff1a9f8b28"
+      ],
+      "observation_scenarios": [
+        "cli_v1_request",
+        "cli_v2_lifecycle"
+      ],
       "observations": {
         "desktop_thread_items_and_notifications": "not_applicable",
         "tool_choice_auto": "observed",
@@ -940,6 +1432,16 @@
       "binary_sha256": "fb5c760e14cf8fe86e12e49e8a3e7f237af06082d6b9fe1e411e463b7229c916",
       "client": "codex_desktop",
       "client_version": "26.803.5235.0",
+      "isolated_home_bindings_sha256": [
+        "c99dd6202b2a2fddc017c522c869e619b72803c8ec1393209ab3bb8c66528007",
+        "9ff014546ee3d0495ea5d21413bd8cc5e7ecf23f1e09bf0023e2b218526b7e04",
+        "8da0a0440f5dba6de038e2343dcf0a90aad1e9df7107f5f734031243fd50d551"
+      ],
+      "observation_scenarios": [
+        "desktop_v1_request",
+        "desktop_v2_lifecycle",
+        "desktop_app_v2_lifecycle"
+      ],
       "observations": {
         "desktop_thread_items_and_notifications": "observed",
         "tool_choice_auto": "observed",
@@ -1741,6 +2243,12 @@
     "unexpected_multi_agent_version_field": "fail_closed",
     "unknown_missing_duplicate_conflicting_or_mixed": "fail_closed"
   },
+  "source_observations": {
+    "canonical_sha256": "1d689f4521ae654b910eec849bc4cb7f6abafa116ecbfb730250f10c1d64e9b6",
+    "capture_run_binding_sha256": "beb7668c5330c396e38457446d7985ae0c126a7a690d964b682744a6609c52c1",
+    "path": "docs/evidence/issue-392/collaboration-runtime-observations.json",
+    "schema": "codexhub.issue392.collaboration-runtime-observations.v1"
+  },
   "wire_lifecycle": {
     "function_call_stream": {
       "assembly_rule": "ordered_delta_assembly_must_equal_done_arguments",
@@ -1808,15 +2316,2284 @@
       "function_call_output",
       "agent_message"
     ],
+    "request_replay_envelopes": {
+      "codex_cli": {
+        "child_initial": {
+          "collaboration_items": [
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                },
+                {
+                  "field_types": {
+                    "encrypted_content": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "encrypted_content",
+                    "type"
+                  ],
+                  "type": "encrypted_content"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "restart_replay": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "message",
+            "message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_after_spawn": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_after_wait": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_initial": {
+          "collaboration_items": [],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        }
+      },
+      "codex_desktop": {
+        "child_initial": {
+          "collaboration_items": [
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                },
+                {
+                  "field_types": {
+                    "encrypted_content": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "encrypted_content",
+                    "type"
+                  ],
+                  "type": "encrypted_content"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "restart_replay": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "message",
+            "message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_after_spawn": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_after_wait": {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        },
+        "root_initial": {
+          "collaboration_items": [],
+          "field_types": {
+            "client_metadata": "object",
+            "include": "array",
+            "input": "array",
+            "instructions": "string",
+            "model": "string",
+            "parallel_tool_calls": "boolean",
+            "prompt_cache_key": "string",
+            "reasoning": "object",
+            "store": "boolean",
+            "stream": "boolean",
+            "tool_choice": "string",
+            "tools": "array"
+          },
+          "fields": [
+            "client_metadata",
+            "include",
+            "input",
+            "instructions",
+            "model",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+            "reasoning",
+            "store",
+            "stream",
+            "tool_choice",
+            "tools"
+          ],
+          "input_type_order": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message"
+          ],
+          "multi_agent_version_locations": [],
+          "tool_choice": "auto"
+        }
+      }
+    },
+    "rollout_readback_envelopes": {
+      "codex_cli": [
+        {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "metadata_records": [
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "session_id": "string",
+                "source": "string",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            }
+          ],
+          "relevant_record_type_order": [
+            "session_meta",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item"
+          ],
+          "role": "root"
+        },
+        {
+          "collaboration_items": [
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                },
+                {
+                  "field_types": {
+                    "encrypted_content": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "encrypted_content",
+                    "type"
+                  ],
+                  "type": "encrypted_content"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "metadata_records": [
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "agent_nickname": "string",
+                "agent_path": "string",
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "forked_from_id": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "parent_thread_id": "string",
+                "session_id": "string",
+                "source": "object",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "agent_nickname",
+                "agent_path",
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "forked_from_id",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "parent_thread_id",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "session_id": "string",
+                "source": "string",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            }
+          ],
+          "relevant_record_type_order": [
+            "session_meta",
+            "session_meta",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item"
+          ],
+          "role": "child"
+        }
+      ],
+      "codex_desktop": [
+        {
+          "collaboration_items": [
+            {
+              "argument_keys": [
+                "message",
+                "task_name"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "task_name"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "argument_keys": [
+                "timeout_ms"
+              ],
+              "arguments_json_type": "object",
+              "field_types": {
+                "arguments": "string",
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "name": "string",
+                "namespace": "string",
+                "type": "string"
+              },
+              "fields": [
+                "arguments",
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "name",
+                "namespace",
+                "type"
+              ],
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "type": "function_call"
+            },
+            {
+              "decoded_output_keys": [
+                "message",
+                "timed_out"
+              ],
+              "decoded_output_type": "object",
+              "field_types": {
+                "call_id": "string",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "output": "string",
+                "type": "string"
+              },
+              "fields": [
+                "call_id",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "output",
+                "type"
+              ],
+              "output_wire_type": "string",
+              "type": "function_call_output"
+            },
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "metadata_records": [
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "session_id": "string",
+                "source": "string",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            }
+          ],
+          "relevant_record_type_order": [
+            "session_meta",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item"
+          ],
+          "role": "root"
+        },
+        {
+          "collaboration_items": [
+            {
+              "content_variants": [
+                {
+                  "field_types": {
+                    "text": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "text",
+                    "type"
+                  ],
+                  "type": "input_text"
+                },
+                {
+                  "field_types": {
+                    "encrypted_content": "string",
+                    "type": "string"
+                  },
+                  "fields": [
+                    "encrypted_content",
+                    "type"
+                  ],
+                  "type": "encrypted_content"
+                }
+              ],
+              "field_types": {
+                "author": "string",
+                "content": "array",
+                "id": "string",
+                "internal_chat_message_metadata_passthrough": "object",
+                "recipient": "string",
+                "type": "string"
+              },
+              "fields": [
+                "author",
+                "content",
+                "id",
+                "internal_chat_message_metadata_passthrough",
+                "recipient",
+                "type"
+              ],
+              "type": "agent_message"
+            }
+          ],
+          "metadata_records": [
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "agent_nickname": "string",
+                "agent_path": "string",
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "forked_from_id": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "parent_thread_id": "string",
+                "session_id": "string",
+                "source": "object",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "agent_nickname",
+                "agent_path",
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "forked_from_id",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "parent_thread_id",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "base_instructions": "object",
+                "cli_version": "string",
+                "context_window": "object",
+                "cwd": "string",
+                "git": "object",
+                "history_mode": "string",
+                "id": "string",
+                "model_provider": "string",
+                "multi_agent_version": "string",
+                "originator": "string",
+                "session_id": "string",
+                "source": "string",
+                "thread_source": "string",
+                "timestamp": "string"
+              },
+              "payload_fields": [
+                "base_instructions",
+                "cli_version",
+                "context_window",
+                "cwd",
+                "git",
+                "history_mode",
+                "id",
+                "model_provider",
+                "multi_agent_version",
+                "originator",
+                "session_id",
+                "source",
+                "thread_source",
+                "timestamp"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "session_meta"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            },
+            {
+              "multi_agent_version": "v2",
+              "payload_field_types": {
+                "approval_policy": "string",
+                "approvals_reviewer": "string",
+                "collaboration_mode": "object",
+                "current_date": "string",
+                "cwd": "string",
+                "effort": "string",
+                "model": "string",
+                "multi_agent_version": "string",
+                "permission_profile": "object",
+                "personality": "string",
+                "realtime_active": "boolean",
+                "sandbox_policy": "object",
+                "summary": "string",
+                "timezone": "string",
+                "turn_id": "string",
+                "workspace_roots": "array"
+              },
+              "payload_fields": [
+                "approval_policy",
+                "approvals_reviewer",
+                "collaboration_mode",
+                "current_date",
+                "cwd",
+                "effort",
+                "model",
+                "multi_agent_version",
+                "permission_profile",
+                "personality",
+                "realtime_active",
+                "sandbox_policy",
+                "summary",
+                "timezone",
+                "turn_id",
+                "workspace_roots"
+              ],
+              "record_field_types": {
+                "payload": "object",
+                "timestamp": "string",
+                "type": "string"
+              },
+              "record_fields": [
+                "payload",
+                "timestamp",
+                "type"
+              ],
+              "record_type": "turn_context"
+            }
+          ],
+          "relevant_record_type_order": [
+            "session_meta",
+            "session_meta",
+            "response_item",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item",
+            "turn_context",
+            "response_item",
+            "response_item"
+          ],
+          "role": "child"
+        }
+      ]
+    },
     "same_home_readback": {
       "agent_message_author_recipient_and_content_kind_preserved": true,
       "call_and_output_ids_preserved": true,
       "call_namespace_preserved": true,
       "call_output_order_preserved": true,
+      "cli_identity_relationships": {
+        "agent_message_author_recipient_and_content_preserved": true,
+        "collaboration_item_order_preserved": true,
+        "function_call_call_ids_preserved": true,
+        "function_call_item_ids_preserved": true,
+        "function_output_call_ids_preserved": true,
+        "function_output_item_ids_preserved": true,
+        "function_outputs_link_to_calls": true
+      },
       "clients": [
         "codex_cli",
         "codex_desktop"
       ],
+      "desktop_app_identity_relationships": {
+        "item_ids_preserved": true,
+        "item_order_preserved": true,
+        "structural_readback_preserved": true,
+        "thread_id_preserved": true,
+        "turn_ids_preserved": true
+      },
+      "desktop_identity_relationships": {
+        "agent_message_author_recipient_and_content_preserved": true,
+        "collaboration_item_order_preserved": true,
+        "function_call_call_ids_preserved": true,
+        "function_call_item_ids_preserved": true,
+        "function_output_call_ids_preserved": true,
+        "function_output_item_ids_preserved": true,
+        "function_outputs_link_to_calls": true
+      },
       "desktop_thread_resume_and_read": "observed",
       "session_meta_multi_agent_version": "v2",
       "turn_context_multi_agent_version": "v2"

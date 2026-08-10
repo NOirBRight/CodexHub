@@ -13,7 +13,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_issue_392_collaboration_contract.py"
+CAPTURE_SCRIPT = ROOT / "scripts" / "capture_issue_392_collaboration_runtime.py"
 ARTIFACT = ROOT / "docs" / "evidence" / "issue-392" / "collaboration-runtime-contract.json"
+OBSERVATIONS = (
+    ROOT
+    / "docs"
+    / "evidence"
+    / "issue-392"
+    / "collaboration-runtime-observations.json"
+)
 
 
 def load_module():
@@ -59,6 +67,13 @@ def test_artifact_binds_both_frozen_runtime_binaries_and_sources() -> None:
         "accepted_request_call_result_agent_message_and_readback"
     )
     assert payload["candidate_revision"] == "be10f62f44b22fa8c84510238250ae11fb3ecab4"
+    observations = json.loads(OBSERVATIONS.read_text(encoding="utf-8"))
+    assert payload["source_observations"] == {
+        "schema": "codexhub.issue392.collaboration-runtime-observations.v1",
+        "canonical_sha256": load_module()._canonical_digest(observations),
+        "capture_run_binding_sha256": observations["capture_run_binding_sha256"],
+        "path": "docs/evidence/issue-392/collaboration-runtime-observations.json",
+    }
 
     by_client = {entry["client"]: entry for entry in payload["runtimes"]}
     assert by_client["codex_cli"] | {
@@ -198,6 +213,9 @@ def test_selection_matches_exact_types_encryption_and_frozen_v2_spawn_fields() -
         lambda: by_name["wait_agent"]["parameters"]["properties"]["timeout_ms"].__setitem__(
             "type", "string"
         ),
+        lambda: by_name["list_agents"]["parameters"]["properties"].__setitem__(
+            "description", {"type": "number"}
+        ),
     ):
         candidate = copy.deepcopy(value)
         candidate_by_name = {child["name"]: child for child in candidate["tools"]}
@@ -208,6 +226,16 @@ def test_selection_matches_exact_types_encryption_and_frozen_v2_spawn_fields() -
             match="namespace_child_parameter_schema_mismatch",
         ):
             module.classify_request({"tool_choice": "auto", "tools": [candidate]})
+
+    annotated = declaration(module, module.V2)
+    annotated_by_name = {child["name"]: child for child in annotated["tools"]}
+    annotated_by_name["list_agents"]["parameters"]["properties"]["path_prefix"][
+        "description"
+    ] = "dynamic annotation"
+    assert (
+        module.classify_request({"tool_choice": "auto", "tools": [annotated]})
+        == module.V2
+    )
 
 
 def test_selection_fails_closed_on_mixed_duplicate_and_conflicting_signals() -> None:
@@ -224,6 +252,31 @@ def test_selection_fails_closed_on_mixed_duplicate_and_conflicting_signals() -> 
     ):
         module.classify_request(
             {"tool_choice": "auto", "tools": [v2, copy.deepcopy(v2)]}
+        )
+    with pytest.raises(
+        module.ContractValidationError, match="collaboration_marker_duplicate_or_mixed"
+    ):
+        module.classify_request(
+            {
+                "tool_choice": "auto",
+                "tools": [
+                    v2,
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                ],
+            }
+        )
+    with pytest.raises(
+        module.ContractValidationError, match="collaboration_marker_duplicate_or_mixed"
+    ):
+        module.classify_request(
+            {
+                "tool_choice": "auto",
+                "tools": [v2, {"type": "function", "name": "collaboration"}],
+            }
         )
     with pytest.raises(
         module.ContractValidationError, match="collaboration_version_signal_unexpected"
@@ -306,20 +359,174 @@ def test_outputs_stream_terminal_and_same_home_shapes_are_complete() -> None:
     assert readback["clients"] == ["codex_cli", "codex_desktop"]
     assert readback["call_output_order_preserved"] is True
     assert readback["agent_message_author_recipient_and_content_kind_preserved"] is True
+    assert all(readback["cli_identity_relationships"].values())
+    assert all(readback["desktop_identity_relationships"].values())
+    assert all(readback["desktop_app_identity_relationships"].values())
+
+    replay = lifecycle["request_replay_envelopes"]["codex_cli"]
+    root_after_wait = replay["root_after_wait"]["collaboration_items"]
+    assert [item["type"] for item in root_after_wait] == [
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "agent_message",
+    ]
+    assert root_after_wait[0]["fields"] == [
+        "arguments",
+        "call_id",
+        "id",
+        "name",
+        "namespace",
+        "type",
+    ]
+    assert root_after_wait[1]["fields"] == ["call_id", "id", "output", "type"]
+    assert root_after_wait[-1]["fields"] == [
+        "author",
+        "content",
+        "id",
+        "recipient",
+        "type",
+    ]
+
+
+def test_runtime_observations_bind_unique_homes_and_exact_readback_envelopes() -> None:
+    module = load_module()
+    observations = json.loads(OBSERVATIONS.read_text(encoding="utf-8"))
+    module.validate_runtime_observations(observations)
+    assert observations["capture_run_binding_sha256"] == module._capture_run_binding(
+        observations
+    )
+
+    scenarios = observations["scenarios"]
+    bindings = [scenario["home_binding_sha256"] for scenario in scenarios.values()]
+    assert len(bindings) == 5
+    assert len(set(bindings)) == 5
+    assert all(re.fullmatch(r"[0-9a-f]{64}", binding) for binding in bindings)
+    assert all(
+        scenario["fresh_empty_home_before_marker"] is True
+        and scenario["workspace_created_under_home"] is True
+        for scenario in scenarios.values()
+    )
+
+    cli = scenarios["cli_v2_lifecycle"]["observed"]
+    assert set(cli["requests_by_phase"]) == {
+        "root_initial",
+        "root_after_spawn",
+        "child_initial",
+        "root_after_wait",
+        "restart_replay",
+    }
+    assert cli["requests_by_phase"]["restart_replay"]["collaboration_items"] == (
+        cli["requests_by_phase"]["root_after_wait"]["collaboration_items"]
+    )
+    root_rollout = next(
+        entry for entry in cli["rollout_readback"] if entry["role"] == "root"
+    )
+    assert {record["record_type"] for record in root_rollout["metadata_records"]} == {
+        "session_meta",
+        "turn_context",
+    }
+    assert all(
+        record["multi_agent_version"] == "v2"
+        for record in root_rollout["metadata_records"]
+    )
+
+    desktop_app = scenarios["desktop_app_v2_lifecycle"]["observed"]
+    assert desktop_app["thread_read_before_restart"] == desktop_app[
+        "thread_read_after_restart"
+    ]
+    pairs = {
+        (entry["method"], entry.get("item_type"))
+        for entry in desktop_app["notifications"]
+    }
+    assert {
+        ("item/started", "agentMessage"),
+        ("item/agentMessage/delta", None),
+        ("item/completed", "agentMessage"),
+        ("item/started", "collabAgentToolCall"),
+        ("item/completed", "collabAgentToolCall"),
+        ("item/started", "subAgentActivity"),
+        ("item/completed", "subAgentActivity"),
+    }.issubset(pairs)
+
+
+@pytest.mark.parametrize("case", ["mutation", "deletion", "loss", "home", "replay"])
+def test_runtime_observation_mutation_deletion_loss_and_replay_fail_closed(
+    case: str,
+) -> None:
+    module = load_module()
+    observations = json.loads(OBSERVATIONS.read_text(encoding="utf-8"))
+    candidate = copy.deepcopy(observations)
+    if case == "mutation":
+        candidate["scenarios"]["cli_v2_lifecycle"]["observed"][
+            "requests_by_phase"
+        ]["root_after_spawn"]["collaboration_items"][0]["namespace"] = (
+            "multi_agent_v1"
+        )
+    elif case == "deletion":
+        del candidate["scenarios"]["desktop_v1_request"]
+    elif case == "loss":
+        candidate["scenarios"]["desktop_v2_lifecycle"]["observed"][
+            "identity_relationships"
+        ]["function_call_item_ids_preserved"] = False
+    elif case == "home":
+        candidate["scenarios"]["desktop_v1_request"]["home_binding_sha256"] = (
+            candidate["scenarios"]["cli_v1_request"]["home_binding_sha256"]
+        )
+    else:
+        replay = candidate["scenarios"]["cli_v2_lifecycle"]["observed"][
+            "requests_by_phase"
+        ]["restart_replay"]["collaboration_items"]
+        replay[0], replay[1] = replay[1], replay[0]
+    candidate["capture_run_binding_sha256"] = module._capture_run_binding(candidate)
+    with pytest.raises(module.ContractValidationError):
+        module.validate_runtime_observations(candidate)
+
+
+def test_capture_runner_requires_explicit_enable_switch(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE_SCRIPT),
+            "--cli-exe",
+            str(tmp_path / "cli"),
+            "--desktop-exe",
+            str(tmp_path / "desktop"),
+            "--cli-source-root",
+            str(tmp_path / "cli-source"),
+            "--desktop-source-root",
+            str(tmp_path / "desktop-source"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout.strip() == "CAPTURE_DISABLED:enable_runtime_capture_required"
 
 
 def test_contract_is_sanitized_and_never_references_existing_tasks() -> None:
-    text = ARTIFACT.read_text(encoding="utf-8")
-    assert "019fb82d-f601-7812-a339-e9c5f675e2e8" not in text
-    assert not re.search(
-        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
-        text,
-        re.IGNORECASE,
-    )
-    lowered = text.lower()
-    for forbidden in ("api_key", "bearer ", "prompt_text", "task_path_value", "call_fixture"):
-        assert forbidden not in lowered
-    scope = json.loads(text)["capture_scope"]
+    contract_text = ARTIFACT.read_text(encoding="utf-8")
+    observation_text = OBSERVATIONS.read_text(encoding="utf-8")
+    for text in (contract_text, observation_text):
+        assert "019fb82d-f601-7812-a339-e9c5f675e2e8" not in text
+        assert not re.search(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            text,
+            re.IGNORECASE,
+        )
+        lowered = text.lower()
+        for forbidden in (
+            "api_key",
+            "bearer ",
+            "prompt_text",
+            "task_path_value",
+            "call_fixture",
+        ):
+            assert forbidden not in lowered
+    scope = json.loads(contract_text)["capture_scope"]
     assert scope["existing_user_home_read"] is False
     assert scope["existing_user_task_read"] is False
     assert scope["known_crash_task_read"] is False

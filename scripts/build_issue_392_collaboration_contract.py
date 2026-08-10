@@ -10,13 +10,21 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 
 SCHEMA = "codexhub.issue392.collaboration-runtime-contract.v1"
 DEFAULT_OUTPUT = Path("docs/evidence/issue-392/collaboration-runtime-contract.json")
+OBSERVATION_SCHEMA = "codexhub.issue392.collaboration-runtime-observations.v1"
+DEFAULT_OBSERVATIONS = Path(
+    "docs/evidence/issue-392/collaboration-runtime-observations.json"
+)
+_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_CAPTURE_DATE = re.compile(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}\Z")
 
 V1 = "collaboration_v1"
 V2 = "collaboration_v2"
@@ -278,26 +286,19 @@ def _argument_contract(version: str) -> dict[str, Any]:
 
 def _runtime(
     *,
-    client: str,
-    client_version: str,
-    runtime_version: str,
-    binary_sha256: str,
-    source_tag: str,
-    source_commit: str,
-    source_blobs: Mapping[str, str],
+    runtime_observation: Mapping[str, Any],
     desktop_app: bool,
+    scenario_names: Sequence[str],
+    home_bindings: Sequence[str],
 ) -> dict[str, Any]:
     return {
-        "client": client,
-        "client_version": client_version,
-        "runtime_version": runtime_version,
-        "binary_sha256": binary_sha256,
-        "source_tag": source_tag,
-        "source_commit": source_commit,
-        "source_files": {
-            key: {"path": SOURCE_FILES[key], "git_blob": source_blobs[key]}
-            for key in SOURCE_FILES
-        },
+        "client": runtime_observation["client"],
+        "client_version": runtime_observation["client_version"],
+        "runtime_version": runtime_observation["runtime_version"],
+        "binary_sha256": runtime_observation["binary_sha256"],
+        "source_tag": runtime_observation["source_tag"],
+        "source_commit": runtime_observation["source_commit"],
+        "source_files": copy.deepcopy(runtime_observation["source_files"]),
         "observations": {
             "v1_namespace_declaration": "observed",
             "v2_namespace_declaration": "observed",
@@ -310,15 +311,736 @@ def _runtime(
                 "observed" if desktop_app else "not_applicable"
             ),
         },
+        "observation_scenarios": list(scenario_names),
+        "isolated_home_bindings_sha256": list(home_bindings),
     }
 
 
-def build_contract() -> dict[str, Any]:
+def _canonical_digest(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _capture_run_binding(payload: Mapping[str, Any]) -> str:
+    clone = copy.deepcopy(dict(payload))
+    clone.pop("capture_run_binding_sha256", None)
+    return _canonical_digest(clone)
+
+
+def _expected_runtime_observation(
+    *,
+    client: str,
+    client_version: str,
+    runtime_version: str,
+    binary_sha256: str,
+    source_tag: str,
+    source_commit: str,
+    source_blobs: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "client": client,
+        "client_version": client_version,
+        "runtime_version": runtime_version,
+        "version_output": f"codex-cli {runtime_version}",
+        "binary_sha256": binary_sha256,
+        "source_tag": source_tag,
+        "source_commit": source_commit,
+        "source_files": {
+            key: {"path": SOURCE_FILES[key], "git_blob": source_blobs[key]}
+            for key in SOURCE_FILES
+        },
+    }
+
+
+def _expected_observed_declaration(version: str) -> dict[str, Any]:
+    namespace = V1_NAMESPACE if version == V1 else V2_NAMESPACE
+    children = [
+        {
+            "type": "function",
+            "name": name,
+            "description_type": "string",
+            "strict": False,
+            "fields": ["description", "name", "parameters", "strict", "type"],
+            "parameters": _normalize_schema(schema),
+        }
+        for name, schema in EXPECTED_PARAMETER_SCHEMAS[version].items()
+    ]
+    children.sort(key=lambda value: value["name"])
+    return {
+        "type": "namespace",
+        "name": namespace,
+        "description_type": "string",
+        "fields": ["description", "name", "tools", "type"],
+        "children": children,
+    }
+
+
+def _require_exact_fields(
+    value: Mapping[str, Any], expected: set[str], code: str
+) -> None:
+    _require(set(value) == expected, code)
+
+
+def _require_digest(value: Any, code: str) -> None:
+    _require(isinstance(value, str) and _DIGEST.fullmatch(value) is not None, code)
+
+
+def _validate_safe_request(value: Any) -> None:
+    _require(isinstance(value, Mapping), "observation_request_invalid")
+    _require_exact_fields(
+        value,
+        {
+            "fields",
+            "field_types",
+            "tool_choice",
+            "multi_agent_version_locations",
+            "input_type_order",
+            "collaboration_items",
+        },
+        "observation_request_fields_invalid",
+    )
+    _require(value.get("tool_choice") == "auto", "observation_tool_choice_invalid")
+    _require(
+        value.get("multi_agent_version_locations") == [],
+        "observation_version_location_invalid",
+    )
+    _require(isinstance(value.get("fields"), list), "observation_request_fields_invalid")
+    _require(
+        isinstance(value.get("field_types"), Mapping),
+        "observation_request_field_types_invalid",
+    )
+    _require(
+        value["fields"] == sorted(value["field_types"]),
+        "observation_request_field_type_keys_invalid",
+    )
+    _require(
+        isinstance(value.get("input_type_order"), list),
+        "observation_input_order_invalid",
+    )
+    items = value.get("collaboration_items")
+    _require(isinstance(items, list), "observation_collaboration_items_invalid")
+    for item in items:
+        _require(isinstance(item, Mapping), "observation_collaboration_item_invalid")
+        item_type = item.get("type")
+        if item_type == "function_call":
+            _require_exact_fields(
+                item,
+                {
+                    "type",
+                    "fields",
+                    "field_types",
+                    "name",
+                    "namespace",
+                    "arguments_json_type",
+                    "argument_keys",
+                },
+                "observation_function_call_fields_invalid",
+            )
+            _require(
+                item.get("namespace") == V2_NAMESPACE,
+                "observation_function_call_namespace_invalid",
+            )
+            _require(
+                item.get("name") in V2_TOOLS,
+                "observation_function_call_name_invalid",
+            )
+            _require(
+                item.get("arguments_json_type") == "object",
+                "observation_function_arguments_invalid",
+            )
+        elif item_type == "function_call_output":
+            _require_exact_fields(
+                item,
+                {
+                    "type",
+                    "fields",
+                    "field_types",
+                    "output_wire_type",
+                    "decoded_output_type",
+                    "decoded_output_keys",
+                },
+                "observation_function_output_fields_invalid",
+            )
+            _require(
+                item.get("output_wire_type") == "string",
+                "observation_function_output_wire_invalid",
+            )
+        elif item_type == "agent_message":
+            _require_exact_fields(
+                item,
+                {"type", "fields", "field_types", "content_variants"},
+                "observation_agent_message_fields_invalid",
+            )
+            variants = item.get("content_variants")
+            _require(isinstance(variants, list), "observation_agent_message_invalid")
+            for variant in variants:
+                _require(
+                    isinstance(variant, Mapping),
+                    "observation_agent_message_variant_invalid",
+                )
+                _require_exact_fields(
+                    variant,
+                    {"type", "fields", "field_types"},
+                    "observation_agent_message_variant_fields_invalid",
+                )
+                _require(
+                    variant.get("type") in {"input_text", "encrypted_content"},
+                    "observation_agent_message_variant_invalid",
+                )
+                _require(
+                    variant.get("fields") == sorted(variant.get("field_types", {})),
+                    "observation_agent_message_variant_type_keys_invalid",
+                )
+        else:
+            raise ContractValidationError("observation_collaboration_item_type_invalid")
+        _require(
+            item.get("fields") == sorted(item.get("field_types", {})),
+            "observation_collaboration_item_field_type_keys_invalid",
+        )
+
+
+def _collaboration_signature(request: Mapping[str, Any]) -> list[Any]:
+    result: list[Any] = []
+    for item in request["collaboration_items"]:
+        item_type = item["type"]
+        if item_type == "function_call":
+            result.append([item_type, item["name"]])
+        elif item_type == "function_call_output":
+            result.append([item_type, item["decoded_output_keys"]])
+        else:
+            result.append(
+                [
+                    item_type,
+                    [variant["type"] for variant in item["content_variants"]],
+                ]
+            )
+    return result
+
+
+def _validate_v2_phase_requests(
+    phases: Any, *, includes_restart: bool
+) -> None:
+    _require(isinstance(phases, Mapping), "observation_phase_requests_invalid")
+    expected = {
+        "root_initial",
+        "root_after_spawn",
+        "child_initial",
+        "root_after_wait",
+    }
+    if includes_restart:
+        expected.add("restart_replay")
+    _require(set(phases) == expected, "observation_phase_set_invalid")
+    for request in phases.values():
+        _validate_safe_request(request)
+    signatures = {
+        phase: _collaboration_signature(request) for phase, request in phases.items()
+    }
+    _require(signatures["root_initial"] == [], "observation_root_initial_invalid")
+    _require(
+        signatures["root_after_spawn"]
+        == [
+            ["function_call", "spawn_agent"],
+            ["function_call_output", ["task_name"]],
+        ],
+        "observation_after_spawn_invalid",
+    )
+    _require(
+        signatures["child_initial"]
+        == [["agent_message", ["input_text", "encrypted_content"]]],
+        "observation_child_initial_invalid",
+    )
+    expected_after_wait = [
+        ["function_call", "spawn_agent"],
+        ["function_call_output", ["task_name"]],
+        ["function_call", "wait_agent"],
+        ["function_call_output", ["message", "timed_out"]],
+        ["agent_message", ["input_text"]],
+    ]
+    _require(
+        signatures["root_after_wait"] == expected_after_wait,
+        "observation_after_wait_invalid",
+    )
+    if includes_restart:
+        _require(
+            signatures["restart_replay"] == expected_after_wait,
+            "observation_restart_replay_invalid",
+        )
+
+
+def _require_all_true(value: Any, code: str) -> None:
+    _require(isinstance(value, Mapping) and value, code)
+    _require(all(child is True for child in value.values()), code)
+
+
+def _validate_rollout_readback(value: Any) -> None:
+    _require(isinstance(value, list) and value, "observation_rollout_invalid")
+    roles = {entry.get("role") for entry in value if isinstance(entry, Mapping)}
+    _require(roles == {"root", "child"}, "observation_rollout_roles_invalid")
+    for entry in value:
+        _require(isinstance(entry, Mapping), "observation_rollout_entry_invalid")
+        _require_exact_fields(
+            entry,
+            {
+                "role",
+                "relevant_record_type_order",
+                "metadata_records",
+                "collaboration_items",
+            },
+            "observation_rollout_fields_invalid",
+        )
+        metadata = entry.get("metadata_records")
+        _require(isinstance(metadata, list) and metadata, "observation_metadata_invalid")
+        record_order = entry.get("relevant_record_type_order")
+        _require(
+            isinstance(record_order, list)
+            and all(
+                record_type in {"session_meta", "turn_context", "response_item"}
+                for record_type in record_order
+            ),
+            "observation_rollout_record_order_invalid",
+        )
+        for record in metadata:
+            _require(isinstance(record, Mapping), "observation_metadata_record_invalid")
+            _require_exact_fields(
+                record,
+                {
+                    "record_type",
+                    "record_fields",
+                    "record_field_types",
+                    "payload_fields",
+                    "payload_field_types",
+                    "multi_agent_version",
+                },
+                "observation_metadata_record_fields_invalid",
+            )
+            _require(
+                record.get("record_fields")
+                == sorted(record.get("record_field_types", {})),
+                "observation_metadata_record_type_keys_invalid",
+            )
+            _require(
+                record.get("payload_fields")
+                == sorted(record.get("payload_field_types", {})),
+                "observation_metadata_payload_type_keys_invalid",
+            )
+        versions = [
+            record.get("multi_agent_version")
+            for record in metadata
+            if isinstance(record, Mapping)
+            and record.get("record_type") in {"session_meta", "turn_context"}
+        ]
+        _require(versions and set(versions) == {"v2"}, "observation_rollout_version_invalid")
+        for item in entry.get("collaboration_items", []):
+            _validate_safe_request(
+                {
+                    "fields": [],
+                    "field_types": {},
+                    "tool_choice": "auto",
+                    "multi_agent_version_locations": [],
+                    "input_type_order": [],
+                    "collaboration_items": [item],
+                }
+            )
+
+
+def _validate_thread_structure(value: Any) -> None:
+    _require(isinstance(value, Mapping), "observation_thread_structure_invalid")
+    _require_exact_fields(
+        value,
+        {
+            "fields",
+            "field_types",
+            "status_fields",
+            "status_field_types",
+            "turns",
+        },
+        "observation_thread_structure_fields_invalid",
+    )
+    turns = value.get("turns")
+    _require(
+        value.get("fields") == sorted(value.get("field_types", {})),
+        "observation_thread_structure_type_keys_invalid",
+    )
+    _require(
+        value.get("status_fields") == sorted(value.get("status_field_types", {})),
+        "observation_thread_status_type_keys_invalid",
+    )
+    _require(isinstance(turns, list) and turns, "observation_thread_turns_invalid")
+    for turn in turns:
+        _require(isinstance(turn, Mapping), "observation_thread_turn_invalid")
+        _require_exact_fields(
+            turn,
+            {"fields", "field_types", "status", "items"},
+            "observation_thread_turn_fields_invalid",
+        )
+        _require(
+            turn.get("fields") == sorted(turn.get("field_types", {})),
+            "observation_thread_turn_type_keys_invalid",
+        )
+        items = turn.get("items")
+        _require(isinstance(items, list), "observation_thread_items_invalid")
+        for item in items:
+            _require(isinstance(item, Mapping), "observation_thread_item_invalid")
+            _require(
+                {"type", "fields", "field_types"}.issubset(item),
+                "observation_thread_item_fields_invalid",
+            )
+            _require(
+                set(item).issubset(
+                    {"type", "fields", "field_types", "kind", "status", "tool", "phase"}
+                ),
+                "observation_thread_item_fields_invalid",
+            )
+            _require(
+                item.get("fields") == sorted(item.get("field_types", {})),
+                "observation_thread_item_type_keys_invalid",
+            )
+
+
+def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
+    _require(isinstance(payload, Mapping), "observations_invalid")
+    _require_exact_fields(
+        payload,
+        {
+            "schema",
+            "candidate_revision",
+            "captured_on",
+            "capture_run_binding_sha256",
+            "controls",
+            "runtimes",
+            "scenarios",
+        },
+        "observations_fields_invalid",
+    )
+    _require(payload.get("schema") == OBSERVATION_SCHEMA, "observations_schema_invalid")
+    _require(
+        payload.get("candidate_revision")
+        == "be10f62f44b22fa8c84510238250ae11fb3ecab4",
+        "observations_candidate_invalid",
+    )
+    captured_on = payload.get("captured_on")
+    _require(
+        isinstance(captured_on, str) and _CAPTURE_DATE.fullmatch(captured_on) is not None,
+        "observations_capture_date_invalid",
+    )
+    binding = payload.get("capture_run_binding_sha256")
+    _require_digest(binding, "observations_binding_invalid")
+    _require(binding == _capture_run_binding(payload), "observations_binding_mismatch")
+    expected_controls = {
+        "explicit_runtime_capture": True,
+        "fresh_empty_home_per_scenario": True,
+        "workspace_under_isolated_home": True,
+        "protocol_upstream_loopback": True,
+        "plugin_services_disabled": ["plugins", "remote_plugin", "plugin_sharing"],
+        "sensitive_environment_credentials_removed": True,
+        "existing_user_home_read": False,
+        "existing_user_task_read": False,
+        "known_crash_task_read": False,
+        "raw_content_or_credentials_retained": False,
+        "raw_paths_or_opaque_identifiers_retained": False,
+    }
+    _require(payload.get("controls") == expected_controls, "observations_controls_invalid")
+    runtimes = payload.get("runtimes")
+    _require(isinstance(runtimes, Mapping), "observations_runtimes_invalid")
+    expected_runtimes = {
+        "codex_cli": _expected_runtime_observation(
+            client="codex_cli",
+            client_version="0.146.1",
+            runtime_version="0.146.1",
+            binary_sha256="ae9d865f3d346a1a2a60c4e84775622d74e3e7ef53e0dede9c68b81eab306cca",
+            source_tag="rust-v0.146.1",
+            source_commit="79b4f03d35962b005b007a015113b38930711665",
+            source_blobs=CLI_SOURCE_BLOBS,
+        ),
+        "codex_desktop": _expected_runtime_observation(
+            client="codex_desktop",
+            client_version="26.803.5235.0",
+            runtime_version="0.147.0-alpha.6.5",
+            binary_sha256="fb5c760e14cf8fe86e12e49e8a3e7f237af06082d6b9fe1e411e463b7229c916",
+            source_tag="rust-v0.147.0-alpha.6.5",
+            source_commit="618b8e9111da9f57fe380b09d0f6516e3f343536",
+            source_blobs=DESKTOP_SOURCE_BLOBS,
+        ),
+    }
+    _require(dict(runtimes) == expected_runtimes, "observations_runtime_inputs_invalid")
+
+    scenarios = payload.get("scenarios")
+    _require(isinstance(scenarios, Mapping), "observations_scenarios_invalid")
+    scenario_contract = {
+        "cli_v1_request": ("codex_cli", 1, 1),
+        "desktop_v1_request": ("codex_desktop", 1, 1),
+        "cli_v2_lifecycle": ("codex_cli", 5, 2),
+        "desktop_v2_lifecycle": ("codex_desktop", 5, 2),
+        "desktop_app_v2_lifecycle": ("codex_desktop", 4, 2),
+    }
+    _require(set(scenarios) == set(scenario_contract), "observations_scenario_set_invalid")
+    home_bindings: list[str] = []
+    for name, (client, request_count, process_runs) in scenario_contract.items():
+        scenario = scenarios[name]
+        _require(isinstance(scenario, Mapping), "observation_scenario_invalid")
+        _require_exact_fields(
+            scenario,
+            {
+                "client",
+                "home_binding_sha256",
+                "fresh_empty_home_before_marker",
+                "workspace_created_under_home",
+                "loopback_request_count",
+                "process_runs",
+                "observed",
+            },
+            "observation_scenario_fields_invalid",
+        )
+        _require(scenario.get("client") == client, "observation_scenario_client_invalid")
+        _require_digest(scenario.get("home_binding_sha256"), "observation_home_binding_invalid")
+        home_bindings.append(scenario["home_binding_sha256"])
+        _require(
+            scenario.get("fresh_empty_home_before_marker") is True,
+            "observation_home_not_fresh",
+        )
+        _require(
+            scenario.get("workspace_created_under_home") is True,
+            "observation_workspace_scope_invalid",
+        )
+        _require(
+            scenario.get("loopback_request_count") == request_count,
+            "observation_request_count_invalid",
+        )
+        _require(
+            scenario.get("process_runs") == process_runs,
+            "observation_process_runs_invalid",
+        )
+    _require(len(set(home_bindings)) == len(home_bindings), "observation_home_binding_duplicate")
+
+    for name in ("cli_v1_request", "desktop_v1_request"):
+        observed = scenarios[name]["observed"]
+        _require(isinstance(observed, Mapping), "observation_v1_invalid")
+        _require_exact_fields(
+            observed, {"request", "declaration"}, "observation_v1_fields_invalid"
+        )
+        _validate_safe_request(observed["request"])
+        _require(
+            observed["request"]["collaboration_items"] == [],
+            "observation_v1_history_invalid",
+        )
+        _require(
+            observed["declaration"] == _expected_observed_declaration(V1),
+            "observation_v1_declaration_invalid",
+        )
+
+    for name in ("cli_v2_lifecycle", "desktop_v2_lifecycle"):
+        observed = scenarios[name]["observed"]
+        _require(isinstance(observed, Mapping), "observation_v2_invalid")
+        _require_exact_fields(
+            observed,
+            {
+                "declaration",
+                "request_arrival_order",
+                "requests_by_phase",
+                "served_function_call_event_order",
+                "served_function_names",
+                "identity_relationships",
+                "rollout_readback",
+            },
+            "observation_v2_fields_invalid",
+        )
+        _require(
+            observed["declaration"] == _expected_observed_declaration(V2),
+            "observation_v2_declaration_invalid",
+        )
+        _validate_v2_phase_requests(observed["requests_by_phase"], includes_restart=True)
+        _require(
+            sorted(observed["request_arrival_order"])
+            == sorted(observed["requests_by_phase"]),
+            "observation_request_arrival_invalid",
+        )
+        _require(
+            observed["served_function_call_event_order"]
+            == [
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+            ],
+            "observation_stream_order_invalid",
+        )
+        _require(
+            observed["served_function_names"] == ["spawn_agent", "wait_agent"],
+            "observation_served_functions_invalid",
+        )
+        _require_all_true(
+            observed["identity_relationships"],
+            "observation_identity_relationship_invalid",
+        )
+        _validate_rollout_readback(observed["rollout_readback"])
+
+    app_observed = scenarios["desktop_app_v2_lifecycle"]["observed"]
+    _require(isinstance(app_observed, Mapping), "observation_desktop_app_invalid")
+    _require_exact_fields(
+        app_observed,
+        {
+            "declaration",
+            "requests_by_phase",
+            "notifications",
+            "thread_read_before_restart",
+            "thread_read_after_restart",
+            "resume_result_fields",
+            "resume_result_field_types",
+            "identity_relationships",
+        },
+        "observation_desktop_app_fields_invalid",
+    )
+    _require(
+        app_observed["declaration"] == _expected_observed_declaration(V2),
+        "observation_desktop_app_declaration_invalid",
+    )
+    _validate_v2_phase_requests(app_observed["requests_by_phase"], includes_restart=False)
+    notifications = app_observed["notifications"]
+    _require(isinstance(notifications, list) and notifications, "observation_notifications_invalid")
+    observed_notification_pairs = {
+        (entry.get("method"), entry.get("item_type"))
+        for entry in notifications
+        if isinstance(entry, Mapping)
+    }
+    required_notification_pairs = {
+        ("item/started", "agentMessage"),
+        ("item/completed", "agentMessage"),
+        ("item/started", "collabAgentToolCall"),
+        ("item/completed", "collabAgentToolCall"),
+        ("item/started", "subAgentActivity"),
+        ("item/completed", "subAgentActivity"),
+        ("item/agentMessage/delta", None),
+    }
+    _require(
+        required_notification_pairs.issubset(observed_notification_pairs),
+        "observation_notification_lifecycle_invalid",
+    )
+    notification_enum_values = {
+        "item_kind": {"started", "completed"},
+        "item_status": {"inProgress", "completed", "failed"},
+        "item_tool": {
+            "spawnAgent",
+            "sendMessage",
+            "followupTask",
+            "wait",
+            "interruptAgent",
+            "listAgents",
+        },
+        "item_phase": {"commentary", "final"},
+    }
+    for entry in notifications:
+        _require(isinstance(entry, Mapping), "observation_notification_invalid")
+        base_fields = {"method", "params_fields", "params_field_types"}
+        if "item_type" in entry:
+            allowed_fields = base_fields | {
+                "item_type",
+                "item_fields",
+                "item_field_types",
+                "item_kind",
+                "item_status",
+                "item_tool",
+                "item_phase",
+            }
+            _require(
+                base_fields
+                | {"item_type", "item_fields", "item_field_types"}
+                <= set(entry)
+                <= allowed_fields,
+                "observation_notification_fields_invalid",
+            )
+            _require(
+                entry.get("item_fields")
+                == sorted(entry.get("item_field_types", {})),
+                "observation_notification_item_type_keys_invalid",
+            )
+            _require(
+                entry.get("item_type")
+                in {"agentMessage", "collabAgentToolCall", "subAgentActivity"},
+                "observation_notification_item_type_invalid",
+            )
+        else:
+            _require(set(entry) == base_fields, "observation_notification_fields_invalid")
+            _require(
+                entry.get("method") == "item/agentMessage/delta",
+                "observation_notification_method_invalid",
+            )
+        _require(
+            entry.get("params_fields")
+            == sorted(entry.get("params_field_types", {})),
+            "observation_notification_param_type_keys_invalid",
+        )
+        for field, allowed in notification_enum_values.items():
+            if field in entry:
+                _require(entry[field] in allowed, "observation_notification_enum_invalid")
+    _validate_thread_structure(app_observed["thread_read_before_restart"])
+    _validate_thread_structure(app_observed["thread_read_after_restart"])
+    _require(
+        app_observed["thread_read_before_restart"]
+        == app_observed["thread_read_after_restart"],
+        "observation_thread_readback_mismatch",
+    )
+    _require_all_true(
+        app_observed["identity_relationships"],
+        "observation_desktop_identity_relationship_invalid",
+    )
+
+    serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    _require(
+        re.search(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            serialized,
+            re.IGNORECASE,
+        )
+        is None,
+        "observations_opaque_identifier_retained",
+    )
+
+
+def _load_runtime_observations(path: Path) -> dict[str, Any]:
+    payload = _load(path, code="observations_file_invalid")
+    validate_runtime_observations(payload)
+    return payload
+
+
+def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if observations is None:
+        observations = _load_runtime_observations(DEFAULT_OBSERVATIONS)
+    validate_runtime_observations(observations)
+    scenarios = observations["scenarios"]
+    cli_scenarios = [
+        "cli_v1_request",
+        "cli_v2_lifecycle",
+    ]
+    desktop_scenarios = [
+        "desktop_v1_request",
+        "desktop_v2_lifecycle",
+        "desktop_app_v2_lifecycle",
+    ]
+    cli_home_bindings = [
+        scenarios[name]["home_binding_sha256"] for name in cli_scenarios
+    ]
+    desktop_home_bindings = [
+        scenarios[name]["home_binding_sha256"] for name in desktop_scenarios
+    ]
+    cli_lifecycle = scenarios["cli_v2_lifecycle"]["observed"]
+    desktop_lifecycle = scenarios["desktop_v2_lifecycle"]["observed"]
+    desktop_app = scenarios["desktop_app_v2_lifecycle"]["observed"]
     return {
         "schema": SCHEMA,
         "qualification_status": "accepted_request_call_result_agent_message_and_readback",
         "candidate_revision": "be10f62f44b22fa8c84510238250ae11fb3ecab4",
-        "captured_on": "2026-08-10",
+        "captured_on": observations["captured_on"],
+        "source_observations": {
+            "schema": observations["schema"],
+            "canonical_sha256": _canonical_digest(observations),
+            "capture_run_binding_sha256": observations[
+                "capture_run_binding_sha256"
+            ],
+            "path": str(DEFAULT_OBSERVATIONS).replace("\\", "/"),
+        },
         "capture_scope": {
             "home": "new_isolated_home_per_runtime",
             "upstream": "loopback_protocol_controlled_responses",
@@ -334,27 +1056,22 @@ def build_contract() -> dict[str, Any]:
                 "desktop_v2_request_call_result_agent_message_and_restart",
                 "desktop_app_thread_items_notifications_and_restart",
             ],
+            "isolated_home_bindings_sha256": [
+                scenarios[name]["home_binding_sha256"] for name in sorted(scenarios)
+            ],
         },
         "runtimes": [
             _runtime(
-                client="codex_cli",
-                client_version="0.146.1",
-                runtime_version="0.146.1",
-                binary_sha256="ae9d865f3d346a1a2a60c4e84775622d74e3e7ef53e0dede9c68b81eab306cca",
-                source_tag="rust-v0.146.1",
-                source_commit="79b4f03d35962b005b007a015113b38930711665",
-                source_blobs=CLI_SOURCE_BLOBS,
+                runtime_observation=observations["runtimes"]["codex_cli"],
                 desktop_app=False,
+                scenario_names=cli_scenarios,
+                home_bindings=cli_home_bindings,
             ),
             _runtime(
-                client="codex_desktop",
-                client_version="26.803.5235.0",
-                runtime_version="0.147.0-alpha.6.5",
-                binary_sha256="fb5c760e14cf8fe86e12e49e8a3e7f237af06082d6b9fe1e411e463b7229c916",
-                source_tag="rust-v0.147.0-alpha.6.5",
-                source_commit="618b8e9111da9f57fe380b09d0f6516e3f343536",
-                source_blobs=DESKTOP_SOURCE_BLOBS,
+                runtime_observation=observations["runtimes"]["codex_desktop"],
                 desktop_app=True,
+                scenario_names=desktop_scenarios,
+                home_bindings=desktop_home_bindings,
             ),
         ],
         "selection_contract": {
@@ -542,6 +1259,14 @@ def build_contract() -> dict[str, Any]:
                 "stream_close_without_completed": "terminal_error",
             },
             "history_items": ["function_call", "function_call_output", "agent_message"],
+            "request_replay_envelopes": {
+                "codex_cli": cli_lifecycle["requests_by_phase"],
+                "codex_desktop": desktop_lifecycle["requests_by_phase"],
+            },
+            "rollout_readback_envelopes": {
+                "codex_cli": cli_lifecycle["rollout_readback"],
+                "codex_desktop": desktop_lifecycle["rollout_readback"],
+            },
             "same_home_readback": {
                 "clients": ["codex_cli", "codex_desktop"],
                 "call_namespace_preserved": True,
@@ -551,6 +1276,15 @@ def build_contract() -> dict[str, Any]:
                 "session_meta_multi_agent_version": "v2",
                 "turn_context_multi_agent_version": "v2",
                 "desktop_thread_resume_and_read": "observed",
+                "cli_identity_relationships": cli_lifecycle[
+                    "identity_relationships"
+                ],
+                "desktop_identity_relationships": desktop_lifecycle[
+                    "identity_relationships"
+                ],
+                "desktop_app_identity_relationships": desktop_app[
+                    "identity_relationships"
+                ],
             },
         },
         "protocol_layers": {
@@ -615,6 +1349,14 @@ def build_contract() -> dict[str, Any]:
                     "collabAgentToolCall": ["item/started", "item/completed"],
                     "subAgentActivity": ["item/started", "item/completed"],
                 },
+                "notification_envelopes": desktop_app["notifications"],
+                "thread_read_envelope": desktop_app[
+                    "thread_read_before_restart"
+                ],
+                "thread_resume_result": {
+                    "fields": desktop_app["resume_result_fields"],
+                    "field_types": desktop_app["resume_result_field_types"],
+                },
                 "turn_terminal_notification": "turn/completed",
                 "same_home_thread_resume_and_read": "observed",
                 "wire_item_equivalent": False,
@@ -661,15 +1403,44 @@ def _namespace_candidates(tools: Sequence[Any]) -> list[Mapping[str, Any]]:
     return candidates
 
 
+def _conflicting_collaboration_markers(
+    tools: Sequence[Any], candidates: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    candidate_ids = {id(candidate) for candidate in candidates}
+    collaboration_names = {V1_NAMESPACE, V2_NAMESPACE}
+    child_names = set(V1_TOOLS) | set(V2_TOOLS)
+    conflicts: list[Mapping[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping) or id(tool) in candidate_ids:
+            continue
+        name = tool.get("name")
+        if name in collaboration_names or (
+            tool.get("type") == "function" and name in child_names
+        ):
+            conflicts.append(tool)
+    return conflicts
+
+
 def _normalize_schema(value: Any) -> Any:
     if isinstance(value, Mapping):
-        normalized = {
-            key: _normalize_schema(child)
-            for key, child in value.items()
-            if key != "description"
-        }
+        normalized: dict[str, Any] = {}
+        for key, child in value.items():
+            if key == "description":
+                continue
+            if key == "properties" and isinstance(child, Mapping):
+                normalized[key] = {
+                    property_name: _normalize_schema(property_schema)
+                    for property_name, property_schema in child.items()
+                }
+            else:
+                normalized[key] = _normalize_schema(child)
         if normalized.get("type") == "object":
             normalized.setdefault("required", [])
+            required = normalized["required"]
+            if isinstance(required, list) and all(
+                isinstance(field, str) for field in required
+            ):
+                normalized["required"] = sorted(required)
         return normalized
     if isinstance(value, list):
         return [_normalize_schema(child) for child in value]
@@ -682,6 +1453,8 @@ def classify_tools(tools: Sequence[Any]) -> str:
     _require(isinstance(tools, Sequence) and not isinstance(tools, (str, bytes)), "tools_invalid")
     candidates = _namespace_candidates(tools)
     _require(candidates, "collaboration_marker_missing")
+    conflicts = _conflicting_collaboration_markers(tools, candidates)
+    _require(not conflicts, "collaboration_marker_duplicate_or_mixed")
     namespaces = [candidate.get("name") for candidate in candidates]
     _require(len(candidates) == 1, "collaboration_marker_duplicate_or_mixed")
     candidate = candidates[0]
@@ -713,7 +1486,7 @@ def classify_tools(tools: Sequence[Any]) -> str:
         _require(isinstance(parameters, Mapping), "namespace_child_parameters_invalid")
         normalized = _normalize_schema(parameters)
         _require(
-            normalized == EXPECTED_PARAMETER_SCHEMAS[version][name],
+            normalized == _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name]),
             "namespace_child_parameter_schema_mismatch",
         )
     return version
@@ -735,16 +1508,20 @@ def classify_request(request: Mapping[str, Any]) -> str:
     return version
 
 
-def validate_contract(payload: Mapping[str, Any]) -> None:
-    expected = build_contract()
+def validate_contract(
+    payload: Mapping[str, Any], observations: Mapping[str, Any] | None = None
+) -> None:
+    expected = build_contract(observations)
     _require(isinstance(payload, Mapping), "contract_invalid")
     _require(payload.get("schema") == SCHEMA, "contract_schema_invalid")
     _require(dict(payload) == expected, "contract_content_invalid")
 
 
-def reconcile_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
+def reconcile_contract(
+    payload: Mapping[str, Any], observations: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     try:
-        validate_contract(payload)
+        validate_contract(payload, observations)
     except ContractValidationError as error:
         return {"reconciled": False, "mismatches": [str(error)]}
     return {"reconciled": True, "mismatches": []}
@@ -762,18 +1539,21 @@ def replay_contract(payload: Mapping[str, Any], case: str) -> dict[str, Any]:
     return clone
 
 
-def _load(path: Path) -> dict[str, Any]:
+def _load(path: Path, *, code: str = "contract_file_invalid") -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ContractValidationError("contract_file_invalid") from error
-    _require(isinstance(value, dict), "contract_file_invalid")
+        raise ContractValidationError(code) from error
+    _require(isinstance(value, dict), code)
     return value
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--source-observations", type=Path, default=DEFAULT_OBSERVATIONS
+    )
     parser.add_argument("--check", action="store_true")
     return parser
 
@@ -781,10 +1561,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        expected = build_contract()
-        validate_contract(expected)
+        observations = _load_runtime_observations(args.source_observations)
+        expected = build_contract(observations)
+        validate_contract(expected, observations)
         if args.check:
-            report = reconcile_contract(_load(args.out))
+            report = reconcile_contract(_load(args.out), observations)
             print(json.dumps(report, sort_keys=True))
             return 0 if report["reconciled"] else 1
         args.out.parent.mkdir(parents=True, exist_ok=True)

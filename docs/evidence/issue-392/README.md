@@ -32,6 +32,13 @@ change.
   classification. The normalized structural schema retains types, nesting,
   encryption flags, required fields, strictness, and additional-properties
   behavior.
+- `collaboration-runtime-observations.json` is the sanitized output of the
+  runtime capture, not a hand-authored status list. Its five distinct
+  `home_binding_sha256` values bind the five newly empty Homes, and
+  `capture_run_binding_sha256` binds the complete observation set.
+- `collaboration-runtime-contract.json` is generated from that committed
+  observation artifact. The builder rejects missing, mutated, replay-reordered,
+  identity-losing, or duplicate-Home observations before producing a contract.
 
 ## Observed decision
 
@@ -48,17 +55,31 @@ change.
 
 ## Reproduction checks
 
-Regenerate and validate the bounded artifacts with Python 3.13:
+Re-run the frozen runtime capture only with the exact binaries and source trees
+listed above (all prompts and IDs remain in temporary Homes and are deleted):
 
 ```powershell
-python scripts/build_issue_392_collaboration_contract.py
-python scripts/build_issue_392_collaboration_contract.py --check
+python scripts/capture_issue_392_collaboration_runtime.py `
+  --enable-runtime-capture `
+  --cli-exe <codex-cli-0.146.1.exe> `
+  --desktop-exe <desktop-runtime-0.147.0-alpha.6.5.exe> `
+  --cli-source-root <rust-v0.146.1-source> `
+  --desktop-source-root <rust-v0.147.0-alpha.6.5-source>
+```
+
+Regenerate and validate the bounded derived artifacts with Python 3.13:
+
+```powershell
+python scripts/build_issue_392_collaboration_contract.py `
+  --source-observations docs/evidence/issue-392/collaboration-runtime-observations.json
+python scripts/build_issue_392_collaboration_contract.py --check `
+  --source-observations docs/evidence/issue-392/collaboration-runtime-observations.json
 python scripts/build_issue_64_collaboration_inventory.py
 python scripts/build_issue_64_collaboration_inventory.py --check
 python -m pytest -q tests/test_issue_392_collaboration_contract.py tests/test_issue_64_collaboration_inventory.py
 ```
 
-The builder binds every cited frozen source file to its Git blob. Re-running
-runtime capture requires the exact two binaries above and the same isolated
-loopback controls; a client, source, or binary change invalidates this evidence
-and requires a fresh capture rather than editing the artifact in place.
+The capture verifies every cited frozen source file against its Git blob before
+starting a client. A client, source, or binary change invalidates this evidence
+and requires a fresh isolated capture rather than editing either artifact in
+place.
