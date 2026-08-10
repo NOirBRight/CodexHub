@@ -14,7 +14,19 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any, Mapping, Sequence
+
+
+_SRC_PYTHON = Path(__file__).resolve().parents[1] / "src-python"
+if str(_SRC_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_SRC_PYTHON))
+
+from collaboration_runtime_contract import (  # noqa: E402
+    CollaborationContractError as _ProductionContractError,
+    classify_collaboration_request as _classify_production_request,
+    classify_collaboration_tools as _classify_production_tools,
+)
 
 
 SCHEMA = "codexhub.issue392.collaboration-runtime-contract.v1"
@@ -1870,63 +1882,20 @@ def _normalize_schema(value: Any) -> Any:
 
 
 def classify_tools(tools: Sequence[Any]) -> str:
-    """Classify the exact frozen request declaration surface, or fail closed."""
+    """Delegate declaration classification to the production #392 contract."""
 
-    _require(isinstance(tools, Sequence) and not isinstance(tools, (str, bytes)), "tools_invalid")
-    candidates = _namespace_candidates(tools)
-    _require(candidates, "collaboration_marker_missing")
-    conflicts = _conflicting_collaboration_markers(tools, candidates)
-    _require(not conflicts, "collaboration_marker_duplicate_or_mixed")
-    namespaces = [candidate.get("name") for candidate in candidates]
-    _require(len(candidates) == 1, "collaboration_marker_duplicate_or_mixed")
-    candidate = candidates[0]
-    namespace = namespaces[0]
-    version = V1 if namespace == V1_NAMESPACE else V2
-    expected_names = set(V1_TOOLS if version == V1 else V2_TOOLS)
-    _require(
-        set(candidate) == {"type", "name", "description", "tools"},
-        "namespace_fields_invalid",
-    )
-    _require(isinstance(candidate.get("description"), str), "namespace_description_invalid")
-    children = candidate.get("tools")
-    _require(isinstance(children, list), "namespace_children_invalid")
-    _require(all(isinstance(child, Mapping) for child in children), "namespace_child_invalid")
-    names = [child.get("name") for child in children]
-    _require(all(child.get("type") == "function" for child in children), "namespace_child_type_invalid")
-    _require(all(isinstance(child.get("name"), str) for child in children), "namespace_child_name_invalid")
-    _require(len(names) == len(set(names)), "namespace_child_duplicate")
-    _require(set(names) == expected_names, "namespace_child_set_invalid")
-    for child in children:
-        name = child["name"]
-        _require(
-            set(child) == {"type", "name", "description", "strict", "parameters"},
-            "namespace_child_fields_invalid",
-        )
-        _require(isinstance(child.get("description"), str), "namespace_child_description_invalid")
-        _require(child.get("strict") is False, "namespace_child_strict_invalid")
-        parameters = child.get("parameters")
-        _require(isinstance(parameters, Mapping), "namespace_child_parameters_invalid")
-        normalized = _normalize_schema(parameters)
-        _require(
-            normalized == _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name]),
-            "namespace_child_parameter_schema_mismatch",
-        )
-    return version
+    try:
+        return _classify_production_tools(tools)
+    except _ProductionContractError as exc:
+        raise ContractValidationError(exc.classification) from exc
 
 
 def classify_request(request: Mapping[str, Any]) -> str:
-    _require(isinstance(request, Mapping), "request_invalid")
-    _require(request.get("tool_choice") == "auto", "tool_choice_invalid")
-    tools = request.get("tools")
-    version = classify_tools(tools)  # type: ignore[arg-type]
-    markers: list[Any] = []
-    if "multi_agent_version" in request:
-        markers.append(request.get("multi_agent_version"))
-    for parent_name in ("metadata", "features", "client_metadata"):
-        parent = request.get(parent_name)
-        if isinstance(parent, Mapping) and "multi_agent_version" in parent:
-            markers.append(parent.get("multi_agent_version"))
-    _require(not markers, "collaboration_version_signal_unexpected")
+    try:
+        version = _classify_production_request(request)
+    except _ProductionContractError as exc:
+        raise ContractValidationError(exc.classification) from exc
+    _require(version is not None, "collaboration_marker_missing")
     return version
 
 
