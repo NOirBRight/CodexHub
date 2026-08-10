@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
 
 import codex_proxy
-from codex_semantic_adapter import COLLABORATION_V2
+from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
+from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
 
 
 def _external_chat_upstream() -> dict:
@@ -26,6 +28,30 @@ def _request(tools: list[dict], *, model: str = "custom-model", tool_choice="aut
             "tool_choice": tool_choice,
         }
     ).encode("utf-8")
+
+
+def _collaboration_namespace(version: str) -> dict:
+    namespace = "multi_agent_v1" if version == COLLABORATION_V1 else "collaboration"
+    children = []
+    for name, schema in EXPECTED_PARAMETER_SCHEMAS[version].items():
+        parameters = copy.deepcopy(schema)
+        if not parameters["required"]:
+            del parameters["required"]
+        children.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": "dynamic",
+                "strict": False,
+                "parameters": parameters,
+            }
+        )
+    return {
+        "type": "namespace",
+        "name": namespace,
+        "description": "dynamic",
+        "tools": children,
+    }
 
 
 def _decoded_sse(line: bytes) -> dict:
@@ -532,27 +558,22 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
         "request_id": "req",
         "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
     }
-    tools = [
-        {
-            "type": "namespace",
-            "name": "collaboration",
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "followup_task",
-                }
-            ],
-        }
-    ]
+    tools = [_collaboration_namespace(COLLABORATION_V2)]
     history = [
         {
             "type": "function_call",
+            "id": "item_v2",
             "namespace": "collaboration",
             "name": "followup_task",
             "call_id": "call_v2",
-            "arguments": '{"task_path":"/root/a","task_name":"a","fork_turns":"all"}',
+            "arguments": '{"target":"/root/a","message":"continue"}',
         },
-        {"type": "function_call_output", "call_id": "call_v2", "output": "queued"},
+        {
+            "type": "function_call_output",
+            "id": "item_v2_output",
+            "call_id": "call_v2",
+            "output": "null",
+        },
     ]
 
     payload = json.loads(
@@ -562,19 +583,20 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
                     "model": "custom-model",
                     "input": history,
                     "tools": tools,
+                    "tool_choice": "auto",
                 }
             ).encode("utf-8"),
-            _external_chat_upstream(),
+            _external_responses_upstream(),
             event_context=context,
         )
     )
 
     aliases = [tool["name"] for tool in payload["tools"] if tool.get("type") == "function"]
-    assert len(aliases) == 1
-    assert aliases[0].startswith("__codexhub_ns_")
-    assert payload["input"][0]["name"] == aliases[0]
+    assert len(aliases) == 6
+    assert all(alias.startswith("__codexhub_ns_") for alias in aliases)
+    assert payload["input"][0]["name"] in aliases
     assert "namespace" not in payload["input"][0]
-    assert json.loads(payload["input"][0]["arguments"])["task_path"] == "/root/a"
+    assert json.loads(payload["input"][0]["arguments"])["target"] == "/root/a"
     assert context["collaboration_protocol"] == COLLABORATION_V2
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
 
@@ -629,12 +651,13 @@ def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions
     body = {
         "model": "custom-model",
         "input": foreign_history,
+        "tool_choice": "auto",
         "tools": [
-            {
-                "type": "namespace",
-                "name": current_namespace,
-                "tools": [{"type": "function", "name": current_child}],
-            }
+            _collaboration_namespace(
+                COLLABORATION_V1
+                if current_namespace == "multi_agent_v1"
+                else COLLABORATION_V2
+            )
         ],
     }
 
@@ -642,7 +665,7 @@ def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions
     payload = json.loads(
         codex_proxy.compatible_request_body(
             json.dumps(body).encode("utf-8"),
-            _external_chat_upstream(),
+            _external_responses_upstream(),
             event_context=context,
             inject_codex_tools=False,
         )

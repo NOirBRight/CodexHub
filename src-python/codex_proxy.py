@@ -2513,12 +2513,14 @@ def _raise_collaboration_boundary_error(
     *,
     classification: str,
     message: str,
+    surface: str = "request",
     cause: BaseException | None = None,
 ) -> NoReturn:
-    _write_adapter_event(
-        event_context,
+    write_proxy_event(
         "collaboration_boundary_rejected",
-        classification=classification,
+        surface=surface,
+        outcome="rejected",
+        count=1,
     )
     error = UpstreamProtocolTranslationError(
         UnsupportedProtocolTranslationError(
@@ -2545,6 +2547,7 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification=exc.classification,
                 message="Collaboration protocol boundary is malformed or ambiguous.",
+                surface=surface,
                 cause=exc,
             )
         context_protocol = (
@@ -2560,6 +2563,7 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification="unknown_state",
                 message="Collaboration protocol selection is unknown.",
+                surface=surface,
             )
         if (
             context_protocol is not None
@@ -2570,38 +2574,19 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification="conflicting_selection",
                 message="Collaboration protocol selection conflicts with the response.",
+                surface=surface,
             )
     else:
         try:
-            tool_protocols = _collaboration_protocols(
-                {"tools": payload.get("tools", [])}
-                if isinstance(payload, Mapping)
-                else {"tools": []}
-            )
-            if len(tool_protocols) > 1:
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="mixed_current_tool_surface",
-                    message="Current Collaboration tools contain multiple protocol families.",
-                )
-            current_protocol = next(iter(tool_protocols), None)
-
-            metadata = {
-                key: event_context[key]
-                for key in (
-                    "multi_agent_version",
-                    "metadata",
-                    "model_metadata",
-                    "capabilities",
-                    "features",
-                )
-                if isinstance(event_context, Mapping) and key in event_context
-            }
-            metadata_protocol = (
-                _classify_collaboration_payload({"metadata": metadata})
-                if metadata
-                else None
-            )
+            request_boundary = {
+                "tools": payload.get("tools", []),
+                "tool_choice": payload.get("tool_choice"),
+            } if isinstance(payload, Mapping) else {"tools": [], "tool_choice": None}
+            if isinstance(payload, Mapping):
+                for key in ("multi_agent_version", "metadata", "features", "client_metadata"):
+                    if key in payload:
+                        request_boundary[key] = payload[key]
+            current_protocol = _classify_collaboration_payload(request_boundary)
 
             raw_context_protocol = (
                 event_context.get("collaboration_protocol")
@@ -2612,23 +2597,6 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
-            request_metadata = {
-                key: payload[key]
-                for key in (
-                    "collaboration_protocol",
-                    "multi_agent_version",
-                    "metadata",
-                    "model_metadata",
-                    "capabilities",
-                    "features",
-                )
-                if isinstance(payload, Mapping) and key in payload
-            }
-            request_metadata_protocol = (
-                _classify_collaboration_payload(request_metadata)
-                if request_metadata
-                else None
-            )
             history_protocols = _collaboration_protocols(
                 {"input": payload.get("input", [])}
                 if isinstance(payload, Mapping)
@@ -2636,10 +2604,19 @@ def _resolve_collaboration_boundary(
             )
             protocol = (
                 current_protocol
-                or request_metadata_protocol
-                or metadata_protocol
                 or context_protocol
             )
+            if (
+                current_protocol is not None
+                and context_protocol is not None
+                and current_protocol != context_protocol
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="conflicting_selection",
+                    message="Collaboration protocol selection conflicts with the request.",
+                    surface=surface,
+                )
             if (
                 raw_context_protocol is not None
                 and context_protocol is None
@@ -2649,12 +2626,14 @@ def _resolve_collaboration_boundary(
                     event_context,
                     classification="unknown_state",
                     message="Collaboration protocol selection is unknown.",
+                    surface=surface,
                 )
         except _CollaborationBoundaryError as exc:
             _raise_collaboration_boundary_error(
                 event_context,
                 classification=exc.classification,
                 message="Collaboration protocol boundary is malformed or ambiguous.",
+                surface=surface,
                 cause=exc,
             )
 
@@ -6418,8 +6397,9 @@ def _prepare_runtime_tool_compatibility(
     except RuntimeToolCompatibilityError as exc:
         write_proxy_event(
             "runtime_tool_compatibility_rejected",
-            classification=exc.classification,
             surface=exc.surface,
+            outcome="rejected",
+            count=1,
         )
         _raise_runtime_tool_compatibility_error(exc)
     event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan

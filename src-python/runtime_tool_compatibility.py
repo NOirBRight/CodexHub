@@ -15,6 +15,15 @@ import json
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
+from collaboration_runtime_contract import (
+    COLLABORATION_V2,
+    CollaborationContractError,
+    classify_collaboration_request,
+    validate_agent_message,
+    validate_collaboration_arguments,
+    validate_collaboration_result,
+)
+
 
 NATIVE = "native"
 ADAPT = "adapt"
@@ -767,6 +776,21 @@ def build_tool_compatibility_plan(
         if not isinstance(item, Mapping):
             raise _MalformedDeclaration()
         declarations.append(item)
+    try:
+        collaboration_version = classify_collaboration_request(
+            {"tools": declarations, "tool_choice": tool_choice}
+        )
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            exc.classification,
+            surface="request",
+        ) from exc
+    if (
+        collaboration_version == COLLABORATION_V2
+        and selected_protocol != "responses_structured"
+    ):
+        raise RequiredToolUnavailableError(family=NAMESPACE)
     capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
     hosted = _provider_hosted(provider_hosted_capabilities)
 
@@ -803,6 +827,12 @@ def build_tool_compatibility_plan(
         if not valid:
             raise _MalformedDeclaration()
         namespace, children, version, namespace_valid = _namespace_details(declaration)
+        if (
+            collaboration_version == COLLABORATION_V2
+            and family == NAMESPACE
+            and namespace == "collaboration"
+        ):
+            is_required = True
         reason = "native_lifecycle"
         disposition = OMIT
         aliases: list[str] = []
@@ -1140,6 +1170,140 @@ class ToolCompatibilityPlan:
             tool_choice=self.tool_choice,
             provider_hosted_kinds=self.provider_hosted_kinds,
         )
+
+    def _collaboration_v2_entry(self) -> ToolCompatibilityEntry | None:
+        matches = [
+            entry
+            for entry in self.entries
+            if entry.family == NAMESPACE
+            and entry.version == "v2"
+            and entry.namespace == "collaboration"
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _raise_collaboration_contract(
+        error: CollaborationContractError,
+        *,
+        surface: str,
+    ) -> None:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            error.classification,
+            surface=surface,
+        ) from error
+
+    def _validate_collaboration_v2_items(
+        self,
+        items: Any,
+        *,
+        surface: str,
+    ) -> None:
+        if self._collaboration_v2_entry() is None or not isinstance(items, list):
+            return
+        calls: dict[str, str] = {}
+        seen_item_ids: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            item_type = item.get("type")
+            if item_type == "agent_message":
+                try:
+                    validate_agent_message(item)
+                except CollaborationContractError as exc:
+                    self._raise_collaboration_contract(exc, surface=surface)
+                item_id = item.get("id")
+            elif (
+                item_type == "function_call"
+                and item.get("namespace") == "collaboration"
+                and item.get("name") in _V2_NAMES
+            ):
+                item_id = item.get("id")
+                if not isinstance(item_id, str) or not item_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_item_identity",
+                        surface=surface,
+                    )
+                allowed_fields = {
+                    "type",
+                    "id",
+                    "call_id",
+                    "namespace",
+                    "name",
+                    "arguments",
+                }
+                if surface in {"response", "stream"}:
+                    allowed_fields.add("status")
+                valid_field_sets = [allowed_fields]
+                if "status" in allowed_fields:
+                    valid_field_sets.append(allowed_fields - {"status"})
+                if set(item) not in valid_field_sets:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "collaboration_call_fields_invalid",
+                        surface=surface,
+                    )
+                call_id = item.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_call_identity",
+                        surface=surface,
+                    )
+                if call_id in calls:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_call_identity",
+                        surface=surface,
+                    )
+                name = str(item["name"])
+                try:
+                    validate_collaboration_arguments(
+                        COLLABORATION_V2,
+                        name,
+                        item.get("arguments"),
+                    )
+                except CollaborationContractError as exc:
+                    self._raise_collaboration_contract(exc, surface=surface)
+                calls[call_id] = name
+            elif item_type == "function_call_output" and item.get("call_id") in calls:
+                item_id = item.get("id")
+                if not isinstance(item_id, str) or not item_id:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_item_identity",
+                        surface=surface,
+                    )
+                if set(item) != {"type", "id", "call_id", "output"}:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "collaboration_result_fields_invalid",
+                        surface=surface,
+                    )
+                try:
+                    validate_collaboration_result(
+                        COLLABORATION_V2,
+                        calls[str(item["call_id"])],
+                        item.get("output"),
+                    )
+                except CollaborationContractError as exc:
+                    self._raise_collaboration_contract(exc, surface=surface)
+            else:
+                continue
+            if not isinstance(item_id, str) or not item_id:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "missing_item_identity",
+                    surface=surface,
+                )
+            if item_id in seen_item_ids:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "duplicate_item_identity",
+                    surface=surface,
+                )
+            seen_item_ids.add(item_id)
 
     def with_final_declarations(
         self,
@@ -2200,6 +2364,7 @@ class ToolCompatibilityPlan:
         call_aliases: dict[str, str] = {}
         raw_input = result.get("input")
         if isinstance(raw_input, list):
+            self._validate_collaboration_v2_items(raw_input, surface="history")
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
             history_call_owners: dict[str, ToolCompatibilityEntry] = {}
@@ -2687,6 +2852,7 @@ class ToolCompatibilityPlan:
         entry: ToolCompatibilityEntry,
         *,
         require_completed: bool = False,
+        surface: str = "history",
     ) -> None:
         if entry.version is not None:
             _validate_version_fields(
@@ -2702,6 +2868,24 @@ class ToolCompatibilityPlan:
                     version=entry.version,
                 ),
             )
+        if (
+            entry.version == "v2"
+            and entry.family == NAMESPACE
+            and item.get("arguments") is not None
+            and item.get("arguments") != ""
+        ):
+            try:
+                validate_collaboration_arguments(
+                    COLLABORATION_V2,
+                    str(item.get("name")),
+                    item.get("arguments"),
+                )
+            except CollaborationContractError as exc:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    exc.classification,
+                    surface=surface,
+                ) from exc
         item_type = item.get("type")
         if entry.family == PLAIN_FUNCTION:
             namespace = item.get("namespace")
@@ -2714,30 +2898,30 @@ class ToolCompatibilityPlan:
                 and f"{namespace}__{item.get('name')}" == entry.original_name
             )
             if item_type != "function_call" or not (plain_shape or flattened_shape):
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
         elif entry.family == NAMESPACE:
             if (
                 item_type != "function_call"
                 or item.get("namespace") != entry.namespace
                 or item.get("name") not in entry.child_names
             ):
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
         elif entry.family == CUSTOM_FREEFORM:
             if item_type != "custom_tool_call" or item.get("name") != entry.original_name:
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
         elif entry.family == TOOL_SEARCH:
             if item_type not in {"tool_search_call", "tool_search_output"}:
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
             if item.get("execution") != "client":
-                raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_tool_search_execution", surface=surface)
         elif entry.family == SELECTED_PROVIDER_HOSTED:
             hosted_spec = _hosted_event_spec_for_declaration_kind(entry.declaration.get("type"))
             if hosted_spec is None or item_type != hosted_spec[0]:
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
             if _item_identity(item) is None:
-                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface=surface)
             if require_completed and item.get("status") not in {None, "completed"}:
-                raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_hosted_lifecycle", surface="history")
+                raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_hosted_lifecycle", surface=surface)
 
     def _decode_items(self, items: Any, *, reject_omitted_response: bool = False) -> tuple[Any, bool]:
         if not isinstance(items, list):
@@ -2926,6 +3110,7 @@ class ToolCompatibilityPlan:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
             result.append(decoded)
             changed = changed or item_changed
+        self._validate_collaboration_v2_items(result, surface=surface)
         return result, changed
 
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3153,7 +3338,7 @@ class CompatibilityStreamState:
                 "duplicate_call_identity",
                 surface="stream",
             )
-        self.plan._validate_native_item(item, entry)
+        self.plan._validate_native_item(item, entry, surface="stream")
         self._seen_item_ids.add(item_id)
         self._seen_call_ids.add(call_id)
         self._native_done.add(item_id)
@@ -3358,6 +3543,20 @@ class CompatibilityStreamState:
     def _check_alias_in_item(self, item: Mapping[str, Any], *, allow_incomplete: bool = True) -> tuple[dict[str, Any], AliasRecord | None, bool]:
         if item.get("type") == "function_call":
             decoded, record, changed = self.plan._decode_call_compat(item, allow_incomplete=allow_incomplete)
+            if (
+                record is not None
+                and record.version == "v2"
+                and record.family == NAMESPACE
+                and not allow_incomplete
+            ):
+                try:
+                    validate_collaboration_arguments(
+                        COLLABORATION_V2,
+                        str(record.child_name),
+                        decoded.get("arguments"),
+                    )
+                except CollaborationContractError as exc:
+                    self.plan._raise_collaboration_contract(exc, surface="stream")
             if record is not None and record.family == NAMESPACE:
                 supplied_namespace = item.get("namespace")
                 if supplied_namespace is not None and supplied_namespace != record.namespace:
@@ -3503,7 +3702,7 @@ class CompatibilityStreamState:
                             "ambiguous_native_identity",
                             surface="stream",
                         )
-                    self.plan._validate_native_item(item, expected_entry)
+                    self.plan._validate_native_item(item, expected_entry, surface="stream")
                     if self._semantic_wire_payload(item, expected_entry) != expected_payload:
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
@@ -3660,7 +3859,7 @@ class CompatibilityStreamState:
                     surface="stream",
                 )
             if expected_entry.family == TOOL_SEARCH:
-                self.plan._validate_native_item(item, expected_entry)
+                self.plan._validate_native_item(item, expected_entry, surface="stream")
             if self._native_wire_identities.get(item_id) != self._native_wire_identity(item):
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -3698,6 +3897,9 @@ class CompatibilityStreamState:
         hosted_event_spec = _hosted_event_spec(event_type)
         if hosted_event_spec is not None:
             return self._decode_hosted_event(result, hosted_event_spec)
+        item = result.get("item")
+        if isinstance(item, Mapping) and item.get("type") == "agent_message":
+            self.plan._validate_collaboration_v2_items([item], surface="stream")
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
             response = result.get("response")
             if isinstance(response, Mapping):
@@ -3713,7 +3915,6 @@ class CompatibilityStreamState:
                     response["output"] = decoded_output
                     result["response"] = response
             return result
-        item = result.get("item")
         if event_type == "response.output_item.added" and isinstance(item, Mapping):
             self.plan._validate_registered_item_identity(item, surface="stream")
             self._validate_output_item_added(item)
@@ -3749,7 +3950,7 @@ class CompatibilityStreamState:
                 if item_id is None:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="stream")
                 if native_entry.family == SELECTED_PROVIDER_HOSTED:
-                    self.plan._validate_native_item(item, native_entry)
+                    self.plan._validate_native_item(item, native_entry, surface="stream")
                     if item_id in self._seen_item_ids:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                     self._seen_item_ids.add(item_id)
@@ -3772,7 +3973,7 @@ class CompatibilityStreamState:
                     return result
                 if not isinstance(call_id, str) or not call_id:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="stream")
-                self.plan._validate_native_item(item, native_entry)
+                self.plan._validate_native_item(item, native_entry, surface="stream")
                 if item_id in self._seen_item_ids:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                 if call_id in self._seen_call_ids:
@@ -4108,9 +4309,14 @@ class CompatibilityStreamState:
                                 "incomplete_hosted_lifecycle",
                                 surface="stream",
                             )
-                        self.plan._validate_native_item(item, hosted_entry, require_completed=True)
+                        self.plan._validate_native_item(
+                            item,
+                            hosted_entry,
+                            require_completed=True,
+                            surface="stream",
+                        )
                     elif expected_entry.family == TOOL_SEARCH:
-                        self.plan._validate_native_item(item, expected_entry)
+                        self.plan._validate_native_item(item, expected_entry, surface="stream")
                     elif expected_entry.family != TOOL_SEARCH and native_item_id not in self._native_delta_done:
                         self._complete_native_arguments_from_item(
                             native_item_id,
@@ -4211,7 +4417,7 @@ class CompatibilityStreamState:
             if pending.record.family == CUSTOM_FREEFORM:
                 decoded_item, _record, _changed = self.plan._decode_call(item, allow_incomplete=False)
             else:
-                decoded_item, _record, _changed = self._check_alias_in_item(item, allow_incomplete=True)
+                decoded_item, _record, _changed = self._check_alias_in_item(item, allow_incomplete=False)
             pending.item_done = True
             payload = self._semantic_wire_payload(item, pending.record)
             if pending.item_id in self._wire_payloads and self._wire_payloads[pending.item_id] != payload:

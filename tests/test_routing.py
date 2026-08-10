@@ -1,3 +1,4 @@
+import copy
 import gc
 import os
 import gzip
@@ -20,6 +21,13 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
+from collaboration_runtime_contract import (
+    COLLABORATION_V1,
+    COLLABORATION_V2,
+    EXPECTED_PARAMETER_SCHEMAS,
+    V1_NAMESPACE,
+    V2_NAMESPACE,
+)
 from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler, SseFrameTooLargeError
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -71,11 +79,27 @@ def _load_model_switch_fixture():
 
 
 def _model_switch_tool_surface(protocol: str) -> dict[str, Any]:
-    namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
+    version = COLLABORATION_V2 if protocol == COLLABORATION_V2 else COLLABORATION_V1
+    namespace = V2_NAMESPACE if version == COLLABORATION_V2 else V1_NAMESPACE
+    children = []
+    for name, parameter_schema in EXPECTED_PARAMETER_SCHEMAS[version].items():
+        parameters = copy.deepcopy(parameter_schema)
+        if not parameters["required"]:
+            del parameters["required"]
+        children.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": f"dynamic child description for {name}",
+                "strict": False,
+                "parameters": parameters,
+            }
+        )
     return {
         "type": "namespace",
         "name": namespace,
-        "tools": [{"type": "function", "name": "spawn_agent"}],
+        "description": "dynamic namespace description",
+        "tools": children,
     }
 
 
@@ -95,10 +119,25 @@ def _model_switch_call(protocol: str, call_id: str) -> dict[str, Any]:
     namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
     return {
         "type": "function_call",
+        "id": f"item-{call_id}",
         "namespace": namespace,
         "name": "spawn_agent",
         "call_id": call_id,
-        "arguments": arguments,
+        "arguments": json.dumps(arguments, separators=(",", ":")),
+    }
+
+
+def _model_switch_result(protocol: str, call_id: str) -> dict[str, Any]:
+    output = (
+        {"task_name": "/root/bounded-model-switch-check"}
+        if protocol == COLLABORATION_V2
+        else {"agent_id": "019f-child", "nickname": None}
+    )
+    return {
+        "type": "function_call_output",
+        "id": f"item-result-{call_id}",
+        "call_id": call_id,
+        "output": json.dumps(output, separators=(",", ":")),
     }
 
 
@@ -3460,11 +3499,12 @@ class RoutingTests(unittest.TestCase):
                 call_item = _model_switch_call(protocol, call_id)
                 body = {
                     "model": model,
+                    "tool_choice": "auto",
                     "input": [
                         *history,
                         {"type": "message", "role": "user", "content": "continue with the selected model"},
                         call_item,
-                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                        _model_switch_result(protocol, call_id),
                     ],
                     "tools": [_model_switch_tool_surface(protocol)],
                     "stream": False,
@@ -3564,7 +3604,7 @@ class RoutingTests(unittest.TestCase):
                 history.extend(
                     [
                         call_item,
-                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                        _model_switch_result(protocol, call_id),
                     ]
                 )
 
@@ -18613,16 +18653,17 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("encrypted_content", payload["input"][0])
         self.assertNotIn(encrypted_content, transformed.decode("utf-8"))
 
-    def test_collaboration_v2_chat_adapts_responses_only_history_before_translation(self):
+    def test_collaboration_v2_chat_fails_before_history_translation(self):
         summary_text = "PRIVATE_REASONING_SUMMARY"
         encrypted_content = "gAAAA-private-reasoning"
         event_context = {
             "request_id": "request-v2-chat-reasoning-history",
             "collaboration_protocol": "collaboration_v2",
         }
-        transformed = compatible_request_body(
-            json.dumps(
-                {
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+            compatible_request_body(
+                json.dumps(
+                    {
                     "model": "kimi-k3",
                     "input": [
                         {
@@ -18641,65 +18682,31 @@ class RoutingTests(unittest.TestCase):
                         {"type": "message", "role": "user", "content": "continue"},
                     ],
                     "tools": [_model_switch_tool_surface("collaboration_v2")],
+                    "tool_choice": "auto",
                     "stream": True,
-                }
-            ).encode("utf-8"),
-            {
-                "name": "kimi",
-                "upstream_model": "kimi-k3",
-                "upstream_format": "chat_completions",
-                "tool_protocol": "none",
-            },
-            event_context=event_context,
-            inject_codex_tools=False,
-        )
-        payload = json.loads(transformed)
+                    }
+                ).encode("utf-8"),
+                {
+                    "name": "kimi",
+                    "upstream_model": "kimi-k3",
+                    "upstream_format": "chat_completions",
+                    "tool_protocol": "none",
+                },
+                event_context=event_context,
+                inject_codex_tools=False,
+            )
 
         self.assertEqual(
-            payload["input"],
-            [
-                {
-                    "id": "msg_final",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Earlier answer."}],
-                },
-                {"type": "message", "role": "user", "content": "continue"},
-            ],
+            caught.exception.cause.code,
+            "tool_compatibility_required_unavailable",
         )
-        chat_payload = json.loads(
-            _responses_request_to_chat_completion_body(
-                transformed,
-                drop_client_transport_fields=True,
-                drop_reasoning=True,
-            )
-        )
-        self.assertEqual(
-            chat_payload["messages"],
-            [
-                {"role": "assistant", "content": "Earlier answer."},
-                {"role": "user", "content": "continue"},
-            ],
-        )
-        serialized = json.dumps(chat_payload, ensure_ascii=False)
-        self.assertNotIn(summary_text, serialized)
-        self.assertNotIn(encrypted_content, serialized)
-        removal_event = next(
-            call.kwargs
+        event_names = [
+            call.args[0]
             for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "v2_chat_reasoning_history_removed"
-        )
-        self.assertEqual(removal_event["count"], 1)
-        for forbidden in ("id", "summary", "content", "text", "encrypted_content"):
-            self.assertNotIn(forbidden, removal_event)
-        phase_event = next(
-            call.kwargs
-            for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "chat_message_phase_removed"
-        )
-        self.assertEqual(phase_event["count"], 1)
-        for forbidden in ("id", "phase", "content", "text"):
-            self.assertNotIn(forbidden, phase_event)
+            if call.args
+        ]
+        self.assertNotIn("v2_chat_reasoning_history_removed", event_names)
+        self.assertNotIn("chat_message_phase_removed", event_names)
 
     def test_codex_app_chat_adapts_message_phase_without_collaboration_signal(self):
         summary_text = "PRIVATE_REASONING_SUMMARY"
@@ -23582,15 +23589,6 @@ Execution constraints:
                     },
                 ],
                 "tools": [
-                    {
-                        "type": "namespace",
-                        "name": "multi_agent_v1",
-                        "tools": [
-                            {"type": "function", "name": "spawn_agent", "parameters": {"type": "object"}},
-                            {"type": "function", "name": "wait_agent", "parameters": {"type": "object"}},
-                            {"type": "function", "name": "close_agent", "parameters": {"type": "object"}},
-                        ],
-                    },
                     {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
                     {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
                     {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
