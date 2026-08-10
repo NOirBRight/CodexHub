@@ -163,7 +163,6 @@ def chat_tool_payload(model: str, *, stream: bool) -> dict[str, Any]:
                 },
             }
         ],
-        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
     }
 
 
@@ -201,7 +200,6 @@ def chat_tool_history_payload(model: str) -> dict[str, Any]:
                 },
             }
         ],
-        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
     }
 
 

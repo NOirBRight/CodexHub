@@ -14498,6 +14498,7 @@ def _tool_exposure_policy_for_route(
     request_kind: str,
     raw_provider_probe: bool,
 ) -> ToolExposurePolicy:
+    tool_protocol = _external_tool_protocol(upstream)
     raw_requested_mode = upstream.get("tool_exposure_mode")
     if raw_requested_mode is None:
         if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
@@ -14536,6 +14537,8 @@ def _tool_exposure_policy_for_route(
         capability_state = CapabilityState.UNQUALIFIED
     elif requested_mode == ToolExposureMode.UNSUPPORTED:
         capability_state = CapabilityState.UNSUPPORTED
+    if tool_protocol == "none":
+        capability_state = CapabilityState.UNSUPPORTED
 
     raw_subset = upstream.get("proven_tool_subset")
     proven_tool_subset = (
@@ -14556,6 +14559,8 @@ def _tool_exposure_policy_for_route(
         # evidence visible while executing the compatibility mode is the
         # behavior-preserving fail-closed boundary.
         effective_mode = ToolExposureMode.CURRENT_COMPATIBILITY
+    if tool_protocol == "none":
+        effective_mode = ToolExposureMode.UNSUPPORTED
     gateway_schema_injection = (
         upstream_name != "official"
         and effective_mode == ToolExposureMode.CURRENT_COMPATIBILITY
