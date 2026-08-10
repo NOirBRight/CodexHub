@@ -9603,7 +9603,7 @@ def _drop_v2_chat_reasoning_history(
     return True
 
 
-def _drop_v2_chat_message_phase(
+def _drop_chat_message_phase(
     payload: dict[str, Any],
     *,
     event_context: Mapping[str, Any] | None,
@@ -9629,7 +9629,7 @@ def _drop_v2_chat_message_phase(
     payload["input"] = rewritten_items
     _write_adapter_event(
         event_context,
-        "v2_chat_message_phase_removed",
+        "chat_message_phase_removed",
         upstream=upstream_name,
         count=removed_count,
     )
@@ -11447,6 +11447,11 @@ def compatible_request_body(
         else _external_tool_surface_strategy(upstream)
     )
     collaboration_v2 = collaboration_protocol == _COLLABORATION_V2
+    codex_app_external = (
+        behavior_profile == BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
+        or (event_context or {}).get("behavior_profile")
+        == BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
+    )
     guidance_enabled = subagent_guidance_enabled(event_context)
     semantic_repair_enabled = subagent_semantic_repair_enabled(event_context)
     if isinstance(event_context, dict):
@@ -11543,15 +11548,6 @@ def compatible_request_body(
             )
         ):
             changed = True
-        if (
-            upstream.get("upstream_format") == "chat_completions"
-            and _drop_v2_chat_message_phase(
-                payload,
-                event_context=event_context,
-                upstream_name=upstream_name,
-            )
-        ):
-            changed = True
     else:
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it
@@ -11578,6 +11574,17 @@ def compatible_request_body(
         else:
             if _rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
+    if (
+        not raw_provider_probe
+        and upstream.get("upstream_format") == "chat_completions"
+        and (collaboration_v2 or codex_app_external)
+        and _drop_chat_message_phase(
+            payload,
+            event_context=event_context,
+            upstream_name=upstream_name,
+        )
+    ):
+        changed = True
     input_items = payload.get("input")
     subagent_worker_context = (
         not raw_provider_probe
