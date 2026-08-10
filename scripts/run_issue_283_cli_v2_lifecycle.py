@@ -337,18 +337,15 @@ class _FixtureServer(ThreadingHTTPServer):
         result = {
             "final_payload": None,
             "interrupted": False,
-            "work": False,
-            "messages": [],
+            "has_signal": False,
         }
         for p in queued:
             if p.startswith("FINAL:"):
                 result["final_payload"] = p[6:]
             elif p == "INTERRUPT":
                 result["interrupted"] = True
-            elif p == "WORK":
-                result["work"] = True
             else:
-                result["messages"].append(p)
+                result["has_signal"] = True
         return result
 
     def _build_child_response(
@@ -361,38 +358,30 @@ class _FixtureServer(ThreadingHTTPServer):
     ) -> list[dict[str, Any]]:
         final_payload = signals["final_payload"]
         interrupted = signals["interrupted"]
-        work = signals["work"]
-        messages = signals["messages"]
+        has_signal = signals["has_signal"]
 
         if final_payload is not None:
             state["completed"] = True
-            text = "; ".join(messages) + (f"; {final_payload}" if messages else final_payload)
-            return _message_events(index, self._child_text(state, text, final=True), model)
+            return _message_events(
+                index, self._child_text(state, final_payload, final=True), model
+            )
 
         if interrupted and not state.get("interrupted_ack"):
             state["interrupted_ack"] = True
             state["completed"] = True
-            text = "interrupted"
-            if messages:
-                text = "; ".join(messages) + f"; {text}"
-            return _message_events(index, self._child_text(state, text, final=True), model)
+            return _message_events(
+                index, self._child_text(state, "interrupted", final=True), model
+            )
 
-        if messages and not state.get("message_ack"):
-            state["message_ack"] = True
-            return _message_events(index, self._child_text(state, "received", final=False), model)
-
-        if work and not state.get("work_ack"):
-            state["work_ack"] = True
-            # Stay alive in an open turn via wait_agent so interrupt_agent has a
-            # current turn to interrupt.
+        if has_signal or open_on_no_signal:
+            # Any non-final/interrupt signal keeps the child task alive by
+            # returning wait_agent.  This lets send_message/followup_task land
+            # without finalizing the child, and leaves a current turn for
+            # interrupt_agent to interrupt.
             return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
 
-        if open_on_no_signal:
-            # Keep the upstream child turn open until the parent signals.
-            return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
-
-        # Fallback: nothing to do, ack with a non-final message.
-        return _message_events(index, self._child_text(state, "idle", final=False), model)
+        # Fallback: nothing to do, keep the turn open.
+        return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
 
     def serve_child(
         self, body: Mapping[str, Any], handler: "_FixtureHandler", model: str, index: int
@@ -514,13 +503,13 @@ class _FixtureServer(ThreadingHTTPServer):
                     index,
                     model,
                 )
-            # Try collecting the child's initial wait before sending a message.
-            # The child completes its first turn with wait_agent; the parent
-            # waits, then attempts send_message/followup_task/interrupt_agent.
-            if "wait_agent" not in tools_called or "wait_agent" not in outputs:
-                return _function_events(
-                    "wait_agent", {"timeout_ms": 30000}, index, model
-                )
+            # Full V2 lifecycle choreography:
+            #   1) spawn -> child starts an open turn waiting for a signal.
+            #   2) send_message -> any non-final signal keeps the child alive.
+            #   3) followup_task -> another keep-alive signal; child is now "working".
+            #   4) wait_agent -> parent collects the running status.
+            #   5) interrupt_agent -> child finalizes with a FINAL_ANSWER.
+            #   6) list_agents -> housekeeping.
             if "send_message" not in tools_called or "send_message" not in outputs:
                 if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "send status update"):
                     return _function_events(
@@ -531,7 +520,7 @@ class _FixtureServer(ThreadingHTTPServer):
                     )
                 return _message_events(index, "waiting for child before send_message", model)
             if "followup_task" not in tools_called or "followup_task" not in outputs:
-                if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "FINAL:follow up"):
+                if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "WORK"):
                     return _function_events(
                         "followup_task",
                         {"target": relative_target, "message": "follow up"},
@@ -539,16 +528,16 @@ class _FixtureServer(ThreadingHTTPServer):
                         model,
                     )
                 return _message_events(index, "waiting for child before followup", model)
+            if "wait_agent" not in tools_called or "wait_agent" not in outputs:
+                return _function_events(
+                    "wait_agent", {"timeout_ms": 30000}, index, model
+                )
             if "interrupt_agent" not in tools_called or "interrupt_agent" not in outputs:
                 if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "INTERRUPT"):
                     return _function_events(
                         "interrupt_agent", {"target": relative_target}, index, model
                     )
                 return _message_events(index, "waiting for child before interrupt", model)
-            if "wait_agent" not in tools_called or "wait_agent" not in outputs:
-                return _function_events(
-                    "wait_agent", {"timeout_ms": 30000}, index, model
-                )
             if "list_agents" not in tools_called:
                 return _function_events("list_agents", {}, index, model)
             return _message_events(index, "parent completion", model)
@@ -1411,19 +1400,20 @@ def capture(
                 "spawn_result_field": "The fixture originally returned task_path in the spawn_agent function_call_output; the #392 V2 contract requires task_name.  After switching to task_name the child identity is accepted.",
                 "agent_type_injection": "The CLI's emitted collaboration.spawn_agent declaration omits the optional agent_type property.  The shim injects it before forwarding to the gateway so the boundary classifier accepts the request.  This injection is unrelated to the spawn execution failure.",
                 "fixture_contract_conformance": "The fixture's spawn_agent function_call response (namespace=collaboration, name=spawn_agent, arguments task_name+message, added/delta/done/completed events) matches the #392 V2 call contract.",
-                "child_persistence_strategy": "The fixture has the child complete its first turn with a collaboration.wait_agent function_call.  This keeps the child task alive without finalizing it, and the parent collects the wait result before attempting send_message.",
-                "send_message_blocker": "The CLI executes collaboration.send_message but records an empty string ('') as the function_call_output instead of the JSON null expected by the #392 V2 contract.  The next parent request containing this malformed send_message result is rejected by the gateway boundary classifier with 'Tool compatibility failed at history: malformed_collaboration_result'.",
+                "child_persistence_strategy": "The fixture keeps the upstream child turn open until the parent enqueues a signal.  Non-final/interrupt signals (send_message, followup_task) make the child return collaboration.wait_agent, keeping the task alive.  The INTERRUPT signal makes the child finalize with a FINAL_ANSWER so wait_agent can collect the result.",
+                "send_message_contract_resolution": "The real Codex CLI 0.146.1 emits an empty string ('') as the function_call_output for collaboration.send_message because the handler returns Rust's unit type.  CodexHub now normalizes that empty string to JSON null at the V2 boundary (src-python/collaboration_runtime_contract.py:validate_collaboration_result), which is the reversible, minimal fix needed to accept what the frozen client can actually produce.",
                 "child_states_tested": [
-                    "child returns wait_agent and completes its turn (idle but not finalized)",
                     "child keeps the upstream turn open waiting for a parent signal",
-                    "child returns a non-final MESSAGE acknowledging a send_message signal"
+                    "child returns wait_agent after a send_message signal (stays alive)",
+                    "child returns wait_agent after a followup_task signal (appears to be working)",
+                    "child returns FINAL_ANSWER after an interrupt_agent signal"
                 ],
                 "full_six_tool_status": "attempted" if passed else "attempted_not_yet_passing",
             },
             "shim_notes": [
                 "CLI-facing shim synthesized an OpenAI-compatible /v1/models list because the candidate gateway serves the CodexHub catalog shape.",
                 "The shim injected the optional agent_type property into the collaboration.spawn_agent tool declaration; the installed CLI 0.146.1 build omits it, causing the gateway boundary classifier to reject the request otherwise.",
-                "The current choreography is spawn_agent -> wait_agent -> send_message -> followup_task -> interrupt_agent -> wait_agent -> list_agents, with the child returning wait_agent on its first turn so the task stays alive.",
+                "The full six-tool lifecycle choreography is spawn_agent -> send_message -> followup_task -> wait_agent -> interrupt_agent -> list_agents, with the child returning wait_agent for send/follow-up and FINAL_ANSWER for interrupt.",
             ],
         }
 

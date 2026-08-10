@@ -1,7 +1,12 @@
 {
-  "candidate_sha": "b5c99f48aaa6879cfd6af10f5b54b2ec7d549e1e",
+  "candidate_sha": "2fcdd67359b3dacbebdba9c3b154bc0d95d4d12d",
   "cli_analysis": {
-    "agent_messages": [],
+    "agent_messages": [
+      {
+        "author": null,
+        "recipient": null
+      }
+    ],
     "collab_tool_calls": [
       {
         "status": "in_progress",
@@ -12,17 +17,13 @@
         "tool": "wait"
       }
     ],
-    "errors": [
-      "error",
-      "turn.failed"
-    ],
+    "errors": [],
     "event_count": 6,
     "event_types": {
-      "error": 1,
-      "item.completed": 1,
+      "item.completed": 2,
       "item.started": 1,
       "thread.started": 1,
-      "turn.failed": 1,
+      "turn.completed": 1,
       "turn.started": 1
     },
     "function_call_outputs": [],
@@ -49,62 +50,55 @@
         "type": "item.completed"
       },
       {
-        "type": "error"
+        "item_name": null,
+        "item_namespace": null,
+        "item_status": null,
+        "item_type": "agent_message",
+        "type": "item.completed"
       },
       {
-        "type": "turn.failed"
+        "type": "turn.completed"
       }
     ],
-    "terminal_event": "turn.failed"
+    "terminal_event": "turn.completed"
   },
-  "cli_exit_code": 1,
-  "cli_terminal_message": "{\"error\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"detail\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"codexhub_error\": {\"code\": \"upstream.error\", \"message\": \"Tool compatibility failed at history: malformed_collaboration_result.\", \"source\": \"custom\", \"retryable\": false, \"details\": {\"error\": \"tool_compatibility_boundary\", \"type\": \"tool_compatibility_boundary\", \"status\": 400, \"failure_class\": \"permanent\"}}}",
+  "cli_exit_code": 0,
+  "cli_terminal_message": null,
   "cli_version": "codex-cli 0.146.1",
   "gateway_log_summary": {
-    "error_details": [
-      {
-        "code": null,
-        "details": null,
-        "event": "request_error",
-        "message": null
-      }
-    ],
-    "errors": [
-      "request_error"
-    ],
-    "event_count": 17,
+    "error_details": [],
+    "errors": [],
+    "event_count": 33,
     "event_types": {
-      "request_complete": 5,
-      "request_error": 1,
-      "request_start": 5,
-      "runtime_tool_compatibility_planned": 6
+      "request_complete": 11,
+      "request_start": 11,
+      "runtime_tool_compatibility_planned": 11
     },
     "fallback_count": 0,
     "has_v1_observation": false,
     "has_v2_observation": true
   },
-  "isolated_home_sha256": "4ec21717a5b35873b5e0f36f823316e5815ec8dd1307b47ab3f8d3d5d1b5289a",
+  "isolated_home_sha256": "8d9f1c4c523959e80ab592ecf088b2563a6755a5004ee0af7c49cfe7cc80ba92",
   "phase_observations": {
-    "errors": [
-      "error",
-      "turn.failed",
-      "request_error"
-    ],
+    "errors": [],
     "fallback_count": 0,
     "observed_namespaces": [
       "collaboration"
     ],
     "observed_tools": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
       "send_message",
       "spawn_agent",
       "wait_agent"
     ],
     "phases": {
-      "child_result_delivery": false,
-      "followup_task": false,
-      "interrupt_agent": false,
-      "list_agents": false,
-      "parent_completion": false,
+      "child_result_delivery": true,
+      "followup_task": true,
+      "interrupt_agent": true,
+      "list_agents": true,
+      "parent_completion": true,
       "send_message": true,
       "spawn_agent": true,
       "wait_agent": true
@@ -112,28 +106,29 @@
     "v1_namespace_seen": false,
     "v1_tools_seen": []
   },
-  "qualification_status": "failed",
+  "qualification_status": "passed",
   "root_cause_details": {
     "agent_type_injection": "The CLI's emitted collaboration.spawn_agent declaration omits the optional agent_type property.  The shim injects it before forwarding to the gateway so the boundary classifier accepts the request.  This injection is unrelated to the spawn execution failure.",
-    "child_persistence_strategy": "The fixture has the child complete its first turn with a collaboration.wait_agent function_call.  This keeps the child task alive without finalizing it, and the parent collects the wait result before attempting send_message.",
+    "child_persistence_strategy": "The fixture keeps the upstream child turn open until the parent enqueues a signal.  Non-final/interrupt signals (send_message, followup_task) make the child return collaboration.wait_agent, keeping the task alive.  The INTERRUPT signal makes the child finalize with a FINAL_ANSWER so wait_agent can collect the result.",
     "child_states_tested": [
-      "child returns wait_agent and completes its turn (idle but not finalized)",
       "child keeps the upstream turn open waiting for a parent signal",
-      "child returns a non-final MESSAGE acknowledging a send_message signal"
+      "child returns wait_agent after a send_message signal (stays alive)",
+      "child returns wait_agent after a followup_task signal (appears to be working)",
+      "child returns FINAL_ANSWER after an interrupt_agent signal"
     ],
     "ephemeral_thread_block": "With --ephemeral the CLI fails internally with 'collab spawn failed: no thread with id: <root_thread_id>'; removing --ephemeral allows spawn to succeed.",
     "fixture_contract_conformance": "The fixture's spawn_agent function_call response (namespace=collaboration, name=spawn_agent, arguments task_name+message, added/delta/done/completed events) matches the #392 V2 call contract.",
-    "full_six_tool_status": "attempted_not_yet_passing",
-    "send_message_blocker": "The CLI executes collaboration.send_message but records an empty string ('') as the function_call_output instead of the JSON null expected by the #392 V2 contract.  The next parent request containing this malformed send_message result is rejected by the gateway boundary classifier with 'Tool compatibility failed at history: malformed_collaboration_result'.",
+    "full_six_tool_status": "attempted",
+    "send_message_contract_resolution": "The real Codex CLI 0.146.1 emits an empty string ('') as the function_call_output for collaboration.send_message because the handler returns Rust's unit type.  CodexHub now normalizes that empty string to JSON null at the V2 boundary (src-python/collaboration_runtime_contract.py:validate_collaboration_result), which is the reversible, minimal fix needed to accept what the frozen client can actually produce.",
     "spawn_result_field": "The fixture originally returned task_path in the spawn_agent function_call_output; the #392 V2 contract requires task_name.  After switching to task_name the child identity is accepted."
   },
-  "root_cause_verdict": "harness_artifact_in_progress",
+  "root_cause_verdict": "harness_artifact_resolved",
   "route": {
-    "gateway_port": 58471,
+    "gateway_port": 60940,
     "selected_model": "custom/fixture-v2",
     "selected_provider": "custom",
-    "shim_port": 58477,
-    "upstream_fixture_port": 58472,
+    "shim_port": 60945,
+    "upstream_fixture_port": 60941,
     "upstream_provider_id": "custom"
   },
   "sanitization": {
@@ -146,6 +141,6 @@
   "shim_notes": [
     "CLI-facing shim synthesized an OpenAI-compatible /v1/models list because the candidate gateway serves the CodexHub catalog shape.",
     "The shim injected the optional agent_type property into the collaboration.spawn_agent tool declaration; the installed CLI 0.146.1 build omits it, causing the gateway boundary classifier to reject the request otherwise.",
-    "The current choreography is spawn_agent -> wait_agent -> send_message -> followup_task -> interrupt_agent -> wait_agent -> list_agents, with the child returning wait_agent on its first turn so the task stays alive."
+    "The full six-tool lifecycle choreography is spawn_agent -> send_message -> followup_task -> wait_agent -> interrupt_agent -> list_agents, with the child returning wait_agent for send/follow-up and FINAL_ANSWER for interrupt."
   ]
 }
