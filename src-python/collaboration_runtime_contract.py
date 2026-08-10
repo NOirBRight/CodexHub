@@ -436,8 +436,16 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
         raise CollaborationContractError("unknown_collaboration_function")
     if not isinstance(value, str):
         raise CollaborationContractError("collaboration_result_wire_type_invalid")
-    parsed = _json_object_or_value(value, "malformed_collaboration_result")
     schema = schemas[name]
+    # Void-result tools (send_message, followup_task in V2) emit an empty string
+    # from the real Codex CLI because their handlers return Rust's unit type.
+    # Treat that as the JSON null the contract expects: reversible normalization
+    # that keeps the wire value intact while accepting what the client can
+    # actually produce.
+    if schema is None and value == "":
+        parsed: Any = None
+    else:
+        parsed = _json_object_or_value(value, "malformed_collaboration_result")
     if (schema is None and parsed is not None) or (
         isinstance(schema, Mapping) and not _matches_schema(parsed, schema)
     ):
