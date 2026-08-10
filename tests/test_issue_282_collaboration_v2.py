@@ -496,6 +496,57 @@ def test_v2_lifecycle_ambiguity_and_schema_drift_fail_closed(
     assert caught.value.surface == "history"
 
 
+def test_v2_void_result_empty_string_is_normalized_to_null() -> None:
+    """Real Codex CLI 0.146.1 emits '' for void-result V2 handlers.
+
+    The contract expects JSON null, so the boundary should accept the empty
+    string as a reversible normalization rather than rejecting it as
+    malformed_collaboration_result.
+    """
+    from collaboration_runtime_contract import validate_collaboration_result
+
+    validate_collaboration_result(COLLABORATION_V2, "send_message", "")
+    validate_collaboration_result(COLLABORATION_V2, "followup_task", "")
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
+    history = _v2_history()
+    # followup_task result is at index 1, send_message result at index 7.
+    history[1]["output"] = ""
+    history[7]["output"] = ""
+
+    plan = _v2_plan(native=native)
+    payload = {
+        "tool_choice": "auto",
+        "tools": [_declaration(COLLABORATION_V2)],
+        "input": history,
+    }
+
+    encoded = plan.encode_payload(payload)
+    decoded = plan.decode_payload({"input": encoded["input"]})
+
+    assert decoded["input"] == history
+
+
+def test_v2_send_message_non_empty_result_still_fails_closed() -> None:
+    history = _v2_history()
+    # send_message result is at index 7.
+    history[7]["output"] = json.dumps({"unexpected": True})
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        _v2_plan().encode_payload(
+            {
+                "tool_choice": "auto",
+                "tools": [_declaration(COLLABORATION_V2)],
+                "input": history,
+            }
+        )
+
+    assert caught.value.classification == "collaboration_result_schema_mismatch"
+    assert caught.value.surface == "history"
+
+
 def test_v2_adapted_stream_restores_all_six_calls_and_preserves_boundaries() -> None:
     plan = _v2_plan()
     stream = plan.new_stream()
