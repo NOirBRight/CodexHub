@@ -74,6 +74,18 @@ export function ProviderDetail({
     setEndpointTestState(availableFormats.length ? "success" : "idle");
   }, [provider.id, provider.available_upstream_formats]);
 
+  // Keep the editor model list in sync with the persisted provider so that
+  // successful discovery is reflected immediately and a stale draft cannot be
+  // saved back over the discovered models.
+  useEffect(() => {
+    setDraft((current) => {
+      if (current.id !== normalizedProvider.id || current.models === normalizedProvider.models) {
+        return current;
+      }
+      return { ...current, models: normalizedProvider.models };
+    });
+  }, [normalizedProvider.id, normalizedProvider.models]);
+
   useEffect(() => {
     if (probeResult) {
       setEndpointTestState(probeResult.model_required ? "error" : "success");
