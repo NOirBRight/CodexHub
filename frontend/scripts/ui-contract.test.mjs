@@ -2713,7 +2713,8 @@ test("provider discovery updates the selected provider and reports progress", as
   const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
-  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.provider,\s*models: mergeDiscoveredModels\(provider\.models, models\),\s*\}/s);
+  assert.match(providersSource, /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
+  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(persistedProvider\.models, models\),\s*\}/s);
   assert.match(providersSource, /setProviders\(nextProviders\)/);
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
 });
