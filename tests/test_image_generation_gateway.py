@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import socket
 import threading
 from contextlib import contextmanager
@@ -38,6 +39,43 @@ class _ImageUpstreamHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+class _CancellationResponse:
+    status = 200
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": "30",
+    }
+
+    def __init__(self, read_outcome: str) -> None:
+        self.read_outcome = read_outcome
+        self.read_started = threading.Event()
+        self.closed = threading.Event()
+
+    def __enter__(self) -> "_CancellationResponse":
+        admission = codex_proxy._active_gateway_request()
+        assert admission is not None
+        admission.attach_upstream_transport(self)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+        self.close()
+        return False
+
+    def read(self) -> bytes:
+        self.read_started.set()
+        assert self.closed.wait(timeout=2)
+        if self.read_outcome == "incomplete":
+            raise http.client.IncompleteRead(b'{"partial":', 20)
+        if self.read_outcome == "oserror":
+            raise OSError("fixture cancellation closed upstream")
+        if self.read_outcome == "generic":
+            raise RuntimeError("fixture cancellation closed upstream")
+        return b'{"partial":"must-not-relay"}'
+
+    def close(self) -> None:
+        self.closed.set()
 
 
 @contextmanager
@@ -143,6 +181,76 @@ def test_image_generation_relays_official_raw_contract(
     assert "local-client-key" not in str(captured)
     assert "session-id" not in captured["headers"]
     assert "x-client-request-id" not in captured["headers"]
+
+
+@pytest.mark.parametrize("read_outcome", ["partial", "incomplete", "oserror", "generic"])
+def test_image_generation_cancellation_during_upstream_body_read_uses_shutdown_outcome(
+    read_outcome: str,
+) -> None:
+    upstream_response = _CancellationResponse(read_outcome)
+    result: dict[str, object] = {}
+
+    with (
+        patch.object(
+            codex_proxy,
+            "official_upstream",
+            return_value={
+                "name": "official",
+                "base_url": "https://controlled.invalid/v1",
+                "auth": "codex_auth",
+            },
+        ),
+        patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
+        patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"),
+        patch.object(codex_proxy, "codex_account_id", return_value="synthetic-account-id"),
+        patch.object(codex_proxy, "_open_upstream_response", return_value=upstream_response),
+        _http_server(codex_proxy.CodexProxyHandler) as gateway,
+    ):
+        request_thread = threading.Thread(
+            target=lambda: result.update(
+                zip(
+                    ("status", "headers", "body"),
+                    _request_image_generation(gateway, b'{"fixture":"cancel"}'),
+                )
+            ),
+            daemon=True,
+        )
+        request_thread.start()
+        assert upstream_response.read_started.wait(timeout=2)
+        gateway.gateway_shutdown_controller.close_admission()  # type: ignore[attr-defined]
+        request_thread.join(timeout=3)
+
+    assert request_thread.is_alive() is False
+    assert result["status"] == 503
+    assert result["headers"]["connection"] == "close"  # type: ignore[index]
+    payload = json.loads(result["body"])  # type: ignore[arg-type]
+    assert payload["type"] == codex_proxy.USER_REQUESTED_SHUTDOWN_OUTCOME
+    assert payload["error"] == codex_proxy.USER_REQUESTED_SHUTDOWN_OUTCOME
+    assert b"must-not-relay" not in result["body"]  # type: ignore[operator]
+
+
+def test_image_generation_official_lookup_failure_completes_admission_and_returns_error() -> None:
+    with (
+        patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
+        patch.object(
+            codex_proxy,
+            "official_upstream",
+            side_effect=RuntimeError("controlled routing config failure"),
+        ),
+        _http_server(codex_proxy.CodexProxyHandler) as gateway,
+    ):
+        status, headers, body = _request_image_generation(
+            gateway,
+            b'{"fixture":"lookup-failure"}',
+        )
+        admission_drained = gateway.gateway_shutdown_controller.wait_for_active_requests()  # type: ignore[attr-defined]
+
+    assert status == 500
+    assert headers["connection"] == "close"
+    payload = json.loads(body)
+    assert payload["error"] == "RuntimeError"
+    assert "controlled routing config failure" in payload["detail"]
+    assert admission_drained is True
 
 
 def test_unsupported_keepalive_post_returns_one_404_closes_and_does_not_log_body() -> None:

@@ -18592,6 +18592,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
+
+        def send_user_requested_shutdown() -> None:
+            _record_user_requested_shutdown()
+            self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
+
         if not _local_request_authorized(self.headers, request_context):
             write_proxy_event(
                 "request_error",
@@ -18613,14 +18618,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
         if admission is None:
-            self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
+            send_user_requested_shutdown()
             return
         previous_admission = _activate_gateway_request(admission)
-        upstream = official_upstream()
-        upstream_name = str(upstream["name"])
+        upstream_name = "official"
         status = 500
         try:
             admission.raise_if_cancelled()
+            upstream = official_upstream()
+            upstream_name = str(upstream["name"])
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
@@ -18707,8 +18713,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 **request_context,
             )
         except GatewayUserRequestedShutdown:
-            self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
+            send_user_requested_shutdown()
         except (IncompleteRead, OSError, URLError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             write_proxy_event(
                 "request_error",
@@ -18728,6 +18737,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 {"error": type(exc).__name__, "detail": detail},
             )
         except Exception as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
             detail = safe_upstream_error_detail(exc)
             logger.error(
                 "unexpected image generation proxy error request_id=%s detail=%s",
@@ -20756,6 +20768,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     def _relay_raw_upstream_response(self, response: Any, upstream_name: str) -> int:
         status = getattr(response, "status", None) or getattr(response, "code", 502)
         body = response.read()
+        admission = _active_gateway_request()
+        if admission is not None:
+            admission.raise_if_cancelled()
         self.send_response(status)
         for key, value in _filtered_response_headers(
             response.headers,
