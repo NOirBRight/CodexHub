@@ -631,6 +631,58 @@ def test_v2_request_history_requires_string_call_and_result_payloads(
     assert caught.value.surface == "history"
 
 
+@pytest.mark.parametrize(
+    ("mutate", "classification"),
+    [
+        (
+            lambda history: history.insert(0, history.pop(1)),
+            "unknown_call_identity",
+        ),
+        (
+            lambda history: history[1].__setitem__("call_id", "orphan-call"),
+            "unknown_call_identity",
+        ),
+        (
+            lambda history: history.append(copy.deepcopy(history[1])),
+            "duplicate_call_identity",
+        ),
+        (
+            lambda history: history[1].__setitem__("output", "{}"),
+            "collaboration_result_schema_mismatch",
+        ),
+        (
+            lambda history: history[1].__setitem__("output", {}),
+            "collaboration_result_wire_type_invalid",
+        ),
+    ],
+    ids=[
+        "result-before-call",
+        "orphan-result",
+        "duplicate-result",
+        "invalid-result-schema",
+        "invalid-result-wire-type",
+    ],
+)
+def test_v2_history_results_are_owned_and_validated_fail_closed(
+    mutate,
+    classification: str,
+) -> None:
+    history = _v2_history()[:2]
+    mutate(history)
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        _v2_plan().encode_payload(
+            {
+                "tool_choice": "auto",
+                "tools": [_declaration(COLLABORATION_V2)],
+                "input": history,
+            }
+        )
+
+    assert caught.value.classification == classification
+    assert caught.value.surface == "history"
+
+
 def _agent_message_stream_event(
     event_type: str,
     item: dict[str, object],
@@ -879,4 +931,163 @@ def test_v2_agent_message_stream_rejects_broken_lifecycle(events, classification
             stream.decode_events_for_event(event)
 
     assert caught.value.classification == classification
+    assert caught.value.surface == "stream"
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_stream_call_lifecycle_reconciles_terminal_identity_and_order(native: bool) -> None:
+    plan = _v2_plan(native=native)
+    stream = plan.new_stream()
+    arguments = json.dumps(V2_ARGUMENTS["followup_task"], separators=(",", ":"))
+    name = "followup_task" if native else plan.entries[0].aliases[0]
+    item = {
+        "type": "function_call",
+        "id": "v2-stream-item",
+        "call_id": "v2-stream-call",
+        "name": name,
+        "arguments": "",
+        "status": "in_progress",
+    }
+    if native:
+        item["namespace"] = "collaboration"
+    stream.decode_events_for_event(
+        {"type": "response.output_item.added", "output_index": 0, "item": item}
+    )
+    stream.decode_events_for_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": item["id"],
+            "output_index": 0,
+            "arguments": arguments,
+        }
+    )
+    done_item = {**item, "arguments": arguments, "status": "completed"}
+    stream.decode_events_for_event(
+        {"type": "response.output_item.done", "output_index": 0, "item": done_item}
+    )
+
+    terminal = stream.decode_events_for_event(
+        {
+            "type": "response.completed",
+            "response": {"output": [done_item]},
+        }
+    )
+    assert terminal[0]["response"]["output"][0]["id"] == item["id"]
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_stream_rejects_output_index_drift_and_terminal_shape_changes(native: bool) -> None:
+    def make_stream() -> tuple[object, dict[str, object], str]:
+        plan = _v2_plan(native=native)
+        stream = plan.new_stream()
+        arguments = json.dumps(V2_ARGUMENTS["followup_task"], separators=(",", ":"))
+        name = "followup_task" if native else plan.entries[0].aliases[0]
+        item = {
+            "type": "function_call",
+            "id": "v2-stream-item",
+            "call_id": "v2-stream-call",
+            "name": name,
+            "arguments": "",
+            "status": "in_progress",
+        }
+        if native:
+            item["namespace"] = "collaboration"
+        stream.decode_events_for_event(
+            {"type": "response.output_item.added", "output_index": 0, "item": item}
+        )
+        stream.decode_events_for_event(
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": item["id"],
+                "output_index": 0,
+                "arguments": arguments,
+            }
+        )
+        return stream, {**item, "arguments": arguments, "status": "completed"}, arguments
+
+    stream, done_item, _arguments = make_stream()
+    with pytest.raises(ToolCompatibilityError) as caught:
+        stream.decode_events_for_event(
+            {"type": "response.output_item.done", "output_index": 1, "item": done_item}
+        )
+    assert caught.value.classification == "ambiguous_native_identity"
+
+    stream, done_item, _arguments = make_stream()
+    stream.decode_events_for_event(
+        {"type": "response.output_item.done", "output_index": 0, "item": done_item}
+    )
+    with pytest.raises(ToolCompatibilityError) as caught:
+        stream.decode_events_for_event(
+            {
+                "type": "response.completed",
+                "response": {"output": [{**done_item, "extra": "invalid"}]},
+            }
+        )
+    assert caught.value.classification == "collaboration_call_fields_invalid"
+
+
+def test_v2_stream_does_not_create_v1_worker_binding_state() -> None:
+    context: dict[str, object] = {}
+    body = _request(COLLABORATION_V2)
+    codex_proxy.compatible_request_body(
+        json.dumps(body).encode(),
+        _responses_upstream(native_namespace=False),
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    alias = context["_runtime_tool_compatibility_plan"].entries[0].aliases[0]
+    added = {
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "type": "function_call",
+            "id": "v2-delta-item",
+            "call_id": "v2-delta-call",
+            "name": alias,
+            "arguments": "",
+            "status": "in_progress",
+        },
+    }
+    codex_proxy.compatible_sse_line(
+        ("data: " + json.dumps(added) + "\n").encode(),
+        "custom_endpoint",
+        event_context=context,
+    )
+    event = {
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "item_id": "v2-delta-item",
+        "delta": "{",
+    }
+    # The argument delta is intentionally incomplete; it still must not
+    # initialize the V1 worker stream scheduler before V2 is resolved.
+    codex_proxy.compatible_sse_line(
+        ("data: " + json.dumps(event) + "\n").encode(),
+        "custom_endpoint",
+        event_context=context,
+    )
+    assert "_worker_stream_binding_state" not in context
+    assert "_subagent_state" not in context
+
+
+def test_agent_message_requires_an_exact_selected_v2_contract() -> None:
+    plain_plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "plain", "parameters": {}}],
+        selected_protocol="responses_structured",
+        tool_choice="auto",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="agent-message-without-v2",
+    )
+    item = _v2_history()[-1]
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        plain_plan.decode_payload({"input": [item]})
+    assert caught.value.classification == "unknown_native_identity"
+    assert caught.value.surface == "history"
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        plain_plan.new_stream().decode_events_for_event(
+            {"type": "response.output_item.added", "output_index": 0, "item": item}
+        )
+    assert caught.value.classification == "unknown_native_identity"
     assert caught.value.surface == "stream"

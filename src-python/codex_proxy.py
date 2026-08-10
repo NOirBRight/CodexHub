@@ -12965,13 +12965,18 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
-    _remember_worker_stream_event(payload, event_context)
     collaboration_protocol = _resolve_collaboration_boundary(
         payload,
         event_context,
         surface="stream",
     )
+    if collaboration_protocol is None and isinstance(event_context, Mapping):
+        selected_protocol = event_context.get("collaboration_protocol")
+        if selected_protocol in {_COLLABORATION_V1, _COLLABORATION_V2}:
+            collaboration_protocol = selected_protocol
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+    if collaboration_protocol != _COLLABORATION_V2:
+        _remember_worker_stream_event(payload, event_context)
     _raise_on_invalid_worker_stream_event(
         payload,
         event_context,

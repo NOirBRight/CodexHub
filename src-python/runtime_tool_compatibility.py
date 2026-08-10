@@ -1193,15 +1193,90 @@ class ToolCompatibilityPlan:
             surface=surface,
         ) from error
 
+    def _validate_collaboration_v2_call_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        surface: str,
+        allow_incomplete_arguments: bool = False,
+    ) -> tuple[str, str]:
+        if (
+            item.get("type") != "function_call"
+            or item.get("namespace") != "collaboration"
+            or item.get("name") not in _V2_NAMES
+        ):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_native_identity",
+                surface=surface,
+            )
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_item_identity",
+                surface=surface,
+            )
+        allowed_fields = {
+            "type",
+            "id",
+            "call_id",
+            "namespace",
+            "name",
+            "arguments",
+        }
+        if surface in {"response", "stream"}:
+            allowed_fields.add("status")
+        valid_field_sets = [allowed_fields]
+        if "status" in allowed_fields:
+            valid_field_sets.append(allowed_fields - {"status"})
+        if set(item) not in valid_field_sets:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "collaboration_call_fields_invalid",
+                surface=surface,
+            )
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_call_identity",
+                surface=surface,
+            )
+        arguments = item.get("arguments")
+        if allow_incomplete_arguments and arguments in {None, ""}:
+            return item_id, call_id
+        try:
+            validate_collaboration_arguments(
+                COLLABORATION_V2,
+                str(item["name"]),
+                arguments,
+            )
+        except CollaborationContractError as exc:
+            self._raise_collaboration_contract(exc, surface=surface)
+        return item_id, call_id
+
     def _validate_collaboration_v2_items(
         self,
         items: Any,
         *,
         surface: str,
     ) -> None:
-        if self._collaboration_v2_entry() is None or not isinstance(items, list):
+        if not isinstance(items, list):
+            return
+        if self._collaboration_v2_entry() is None:
+            if any(
+                isinstance(item, Mapping) and item.get("type") == "agent_message"
+                for item in items
+            ):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface=surface,
+                )
             return
         calls: dict[str, str] = {}
+        seen_result_call_ids: set[str] = set()
         seen_item_ids: set[str] = set()
         for item in items:
             if not isinstance(item, Mapping):
@@ -1218,32 +1293,18 @@ class ToolCompatibilityPlan:
                 and item.get("namespace") == "collaboration"
                 and item.get("name") in _V2_NAMES
             ):
-                item_id = item.get("id")
-                if not isinstance(item_id, str) or not item_id:
+                item_id, call_id = self._validate_collaboration_v2_call_item(
+                    item,
+                    surface=surface,
+                )
+                if call_id in calls:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
-                        "missing_item_identity",
+                        "duplicate_call_identity",
                         surface=surface,
                     )
-                allowed_fields = {
-                    "type",
-                    "id",
-                    "call_id",
-                    "namespace",
-                    "name",
-                    "arguments",
-                }
-                if surface in {"response", "stream"}:
-                    allowed_fields.add("status")
-                valid_field_sets = [allowed_fields]
-                if "status" in allowed_fields:
-                    valid_field_sets.append(allowed_fields - {"status"})
-                if set(item) not in valid_field_sets:
-                    raise ToolCompatibilityError(
-                        "tool_compatibility_boundary",
-                        "collaboration_call_fields_invalid",
-                        surface=surface,
-                    )
+                calls[call_id] = str(item["name"])
+            elif item_type == "function_call_output":
                 call_id = item.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     raise ToolCompatibilityError(
@@ -1251,23 +1312,12 @@ class ToolCompatibilityPlan:
                         "missing_call_identity",
                         surface=surface,
                     )
-                if call_id in calls:
+                if call_id not in calls:
                     raise ToolCompatibilityError(
                         "tool_compatibility_boundary",
-                        "duplicate_call_identity",
+                        "unknown_call_identity",
                         surface=surface,
                     )
-                name = str(item["name"])
-                try:
-                    validate_collaboration_arguments(
-                        COLLABORATION_V2,
-                        name,
-                        item.get("arguments"),
-                    )
-                except CollaborationContractError as exc:
-                    self._raise_collaboration_contract(exc, surface=surface)
-                calls[call_id] = name
-            elif item_type == "function_call_output" and item.get("call_id") in calls:
                 item_id = item.get("id")
                 if not isinstance(item_id, str) or not item_id:
                     raise ToolCompatibilityError(
@@ -1281,14 +1331,21 @@ class ToolCompatibilityPlan:
                         "collaboration_result_fields_invalid",
                         surface=surface,
                     )
+                if call_id in seen_result_call_ids:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_call_identity",
+                        surface=surface,
+                    )
                 try:
                     validate_collaboration_result(
                         COLLABORATION_V2,
-                        calls[str(item["call_id"])],
+                        calls[call_id],
                         item.get("output"),
                     )
                 except CollaborationContractError as exc:
                     self._raise_collaboration_contract(exc, surface=surface)
+                seen_result_call_ids.add(call_id)
             else:
                 continue
             if not isinstance(item_id, str) or not item_id:
@@ -3234,6 +3291,11 @@ class CompatibilityStreamState:
         self._agent_message_added_order: list[str] = []
         self._agent_message_done: set[str] = set()
         self._agent_message_done_order: list[str] = []
+        self._collaboration_v2_calls: dict[str, dict[str, Any]] = {}
+        self._collaboration_v2_output_indices: dict[str, int] = {}
+        self._collaboration_v2_added_order: list[str] = []
+        self._collaboration_v2_done: set[str] = set()
+        self._collaboration_v2_done_order: list[str] = []
         self._terminal = False
 
     @property
@@ -3656,12 +3718,16 @@ class CompatibilityStreamState:
         agent_message_incomplete = (
             set(self._agent_message_pending) - self._agent_message_done
         )
+        collaboration_v2_incomplete = (
+            set(self._collaboration_v2_calls) - self._collaboration_v2_done
+        )
         if (
             incomplete
             or native_incomplete
             or opaque_incomplete
             or search_incomplete
             or agent_message_incomplete
+            or collaboration_v2_incomplete
         ):
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
@@ -3677,12 +3743,104 @@ class CompatibilityStreamState:
             )
         return output_index
 
+    @staticmethod
+    def _collaboration_v2_output_index(event: Mapping[str, Any]) -> int:
+        output_index = event.get("output_index")
+        if type(output_index) is not int or output_index < 0:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        return output_index
+
+    def _record_collaboration_v2_added(
+        self,
+        item_id: str,
+        item: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> None:
+        if item_id in self._collaboration_v2_calls:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_item_identity",
+                surface="stream",
+            )
+        output_index = self._collaboration_v2_output_index(event)
+        if (
+            output_index in self._collaboration_v2_output_indices.values()
+            or (
+                self._collaboration_v2_added_order
+                and output_index
+                <= self._collaboration_v2_output_indices[
+                    self._collaboration_v2_added_order[-1]
+                ]
+            )
+        ):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        self._collaboration_v2_calls[item_id] = _copy_mapping(item)
+        self._collaboration_v2_output_indices[item_id] = output_index
+        self._collaboration_v2_added_order.append(item_id)
+
+    def _validate_collaboration_v2_stream_call(
+        self,
+        item_id: str,
+        item: Mapping[str, Any],
+        *,
+        surface: str = "stream",
+    ) -> dict[str, Any]:
+        canonical = _copy_mapping(item)
+        record = self.plan.registry.record_for_alias(canonical.get("name"))
+        if record is not None and record.version == "v2" and record.family == NAMESPACE:
+            canonical, _record, _changed = self._check_alias_in_item(
+                canonical,
+                allow_incomplete=False,
+            )
+        self.plan._validate_collaboration_v2_call_item(
+            canonical,
+            surface=surface,
+        )
+        expected = self._collaboration_v2_calls.get(item_id)
+        if expected is None:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "missing_stream_identity",
+                surface=surface,
+            )
+        for key in ("id", "call_id", "namespace", "name"):
+            if canonical.get(key) != expected.get(key):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "ambiguous_native_identity",
+                    surface=surface,
+                )
+        return canonical
+
+    def _validate_collaboration_v2_event_index(
+        self,
+        item_id: str,
+        event: Mapping[str, Any],
+    ) -> None:
+        output_index = self._collaboration_v2_output_index(event)
+        expected_output_index = self._collaboration_v2_output_indices.get(item_id)
+        if expected_output_index is None or output_index != expected_output_index:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+
     def _validate_terminal_native_output(self, response: Mapping[str, Any]) -> None:
         output = response.get("output")
         required_native_ids = {
             item_id
             for item_id in self._native_pending
         }
+        required_collaboration_v2_ids = set(self._collaboration_v2_calls)
         required_adapter_ids = set(self._pending) | set(self._adapter_wire_identities)
         required_agent_message_ids = set(self._agent_message_pending)
         if output is None:
@@ -3697,13 +3855,19 @@ class CompatibilityStreamState:
                 )
             return
         if output == []:
-            if required_native_ids or required_adapter_ids or required_agent_message_ids:
+            if (
+                required_native_ids
+                or required_collaboration_v2_ids
+                or required_adapter_ids
+                or required_agent_message_ids
+            ):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
             return
         if not isinstance(output, list):
             raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_event", surface="stream")
         seen_output_ids: set[str] = set()
         terminal_agent_message_order: list[str] = []
+        terminal_collaboration_v2_order: list[str] = []
         for output_index, item in enumerate(output):
             if not isinstance(item, Mapping):
                 continue
@@ -3740,6 +3904,86 @@ class CompatibilityStreamState:
                         surface="stream",
                     )
                 terminal_agent_message_order.append(item_id)
+                continue
+            collaboration_v2_record = None
+            if item_id is not None:
+                collaboration_v2_record = self._collaboration_v2_calls.get(item_id)
+            alias_record = self.plan.registry.record_for_alias(item.get("name"))
+            is_collaboration_v2_item = (
+                collaboration_v2_record is not None
+                or (
+                    item.get("type") == "function_call"
+                    and (
+                        (
+                            item.get("namespace") == "collaboration"
+                            and item.get("name") in _V2_NAMES
+                        )
+                        or (
+                            alias_record is not None
+                            and alias_record.version == "v2"
+                            and alias_record.family == NAMESPACE
+                        )
+                    )
+                )
+            )
+            if is_collaboration_v2_item:
+                # Terminal output is not allowed to establish a new V2 call.
+                # The call must have been established by ``output_item.added``
+                # and completed by ``output_item.done`` first.
+                canonical = self._validate_collaboration_v2_stream_call(
+                    item_id or "",
+                    item,
+                )
+                if item_id is None or collaboration_v2_record is None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_stream_identity",
+                        surface="stream",
+                    )
+                expected_output_index = self._collaboration_v2_output_indices.get(item_id)
+                if expected_output_index is None or output_index != expected_output_index:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                if item_id not in self._collaboration_v2_done:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "incomplete_stream",
+                        surface="stream",
+                    )
+                if (
+                    terminal_collaboration_v2_order
+                    and self._collaboration_v2_output_indices[
+                        terminal_collaboration_v2_order[-1]
+                    ]
+                    >= expected_output_index
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                )
+                expected_payload = self._wire_payloads.get(item_id)
+                payload_owner = alias_record
+                if payload_owner is None:
+                    payload_owner = self._native_entry_for_item(canonical)
+                if payload_owner is None:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                if expected_payload is not None and self._semantic_wire_payload(
+                    canonical, payload_owner
+                ) != expected_payload:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                terminal_collaboration_v2_order.append(item_id)
                 continue
             pending = self._native_pending.get(item_id) if item_id is not None else None
             if pending is None:
@@ -3941,11 +4185,20 @@ class CompatibilityStreamState:
                     surface="stream",
                 )
         missing = (
-            required_native_ids | required_adapter_ids | required_agent_message_ids
+            required_native_ids
+            | required_collaboration_v2_ids
+            | required_adapter_ids
+            | required_agent_message_ids
         ) - seen_output_ids
         if missing:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         if terminal_agent_message_order != self._agent_message_added_order:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+                surface="stream",
+            )
+        if terminal_collaboration_v2_order != self._collaboration_v2_added_order:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
                 "ambiguous_native_identity",
@@ -3969,6 +4222,12 @@ class CompatibilityStreamState:
             return self._decode_hosted_event(result, hosted_event_spec)
         item = result.get("item")
         if isinstance(item, Mapping) and item.get("type") == "agent_message":
+            if self.plan._collaboration_v2_entry() is None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "unknown_native_identity",
+                    surface="stream",
+                )
             self.plan._validate_collaboration_v2_items([item], surface="stream")
             item_id = self._item_id(item)
             if item_id is None:
@@ -4098,6 +4357,17 @@ class CompatibilityStreamState:
                     record,
                     self._native_wire_identity(item),
                 )
+                if record.version == "v2" and record.family == NAMESPACE:
+                    self.plan._validate_collaboration_v2_call_item(
+                        decoded_item,
+                        surface="stream",
+                        allow_incomplete_arguments=True,
+                    )
+                    self._record_collaboration_v2_added(
+                        item_id,
+                        decoded_item,
+                        result,
+                    )
                 result["item"] = decoded_item
                 return result
             native_entry = self._native_entry_for_item(item)
@@ -4135,10 +4405,18 @@ class CompatibilityStreamState:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                 if call_id in self._seen_call_ids:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_call_identity", surface="stream")
+                if native_entry.version == "v2" and native_entry.family == NAMESPACE:
+                    self.plan._validate_collaboration_v2_call_item(
+                        item,
+                        surface="stream",
+                        allow_incomplete_arguments=True,
+                    )
                 self._seen_item_ids.add(item_id)
                 self._seen_call_ids.add(call_id)
                 self._native_pending[item_id] = (call_id, native_entry)
                 self._native_wire_identities[item_id] = self._native_wire_identity(item)
+                if native_entry.version == "v2" and native_entry.family == NAMESPACE:
+                    self._record_collaboration_v2_added(item_id, item, result)
                 result["item"] = decoded_item
             elif item.get("type") == "custom_tool_call":
                 if self.plan._omitted_response_entry_for_item(item) is not None:
@@ -4210,6 +4488,8 @@ class CompatibilityStreamState:
                         "ambiguous_call_identity",
                         surface="stream",
                     )
+                if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
+                    self._validate_collaboration_v2_event_index(item_id, result)
                 delta = result.get("delta")
                 if not isinstance(delta, str):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_delta", surface="stream")
@@ -4246,6 +4526,8 @@ class CompatibilityStreamState:
             pending = self._pending_for(result)
             if isinstance(result.get("call_id"), str) and result.get("call_id") != pending.call_id:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
+            if pending.record.version == "v2" and pending.record.family == NAMESPACE:
+                self._validate_collaboration_v2_event_index(item_id, result)
             delta = result.get("delta")
             if not isinstance(delta, str):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_stream_delta", surface="stream")
@@ -4270,6 +4552,8 @@ class CompatibilityStreamState:
                         "ambiguous_call_identity",
                         surface="stream",
                     )
+                if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
+                    self._validate_collaboration_v2_event_index(item_id, result)
                 if item_id in self._native_delta_done:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_stream_done", surface="stream")
                 arguments = result.get("arguments", result.get("input"))
@@ -4278,6 +4562,15 @@ class CompatibilityStreamState:
                 fragments = self._native_fragments.get(item_id, [])
                 if fragments and "".join(fragments) != arguments:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+                if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
+                    complete_item = _copy_mapping(
+                        self._collaboration_v2_calls.get(item_id, {})
+                    )
+                    complete_item["arguments"] = arguments
+                    self._validate_collaboration_v2_stream_call(
+                        item_id,
+                        complete_item,
+                    )
                 payload_item = (
                     {"type": "custom_tool_call", "input": result.get("input", arguments)}
                     if expected_entry.family == CUSTOM_FREEFORM
@@ -4326,6 +4619,8 @@ class CompatibilityStreamState:
             pending = self._pending_for(result)
             if isinstance(result.get("call_id"), str) and result.get("call_id") != pending.call_id:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
+            if pending.record.version == "v2" and pending.record.family == NAMESPACE:
+                self._validate_collaboration_v2_event_index(item_id, result)
             if pending.delta_done:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_stream_done", surface="stream")
             arguments = result.get("arguments", result.get("input"))
@@ -4335,6 +4630,18 @@ class CompatibilityStreamState:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
             if not arguments:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+            if pending.record.version == "v2" and pending.record.family == NAMESPACE:
+                complete_item = {
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": pending.call_id,
+                    "name": pending.record.alias,
+                    "arguments": arguments,
+                }
+                self._validate_collaboration_v2_stream_call(
+                    item_id,
+                    complete_item,
+                )
             pending.delta_done = True
             if pending.record.family == CUSTOM_FREEFORM:
                 envelope = _json_object_exact(arguments)
@@ -4455,6 +4762,36 @@ class CompatibilityStreamState:
                             "ambiguous_native_identity",
                             surface="stream",
                         )
+                    is_v2_call = (
+                        expected_entry.version == "v2"
+                        and expected_entry.family == NAMESPACE
+                    )
+                    if is_v2_call:
+                        output_index = self._collaboration_v2_output_index(result)
+                        expected_output_index = self._collaboration_v2_output_indices.get(
+                            native_item_id
+                        )
+                        if (
+                            expected_output_index is None
+                            or output_index != expected_output_index
+                            or native_item_id in self._collaboration_v2_done
+                            or (
+                                self._collaboration_v2_done_order
+                                and output_index
+                                <= self._collaboration_v2_output_indices[
+                                    self._collaboration_v2_done_order[-1]
+                                ]
+                            )
+                        ):
+                            raise ToolCompatibilityError(
+                                "tool_compatibility_boundary",
+                                "ambiguous_native_identity",
+                                surface="stream",
+                            )
+                        self._validate_collaboration_v2_stream_call(
+                            native_item_id,
+                            item,
+                        )
                     if expected_entry.family == SELECTED_PROVIDER_HOSTED:
                         hosted_entry = self._native_entry_for_item(item)
                         if hosted_entry is None or hosted_entry is not expected_entry:
@@ -4487,6 +4824,9 @@ class CompatibilityStreamState:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
                     self._wire_payloads[native_item_id] = payload
                     self._native_done.add(native_item_id)
+                    if is_v2_call:
+                        self._collaboration_v2_done.add(native_item_id)
+                        self._collaboration_v2_done_order.append(native_item_id)
                     return result
                 native_entry = self._native_entry_for_item(item)
                 if native_entry is not None:
@@ -4575,11 +4915,41 @@ class CompatibilityStreamState:
                 decoded_item, _record, _changed = self.plan._decode_call(item, allow_incomplete=False)
             else:
                 decoded_item, _record, _changed = self._check_alias_in_item(item, allow_incomplete=False)
+            is_v2_call = pending.record.version == "v2" and pending.record.family == NAMESPACE
+            if is_v2_call:
+                output_index = self._collaboration_v2_output_index(result)
+                expected_output_index = self._collaboration_v2_output_indices.get(
+                    pending.item_id
+                )
+                if (
+                    expected_output_index is None
+                    or output_index != expected_output_index
+                    or pending.item_id in self._collaboration_v2_done
+                    or (
+                        self._collaboration_v2_done_order
+                        and output_index
+                        <= self._collaboration_v2_output_indices[
+                            self._collaboration_v2_done_order[-1]
+                        ]
+                    )
+                ):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                decoded_item = self._validate_collaboration_v2_stream_call(
+                    pending.item_id,
+                    decoded_item,
+                )
             pending.item_done = True
             payload = self._semantic_wire_payload(item, pending.record)
             if pending.item_id in self._wire_payloads and self._wire_payloads[pending.item_id] != payload:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="stream")
             self._wire_payloads[pending.item_id] = payload
+            if is_v2_call:
+                self._collaboration_v2_done.add(pending.item_id)
+                self._collaboration_v2_done_order.append(pending.item_id)
             result["item"] = decoded_item
             return result
         if isinstance(item, Mapping) and self.plan.registry.looks_like_alias(item.get("name")):
