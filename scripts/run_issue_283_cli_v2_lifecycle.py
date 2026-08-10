@@ -11,7 +11,7 @@ files, tasks, or credentials are read or modified.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
 import copy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -231,8 +231,20 @@ def _extract_child_task_name(body: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _agent_message_text(item: Mapping[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", "")) for part in content if isinstance(part, Mapping)
+        )
+    if isinstance(content, str):
+        return content
+    return ""
+
+
 class _FixtureServer(ThreadingHTTPServer):
     daemon_threads = True
+    CHILD_WAIT_TIMEOUT = 30.0
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _FixtureHandler)
@@ -243,68 +255,202 @@ class _FixtureServer(ThreadingHTTPServer):
         self.child_thread: str | None = None
         self.root_request_count = 0
         self.child_request_count = 0
-        self.child_states: dict[str, dict[str, int]] = {}
+        # Per-child persistent state for the open-connection choreography.
+        self.child_loops: dict[str, dict[str, Any]] = {}
+        self.task_to_child: dict[str, str] = {}
 
-    def _child_state(self, thread_id: str) -> dict[str, int]:
+    def _register_child(self, thread_id: str, task_name: str) -> dict[str, Any]:
         with self.lock:
-            if thread_id not in self.child_states:
-                self.child_states[thread_id] = {"new_task_count": 0, "message_count": 0}
-            return self.child_states[thread_id]
+            state = {
+                "thread_id": thread_id,
+                "task_name": task_name,
+                "event": threading.Event(),
+                "queue": deque[str](),
+                "completed": False,
+                "request_count": 0,
+                "pending_messages": [],
+                "message_ack": False,
+                "work_ack": False,
+                "interrupted_ack": False,
+            }
+            self.child_loops[thread_id] = state
+            self.task_to_child[task_name] = thread_id
+            return state
 
-    def _child_events_for(
-        self, body: Mapping[str, Any], index: int, model: str, thread_id: str | None
-    ) -> list[dict[str, Any]]:
-        """Drive a stateful child agent that stays alive until followup_task.
-
-        The child receives the initial task as a NEW_TASK agent_message, then
-        uses ``wait_agent`` to wait for parent messages.  A ``send_message``
-        arrives as an agent_message MESSAGE; ``followup_task`` arrives as a
-        second NEW_TASK.  The child finalizes only after the followup.
-        """
-        state = self._child_state(thread_id or "unknown")
-        sender = "/root/worker"
-        recipient = "/root"
-        has_new_task = False
-        has_message = False
+    def _child_task_name(self, body: Mapping[str, Any]) -> str | None:
         for item in body.get("input", []) if isinstance(body.get("input"), list) else []:
-            if not isinstance(item, Mapping):
+            if not isinstance(item, Mapping) or item.get("type") != "agent_message":
                 continue
-            if item.get("type") == "agent_message":
-                sender = str(item.get("recipient") or sender)
-                recipient = str(item.get("author") or recipient)
-                text = ""
-                content = item.get("content")
-                if isinstance(content, list):
-                    text = "\n".join(
-                        str(part.get("text", "")) for part in content if isinstance(part, Mapping)
-                    )
-                elif isinstance(content, str):
-                    text = content
-                if "Message Type: NEW_TASK" in text:
-                    has_new_task = True
-                elif "Message Type: MESSAGE" in text:
-                    has_message = True
+            text = _agent_message_text(item)
+            if "Message Type: NEW_TASK" in text:
+                name = item.get("recipient")
+                if isinstance(name, str) and name:
+                    return name
+        return None
 
-        if has_new_task:
-            state["new_task_count"] += 1
+    def _enqueue_child(self, task_name: str, payload: str) -> bool:
+        with self.lock:
+            thread_id = self.task_to_child.get(task_name)
+            if thread_id is None:
+                return False
+            state = self.child_loops.get(thread_id)
+            if state is None or state["completed"]:
+                return False
+            state["queue"].append(payload)
+            state["event"].set()
+            return True
 
-        if has_message:
-            state["message_count"] += 1
+    def _wait_for_child(self, task_name: str, timeout: float = 10.0) -> bool:
+        """Wait until the child thread has registered with the fixture."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.task_to_child.get(task_name):
+                    return True
+            time.sleep(0.05)
+        return False
 
-        # Finalize only on the second NEW_TASK (the followup_task).
-        if state["new_task_count"] >= 2:
-            child_text = (
+    def _child_text(
+        self, state: Mapping[str, Any], payload: str, final: bool = False
+    ) -> str:
+        task_name = str(state["task_name"])
+        recipient = "/root"
+        if final:
+            return (
                 f"Message Type: FINAL_ANSWER\n"
                 f"Task name: {recipient}\n"
-                f"Sender: {sender}\n"
+                f"Sender: {task_name}\n"
                 f"Recipient: {recipient}\n"
-                f"Payload:\nchild completed after followup"
+                f"Payload:\n{payload}"
             )
-            return _message_events(index, child_text, model)
+        return (
+            f"Message Type: MESSAGE\n"
+            f"Task name: {recipient}\n"
+            f"Sender: {task_name}\n"
+            f"Recipient: {recipient}\n"
+            f"Payload:\n{payload}"
+        )
 
-        # Otherwise stay alive by calling wait_agent; the parent can still
-        # send_message to this running child.
-        return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
+    @staticmethod
+    def _classify_child_signals(state: dict[str, Any], queued: list[str]) -> dict[str, Any]:
+        """Translate enqueued parent signals into response flags."""
+        result = {
+            "final_payload": None,
+            "interrupted": False,
+            "work": False,
+            "messages": [],
+        }
+        for p in queued:
+            if p.startswith("FINAL:"):
+                result["final_payload"] = p[6:]
+            elif p == "INTERRUPT":
+                result["interrupted"] = True
+            elif p == "WORK":
+                result["work"] = True
+            else:
+                result["messages"].append(p)
+        return result
+
+    def _build_child_response(
+        self,
+        state: dict[str, Any],
+        signals: dict[str, Any],
+        index: int,
+        model: str,
+        open_on_no_signal: bool = True,
+    ) -> list[dict[str, Any]]:
+        final_payload = signals["final_payload"]
+        interrupted = signals["interrupted"]
+        work = signals["work"]
+        messages = signals["messages"]
+
+        if final_payload is not None:
+            state["completed"] = True
+            text = "; ".join(messages) + (f"; {final_payload}" if messages else final_payload)
+            return _message_events(index, self._child_text(state, text, final=True), model)
+
+        if interrupted and not state.get("interrupted_ack"):
+            state["interrupted_ack"] = True
+            state["completed"] = True
+            text = "interrupted"
+            if messages:
+                text = "; ".join(messages) + f"; {text}"
+            return _message_events(index, self._child_text(state, text, final=True), model)
+
+        if messages and not state.get("message_ack"):
+            state["message_ack"] = True
+            return _message_events(index, self._child_text(state, "received", final=False), model)
+
+        if work and not state.get("work_ack"):
+            state["work_ack"] = True
+            # Stay alive in an open turn via wait_agent so interrupt_agent has a
+            # current turn to interrupt.
+            return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
+
+        if open_on_no_signal:
+            # Keep the upstream child turn open until the parent signals.
+            return _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
+
+        # Fallback: nothing to do, ack with a non-final message.
+        return _message_events(index, self._child_text(state, "idle", final=False), model)
+
+    def serve_child(
+        self, body: Mapping[str, Any], handler: "_FixtureHandler", model: str, index: int
+    ) -> None:
+        thread_id = (body.get("client_metadata") or {}).get("thread_id")
+        if not isinstance(thread_id, str):
+            self._write_events(
+                handler, _message_events(index, "unknown child thread", model)
+            )
+            return
+
+        task_name = self._child_task_name(body)
+        with self.lock:
+            state = self.child_loops.get(thread_id)
+        if state is None and task_name:
+            state = self._register_child(thread_id, task_name)
+        if state is None:
+            self._write_events(
+                handler, _message_events(index, "unregistered child", model)
+            )
+            return
+
+        with self.lock:
+            state["request_count"] += 1
+            queued = list(state["queue"])
+            state["queue"].clear()
+
+        signals = self._classify_child_signals(state, queued)
+        events = self._build_child_response(state, signals, index, model, open_on_no_signal=True)
+
+        # If the response keeps the turn open (wait_agent), block until the
+        # parent signals; then emit the real response.
+        if events and events[-1].get("type") == "response.completed":
+            last_item = events[-2].get("item") if len(events) >= 2 else None
+            if isinstance(last_item, Mapping) and last_item.get("type") == "function_call" and last_item.get("name") == "wait_agent":
+                state["event"].wait(timeout=self.CHILD_WAIT_TIMEOUT)
+                with self.lock:
+                    queued = list(state["queue"])
+                    state["queue"].clear()
+                if queued:
+                    signals = self._classify_child_signals(state, queued)
+                    events = self._build_child_response(state, signals, index, model, open_on_no_signal=False)
+
+        with self.lock:
+            self.responses.append(events)
+        self._write_events(handler, events)
+
+    @staticmethod
+    def _write_events(
+        handler: "_FixtureHandler", events: list[dict[str, Any]]
+    ) -> None:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        for event in events:
+            handler.wfile.write(_sse(event))
+            handler.wfile.flush()
 
     def events_for(self, body: dict[str, Any]) -> list[dict[str, Any]]:
         thread_id_value = (body.get("client_metadata") or {}).get("thread_id")
@@ -318,58 +464,96 @@ class _FixtureServer(ThreadingHTTPServer):
             is_root = thread_id == self.root_thread
             if is_root:
                 self.root_request_count += 1
-                root_stage = self.root_request_count
             else:
                 if self.child_thread is None:
                     self.child_thread = thread_id
                 self.child_request_count += 1
-                root_stage = 0
 
         if not is_root:
-            # Child thread: return a final answer so the parent can wait_agent
-            # and then list_agents.  This is the FINAL_ANSWER agent_message form
-            # observed in the #392 contract.
-            sender = "/root/worker"
-            recipient = "/root"
-            for item in body.get("input", []) if isinstance(body.get("input"), list) else []:
-                if isinstance(item, Mapping) and item.get("type") == "agent_message":
-                    sender = str(item.get("recipient") or sender)
-                    recipient = str(item.get("author") or recipient)
-                    break
-            child_text = (
-                f"Message Type: FINAL_ANSWER\n"
-                f"Task name: {recipient}\n"
-                f"Sender: {sender}\n"
-                f"Recipient: {recipient}\n"
-                f"Payload:\nchild completed"
-            )
-            events = _message_events(index, child_text, model)
-            with self.lock:
-                self.responses.append(events)
-            return events
+            # Child handling is done directly by the request handler so it can
+            # keep the upstream turn open until the parent signals.
+            raise CaptureFailure("child_request_should_use_serve_child")
 
-        # Parent thread: drive a minimal but contract-valid V2 lifecycle
-        # (spawn, wait, list).  The full six-tool lifecycle with interleaved
-        # send_message/followup_task requires a persistent child-agent runtime
-        # that this loopback fixture does not implement.
-        if root_stage == 1:
-            events = _function_events("spawn_agent", {"task_name": "worker", "message": "perform a bounded task"}, index, model)
-            with self.lock:
-                self.responses.append(events)
-            return events
+        # Parent thread: reactive lifecycle based on what the CLI has already
+        # executed, not a fixed request count (the CLI may interleave child
+        # turns).
+        tools_called: set[str] = set()
+        outputs: dict[str, Any] = {}
+        call_id_to_name: dict[str, str] = {}
+        for item in body.get("input", []) if isinstance(body.get("input"), list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("type") == "function_call":
+                name = str(item.get("name", ""))
+                tools_called.add(name)
+                call_id = str(item.get("call_id", ""))
+                if call_id:
+                    call_id_to_name[call_id] = name
+            elif item.get("type") == "function_call_output":
+                call_id = str(item.get("call_id", ""))
+                name = call_id_to_name.get(call_id, str(item.get("name", "")))
+                out = item.get("output")
+                if isinstance(out, str):
+                    try:
+                        outputs[name] = json.loads(out)
+                    except json.JSONDecodeError:
+                        outputs[name] = out
 
         task_name = _extract_child_task_name(body)
-        if root_stage == 2:
-            events = _function_events("wait_agent", {"timeout_ms": 30000}, index, model)
-            with self.lock:
-                self.responses.append(events)
-            return events
-        if root_stage == 3:
-            events = _function_events("list_agents", {}, index, model)
-            with self.lock:
-                self.responses.append(events)
-            return events
-        events = _message_events(index, "parent completion", model)
+        # The CLI tool calls accept either a relative or canonical task name.
+        # Use the relative name (e.g. "worker") for the tool arguments while
+        # still using the canonical name (e.g. "/root/worker") for fixture-side
+        # child bookkeeping.
+        relative_target = task_name.split("/")[-1] if task_name else task_name
+
+        def next_events() -> list[dict[str, Any]]:
+            if "spawn_agent" not in tools_called:
+                return _function_events(
+                    "spawn_agent",
+                    {"task_name": "worker", "message": "perform a bounded task"},
+                    index,
+                    model,
+                )
+            # Try collecting the child's initial wait before sending a message.
+            # The child completes its first turn with wait_agent; the parent
+            # waits, then attempts send_message/followup_task/interrupt_agent.
+            if "wait_agent" not in tools_called or "wait_agent" not in outputs:
+                return _function_events(
+                    "wait_agent", {"timeout_ms": 30000}, index, model
+                )
+            if "send_message" not in tools_called or "send_message" not in outputs:
+                if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "send status update"):
+                    return _function_events(
+                        "send_message",
+                        {"target": relative_target, "message": "send status update"},
+                        index,
+                        model,
+                    )
+                return _message_events(index, "waiting for child before send_message", model)
+            if "followup_task" not in tools_called or "followup_task" not in outputs:
+                if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "FINAL:follow up"):
+                    return _function_events(
+                        "followup_task",
+                        {"target": relative_target, "message": "follow up"},
+                        index,
+                        model,
+                    )
+                return _message_events(index, "waiting for child before followup", model)
+            if "interrupt_agent" not in tools_called or "interrupt_agent" not in outputs:
+                if task_name and self._wait_for_child(task_name) and self._enqueue_child(task_name, "INTERRUPT"):
+                    return _function_events(
+                        "interrupt_agent", {"target": relative_target}, index, model
+                    )
+                return _message_events(index, "waiting for child before interrupt", model)
+            if "wait_agent" not in tools_called or "wait_agent" not in outputs:
+                return _function_events(
+                    "wait_agent", {"timeout_ms": 30000}, index, model
+                )
+            if "list_agents" not in tools_called:
+                return _function_events("list_agents", {}, index, model)
+            return _message_events(index, "parent completion", model)
+
+        events = next_events()
         with self.lock:
             self.responses.append(events)
         return events
@@ -414,14 +598,31 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self.send_error(400)
             return
-        events = server.events_for(body)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        for event in events:
-            self.wfile.write(_sse(event))
-            self.wfile.flush()
+
+        thread_id_value = (body.get("client_metadata") or {}).get("thread_id")
+        thread_id = thread_id_value if isinstance(thread_id_value, str) else None
+        with server.lock:
+            if server.root_thread is None:
+                server.root_thread = thread_id
+            is_root = thread_id == server.root_thread
+            if not is_root:
+                if server.child_thread is None:
+                    server.child_thread = thread_id
+                server.child_request_count += 1
+
+        model = body.get("model") or f"{FIXTURE_PROVIDER_ID}/{MODEL}"
+        if is_root:
+            events = server.events_for(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for event in events:
+                self.wfile.write(_sse(event))
+                self.wfile.flush()
+        else:
+            index = len(server.requests) + 1
+            server.serve_child(body, self, model, index)
 
 
 class FixtureServer:
@@ -1053,24 +1254,14 @@ def _extract_phase_observations(
 
     phases = {
         "spawn_agent": "spawn_agent" in observed_tools,
-        "wait_agent": "wait_agent" in observed_tools,
-        "list_agents": "list_agents" in observed_tools,
-        "child_result_delivery": child_result_delivery,
-        "parent_completion": cli_analysis.get("terminal_event") == "turn.completed",
-        # send_message/followup_task/interrupt_agent are intentionally not part
-        # of this minimal lifecycle because the loopback fixture cannot model a
-        # persistent child agent that stays alive across those interactions.
         "send_message": "send_message" in observed_tools,
         "followup_task": "followup_task" in observed_tools,
+        "wait_agent": "wait_agent" in observed_tools,
+        "list_agents": "list_agents" in observed_tools,
         "interrupt_agent": "interrupt_agent" in observed_tools,
+        "child_result_delivery": child_result_delivery,
+        "parent_completion": cli_analysis.get("terminal_event") == "turn.completed",
     }
-
-    if not phases["interrupt_agent"]:
-        phases["interrupt_agent"] = "not_applicable:child_completed_without_interrupt"
-    if not phases["send_message"]:
-        phases["send_message"] = "not_exercised:minimal_lifecycle"
-    if not phases["followup_task"]:
-        phases["followup_task"] = "not_exercised:minimal_lifecycle"
 
     v1_namespace_seen = V1_NAMESPACE in observed_namespaces
     # Only count a shared tool name as V1 when it was observed under the V1
@@ -1119,7 +1310,8 @@ def capture(
                     shim.port,
                     prompt=(
                         "Use the collaboration tools to spawn a worker subagent, "
-                        "wait for it to finish, list active agents, and then complete."
+                        "send it a message, follow up on its task, wait for it to finish, "
+                        "list active agents, and then complete."
                     ),
                     workspace=workspace,
                 )
@@ -1135,6 +1327,14 @@ def capture(
 
         if debug_capture_path is not None:
             debug_capture_path.parent.mkdir(parents=True, exist_ok=True)
+            gateway_log_lines: list[str] = []
+            if gateway_log_path.exists():
+                try:
+                    gateway_log_lines = gateway_log_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                except OSError:
+                    pass
             debug_capture_path.write_text(
                 json.dumps(
                     {
@@ -1153,6 +1353,7 @@ def capture(
                         "cli_stdout": cli_stdout,
                         "cli_stderr": cli_stderr,
                         "gateway_log_path": str(gateway_log_path),
+                        "gateway_log_lines": gateway_log_lines,
                     },
                     ensure_ascii=True,
                     indent=2,
@@ -1166,14 +1367,12 @@ def capture(
 
         passed = (
             returncode == 0
-            and all(
-                value is True
-                or (isinstance(value, str) and value.startswith(("not_applicable", "not_exercised")))
-                for value in phase_observations["phases"].values()
-            )
             and phase_observations["phases"]["spawn_agent"] is True
+            and phase_observations["phases"]["send_message"] is True
+            and phase_observations["phases"]["followup_task"] is True
             and phase_observations["phases"]["wait_agent"] is True
             and phase_observations["phases"]["list_agents"] is True
+            and phase_observations["phases"]["interrupt_agent"] is True
             and phase_observations["phases"]["parent_completion"] is True
             and not phase_observations["v1_namespace_seen"]
             and not phase_observations["v1_tools_seen"]
@@ -1206,19 +1405,25 @@ def capture(
                 "absolute_paths_retained": False,
             },
             "cli_terminal_message": _sanitized_terminal_message(cli_lines),
-            "root_cause_verdict": "harness_artifact",
+            "root_cause_verdict": "harness_artifact_resolved" if passed else "harness_artifact_in_progress",
             "root_cause_details": {
                 "ephemeral_thread_block": "With --ephemeral the CLI fails internally with 'collab spawn failed: no thread with id: <root_thread_id>'; removing --ephemeral allows spawn to succeed.",
                 "spawn_result_field": "The fixture originally returned task_path in the spawn_agent function_call_output; the #392 V2 contract requires task_name.  After switching to task_name the child identity is accepted.",
-                "full_six_tool_status": "not_exercised",
-                "full_six_tool_reason": "send_message/followup_task require a persistent child-agent runtime that this loopback fixture does not implement.  The observed failure when those tools were scripted was an empty send_message function_call_output because the child thread was in a pending wait_agent tool call and could not receive the message.  This is a fixture limitation, not proven CLI-binary inability.",
                 "agent_type_injection": "The CLI's emitted collaboration.spawn_agent declaration omits the optional agent_type property.  The shim injects it before forwarding to the gateway so the boundary classifier accepts the request.  This injection is unrelated to the spawn execution failure.",
                 "fixture_contract_conformance": "The fixture's spawn_agent function_call response (namespace=collaboration, name=spawn_agent, arguments task_name+message, added/delta/done/completed events) matches the #392 V2 call contract.",
+                "child_persistence_strategy": "The fixture has the child complete its first turn with a collaboration.wait_agent function_call.  This keeps the child task alive without finalizing it, and the parent collects the wait result before attempting send_message.",
+                "send_message_blocker": "The CLI executes collaboration.send_message but records an empty string ('') as the function_call_output instead of the JSON null expected by the #392 V2 contract.  The next parent request containing this malformed send_message result is rejected by the gateway boundary classifier with 'Tool compatibility failed at history: malformed_collaboration_result'.",
+                "child_states_tested": [
+                    "child returns wait_agent and completes its turn (idle but not finalized)",
+                    "child keeps the upstream turn open waiting for a parent signal",
+                    "child returns a non-final MESSAGE acknowledging a send_message signal"
+                ],
+                "full_six_tool_status": "attempted" if passed else "attempted_not_yet_passing",
             },
             "shim_notes": [
                 "CLI-facing shim synthesized an OpenAI-compatible /v1/models list because the candidate gateway serves the CodexHub catalog shape.",
                 "The shim injected the optional agent_type property into the collaboration.spawn_agent tool declaration; the installed CLI 0.146.1 build omits it, causing the gateway boundary classifier to reject the request otherwise.",
-                "This minimal lifecycle exercises spawn_agent, wait_agent, and list_agents.  send_message, followup_task, and interrupt_agent are not exercised because the loopback fixture cannot model a persistent child agent that stays alive across those interactions.",
+                "The current choreography is spawn_agent -> wait_agent -> send_message -> followup_task -> interrupt_agent -> wait_agent -> list_agents, with the child returning wait_agent on its first turn so the task stays alive.",
             ],
         }
 
