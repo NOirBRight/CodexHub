@@ -76,7 +76,7 @@ export function ProviderDetail({
 
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState("success");
+      setEndpointTestState(probeResult.model_required ? "error" : "success");
     }
   }, [probeResult]);
 
@@ -268,7 +268,7 @@ export function AddProviderPanel({
 
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState("success");
+      setEndpointTestState(probeResult.model_required ? "error" : "success");
     }
   }, [probeResult]);
 

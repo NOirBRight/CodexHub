@@ -315,6 +315,107 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
         self.assertTrue(anthropic_text_ok({"content": [{"type": "text", "text": "OK"}]}))
         self.assertFalse(anthropic_text_ok({"choices": []}))
 
+    def test_probe_reports_model_required_when_no_model_and_discovery_fails(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return False, 404, None, "not found"
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://example.test/v1", "test-key", None, 2)
+
+        self.assertTrue(result["model_required"])
+        self.assertIsNone(result["model"])
+        self.assertFalse(result["models_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_AUTO)
+        self.assertIn("No model is available for POST probes.", result["notes"])
+
+    def test_probe_reports_model_required_when_discovery_returns_no_models(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return True, 200, {"data": []}, None
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://example.test/v1", "test-key", None, 2)
+
+        self.assertTrue(result["model_required"])
+        self.assertIsNone(result["model"])
+        self.assertTrue(result["models_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_AUTO)
+
+    def test_probe_uses_discovered_model_when_none_configured(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return True, 200, {"data": [{"id": "discovered-model"}]}, None
+            if path == "/responses":
+                return True, 200, {"id": "resp_1"}, None
+            if path == "/chat/completions":
+                return False, 404, None, "not found"
+            if path == "/messages":
+                return False, 404, None, "not found"
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://example.test/v1", "test-key", None, 2)
+
+        self.assertFalse(result["model_required"])
+        self.assertEqual(result["model"], "discovered-model")
+        self.assertTrue(result["responses_text_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
+
+    def test_probe_uses_configured_model_when_provided(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return False, 404, None, "not found"
+            if path == "/responses":
+                return True, 200, {"id": "resp_1"}, None
+            if path == "/chat/completions":
+                return False, 404, None, "not found"
+            if path == "/messages":
+                return False, 404, None, "not found"
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://example.test/v1", "test-key", "configured-model", 2)
+
+        self.assertFalse(result["model_required"])
+        self.assertEqual(result["model"], "configured-model")
+        self.assertTrue(result["responses_text_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
+
 
 if __name__ == "__main__":
     unittest.main()
