@@ -3229,6 +3229,8 @@ class CompatibilityStreamState:
         # an opaque stream owner once ``output_item.added`` establishes it so
         # later deltas and terminal events cannot borrow an arbitrary id.
         self._opaque_pending: dict[str, _OpaqueStreamItem] = {}
+        self._agent_message_pending: dict[str, Any] = {}
+        self._agent_message_done: set[str] = set()
         self._terminal = False
 
     @property
@@ -3648,7 +3650,16 @@ class CompatibilityStreamState:
             pending.arguments_done_event is None
             for pending in self._buffered_tool_search.values()
         )
-        if incomplete or native_incomplete or opaque_incomplete or search_incomplete:
+        agent_message_incomplete = (
+            set(self._agent_message_pending) - self._agent_message_done
+        )
+        if (
+            incomplete
+            or native_incomplete
+            or opaque_incomplete
+            or search_incomplete
+            or agent_message_incomplete
+        ):
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
         self._terminal = True
 
@@ -3659,13 +3670,14 @@ class CompatibilityStreamState:
             for item_id in self._native_pending
         }
         required_adapter_ids = set(self._pending) | set(self._adapter_wire_identities)
+        required_agent_message_ids = set(self._agent_message_pending)
         if output is None:
             # Some upstream terminal envelopes omit ``output`` after the SSE
             # lifecycle has already delivered the completed item.  _finish_terminal
             # below still rejects an actually incomplete lifecycle.
             return
         if output == []:
-            if required_native_ids or required_adapter_ids:
+            if required_native_ids or required_adapter_ids or required_agent_message_ids:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
             return
         if not isinstance(output, list):
@@ -3679,6 +3691,22 @@ class CompatibilityStreamState:
                 if item_id in seen_output_ids:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                 seen_output_ids.add(item_id)
+            if item.get("type") == "agent_message":
+                self.plan._validate_collaboration_v2_items([item], surface="stream")
+                if item_id in self._agent_message_pending:
+                    if item_id not in self._agent_message_done:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "incomplete_stream",
+                            surface="stream",
+                        )
+                    if _freeze(item) != self._agent_message_pending[item_id]:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "ambiguous_native_identity",
+                            surface="stream",
+                        )
+                continue
             pending = self._native_pending.get(item_id) if item_id is not None else None
             if pending is None:
                 legacy_done = self._legacy_unowned_done.get(item_id) if item_id is not None else None
@@ -3878,7 +3906,9 @@ class CompatibilityStreamState:
                     "ambiguous_call_identity",
                     surface="stream",
                 )
-        missing = (required_native_ids | required_adapter_ids) - seen_output_ids
+        missing = (
+            required_native_ids | required_adapter_ids | required_agent_message_ids
+        ) - seen_output_ids
         if missing:
             raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream", surface="stream")
 
@@ -3900,6 +3930,49 @@ class CompatibilityStreamState:
         item = result.get("item")
         if isinstance(item, Mapping) and item.get("type") == "agent_message":
             self.plan._validate_collaboration_v2_items([item], surface="stream")
+            item_id = self._item_id(item)
+            if item_id is None:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "missing_item_identity",
+                    surface="stream",
+                )
+            if event_type == "response.output_item.added":
+                if item_id in self._seen_item_ids:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_item_identity",
+                        surface="stream",
+                    )
+                self._seen_item_ids.add(item_id)
+                self._agent_message_pending[item_id] = _freeze(item)
+                return result
+            if event_type == "response.output_item.done":
+                if item_id not in self._agent_message_pending:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "missing_stream_identity",
+                        surface="stream",
+                    )
+                if item_id in self._agent_message_done:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "duplicate_item_identity",
+                        surface="stream",
+                    )
+                if _freeze(item) != self._agent_message_pending[item_id]:
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "ambiguous_native_identity",
+                        surface="stream",
+                    )
+                self._agent_message_done.add(item_id)
+                return result
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "invalid_agent_message_lifecycle",
+                surface="stream",
+            )
         if event_type in {"response.completed", "response.incomplete", "response.failed"}:
             response = result.get("response")
             if isinstance(response, Mapping):

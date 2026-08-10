@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -602,11 +603,10 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
 
 
 @pytest.mark.parametrize(
-    ("current_namespace", "current_child", "foreign_history"),
+    ("current_namespace", "foreign_history"),
     [
         (
             "multi_agent_v1",
-            "spawn_agent",
             [
                 {
                     "type": "function_call",
@@ -624,7 +624,6 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
         ),
         (
             "collaboration",
-            "followup_task",
             [
                 {
                     "type": "function_call",
@@ -643,9 +642,8 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     ],
     ids=["current-v1-foreign-v2", "current-v2-foreign-v1"],
 )
-def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions(
+def test_gateway_rejects_foreign_collaboration_history_before_planning(
     current_namespace: str,
-    current_child: str,
     foreign_history: list[dict],
 ) -> None:
     body = {
@@ -662,19 +660,17 @@ def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions
     }
 
     context: dict = {}
-    payload = json.loads(
-        codex_proxy.compatible_request_body(
-            json.dumps(body).encode("utf-8"),
-            _external_responses_upstream(),
-            event_context=context,
-            inject_codex_tools=False,
-        )
-    )
+    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+            codex_proxy.compatible_request_body(
+                json.dumps(body).encode("utf-8"),
+                _external_responses_upstream(),
+                event_context=context,
+                inject_codex_tools=False,
+            )
 
-    assert payload["input"] == foreign_history
-    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "adapt"
-    assert payload["tools"][0]["type"] == "function"
-    assert payload["tools"][0]["name"].startswith("__codexhub_ns_")
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    prepare.assert_not_called()
 
 
 def _external_responses_upstream() -> dict:

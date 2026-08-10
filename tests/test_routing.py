@@ -3406,7 +3406,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["transport_policy"], codex_proxy.TransportPolicy.OFFICIAL_KEEPALIVE.value)
             self.assertEqual(fields["mutation_summary"], [codex_proxy.RouteMutation.MODEL_ALIAS.value])
 
-    def test_model_switch_gateway_request_response_path_uses_selected_model_in_both_directions(self):
+    def test_model_switch_gateway_rejects_cross_protocol_history_before_sampling(self):
         versioned_slug = "deepseek-v4-flash:0731"
         versioned_catalog = catalog_sync.build_codex_catalog(
             [],
@@ -3430,12 +3430,6 @@ class RoutingTests(unittest.TestCase):
         }
         fixture = _load_model_switch_fixture()
         self.assertEqual(fixture["schema_version"], "codexhub.model-switch.v1")
-        self.assertEqual(fixture["expected"], {
-            "same_thread": True,
-            "fallback_model": None,
-            "boundary_error": None,
-            "reconnect_count": 0,
-        })
         turns = fixture["turns"]
         self.assertEqual(len(turns), 2)
         self.assertEqual(
@@ -3566,6 +3560,17 @@ class RoutingTests(unittest.TestCase):
                     ) as open_upstream,
                 ):
                     CodexProxyHandler.do_POST(handler)
+
+                if turn_index > 0:
+                    self.assertEqual(fake.status, 400, direction)
+                    open_upstream.assert_not_called()
+                    event_names = [
+                        event_call.args[0]
+                        for event_call in self.write_proxy_event.call_args_list[event_offset:]
+                        if event_call.args
+                    ]
+                    self.assertIn("collaboration_boundary_rejected", event_names)
+                    break
 
                 self.assertEqual(fake.status, 200, direction)
                 open_upstream.assert_called_once()

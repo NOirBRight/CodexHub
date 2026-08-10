@@ -2617,6 +2617,25 @@ def _resolve_collaboration_boundary(
                     message="Collaboration protocol selection conflicts with the request.",
                     surface=surface,
                 )
+            if len(history_protocols) > 1:
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="mixed_v1_v2",
+                    message="Collaboration history contains multiple protocol families.",
+                    surface=surface,
+                )
+            history_protocol = next(iter(history_protocols), None)
+            if (
+                protocol is not None
+                and history_protocol is not None
+                and protocol != history_protocol
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="conflicting_selection",
+                    message="Collaboration protocol selection conflicts with history.",
+                    surface=surface,
+                )
             if (
                 raw_context_protocol is not None
                 and context_protocol is None
@@ -2637,14 +2656,8 @@ def _resolve_collaboration_boundary(
                 cause=exc,
             )
 
-        if len(history_protocols) > 1:
-            _write_adapter_event(
-                event_context,
-                "collaboration_history_mixed",
-                protocol_count=len(history_protocols),
-            )
-        if protocol is None and len(history_protocols) == 1:
-            protocol = next(iter(history_protocols))
+        if protocol is None:
+            protocol = history_protocol
 
     if isinstance(event_context, dict) and protocol is not None:
         event_context["collaboration_protocol"] = protocol

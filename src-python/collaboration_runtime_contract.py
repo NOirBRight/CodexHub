@@ -423,6 +423,8 @@ def validate_collaboration_arguments(version: str, name: str, value: Any) -> Non
     schemas = EXPECTED_PARAMETER_SCHEMAS.get(version)
     if schemas is None or name not in schemas:
         raise CollaborationContractError("unknown_collaboration_function")
+    if not isinstance(value, str):
+        raise CollaborationContractError("collaboration_arguments_wire_type_invalid")
     parsed = _json_object_or_value(value, "malformed_collaboration_arguments")
     if not _matches_schema(parsed, schemas[name]):
         raise CollaborationContractError("collaboration_arguments_schema_mismatch")
@@ -432,6 +434,8 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
     schemas = EXPECTED_OUTPUT_SCHEMAS.get(version)
     if schemas is None or name not in schemas:
         raise CollaborationContractError("unknown_collaboration_function")
+    if not isinstance(value, str):
+        raise CollaborationContractError("collaboration_result_wire_type_invalid")
     parsed = _json_object_or_value(value, "malformed_collaboration_result")
     schema = schemas[name]
     if (schema is None and parsed is not None) or (

@@ -37,11 +37,14 @@ def _v2_spawn_call() -> dict[str, object]:
         "name": "spawn_agent",
         "id": "item_v2_spawn",
         "call_id": "call_v2_spawn",
-        "arguments": {
-            "task_name": "worker-task",
-            "message": "return the bounded result",
-            "fork_turns": "all",
-        },
+        "arguments": json.dumps(
+            {
+                "task_name": "worker-task",
+                "message": "return the bounded result",
+                "fork_turns": "all",
+            },
+            separators=(",", ":"),
+        ),
     }
 
 
@@ -214,7 +217,7 @@ def test_current_v2_tools_reject_malformed_collaboration_history(
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_current_v2_tools_allow_completed_mixed_collaboration_history() -> None:
+def test_current_v2_tools_reject_completed_mixed_collaboration_history() -> None:
     body = {
         "model": "gpt-5.6-luna",
         "input": [
@@ -228,24 +231,16 @@ def test_current_v2_tools_allow_completed_mixed_collaboration_history() -> None:
     }
     context = {"request_id": "mixed-history-v2-current"}
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_event:
-        transformed = codex_proxy.compatible_request_body(
-            json.dumps(body).encode(),
-            _upstream(),
-            event_context=context,
-        )
+    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+            codex_proxy.compatible_request_body(
+                json.dumps(body).encode(),
+                _upstream(),
+                event_context=context,
+            )
 
-    transformed_payload = json.loads(transformed)
-    assert transformed_payload["input"] == body["input"]
-    assert transformed_payload["tools"][0]["name"] == "collaboration"
-    assert context["collaboration_protocol"] == COLLABORATION_V2
-    mixed_events = [
-        call for call in write_event.call_args_list
-        if call.args and call.args[0] == "collaboration_history_mixed"
-    ]
-    assert len(mixed_events) == 1
-    assert mixed_events[0].kwargs["protocol_count"] == 2
-    assert set(mixed_events[0].kwargs) <= {"request_id", "protocol_count"}
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    prepare.assert_not_called()
 
 
 def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
@@ -814,7 +809,7 @@ def test_unknown_context_state_fails_closed() -> None:
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_mixed_history_diagnostic_is_bounded_and_does_not_include_payload() -> None:
+def test_mixed_history_rejection_is_bounded_and_does_not_include_payload() -> None:
     context = {"request_id": "safe-request", "repair_policy": REPAIR_CODEX_SUBAGENT}
     body = {
         "model": "glm-5.2",
@@ -828,30 +823,36 @@ def test_mixed_history_diagnostic_is_bounded_and_does_not_include_payload() -> N
     }
 
     with patch.object(codex_proxy, "write_proxy_event") as write_event:
-        assert codex_proxy._resolve_collaboration_boundary(body, context) is None
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
+            codex_proxy._resolve_collaboration_boundary(body, context)
 
-    event = next(call for call in write_event.call_args_list if call.args[0] == "collaboration_history_mixed")
+    event = next(
+        call
+        for call in write_event.call_args_list
+        if call.args[0] == "collaboration_boundary_rejected"
+    )
     fields = event.kwargs
-    assert fields["protocol_count"] == 2
+    assert fields == {"surface": "request", "outcome": "rejected", "count": 1}
     assert "SECRET_PROMPT" not in repr(fields)
     assert "SECRET_TASK" not in repr(fields)
     assert "call_v1_spawn" not in repr(fields)
 
 
-def test_selected_v2_context_overrides_v1_history() -> None:
+def test_selected_v2_context_conflicting_with_v1_history_fails_closed() -> None:
     context = {
         "repair_policy": REPAIR_CODEX_SUBAGENT,
         "collaboration_protocol": COLLABORATION_V2,
         "request_id": "issue198-conflict",
     }
 
-    codex_proxy.compatible_request_body(
-        json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
-        _upstream(),
-        event_context=context,
-    )
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
+            _upstream(),
+            event_context=context,
+        )
 
-    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_conflicting_current_target_metadata_fails_closed() -> None:
@@ -891,7 +892,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
     assert payload["input"] == body_payload["input"]
 
 
-def test_v1_request_keeps_existing_repair_path_and_mixed_history_is_tolerated() -> None:
+def test_v1_request_keeps_existing_repair_path_and_rejects_mixed_history() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "issue198-v1"}
     transformed = codex_proxy.compatible_request_body(
         json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
@@ -907,14 +908,16 @@ def test_v1_request_keeps_existing_repair_path_and_mixed_history_is_tolerated() 
     )
 
     mixed_context = {"request_id": "issue198-mixed"}
-    codex_proxy.compatible_request_body(
-        json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call(), _v2_spawn_call()]}).encode(),
-        _upstream(),
-        event_context=mixed_context,
-    )
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call(), _v2_spawn_call()]}).encode(),
+            _upstream(),
+            event_context=mixed_context,
+        )
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_model_switch_v2_history_to_v1_current_surface_is_allowed() -> None:
+def test_model_switch_v2_history_to_v1_current_surface_fails_closed() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v2-v1"}
     body = {
         "model": "deepseek-v4-flash:0731",
@@ -925,17 +928,15 @@ def test_model_switch_v2_history_to_v1_current_surface_is_allowed() -> None:
     upstream = _upstream()
     upstream["upstream_model"] = body["model"]
 
-    payload = json.loads(codex_proxy.compatible_request_body(
-        json.dumps(body).encode(), upstream, event_context=context,
-    ))
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(), upstream, event_context=context,
+        )
 
-    assert context["collaboration_protocol"] == COLLABORATION_V1
-    assert payload["model"] == upstream["upstream_model"]
-    assert payload["input"][0]["namespace"] == "collaboration"
-    assert payload["tools"][0]["name"] == "multi_agent_v1"
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_model_switch_v1_history_to_v2_current_surface_is_allowed() -> None:
+def test_model_switch_v1_history_to_v2_current_surface_fails_closed() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "switch-v1-v2"}
     body = {
         "model": "gpt-5.6-luna",
@@ -946,14 +947,12 @@ def test_model_switch_v1_history_to_v2_current_surface_is_allowed() -> None:
     upstream = _upstream()
     upstream["upstream_model"] = body["model"]
 
-    payload = json.loads(codex_proxy.compatible_request_body(
-        json.dumps(body).encode(), upstream, event_context=context,
-    ))
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(), upstream, event_context=context,
+        )
 
-    assert context["collaboration_protocol"] == COLLABORATION_V2
-    assert payload["model"] == upstream["upstream_model"]
-    assert payload["input"][0]["namespace"] == "multi_agent_v1"
-    assert payload["tools"][0]["name"] == "collaboration"
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_current_tool_surface_conflicting_with_context_fails_closed() -> None:
@@ -993,37 +992,22 @@ def test_current_tool_surface_containing_both_protocols_still_fails_closed() -> 
     assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_current_target_boundary_precedence_handles_mixed_history() -> None:
+def test_current_target_boundary_rejects_mixed_history() -> None:
     current_v1_tools_body = {
         "input": [_v1_spawn_call(), _v2_spawn_call()],
         "tool_choice": "auto",
         "tools": [_collaboration_namespace(COLLABORATION_V1)],
     }
-    context = {}
-
-    assert codex_proxy._resolve_collaboration_boundary(
-        current_v1_tools_body,
-        context,
-    ) == COLLABORATION_V1
-    assert context["collaboration_protocol"] == COLLABORATION_V1
-
-    assert codex_proxy._resolve_collaboration_boundary(
-        {"input": [_v1_spawn_call(), _v2_spawn_call()]},
-        {"multi_agent_version": "v2"},
-    ) is None
-
-    with patch.object(codex_proxy, "write_proxy_event") as write_event:
-        history_context = {}
-        assert codex_proxy._resolve_collaboration_boundary(
+    for payload, context in (
+        (current_v1_tools_body, {}),
+        (
             {"input": [_v1_spawn_call(), _v2_spawn_call()]},
-            history_context,
-        ) is None
-
-    history_event = next(
-        call for call in write_event.call_args_list
-        if call.args[0] == "collaboration_history_mixed"
-    )
-    assert history_event.kwargs == {"protocol_count": 2}
+            {"multi_agent_version": "v2"},
+        ),
+        ({"input": [_v1_spawn_call(), _v2_spawn_call()]}, {}),
+    ):
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
+            codex_proxy._resolve_collaboration_boundary(payload, context)
 
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
         codex_proxy.compatible_request_body(

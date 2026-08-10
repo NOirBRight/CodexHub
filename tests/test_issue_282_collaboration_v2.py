@@ -555,3 +555,162 @@ def test_v2_stream_rejects_malformed_agent_message_before_forwarding() -> None:
 
     assert caught.value.classification == "agent_message_content_invalid"
     assert caught.value.surface == "stream"
+
+
+def test_mixed_collaboration_history_fails_before_runtime_planning() -> None:
+    body = _request(COLLABORATION_V2)
+    body["input"] = [
+        {
+            "type": "function_call",
+            "id": "item-v1",
+            "call_id": "call-v1",
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": '{"agent_type":"general","message":"work"}',
+        },
+        _v2_history()[0],
+    ]
+
+    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+            codex_proxy.compatible_request_body(
+                json.dumps(body).encode(),
+                _responses_upstream(native_namespace=False),
+                event_context={},
+                inject_codex_tools=False,
+            )
+
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    prepare.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("item_index", "field", "value", "classification"),
+    [
+        (0, "arguments", V2_ARGUMENTS["followup_task"], "collaboration_arguments_wire_type_invalid"),
+        (1, "output", None, "collaboration_result_wire_type_invalid"),
+        (
+            8,
+            "arguments",
+            '{"task_name":"worker","task_name":"other","message":"work"}',
+            "malformed_collaboration_arguments",
+        ),
+        (
+            9,
+            "output",
+            '{"task_name":"/root/worker","task_name":"/root/other"}',
+            "malformed_collaboration_result",
+        ),
+    ],
+    ids=[
+        "raw-arguments-object",
+        "raw-output-null",
+        "duplicate-argument-key",
+        "duplicate-result-key",
+    ],
+)
+def test_v2_request_history_requires_string_call_and_result_payloads(
+    item_index: int,
+    field: str,
+    value,
+    classification: str,
+) -> None:
+    history = _v2_history()
+    history[item_index][field] = value
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        _v2_plan().encode_payload(
+            {
+                "tool_choice": "auto",
+                "tools": [_declaration(COLLABORATION_V2)],
+                "input": history,
+            }
+        )
+
+    assert caught.value.classification == classification
+    assert caught.value.surface == "history"
+
+
+def _agent_message_stream_event(event_type: str, item: dict[str, object]) -> dict[str, object]:
+    return {"type": event_type, "output_index": 0, "item": item}
+
+
+def test_v2_agent_message_stream_preserves_complete_lifecycle() -> None:
+    stream = _v2_plan().new_stream()
+    item = _v2_history()[-1]
+
+    added = stream.decode_events_for_event(
+        _agent_message_stream_event("response.output_item.added", item)
+    )
+    done = stream.decode_events_for_event(
+        _agent_message_stream_event("response.output_item.done", item)
+    )
+    terminal = stream.decode_events_for_event(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "response-agent-message",
+                "object": "response",
+                "status": "completed",
+                "output": [item],
+            },
+        }
+    )
+
+    assert added[0]["item"] == item
+    assert done[0]["item"] == item
+    assert terminal[0]["response"]["output"] == [item]
+
+
+@pytest.mark.parametrize(
+    ("events", "classification"),
+    [
+        (
+            lambda item: [
+                _agent_message_stream_event("response.output_item.added", item),
+                _agent_message_stream_event("response.output_item.added", item),
+            ],
+            "duplicate_item_identity",
+        ),
+        (
+            lambda item: [
+                _agent_message_stream_event("response.output_item.done", item),
+            ],
+            "missing_stream_identity",
+        ),
+        (
+            lambda item: [
+                _agent_message_stream_event("response.output_item.added", item),
+                {
+                    "type": "response.completed",
+                    "response": {"id": "response", "object": "response", "status": "completed"},
+                },
+            ],
+            "incomplete_stream",
+        ),
+        (
+            lambda item: [
+                _agent_message_stream_event("response.output_item.added", item),
+                _agent_message_stream_event(
+                    "response.output_item.done",
+                    {
+                        **item,
+                        "content": [{"type": "input_text", "text": "changed"}],
+                    },
+                ),
+            ],
+            "ambiguous_native_identity",
+        ),
+    ],
+    ids=["duplicate-id", "done-without-added", "missing-done", "changed-content"],
+)
+def test_v2_agent_message_stream_rejects_broken_lifecycle(events, classification: str) -> None:
+    stream = _v2_plan().new_stream()
+    item = _v2_history()[-1]
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        for event in events(item):
+            stream.decode_events_for_event(event)
+
+    assert caught.value.classification == classification
+    assert caught.value.surface == "stream"
