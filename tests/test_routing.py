@@ -1,3 +1,4 @@
+import copy
 import gc
 import os
 import gzip
@@ -20,6 +21,13 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
+from collaboration_runtime_contract import (
+    COLLABORATION_V1,
+    COLLABORATION_V2,
+    EXPECTED_PARAMETER_SCHEMAS,
+    V1_NAMESPACE,
+    V2_NAMESPACE,
+)
 from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler, SseFrameTooLargeError
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -71,11 +79,27 @@ def _load_model_switch_fixture():
 
 
 def _model_switch_tool_surface(protocol: str) -> dict[str, Any]:
-    namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
+    version = COLLABORATION_V2 if protocol == COLLABORATION_V2 else COLLABORATION_V1
+    namespace = V2_NAMESPACE if version == COLLABORATION_V2 else V1_NAMESPACE
+    children = []
+    for name, parameter_schema in EXPECTED_PARAMETER_SCHEMAS[version].items():
+        parameters = copy.deepcopy(parameter_schema)
+        if not parameters["required"]:
+            del parameters["required"]
+        children.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": f"dynamic child description for {name}",
+                "strict": False,
+                "parameters": parameters,
+            }
+        )
     return {
         "type": "namespace",
         "name": namespace,
-        "tools": [{"type": "function", "name": "spawn_agent"}],
+        "description": "dynamic namespace description",
+        "tools": children,
     }
 
 
@@ -95,10 +119,25 @@ def _model_switch_call(protocol: str, call_id: str) -> dict[str, Any]:
     namespace = "collaboration" if protocol == "collaboration_v2" else "multi_agent_v1"
     return {
         "type": "function_call",
+        "id": f"item-{call_id}",
         "namespace": namespace,
         "name": "spawn_agent",
         "call_id": call_id,
-        "arguments": arguments,
+        "arguments": json.dumps(arguments, separators=(",", ":")),
+    }
+
+
+def _model_switch_result(protocol: str, call_id: str) -> dict[str, Any]:
+    output = (
+        {"task_name": "/root/bounded-model-switch-check"}
+        if protocol == COLLABORATION_V2
+        else {"agent_id": "019f-child", "nickname": None}
+    )
+    return {
+        "type": "function_call_output",
+        "id": f"item-result-{call_id}",
+        "call_id": call_id,
+        "output": json.dumps(output, separators=(",", ":")),
     }
 
 
@@ -1246,6 +1285,35 @@ class RoutingTests(unittest.TestCase):
                 self.assertIn(codex_proxy.RouteMutation.SEMANTIC_REPAIR, plan.named_mutations)
                 self.assertFalse(plan.official_http_passthrough)
                 self.assertFalse(plan.transparent_metered)
+
+    def test_route_plan_reports_disabled_tool_protocol_without_schema_injection(self):
+        plan = codex_proxy.route_plan_for_request(
+            {
+                "name": "custom_endpoint",
+                "auth": "api_key",
+                "upstream_model": "thinking-model",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="custom-endpoint/thinking-model",
+        )
+
+        self.assertEqual(plan.primary_attempt.tool_protocol, "none")
+        self.assertEqual(
+            plan.tool_exposure.capability_state,
+            codex_proxy.CapabilityState.UNSUPPORTED,
+        )
+        self.assertEqual(
+            plan.tool_exposure.effective_mode,
+            codex_proxy.ToolExposureMode.UNSUPPORTED,
+        )
+        self.assertFalse(plan.tool_exposure.gateway_schema_injection)
+        self.assertNotIn(
+            codex_proxy.RouteMutation.HARD_CODED_SCHEMA_INJECTION,
+            plan.named_mutations,
+        )
 
     def test_route_plan_and_nested_tool_policy_are_immutable(self):
         plan = codex_proxy.route_plan_for_request(
@@ -3338,7 +3406,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["transport_policy"], codex_proxy.TransportPolicy.OFFICIAL_KEEPALIVE.value)
             self.assertEqual(fields["mutation_summary"], [codex_proxy.RouteMutation.MODEL_ALIAS.value])
 
-    def test_model_switch_gateway_request_response_path_uses_selected_model_in_both_directions(self):
+    def test_model_switch_gateway_rejects_cross_protocol_history_before_sampling(self):
         versioned_slug = "deepseek-v4-flash:0731"
         versioned_catalog = catalog_sync.build_codex_catalog(
             [],
@@ -3362,12 +3430,6 @@ class RoutingTests(unittest.TestCase):
         }
         fixture = _load_model_switch_fixture()
         self.assertEqual(fixture["schema_version"], "codexhub.model-switch.v1")
-        self.assertEqual(fixture["expected"], {
-            "same_thread": True,
-            "fallback_model": None,
-            "boundary_error": None,
-            "reconnect_count": 0,
-        })
         turns = fixture["turns"]
         self.assertEqual(len(turns), 2)
         self.assertEqual(
@@ -3431,11 +3493,12 @@ class RoutingTests(unittest.TestCase):
                 call_item = _model_switch_call(protocol, call_id)
                 body = {
                     "model": model,
+                    "tool_choice": "auto",
                     "input": [
                         *history,
                         {"type": "message", "role": "user", "content": "continue with the selected model"},
                         call_item,
-                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                        _model_switch_result(protocol, call_id),
                     ],
                     "tools": [_model_switch_tool_surface(protocol)],
                     "stream": False,
@@ -3498,6 +3561,17 @@ class RoutingTests(unittest.TestCase):
                 ):
                     CodexProxyHandler.do_POST(handler)
 
+                if turn_index > 0:
+                    self.assertEqual(fake.status, 400, direction)
+                    open_upstream.assert_not_called()
+                    event_names = [
+                        event_call.args[0]
+                        for event_call in self.write_proxy_event.call_args_list[event_offset:]
+                        if event_call.args
+                    ]
+                    self.assertIn("collaboration_boundary_rejected", event_names)
+                    break
+
                 self.assertEqual(fake.status, 200, direction)
                 open_upstream.assert_called_once()
                 forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
@@ -3535,7 +3609,7 @@ class RoutingTests(unittest.TestCase):
                 history.extend(
                     [
                         call_item,
-                        {"type": "function_call_output", "call_id": call_id, "output": "done"},
+                        _model_switch_result(protocol, call_id),
                     ]
                 )
 
@@ -14681,7 +14755,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(done["item"]["arguments"])["message"], "Implement Task 1 exactly.")
         self.assertEqual(json.loads(done["item"]["arguments"])["nickname"], "implementer-task-1")
         self.assertEqual(done["item"]["arguments"], arguments_done["arguments"])
-        self.assertEqual(json.loads(done["item"]["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(done["item"]["arguments"])["agent_type"], "default")
 
 
     def test_non_sse_relay_bulk_writes_body(self):
@@ -15818,7 +15892,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(arguments["message"], "return sentinel A")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
@@ -16105,7 +16179,7 @@ class RoutingTests(unittest.TestCase):
         arguments = json.loads(argument_text)
         self.assertEqual(arguments["message"], "return sentinel B")
         self.assertEqual(arguments["nickname"], "child-b")
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 
@@ -18584,16 +18658,17 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("encrypted_content", payload["input"][0])
         self.assertNotIn(encrypted_content, transformed.decode("utf-8"))
 
-    def test_collaboration_v2_chat_adapts_responses_only_history_before_translation(self):
+    def test_collaboration_v2_chat_fails_before_history_translation(self):
         summary_text = "PRIVATE_REASONING_SUMMARY"
         encrypted_content = "gAAAA-private-reasoning"
         event_context = {
             "request_id": "request-v2-chat-reasoning-history",
             "collaboration_protocol": "collaboration_v2",
         }
-        transformed = compatible_request_body(
-            json.dumps(
-                {
+        with self.assertRaises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+            compatible_request_body(
+                json.dumps(
+                    {
                     "model": "kimi-k3",
                     "input": [
                         {
@@ -18612,65 +18687,31 @@ class RoutingTests(unittest.TestCase):
                         {"type": "message", "role": "user", "content": "continue"},
                     ],
                     "tools": [_model_switch_tool_surface("collaboration_v2")],
+                    "tool_choice": "auto",
                     "stream": True,
-                }
-            ).encode("utf-8"),
-            {
-                "name": "kimi",
-                "upstream_model": "kimi-k3",
-                "upstream_format": "chat_completions",
-                "tool_protocol": "none",
-            },
-            event_context=event_context,
-            inject_codex_tools=False,
-        )
-        payload = json.loads(transformed)
+                    }
+                ).encode("utf-8"),
+                {
+                    "name": "kimi",
+                    "upstream_model": "kimi-k3",
+                    "upstream_format": "chat_completions",
+                    "tool_protocol": "none",
+                },
+                event_context=event_context,
+                inject_codex_tools=False,
+            )
 
         self.assertEqual(
-            payload["input"],
-            [
-                {
-                    "id": "msg_final",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Earlier answer."}],
-                },
-                {"type": "message", "role": "user", "content": "continue"},
-            ],
+            caught.exception.cause.code,
+            "tool_compatibility_required_unavailable",
         )
-        chat_payload = json.loads(
-            _responses_request_to_chat_completion_body(
-                transformed,
-                drop_client_transport_fields=True,
-                drop_reasoning=True,
-            )
-        )
-        self.assertEqual(
-            chat_payload["messages"],
-            [
-                {"role": "assistant", "content": "Earlier answer."},
-                {"role": "user", "content": "continue"},
-            ],
-        )
-        serialized = json.dumps(chat_payload, ensure_ascii=False)
-        self.assertNotIn(summary_text, serialized)
-        self.assertNotIn(encrypted_content, serialized)
-        removal_event = next(
-            call.kwargs
+        event_names = [
+            call.args[0]
             for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "v2_chat_reasoning_history_removed"
-        )
-        self.assertEqual(removal_event["count"], 1)
-        for forbidden in ("id", "summary", "content", "text", "encrypted_content"):
-            self.assertNotIn(forbidden, removal_event)
-        phase_event = next(
-            call.kwargs
-            for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "chat_message_phase_removed"
-        )
-        self.assertEqual(phase_event["count"], 1)
-        for forbidden in ("id", "phase", "content", "text"):
-            self.assertNotIn(forbidden, phase_event)
+            if call.args
+        ]
+        self.assertNotIn("v2_chat_reasoning_history_removed", event_names)
+        self.assertNotIn("chat_message_phase_removed", event_names)
 
     def test_codex_app_chat_adapts_message_phase_without_collaboration_signal(self):
         summary_text = "PRIVATE_REASONING_SUMMARY"
@@ -23553,15 +23594,6 @@ Execution constraints:
                     },
                 ],
                 "tools": [
-                    {
-                        "type": "namespace",
-                        "name": "multi_agent_v1",
-                        "tools": [
-                            {"type": "function", "name": "spawn_agent", "parameters": {"type": "object"}},
-                            {"type": "function", "name": "wait_agent", "parameters": {"type": "object"}},
-                            {"type": "function", "name": "close_agent", "parameters": {"type": "object"}},
-                        ],
-                    },
                     {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
                     {"type": "function", "name": "multi_agent_v1__wait_agent", "parameters": {"type": "object"}},
                     {"type": "function", "name": "multi_agent_v1__close_agent", "parameters": {"type": "object"}},
@@ -24356,7 +24388,7 @@ Execution constraints:
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("prompt", arguments)
         self.assertNotIn("name", arguments)
 
@@ -24384,7 +24416,7 @@ Execution constraints:
             event_context={},
         )
         replay_call = json.loads(replay)["input"][0]
-        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
 
     def test_external_general_spawn_sse_normalize_to_replay_preserves_selector_without_worker_sidecar(self):
@@ -24413,7 +24445,7 @@ Execution constraints:
         )
         event = json.loads(normalized_line.removeprefix(b"data: ").strip())
         call = event["item"]
-        self.assertEqual(json.loads(call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", call)
 
         replay = compatible_request_body(
@@ -24440,7 +24472,7 @@ Execution constraints:
             event_context={},
         )
         replay_call = json.loads(replay)["input"][0]
-        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "general")
+        self.assertEqual(json.loads(replay_call["arguments"])["agent_type"], "default")
         self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
 
     def test_external_worker_agent_type_survives_declaration_response_and_history_replay(self):
@@ -24451,7 +24483,7 @@ Execution constraints:
         )
         self.assertEqual(
             spawn_tool["parameters"]["properties"]["agent_type"],
-            {"type": "string", "enum": ["worker", "general"]},
+            {"type": "string", "enum": ["worker", "default"]},
         )
         self.assertIn("agent_type", spawn_tool["parameters"]["required"])
         self.assertNotIn("synthetic-unknown", spawn_tool["parameters"]["properties"]["agent_type"]["enum"])
@@ -24573,7 +24605,7 @@ Execution constraints:
         )
         self.assertEqual(
             spawn_tool["parameters"]["properties"]["agent_type"]["enum"],
-            ["general"],
+            ["default"],
         )
         self.assertNotIn("_worker_requested_binding", event_context)
 
@@ -26192,7 +26224,7 @@ Execution constraints:
         self.assertEqual(call["name"], "spawn_agent")
         self.assertEqual(args["message"], "return ok")
         self.assertEqual(args["nickname"], "worker")
-        self.assertEqual(args["agent_type"], "general")
+        self.assertEqual(args["agent_type"], "default")
 
     def test_external_response_normalizes_concatenated_multi_agent_alias(self):
         body = json.dumps(
@@ -26654,7 +26686,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
                 arguments = json.loads(call["arguments"])
                 self.assertEqual(arguments["message"], "return sentinel")
                 self.assertEqual(arguments["nickname"], "child-a")
-                self.assertEqual(arguments["agent_type"], "general")
+                self.assertEqual(arguments["agent_type"], "default")
 
     def test_external_sse_normalizes_concatenated_multi_agent_alias_fragments(self):
         events = [
@@ -26735,7 +26767,7 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
         self.assertEqual(arguments["message"], "return sentinel")
         self.assertEqual(arguments["nickname"], "child-a")
         self.assertIs(arguments["fork_context"], False)
-        self.assertEqual(arguments["agent_type"], "general")
+        self.assertEqual(arguments["agent_type"], "default")
         self.assertNotIn("input", arguments)
         self.assertNotIn("name", arguments)
 

@@ -1,0 +1,176 @@
+{
+  "schema": "codexhub.issue283.protocol-fixture.v1",
+  "candidate_revision": "5bb5ce50fc736d79d5ca1b37fd75720c9bc5b12b",
+  "evidence_status": "protocol_fixture_sanitized",
+  "captured_on": "2026-08-10T15:48:05Z",
+  "capture_scope": {
+    "fixture_type": "protocol_controlled_responses",
+    "upstream": "loopback_responses_structured",
+    "content_or_credentials_retained": false,
+    "opaque_identity_retained": false,
+    "existing_user_home_read": false,
+    "existing_user_task_read": false,
+    "note": "All assertions use synthetic tool declarations and history; no real call IDs, item IDs, task paths, or tokens are retained."
+  },
+  "deferred_from_issue_392": [
+    "full_six_tool_two_child_lifecycle",
+    "cross_home_negative_cases",
+    "malformed_agent_message_and_identity_negative_cases"
+  ],
+  "issue_283_test_file": "tests/test_issue_283_v2_lifecycle_fixture.py",
+  "cases": [
+    {
+      "id": "C1_native_responses_forwards_declarations_unchanged",
+      "description": "Native Responses endpoint with namespace_lifecycle=True receives the collaboration V2 namespace unchanged and round-trips SSE/terminal events.",
+      "result": "passed"
+    },
+    {
+      "id": "C1_native_history_round_trips_unchanged",
+      "description": "Native V2 history survives request encoding and response decoding byte-equivalently.",
+      "result": "passed"
+    },
+    {
+      "id": "C2_adapted_alias_encoding_is_injective_and_reversible",
+      "description": "Responses endpoint without namespace_lifecycle triggers injective, request-scoped aliases and reversible decode.",
+      "result": "passed"
+    },
+    {
+      "id": "C2_adapted_aliases_are_request_scoped",
+      "description": "Identical declaration shapes produce disjoint alias sets across separate request tokens.",
+      "result": "passed"
+    },
+    {
+      "id": "C3_stream_arguments_delta_assembly_and_terminal",
+      "description": "Fragmented function_call_arguments.delta events reassemble and terminal response.completed reconciles on alias wire.",
+      "result": "passed"
+    },
+    {
+      "id": "C3_stream_preserves_output_order_and_no_reordering",
+      "description": "Adapted stream preserves upstream output order through SSE and terminal envelope.",
+      "result": "passed"
+    },
+    {
+      "id": "C4_negative_mixed_v1_v2_tools",
+      "description": "Mixed V1/V2 tool declarations are rejected before upstream sampling.",
+      "result": "passed",
+      "expected_code": "invalid_collaboration_boundary"
+    },
+    {
+      "id": "C4_negative_mixed_v1_v2_history",
+      "description": "Mixed V1/V2 history items are rejected before upstream sampling.",
+      "result": "passed",
+      "expected_code": "invalid_collaboration_boundary"
+    },
+    {
+      "id": "C4_negative_v1_parameters_on_v2_call",
+      "description": "V1-style parameters on a V2 function_call are rejected.",
+      "result": "passed",
+      "expected_code": "tool_compatibility_boundary"
+    },
+    {
+      "id": "C4_negative_missing_namespace_spawn",
+      "description": "Native V2 spawn_agent missing namespace is rejected.",
+      "result": "passed",
+      "expected_code": "invalid_collaboration_boundary"
+    },
+    {
+      "id": "C4_negative_duplicate_call_id",
+      "description": "Duplicate call_id values in V2 history are rejected.",
+      "result": "passed",
+      "expected_code": "tool_compatibility_boundary"
+    },
+    {
+      "id": "C4_negative_missing_call_id",
+      "description": "V2 function_call missing call_id is rejected.",
+      "result": "passed",
+      "expected_code": "tool_compatibility_boundary"
+    },
+    {
+      "id": "C4_negative_malformed_agent_message",
+      "description": "agent_message with disallowed content variant is rejected.",
+      "result": "passed",
+      "expected_code": "tool_compatibility_boundary"
+    },
+    {
+      "id": "C4_history_integrity_orphan_result",
+      "description": "Orphan function_call_output with no matching call is rejected.",
+      "result": "passed"
+    },
+    {
+      "id": "C4_history_integrity_cross_home_v1_state",
+      "description": "V1 multi_agent_v1 state mixed into V2 history is rejected.",
+      "result": "passed"
+    },
+    {
+      "id": "C4_history_integrity_incompatible_paginated_state",
+      "description": "V2 list_agents result carrying pagination fields is rejected.",
+      "result": "passed"
+    },
+    {
+      "id": "gateway_does_not_fabricate_completion_or_output",
+      "description": "Gateway never synthesizes function_call_output or completion items.",
+      "result": "passed"
+    },
+    {
+      "id": "v2_skips_v1_scheduler_and_repair",
+      "description": "V2 contexts do not initialize V1 scheduler, worker stream binding, or spawn-allowed state.",
+      "result": "passed"
+    }
+  ],
+  "regression_summary": {
+    "command": "py -3.13 -B -m pytest -q -p no:cacheprovider --basetemp C:\\tmp\\issue283-c tests/test_issue_283_v2_lifecycle_fixture.py tests/test_issue_198_v1_v2_isolation.py tests/test_runtime_tool_compatibility_boundaries.py tests/test_runtime_tool_compatibility_integration.py tests/test_subagent_policy.py tests/test_subagent_scheduler.py tests/test_subagent_state.py tests/test_config_overlay.py tests/test_issue_64_collaboration_inventory.py",
+    "passed": 403,
+    "failed": 0,
+    "skipped": 0,
+    "subtests_passed": 11,
+    "result": "passed"
+  },
+  "full_python_core_summary": {
+    "command": "py -3.13 -B -m pytest -q -p no:cacheprovider --basetemp C:\\tmp\\issue283-c --ignore=tests/test_real_client_e2e.py",
+    "passed": 2347,
+    "failed": 2,
+    "skipped": 1,
+    "subtests_passed": 490,
+    "result": "passed_with_known_unrelated_failures",
+    "known_failures": [
+      {
+        "test": "tests/test_release_channel_scripts.py::test_portable_rejects_invalid_flavor_before_building",
+        "reason": "Locale-dependent PowerShell error message assertion fails on zh-CN Windows; pre-existing and unrelated to V2 protocol fixture."
+      },
+      {
+        "test": "tests/test_smoke_scripts.py::test_issue_108_tool_surface_evidence_replay_has_semantic_three_case_ab",
+        "reason": "External PowerShell evidence replay subprocess reports evidence_fixture_invalid; pre-existing and unrelated to V2 protocol fixture."
+      }
+    ]
+  },
+  "static_invariants": {
+    "codex_proxy_v2_branch": {
+      "include_spawn_agent_false": true,
+      "subagent_state_none": true,
+      "worker_stream_event_early_return": true,
+      "response_contract_v2_skip": true,
+      "suppression_functions_v2_early_return": true
+    },
+    "runtime_tool_compatibility_v2_names": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
+      "send_message",
+      "spawn_agent",
+      "wait_agent"
+    ]
+  },
+  "issue_369_matrix": {
+    "validator": "scripts/validate_issue_369_matrix.py",
+    "unpinned_result": "ISSUE_369_MATRIX_OK",
+    "pinned_candidate_sha": "5bb5ce50fc736d79d5ca1b37fd75720c9bc5b12b",
+    "pinned_result": "ISSUE_369_MATRIX_INVALID:candidate_sha_mismatch",
+    "pinned_note": "The matrix artifact candidate_revision is 7006542a773fc20c10e4bbcadd593393a259ceb2; the fixture branch HEAD is 5bb5ce50fc736d79d5ca1b37fd75720c9bc5b12b. Structural validation passes when not pinned."
+  },
+  "quality_gates": {
+    "command": "py -3.13 -B scripts/report_quality_gates.py",
+    "mode": "report-only",
+    "result": "completed",
+    "parse_errors": 0
+  }
+}

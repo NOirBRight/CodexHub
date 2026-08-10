@@ -101,6 +101,7 @@ from codex_semantic_adapter import (
     normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
     strict_json_object as _semantic_strict_json_object,
+    synthesize_effective_worker_binding_readback as _semantic_synthesize_effective_worker_binding_readback,
     validate_effective_worker_binding as _semantic_validate_effective_worker_binding,
     validate_requested_worker_binding as _semantic_validate_requested_worker_binding,
     validate_worker_selector as _semantic_validate_worker_selector,
@@ -590,7 +591,7 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "agent_type": {"type": "string", "enum": ["worker", "general"]},
+                        "agent_type": {"type": "string", "enum": ["worker", "default"]},
                         "fork_context": {"type": "boolean"},
                         "message": {"type": "string"},
                     },
@@ -2513,12 +2514,14 @@ def _raise_collaboration_boundary_error(
     *,
     classification: str,
     message: str,
+    surface: str = "request",
     cause: BaseException | None = None,
 ) -> NoReturn:
-    _write_adapter_event(
-        event_context,
+    write_proxy_event(
         "collaboration_boundary_rejected",
-        classification=classification,
+        surface=surface,
+        outcome="rejected",
+        count=1,
     )
     error = UpstreamProtocolTranslationError(
         UnsupportedProtocolTranslationError(
@@ -2545,6 +2548,7 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification=exc.classification,
                 message="Collaboration protocol boundary is malformed or ambiguous.",
+                surface=surface,
                 cause=exc,
             )
         context_protocol = (
@@ -2560,6 +2564,7 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification="unknown_state",
                 message="Collaboration protocol selection is unknown.",
+                surface=surface,
             )
         if (
             context_protocol is not None
@@ -2570,38 +2575,19 @@ def _resolve_collaboration_boundary(
                 event_context,
                 classification="conflicting_selection",
                 message="Collaboration protocol selection conflicts with the response.",
+                surface=surface,
             )
     else:
         try:
-            tool_protocols = _collaboration_protocols(
-                {"tools": payload.get("tools", [])}
-                if isinstance(payload, Mapping)
-                else {"tools": []}
-            )
-            if len(tool_protocols) > 1:
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="mixed_current_tool_surface",
-                    message="Current Collaboration tools contain multiple protocol families.",
-                )
-            current_protocol = next(iter(tool_protocols), None)
-
-            metadata = {
-                key: event_context[key]
-                for key in (
-                    "multi_agent_version",
-                    "metadata",
-                    "model_metadata",
-                    "capabilities",
-                    "features",
-                )
-                if isinstance(event_context, Mapping) and key in event_context
-            }
-            metadata_protocol = (
-                _classify_collaboration_payload({"metadata": metadata})
-                if metadata
-                else None
-            )
+            request_boundary = {
+                "tools": payload.get("tools", []),
+                "tool_choice": payload.get("tool_choice"),
+            } if isinstance(payload, Mapping) else {"tools": [], "tool_choice": None}
+            if isinstance(payload, Mapping):
+                for key in ("multi_agent_version", "metadata", "features", "client_metadata"):
+                    if key in payload:
+                        request_boundary[key] = payload[key]
+            current_protocol = _classify_collaboration_payload(request_boundary)
 
             raw_context_protocol = (
                 event_context.get("collaboration_protocol")
@@ -2612,23 +2598,6 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
-            request_metadata = {
-                key: payload[key]
-                for key in (
-                    "collaboration_protocol",
-                    "multi_agent_version",
-                    "metadata",
-                    "model_metadata",
-                    "capabilities",
-                    "features",
-                )
-                if isinstance(payload, Mapping) and key in payload
-            }
-            request_metadata_protocol = (
-                _classify_collaboration_payload(request_metadata)
-                if request_metadata
-                else None
-            )
             history_protocols = _collaboration_protocols(
                 {"input": payload.get("input", [])}
                 if isinstance(payload, Mapping)
@@ -2636,10 +2605,38 @@ def _resolve_collaboration_boundary(
             )
             protocol = (
                 current_protocol
-                or request_metadata_protocol
-                or metadata_protocol
                 or context_protocol
             )
+            if (
+                current_protocol is not None
+                and context_protocol is not None
+                and current_protocol != context_protocol
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="conflicting_selection",
+                    message="Collaboration protocol selection conflicts with the request.",
+                    surface=surface,
+                )
+            if len(history_protocols) > 1:
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="mixed_v1_v2",
+                    message="Collaboration history contains multiple protocol families.",
+                    surface=surface,
+                )
+            history_protocol = next(iter(history_protocols), None)
+            if (
+                protocol is not None
+                and history_protocol is not None
+                and protocol != history_protocol
+            ):
+                _raise_collaboration_boundary_error(
+                    event_context,
+                    classification="conflicting_selection",
+                    message="Collaboration protocol selection conflicts with history.",
+                    surface=surface,
+                )
             if (
                 raw_context_protocol is not None
                 and context_protocol is None
@@ -2649,23 +2646,19 @@ def _resolve_collaboration_boundary(
                     event_context,
                     classification="unknown_state",
                     message="Collaboration protocol selection is unknown.",
+                    surface=surface,
                 )
         except _CollaborationBoundaryError as exc:
             _raise_collaboration_boundary_error(
                 event_context,
                 classification=exc.classification,
                 message="Collaboration protocol boundary is malformed or ambiguous.",
+                surface=surface,
                 cause=exc,
             )
 
-        if len(history_protocols) > 1:
-            _write_adapter_event(
-                event_context,
-                "collaboration_history_mixed",
-                protocol_count=len(history_protocols),
-            )
-        if protocol is None and len(history_protocols) == 1:
-            protocol = next(iter(history_protocols))
+        if protocol is None:
+            protocol = history_protocol
 
     if isinstance(event_context, dict) and protocol is not None:
         event_context["collaboration_protocol"] = protocol
@@ -5980,7 +5973,7 @@ def _multi_agent_explicit_function_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
-    worker_selector_values: tuple[str, ...] = ("worker", "general"),
+    worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> list[dict[str, Any]]:
     namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
     tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
@@ -6418,8 +6411,9 @@ def _prepare_runtime_tool_compatibility(
     except RuntimeToolCompatibilityError as exc:
         write_proxy_event(
             "runtime_tool_compatibility_rejected",
-            classification=exc.classification,
             surface=exc.surface,
+            outcome="rejected",
+            count=1,
         )
         _raise_runtime_tool_compatibility_error(exc)
     event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan
@@ -6977,7 +6971,7 @@ def _inject_explicit_codex_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
-    worker_selector_values: tuple[str, ...] = ("worker", "general"),
+    worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> bool:
     if tool_surface_counts is not None:
         tool_surface_counts.update(
@@ -7763,7 +7757,7 @@ def _validate_external_worker_selectors(
         arguments = _json_object_from_arguments(raw_arguments)
         if arguments is not None and raw_arguments not in (None, ""):
             agent_type = arguments.get("agent_type")
-            if agent_type == "general":
+            if agent_type in {"general", "default"}:
                 pass
             elif agent_type == "worker":
                 if not _worker_caller_carrier_supported(event_context):
@@ -8198,7 +8192,7 @@ def _validate_worker_binding_history(
         if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
             arguments = _json_object_from_arguments(item.get("arguments"))
             agent_type = arguments.get("agent_type") if arguments is not None else None
-            if agent_type == "general":
+            if agent_type in {"general", "default"}:
                 continue
             selector_validation = _semantic_validate_worker_selector(arguments)
             if selector_validation.outcome != _BINDING_ACCEPTED:
@@ -8256,6 +8250,10 @@ def _validate_worker_binding_history(
                 classification="malformed_readback",
             )
         requested = worker_calls[call_id]
+        readback = _semantic_synthesize_effective_worker_binding_readback(
+            requested,
+            readback,
+        )
         validation = _semantic_validate_effective_worker_binding(
             requested,
             readback,
@@ -12030,9 +12028,9 @@ def compatible_request_body(
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
                 worker_selector_values=(
-                    ("worker", "general")
+                    ("worker", "default")
                     if worker_caller_carrier_supported
-                    else ("general",)
+                    else ("default",)
                 ),
             )
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
@@ -12972,13 +12970,18 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
-    _remember_worker_stream_event(payload, event_context)
     collaboration_protocol = _resolve_collaboration_boundary(
         payload,
         event_context,
         surface="stream",
     )
+    if collaboration_protocol is None and isinstance(event_context, Mapping):
+        selected_protocol = event_context.get("collaboration_protocol")
+        if selected_protocol in {_COLLABORATION_V1, _COLLABORATION_V2}:
+            collaboration_protocol = selected_protocol
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
+    if collaboration_protocol != _COLLABORATION_V2:
+        _remember_worker_stream_event(payload, event_context)
     _raise_on_invalid_worker_stream_event(
         payload,
         event_context,
@@ -14498,6 +14501,7 @@ def _tool_exposure_policy_for_route(
     request_kind: str,
     raw_provider_probe: bool,
 ) -> ToolExposurePolicy:
+    tool_protocol = _external_tool_protocol(upstream)
     raw_requested_mode = upstream.get("tool_exposure_mode")
     if raw_requested_mode is None:
         if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
@@ -14536,6 +14540,8 @@ def _tool_exposure_policy_for_route(
         capability_state = CapabilityState.UNQUALIFIED
     elif requested_mode == ToolExposureMode.UNSUPPORTED:
         capability_state = CapabilityState.UNSUPPORTED
+    if tool_protocol == "none":
+        capability_state = CapabilityState.UNSUPPORTED
 
     raw_subset = upstream.get("proven_tool_subset")
     proven_tool_subset = (
@@ -14556,6 +14562,8 @@ def _tool_exposure_policy_for_route(
         # evidence visible while executing the compatibility mode is the
         # behavior-preserving fail-closed boundary.
         effective_mode = ToolExposureMode.CURRENT_COMPATIBILITY
+    if tool_protocol == "none":
+        effective_mode = ToolExposureMode.UNSUPPORTED
     gateway_schema_injection = (
         upstream_name != "official"
         and effective_mode == ToolExposureMode.CURRENT_COMPATIBILITY
@@ -18579,7 +18587,177 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
             return
 
-        self._send_json(404, {"error": "not found"})
+        if parsed.path == "/v1/images/generations":
+            self._proxy_official_image_generation()
+            return
+
+        self._send_json_and_close(404, {"error": "not found"})
+
+    def _proxy_official_image_generation(self) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        started_at = time.monotonic()
+        request_context = request_context_from_headers(self.headers)
+
+        def send_user_requested_shutdown() -> None:
+            _record_user_requested_shutdown()
+            self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
+
+        if not _local_request_authorized(self.headers, request_context):
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                path=self.path,
+                method="POST",
+                model=None,
+                upstream="local",
+                route_reason="official_image_generation",
+                status=401,
+                error="UnauthorizedLocalClient",
+                detail="missing or invalid local Gateway client key",
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._send_json_and_close(401, _local_gateway_auth_error_payload())
+            return
+
+        shutdown_controller = _gateway_shutdown_controller_for_handler(self)
+        admission = shutdown_controller.admit()
+        if admission is None:
+            send_user_requested_shutdown()
+            return
+        previous_admission = _activate_gateway_request(admission)
+        upstream_name = "official"
+        status = 500
+        try:
+            admission.raise_if_cancelled()
+            upstream = official_upstream()
+            upstream_name = str(upstream["name"])
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                self._send_json_and_close(400, {"error": "invalid Content-Length"})
+                return
+            if content_length < 0:
+                self._send_json_and_close(400, {"error": "invalid Content-Length"})
+                return
+            max_body_bytes = max_request_body_bytes()
+            if content_length > max_body_bytes:
+                self._send_json_and_close(
+                    413,
+                    {
+                        "error": "request body too large",
+                        "max_request_body_bytes": max_body_bytes,
+                    },
+                )
+                return
+
+            body = self.rfile.read(content_length)
+            admission.raise_if_cancelled()
+            operational_authentication = materialize_operational_authentication(
+                self.headers,
+                upstream,
+            )
+            headers = upstream_headers(
+                self.headers,
+                upstream,
+                request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
+                operational_authentication=operational_authentication,
+            )
+            request = Request(
+                _upstream_endpoint_url(upstream, "/images/generations"),
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            event_context = {
+                "request_id": request_id,
+                "model": None,
+                **_event_context_with_request_kind(
+                    request_context,
+                    RETRY_REQUEST_MAIN_GENERATION,
+                ),
+            }
+            write_proxy_event(
+                "request_start",
+                request_id=request_id,
+                path=self.path,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                content_length=content_length,
+                **request_context,
+            )
+            try:
+                with _open_upstream_response(
+                    request,
+                    upstream_name=upstream_name,
+                    upstream_format="images",
+                    timeout=upstream_timeout_seconds(),
+                    event_context=event_context,
+                    request_kind=RETRY_REQUEST_MAIN_GENERATION,
+                    max_attempts=1,
+                    retry_http_errors=False,
+                    transport_policy=TransportPolicy.OFFICIAL_KEEPALIVE,
+                ) as response:
+                    status = self._relay_raw_upstream_response(response, upstream_name)
+            except HTTPError as exc:
+                try:
+                    status = self._relay_raw_upstream_response(exc, upstream_name)
+                finally:
+                    exc.close()
+            write_proxy_event(
+                "request_complete",
+                request_id=request_id,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                status=status,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+        except GatewayUserRequestedShutdown:
+            send_user_requested_shutdown()
+        except (IncompleteRead, OSError, URLError) as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
+            detail = safe_upstream_error_detail(exc)
+            write_proxy_event(
+                "request_error",
+                request_id=request_id,
+                method="POST",
+                model=None,
+                upstream=upstream_name,
+                route_reason="official_image_generation",
+                status=502,
+                error=type(exc).__name__,
+                detail=detail,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                **request_context,
+            )
+            self._send_json_and_close(
+                502,
+                {"error": type(exc).__name__, "detail": detail},
+            )
+        except Exception as exc:
+            if admission.cancelled:
+                send_user_requested_shutdown()
+                return
+            detail = safe_upstream_error_detail(exc)
+            logger.error(
+                "unexpected image generation proxy error request_id=%s detail=%s",
+                request_id,
+                detail,
+            )
+            self._send_json_and_close(
+                500,
+                {"error": type(exc).__name__, "detail": detail},
+            )
+        finally:
+            _restore_gateway_request(previous_admission)
+            shutdown_controller.complete(admission)
 
     def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None = None) -> None:
         """Shared POST handler for inbound Responses and Chat Completions requests.
@@ -20581,6 +20759,37 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json_and_close(self, status: int, payload: dict[str, Any]) -> None:
+        body = _json_response_bytes(payload)
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self._write_non_streaming_body_relay(body)
+
+    def _relay_raw_upstream_response(self, response: Any, upstream_name: str) -> int:
+        status = getattr(response, "status", None) or getattr(response, "code", 502)
+        body = response.read()
+        admission = _active_gateway_request()
+        if admission is not None:
+            admission.raise_if_cancelled()
+        self.send_response(status)
+        for key, value in _filtered_response_headers(
+            response.headers,
+            False,
+            content_length=len(body),
+        ):
+            self.send_header(key, value)
+        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if not self._write_non_streaming_body_relay(body):
+            return 499
+        self.close_connection = True
+        return status
 
     def _send_sse_headers(self, status: int, upstream_name: str) -> bool:
         seam = _handler_downstream_stream_commit(self)

@@ -172,13 +172,17 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
         return Ok(());
     }
     let outcome = refresh(RefreshTrigger::Activation)?;
+    allow_activation_without_official_snapshot(outcome)
+}
+
+fn allow_activation_without_official_snapshot(outcome: RefreshOutcome) -> Result<(), String> {
     if outcome.snapshot_available {
         Ok(())
     } else {
-        Err(
-            "current Official context snapshot is unavailable; refuse to activate CodexHub Official without a safe budget"
-                .to_string(),
-        )
+        log::warn!(
+            "CodexHub Official snapshot is unavailable; activating Gateway without Official models until a safe snapshot is published"
+        );
+        Ok(())
     }
 }
 
@@ -709,13 +713,12 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_refresh_due, finalize_published_snapshot, manual_refresh_models, read_state,
-        record_attempt, published_context_budgets_from_catalog_payload,
-        published_official_models_from_catalog, refresh_with_flight, should_attempt,
-        direct_official_refresh_failure_message, update_published_context_budgets, write_state,
-        OfficialRefreshState,
-        PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
-        OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        allow_activation_without_official_snapshot, automatic_refresh_due,
+        finalize_published_snapshot, manual_refresh_models, read_state, record_attempt,
+        published_context_budgets_from_catalog_payload, published_official_models_from_catalog,
+        refresh_with_flight, should_attempt, direct_official_refresh_failure_message,
+        update_published_context_budgets, write_state, OfficialRefreshState, PublishedOfficialBudget,
+        RefreshOutcome, RefreshTrigger, SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
     use crate::Model;
     use serde_json::json;
@@ -794,6 +797,20 @@ mod tests {
         assert!(!should_attempt(RefreshTrigger::Scheduled, &state, 1_001));
         assert!(!should_attempt(RefreshTrigger::Resume, &state, 1_001));
         assert!(should_attempt(RefreshTrigger::Activation, &state, 1_001));
+    }
+
+    #[test]
+    fn activation_succeeds_without_official_models_when_safe_snapshot_is_unavailable() {
+        assert!(allow_activation_without_official_snapshot(outcome(
+            RefreshTrigger::Activation,
+            false,
+        ))
+        .is_ok());
+        assert!(allow_activation_without_official_snapshot(outcome(
+            RefreshTrigger::Activation,
+            true,
+        ))
+        .is_ok());
     }
 
     #[test]

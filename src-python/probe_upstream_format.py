@@ -163,7 +163,6 @@ def chat_tool_payload(model: str, *, stream: bool) -> dict[str, Any]:
                 },
             }
         ],
-        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
     }
 
 
@@ -201,7 +200,6 @@ def chat_tool_history_payload(model: str) -> dict[str, Any]:
                 },
             }
         ],
-        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
     }
 
 
@@ -476,6 +474,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
     result: dict[str, Any] = {
         "base_url": base_url,
         "model": requested_model.strip() if requested_model and requested_model.strip() else None,
+        "model_required": False,
         "models_ok": False,
         "responses_text_ok": False,
         "responses_tool_ok": False,
@@ -503,6 +502,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
     model = result["model"]
     if not isinstance(model, str) or not model.strip():
         notes.append("No model is available for POST probes.")
+        result["model_required"] = True
         result["duration_ms"] = int((time.monotonic() - started) * 1000)
         return result
 

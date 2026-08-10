@@ -468,6 +468,7 @@ const zhCN = {
     providerOrderSaved: "供应商顺序已保存",
     providerSaved: "{{name}} 已保存",
     probeCompleted: "探测完成：{{format}}",
+    probeModelRequired: "需要模型才能测试端点兼容性",
     probeNoSupportedEndpoint: "探测完成：未检测到可用端点",
     reasoningLevels: "推理级别",
     recommendedFormat: "推荐 {{format}}",

@@ -86,6 +86,14 @@ export function useProviderCatalogActions({
   const { showToast, updateToast } = toast;
 
   function updateProbeToast(toastId: string, result: UpstreamFormatProbeResult) {
+    if (result.model_required) {
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.probeModelRequired"),
+        tone: "error",
+      });
+      return;
+    }
     const detectedFormat = probeDetectedEndpointFormat(result);
     updateToast(toastId, {
       action: null,
@@ -237,10 +245,13 @@ export function useProviderCatalogActions({
     const toastId = showToast(t("providers.discoveringProviderModels", { name: provider.name }), "loading");
     try {
       const models = await api.discoverProviderModels(provider.base_url, provider.api_key ?? "");
-      const previousModelIds = new Set(provider.models.map((model) => model.id));
+      // Merge against the persisted provider so discovery never drops manual
+      // models that are present in saved state but absent from a stale draft.
+      const persistedProvider = providers.find((item) => item.id === provider.id) ?? provider;
+      const previousModelIds = new Set(persistedProvider.models.map((model) => model.id));
       const nextProvider = {
-        ...provider,
-        models: mergeDiscoveredModels(provider.models, models),
+        ...persistedProvider,
+        models: mergeDiscoveredModels(persistedProvider.models, models),
       };
       const nextProviders = providers.map((item) =>
         item.id === provider.id ? nextProvider : item,

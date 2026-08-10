@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
-"""Build and reconcile the bounded Issue #64 Collaboration V1/V2 contract.
-
-This is a structural inventory only.  It binds the accepted Codex CLI 0.146
-source contract, records the pre-exposure discriminator and the two small
-schema families, and states the namespace adapter requirements needed by #198
-and #58.  It does not inspect a live client, execute tools, schedule agents,
-or implement a protocol adapter.
-"""
+"""Build the #64 inventory from the exact runtime contract accepted by #392."""
 
 from __future__ import annotations
 
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,155 +14,39 @@ from typing import Any, Mapping
 
 SCHEMA = "codexhub.issue64.collaboration-v1-v2.v1"
 ARTIFACT_KIND = "collaboration_v1_v2_inventory"
-DEFAULT_SOURCE_CONTRACT = Path("docs/evidence/issue-62/codex-0.146-source-contract.json")
+DEFAULT_SOURCE_CONTRACT = Path(
+    "docs/evidence/issue-392/collaboration-runtime-contract.json"
+)
 DEFAULT_OUTPUT = Path("docs/evidence/issue-64/collaboration-v1-v2-inventory.json")
-EXPECTED_SOURCE_CONTRACT_SHA256 = "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c"
-EXPECTED_SOURCE_RUNTIME_SURFACE_DIGEST = "53ad2ec352b7ad558fefdb265f01d3f28da0f410f022ffdf0cc231a488f5d318"
 
 V1_ID = "collaboration_v1"
 V2_ID = "collaboration_v2"
 V1_NAMESPACE = "multi_agent_v1"
 V2_NAMESPACE = "collaboration"
-V1_TOOLS = ("spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent")
+V1_TOOLS = ("close_agent", "resume_agent", "send_input", "spawn_agent", "wait_agent")
 V2_TOOLS = (
-    "spawn_agent",
-    "send_message",
     "followup_task",
-    "wait_agent",
     "interrupt_agent",
     "list_agents",
+    "send_message",
+    "spawn_agent",
+    "wait_agent",
 )
-V1_ONLY_FIELDS = frozenset({"agent_id", "fork_context"})
-V2_ONLY_FIELDS = frozenset({"task_name", "task_path", "fork_turns", "continuation_id"})
+V1_ONLY_FIELDS = frozenset({"agent_id", "fork_context", "items", "targets"})
+V2_ONLY_FIELDS = frozenset({"task_name", "fork_turns", "path_prefix"})
 V1_ONLY_TOOLS = frozenset({"send_input", "close_agent", "resume_agent"})
-V2_ONLY_TOOLS = frozenset({"send_message", "followup_task", "interrupt_agent", "list_agents"})
-BOUNDARY_ARGUMENT_FIELDS = {
-    V1_NAMESPACE: {
-        "spawn_agent": frozenset({"agent_type", "fork_context", "message"}),
-        "send_input": frozenset({"target", "message", "interrupt"}),
-        "wait_agent": frozenset({"targets", "timeout_ms"}),
-        "close_agent": frozenset({"target"}),
-        "resume_agent": frozenset({"id"}),
-    },
-    V2_NAMESPACE: {
-        "spawn_agent": frozenset({"task_name", "message", "fork_turns", "agent_type", "model", "reasoning_effort"}),
-        "send_message": frozenset({"target", "message"}),
-        "followup_task": frozenset({"target", "message"}),
-        "wait_agent": frozenset({"timeout_ms"}),
-        "interrupt_agent": frozenset({"target"}),
-        "list_agents": frozenset({"path_prefix"}),
-    },
-}
-BOUNDARY_INPUT_FIELDS = frozenset({
-    "namespace",
-    "name",
-    "tool_name",
-    "arguments",
-    "type",
-    "item_id",
-    "call_id",
-    "parameters",
-    "tools",
-})
+V2_ONLY_TOOLS = frozenset(
+    {"send_message", "followup_task", "interrupt_agent", "list_agents"}
+)
 DEFERRED_QUALIFICATION = [
-    "full_spawn_message_followup_wait_interrupt_list_lifecycle",
-    "restart_and_cold_root_resume",
-    "cross_home_topology_and_history",
+    "full_six_tool_two_child_lifecycle",
+    "cross_home_negative_cases",
+    "malformed_agent_message_and_identity_negative_cases",
 ]
-
-SOURCE_CONTRACT_TOP_LEVEL_FIELDS = {
-    "schema_version",
-    "fixture_kind",
-    "capture_status",
-    "qualification_status",
-    "captured_at",
-    "provenance",
-    "runtime_wire_surface",
-}
-SOURCE_CONTRACT_PROVENANCE = {
-    "cli_version": "0.146.0",
-    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
-    "cli_source_tag": "rust-v0.146.0",
-    "cli_source_commit_status": "published_attested",
-    "cli_binary_sha256": "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
-    "candidate_revision": "accab8ff6eb4d6ebd93cda84585fb5f6cb89da82",
-}
-SOURCE_DECLARATION_FAMILY_ORDER = [
-    "plain_function",
-    "custom_freeform",
-    "namespace",
-    "client_executed_tool_discovery",
-    "selected_provider_hosted",
-    "unknown_future_kind",
-]
-SOURCE_DECLARATION_FAMILIES = [
-    {
-        "family": "plain_function",
-        "runtime_type": "function",
-        "wire_declaration_type": "function",
-        "observed": False,
-        "observation": "not_observed_source_contract_only",
-        "executor": "codex_client",
-        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-    },
-    {
-        "family": "custom_freeform",
-        "runtime_type": "custom",
-        "wire_declaration_type": "custom",
-        "observed": False,
-        "observation": "not_observed_source_contract_only",
-        "executor": "codex_client",
-        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-    },
-    {
-        "family": "namespace",
-        "runtime_type": "namespace",
-        "wire_declaration_type": "namespace",
-        "observed": False,
-        "observation": "not_observed_source_contract_only",
-        "executor": "codex_client",
-        "loss_boundary": "preserve declaration and inverse call/result/history IDs",
-    },
-    {
-        "family": "client_executed_tool_discovery",
-        "runtime_type": "tool_search",
-        "wire_declaration_type": "tool_search",
-        "observed": False,
-        "observation": "not_observed_source_contract_only",
-        "executor": "codex_client",
-        "loss_boundary": "discovery request/result stays client-executed",
-    },
-    {
-        "family": "selected_provider_hosted",
-        "runtime_type": "web_search",
-        "wire_declaration_type": "web_search",
-        "observed": False,
-        "observation": "not_observed_selected_provider_control_required",
-        "executor": "selected_provider",
-        "loss_boundary": "optional unsupported hosted capability is omitted; required capability fails visibly",
-    },
-    {
-        "family": "unknown_future_kind",
-        "runtime_type": "unknown",
-        "wire_declaration_type": "<unknown>",
-        "observed": False,
-        "observation": "opaque_sentinel_only",
-        "executor": "unknown",
-        "loss_boundary": "retain tag and opaque payload; do not normalize",
-    },
-]
-SOURCE_RUNTIME_SURFACE_FIELDS = {
-    "source",
-    "declaration_family_order",
-    "declaration_families",
-    "request_shape",
-    "response_shape",
-    "declaration_family_examples",
-}
 
 
 class InventoryValidationError(ValueError):
-    """A deliberately bounded, non-sensitive contract failure."""
+    """Bounded inventory failure; never includes request content."""
 
 
 def _require(condition: bool, code: str) -> None:
@@ -176,472 +54,292 @@ def _require(condition: bool, code: str) -> None:
         raise InventoryValidationError(code)
 
 
-def _exact(value: Any, fields: set[str], code: str) -> Mapping[str, Any]:
-    _require(isinstance(value, Mapping), code)
-    _require(set(value) == fields, code)
-    return value
-
-
-def _sha256_file(path: Path) -> str:
-    try:
-        # Evidence files are text.  Bind their canonical LF bytes so Windows
-        # CRLF and Linux LF checkouts reconcile to the same source digest.
-        canonical = path.read_bytes().replace(b"\r\n", b"\n")
-        return hashlib.sha256(canonical).hexdigest()
-    except OSError as error:
-        raise InventoryValidationError("source_contract_unavailable") from error
-
-
 def _load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InventoryValidationError("source_contract_invalid") from error
-    _require(isinstance(value, dict), "source_contract_root_invalid")
+    _require(isinstance(value, dict), "source_contract_invalid")
     return value
 
 
-def _validate_source_contract(source_contract: Mapping[str, Any]) -> None:
-    _require(set(source_contract) == SOURCE_CONTRACT_TOP_LEVEL_FIELDS, "source_contract_fields_invalid")
-    _require(source_contract.get("schema_version") == 1, "source_contract_schema_invalid")
-    _require(source_contract.get("fixture_kind") == "codex_cli_source_contract", "source_contract_kind_invalid")
-    _require(source_contract.get("capture_status") == "not_observed", "source_contract_capture_status_invalid")
-    _require(source_contract.get("qualification_status") == "unqualified", "source_contract_qualification_invalid")
-    _require(source_contract.get("captured_at") is None, "source_contract_captured_at_invalid")
-    provenance = source_contract.get("provenance")
-    _require(isinstance(provenance, Mapping), "source_contract_provenance_invalid")
-    _require(dict(provenance) == SOURCE_CONTRACT_PROVENANCE, "source_contract_provenance_invalid")
-    surface = source_contract.get("runtime_wire_surface")
-    _require(isinstance(surface, Mapping), "source_contract_surface_invalid")
-    _require(set(surface) == SOURCE_RUNTIME_SURFACE_FIELDS, "source_contract_surface_fields_invalid")
-    _require(surface.get("source") == "Codex CLI 0.146.0 ToolSpec and ResponseItem source contract", "source_contract_surface_source_invalid")
-    _require(surface.get("declaration_family_order") == SOURCE_DECLARATION_FAMILY_ORDER, "source_contract_family_order_invalid")
-    _require(surface.get("declaration_families") == SOURCE_DECLARATION_FAMILIES, "source_contract_families_invalid")
-    surface_digest = hashlib.sha256(
-        json.dumps(surface, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    _require(surface_digest == EXPECTED_SOURCE_RUNTIME_SURFACE_DIGEST, "source_contract_surface_digest_invalid")
+def _sha256_file(path: Path) -> str:
+    try:
+        canonical = path.read_bytes().replace(b"\r\n", b"\n")
+    except OSError as error:
+        raise InventoryValidationError("source_contract_unavailable") from error
+    return hashlib.sha256(canonical).hexdigest()
 
 
-def _boundary_arguments(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    if "arguments" not in value:
-        return {}
-    arguments = value.get("arguments")
-    _require(isinstance(arguments, Mapping), "boundary_arguments_invalid")
-    return arguments
+def _issue392_module():
+    path = Path(__file__).with_name("build_issue_392_collaboration_contract.py")
+    spec = importlib.util.spec_from_file_location("issue392_contract", path)
+    _require(spec is not None and spec.loader is not None, "source_validator_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def classify_boundary(value: Mapping[str, Any]) -> str:
-    """Classify a declaration/call before exposure or semantic repair.
-
-    The namespace and child tool name are both required.  A bare or flattened
-    name is intentionally not enough to choose a repair path.
-    """
-
-    _require(isinstance(value, Mapping), "boundary_input_invalid")
-    _require(set(value).issubset(BOUNDARY_INPUT_FIELDS), "boundary_fields_unknown")
-    if "name" in value and "tool_name" in value:
-        _require(value["name"] == value["tool_name"], "boundary_discriminator_conflict")
-    namespace = value.get("namespace")
-    name = value.get("name", value.get("tool_name"))
-    _require(isinstance(namespace, str) and namespace, "boundary_discriminator_missing")
-    _require(isinstance(name, str) and name, "boundary_discriminator_missing")
-    arguments = _boundary_arguments(value)
-    fields = set(arguments)
-    if (namespace == V1_NAMESPACE and "tools" in value) or (namespace == V2_NAMESPACE and "parameters" in value):
-        raise InventoryValidationError("boundary_v1_v2_field_mixed")
-    if (namespace == V1_NAMESPACE and fields & V2_ONLY_FIELDS) or (namespace == V2_NAMESPACE and fields & V1_ONLY_FIELDS):
-        raise InventoryValidationError("boundary_v1_v2_field_mixed")
-    allowed_fields = BOUNDARY_ARGUMENT_FIELDS.get(namespace, {}).get(name)
-    if allowed_fields is not None:
-        _require(fields.issubset(allowed_fields), "boundary_arguments_unknown")
-    if namespace == V1_NAMESPACE:
-        if name in V2_ONLY_TOOLS:
-            raise InventoryValidationError("boundary_v1_v2_field_mixed")
-        if name not in V1_TOOLS:
-            raise InventoryValidationError("boundary_tool_unknown")
-        return V1_ID
-    if namespace == V2_NAMESPACE:
-        if name in V1_ONLY_TOOLS:
-            raise InventoryValidationError("boundary_v1_v2_field_mixed")
-        if name not in V2_TOOLS:
-            raise InventoryValidationError("boundary_tool_unknown")
-        return V2_ID
-    raise InventoryValidationError("boundary_namespace_unknown")
+def _validate_source_contract(source: Mapping[str, Any]) -> None:
+    module = _issue392_module()
+    try:
+        module.validate_contract(source)
+    except module.ContractValidationError as error:
+        raise InventoryValidationError("source_contract_content_invalid") from error
 
 
-def _stream_shape() -> dict[str, Any]:
-    return {
-        "event_order": [
-            "response.output_item.added",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.done",
-            "response.output_item.done",
-        ],
-        "terminal_events": ["response.completed", "response.incomplete", "response.failed"],
-        "error_event": "response.failed",
-        "qualification": "not_observed",
-    }
+def _argument_fields(source: Mapping[str, Any], version: str) -> dict[str, Any]:
+    return copy.deepcopy(
+        source["selection_contract"]["markers"][version]["argument_contract"]
+    )
 
 
-def _protocol_v1() -> dict[str, Any]:
+def _protocol_v1(source: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": V1_ID,
         "namespace": V1_NAMESPACE,
         "owner": "codex_client",
         "executor": "codex_client",
-        "status": "legacy_structural_contract",
+        "status": "runtime_observed",
         "shape_provenance": {
-            "shape_kind": "current_gateway_compatibility_surface",
-            "source": "src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS",
-            "official_cli_capture_status": "not_observed",
+            "source": "issue392_exact_cli_and_desktop_runtime_contract",
+            "cli_capture_status": "observed",
+            "desktop_capture_status": "observed",
         },
         "declaration": {
-            "discriminator": {"namespace": V1_NAMESPACE, "tool_field": "name"},
             "wire_type": "namespace",
-            "fields": ["type", "name", "tools"],
+            "fields": ["type", "name", "description", "tools"],
             "child_wire_type": "function",
             "tool_names": list(V1_TOOLS),
-            "flattened_name_prefixes": ["multi_agent_v1__", "multi_agent_v1."],
+            "argument_fields": _argument_fields(source, V1_ID),
         },
         "call": {
             "wire_type": "function_call",
-            "fields": ["type", "namespace", "name", "item_id", "call_id", "arguments"],
-            "identity_fields": ["call_id", "item_id"],
-            "argument_fields": {
-                "spawn_agent": {"required": ["agent_type"], "optional": ["fork_context", "message"]},
-                "send_input": {"required": ["target"], "optional": ["interrupt", "message"]},
-                "wait_agent": {"required": ["targets"], "optional": ["timeout_ms"]},
-                "close_agent": {"required": ["target"], "optional": []},
-                "resume_agent": {"required": ["id"], "optional": []},
-            },
+            "fields": ["type", "id", "name", "namespace", "arguments", "call_id"],
+            "identity_fields": ["id", "call_id"],
         },
         "result": {
             "wire_type": "function_call_output",
-            "fields": ["type", "call_id", "item_id", "output"],
-            "identity_fields": ["call_id", "item_id"],
-            "result_identity": "agent_id",
-            "result_fields_by_tool": {
-                "spawn_agent": ["agent_id", "nickname"],
-                "wait_agent": ["timed_out", "status"],
-                "close_agent": ["previous_status"],
-                "send_input": ["status"],
-                "resume_agent": ["status"],
-            },
+            "fields": ["type", "id", "call_id", "output"],
+            "identity_fields": ["id", "call_id"],
+            "spawn_identity": "agent_id",
+            "output_wire_encoding": source["protocols"][V1_ID]["result"][
+                "output_wire_encoding"
+            ],
+            "tool_output_schemas": copy.deepcopy(
+                source["protocols"][V1_ID]["result"]["tool_output_schemas"]
+            ),
         },
         "history": {
             "items": ["function_call", "function_call_output"],
-            "identity_fields": ["agent_id", "call_id", "call_item_id", "output_item_id"],
-            "continuation_identity": "agent_id",
-            "transcript_markers": [
-                "Previous real Codex native multi_agent_v1.<tool> call transcript",
-                "Codex native multi_agent_v1.<tool> result",
-            ],
+            "identity_fields": ["id", "call_id", "agent_id"],
+            "rollout_version_field": "multi_agent_version",
         },
-        "stream": _stream_shape(),
-        "terminal_error": {
-            "terminal_events": ["response.completed", "response.incomplete", "response.failed"],
-            "error_event": "response.failed",
-            "error_fields": ["id", "status", "error"],
-            "qualification": "not_observed",
+        "stream": {
+            "event_order": list(
+                source["wire_lifecycle"]["function_call_stream"]["event_order"]
+            ),
+            "event_shapes": copy.deepcopy(
+                source["wire_lifecycle"]["function_call_stream"]["event_shapes"]
+            ),
+            "terminal_events": list(source["wire_lifecycle"]["terminal"]["events"]),
+            "terminal_shapes": copy.deepcopy(
+                source["wire_lifecycle"]["terminal"]["event_shapes"]
+            ),
         },
         "isolation": {
             "forbidden_v2_fields": sorted(V2_ONLY_FIELDS),
             "forbidden_v2_tools": sorted(V2_ONLY_TOOLS),
-            "forbidden_v2_semantics": ["task_path_continuation", "fork_turns"],
         },
     }
 
 
-def _protocol_v2() -> dict[str, Any]:
+def _protocol_v2(source: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": V2_ID,
         "namespace": V2_NAMESPACE,
         "owner": "codex_client",
         "executor": "codex_client",
-        "status": "stable_surface_not_lifecycle_qualified",
+        "status": "runtime_observed_request_shape_and_readback",
         "shape_provenance": {
-            "shape_kind": "accepted_structural_contract",
-            "source": "accepted_issue_62_source_contract_and_repository_evidence",
-            "official_cli_capture_status": "not_observed",
+            "source": "issue392_exact_cli_and_desktop_runtime_contract",
+            "cli_capture_status": "observed",
+            "desktop_capture_status": "observed",
         },
         "declaration": {
-            "discriminator": {"namespace": V2_NAMESPACE, "tool_field": "name"},
             "wire_type": "namespace",
-            "fields": ["type", "name", "tools"],
+            "fields": ["type", "name", "description", "tools"],
             "child_wire_type": "function",
             "tool_names": list(V2_TOOLS),
+            "argument_fields": _argument_fields(source, V2_ID),
         },
         "call": {
             "wire_type": "function_call",
-            "fields": ["type", "namespace", "name", "item_id", "call_id", "arguments"],
-            "identity_fields": ["call_id", "item_id", "task_path", "continuation_id"],
-            "argument_fields": {
-                "spawn_agent": {"required": ["task_name", "message"], "optional": ["fork_turns", "agent_type", "model", "reasoning_effort"]},
-                "send_message": {"required": ["target", "message"], "optional": []},
-                "followup_task": {"required": ["target", "message"], "optional": []},
-                "wait_agent": {"required": [], "optional": ["timeout_ms"]},
-                "interrupt_agent": {"required": ["target"], "optional": []},
-                "list_agents": {"required": [], "optional": ["path_prefix"]},
-            },
-            "fork_turns": {"field": "fork_turns", "values": ["all", "none", "positive_decimal_string"]},
+            "fields": ["type", "id", "name", "namespace", "arguments", "call_id"],
+            "identity_fields": ["id", "call_id"],
         },
         "result": {
             "wire_type": "function_call_output",
-            "fields": ["type", "call_id", "item_id", "output"],
-            "identity_fields": ["call_id", "item_id", "task_path", "continuation_id"],
-            "result_identity": "task_path",
-            "result_fields": ["task_path", "continuation_id", "status"],
+            "fields": ["type", "id", "call_id", "output"],
+            "identity_fields": ["id", "call_id"],
+            "spawn_identity": "task_name",
+            "spawn_output_fields_default": ["task_name"],
+            "continuation_id_field": "not_present",
+            "output_wire_encoding": copy.deepcopy(
+                source["protocols"][V2_ID]["result"]["output_wire_encoding"]
+            ),
+            "tool_output_schemas": copy.deepcopy(
+                source["protocols"][V2_ID]["result"]["tool_output_schemas"]
+            ),
         },
         "history": {
-            "items": ["function_call", "function_call_output"],
-            "identity_fields": ["task_path", "continuation_id", "call_id", "call_item_id", "output_item_id"],
-            "continuation_identity": "task_path",
-            "continuation_fields": ["task_path", "continuation_id", "task_name", "fork_turns"],
-            "pagination": "deferred_qualification",
-            "inherited_prefix": "deferred_qualification",
+            "items": ["function_call", "function_call_output", "agent_message"],
+            "identity_fields": ["id", "call_id", "author", "recipient"],
+            "canonical_task_identity": "agent_path_serialized_as_task_name",
+            "rollout_version_field": "multi_agent_version",
+            "same_home_restart_readback": "observed",
         },
         "stream": {
-            **_stream_shape(),
-            "call_semantics": "namespace_child_function_uses_function_call_lifecycle",
-        },
-        "terminal_error": {
-            "terminal_events": ["response.completed", "response.incomplete", "response.failed"],
-            "error_event": "response.failed",
-            "error_fields": ["id", "status", "error"],
-            "qualification": "not_observed",
+            "event_order": list(
+                source["wire_lifecycle"]["function_call_stream"]["event_order"]
+            ),
+            "event_shapes": copy.deepcopy(
+                source["wire_lifecycle"]["function_call_stream"]["event_shapes"]
+            ),
+            "terminal_events": list(source["wire_lifecycle"]["terminal"]["events"]),
+            "terminal_shapes": copy.deepcopy(
+                source["wire_lifecycle"]["terminal"]["event_shapes"]
+            ),
         },
         "isolation": {
             "forbidden_v1_fields": sorted(V1_ONLY_FIELDS),
             "forbidden_v1_tools": sorted(V1_ONLY_TOOLS),
-            "forbidden_v1_semantics": ["agent_id_close_resume", "fork_context"],
         },
     }
 
 
-def _build_inventory(source_contract_path: Path) -> dict[str, Any]:
-    source_contract = _load_json(source_contract_path)
-    _validate_source_contract(source_contract)
-    _require(_sha256_file(source_contract_path) == EXPECTED_SOURCE_CONTRACT_SHA256, "source_contract_digest_invalid")
+def build_inventory(source_contract_path: Path = DEFAULT_SOURCE_CONTRACT) -> dict[str, Any]:
+    source = _load_json(source_contract_path)
+    _validate_source_contract(source)
+    runtimes = source["runtimes"]
     return {
         "schema": SCHEMA,
         "artifact_kind": ARTIFACT_KIND,
-        "verification_scope": "structural_contract_only",
-        "qualification_status": "structural_boundary_only",
+        "verification_scope": "runtime_observed_structural_contract",
+        "qualification_status": "superseded_by_issue392_exact_runtime_contract",
         "candidate_identity": {
-            "cli_version": "0.146.0",
-            "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
-            "source_tag": "rust-v0.146.0",
-            "source_commit_status": "published_attested",
-            "source_capture_status": "not_observed",
+            "candidate_revision": source["candidate_revision"],
+            "cli_version": runtimes[0]["client_version"],
+            "cli_source_commit": runtimes[0]["source_commit"],
+            "desktop_version": runtimes[1]["client_version"],
+            "desktop_runtime_version": runtimes[1]["runtime_version"],
+            "desktop_source_commit": runtimes[1]["source_commit"],
+            "source_capture_status": "observed",
             "source_contract_file": source_contract_path.name,
         },
         "evidence_binding": {
-            "source_contract": {"file": source_contract_path.name, "sha256": _sha256_file(source_contract_path)},
-            "basis": "accepted_issue_62_source_contract_and_repository_evidence",
+            "source_contract": {
+                "file": source_contract_path.name,
+                "sha256": _sha256_file(source_contract_path),
+            },
+            "basis": "accepted_issue392_exact_runtime_contract",
         },
         "boundary": {
-            "pre_exposure_stage": "before_tool_exposure_or_semantic_repair",
-            "discriminator_fields": ["namespace", "name"],
+            "pre_exposure_stage": "before_schema_repair_state_or_scheduler",
             "protocol_markers": {
                 V1_ID: {"namespace": V1_NAMESPACE, "tool_names": list(V1_TOOLS)},
                 V2_ID: {"namespace": V2_NAMESPACE, "tool_names": list(V2_TOOLS)},
             },
-            "flattened_name_policy": "not_decidable_without_namespace",
+            "matching_policy": "complete_namespace_and_child_schema",
+            "shared_tool_name_policy": "never_classify_from_child_name_alone",
+            "direct_function_policy": "not_a_frozen_runtime_collaboration_marker",
+            "request_metadata_version_field": "absent_in_both_frozen_runtimes",
+            "tool_choice": "auto",
             "unknown_action": "fail_closed",
-            "ambiguous_action": "fail_closed",
+            "missing_action": "fail_closed",
+            "duplicate_action": "fail_closed",
+            "conflicting_action": "fail_closed",
             "mixed_v1_v2_action": "fail_closed",
         },
-        "protocols": [_protocol_v1(), _protocol_v2()],
+        "protocols": [_protocol_v1(source), _protocol_v2(source)],
+        "protocol_layers": copy.deepcopy(source["protocol_layers"]),
         "adapter_requirements": {
             "owner": "codex_client",
             "adaptation_owner": "codexhub_gateway",
-            "protocol_shape_decisions": {
-                V1_ID: {
-                    "shape_kind": "current_gateway_compatibility_surface",
-                    "namespace_to_function": "required_when_selected_protocol_lacks_namespace",
-                    "official_cli_capture_status": "not_observed",
-                    "inverse_mapping": "request_scoped_and_lossless",
-                },
-                V2_ID: {
-                    "shape_kind": "accepted_structural_contract",
-                    "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
-                    "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
-                    "official_cli_capture_status": "not_observed",
-                    "inverse_mapping": "request_scoped_and_lossless",
-                    "preserved_fields": ["task_path", "continuation_id", "task_name", "fork_turns"],
-                },
-            },
+            "native_namespace": "pass_without_semantic_mutation",
+            "adapt_only_when": "complete_lifecycle_inverse_is_proven",
             "requirements": [
-                "namespace_to_function",
                 "injective_request_scoped_aliases",
-                "preserve_task_path_identity",
-                "preserve_continuation_id_and_fork_turns",
-                "preserve_call_result_history_links",
-                "preserve_inverse_declaration_call_result_history_mapping",
-                "assemble_stream_before_validation",
-                "reject_unknown_or_ambiguous_boundary",
+                "preserve_namespace_and_child_name",
+                "preserve_call_and_item_identity",
+                "preserve_order_and_stream_boundaries",
+                "preserve_task_name_and_agent_path_identity",
+                "preserve_agent_message_author_and_recipient",
+                "preserve_same_home_history_replay",
+                "reject_unknown_missing_duplicate_conflicting_or_mixed_boundary",
                 "keep_v1_and_v2_isolated",
             ],
-            "forbidden_gateway_actions": ["execute_tools", "schedule_agents", "forge_results", "downgrade_v2_to_v1"],
-            "scope": "requirements_only_for_198_and_58",
+            "forbidden_gateway_actions": [
+                "execute_tools",
+                "schedule_agents",
+                "forge_results_or_identity",
+                "downgrade_v2_to_v1",
+                "rewrite_history",
+            ],
         },
-        "deferred_qualification": list(DEFERRED_QUALIFICATION),
+        "deferred_qualification": DEFERRED_QUALIFICATION,
     }
 
 
-def _validate_protocol(protocol: Any, expected_id: str, expected_namespace: str) -> None:
-    expected_fields = {
-        "id",
-        "namespace",
-        "owner",
-        "executor",
-        "status",
-        "shape_provenance",
-        "declaration",
-        "call",
-        "result",
-        "history",
-        "stream",
-        "terminal_error",
-        "isolation",
-    }
-    _exact(protocol, expected_fields, "protocol_fields_invalid")
-    expected = _protocol_v1() if expected_id == V1_ID else _protocol_v2()
-    _require(protocol == expected, "protocol_schema_invalid")
-    _require(protocol["id"] == expected_id and protocol["namespace"] == expected_namespace, "protocol_identity_invalid")
+def classify_boundary(value: Mapping[str, Any]) -> str:
+    """Classify an already-selected namespaced call without using name alone."""
+
+    _require(isinstance(value, Mapping), "boundary_input_invalid")
+    allowed = {"type", "id", "item_id", "call_id", "namespace", "name", "tool_name", "arguments"}
+    _require(set(value).issubset(allowed), "boundary_fields_unknown")
+    namespace = value.get("namespace")
+    name = value.get("name", value.get("tool_name"))
+    if "name" in value and "tool_name" in value:
+        _require(value["name"] == value["tool_name"], "boundary_discriminator_conflict")
+    _require(isinstance(namespace, str) and isinstance(name, str), "boundary_discriminator_missing")
+    arguments = value.get("arguments", {})
+    _require(isinstance(arguments, Mapping), "boundary_arguments_invalid")
+    fields = set(arguments)
+    if namespace == V1_NAMESPACE:
+        _require(name in V1_TOOLS, "boundary_tool_unknown")
+        _require(not fields.intersection(V2_ONLY_FIELDS), "boundary_v1_v2_field_mixed")
+        version = V1_ID
+    elif namespace == V2_NAMESPACE:
+        _require(name in V2_TOOLS, "boundary_tool_unknown")
+        _require(not fields.intersection(V1_ONLY_FIELDS), "boundary_v1_v2_field_mixed")
+        version = V2_ID
+    else:
+        raise InventoryValidationError("boundary_namespace_unknown")
+    source = _load_json(DEFAULT_SOURCE_CONTRACT)
+    argument_contract = source["selection_contract"]["markers"][version][
+        "argument_contract"
+    ][name]
+    required = argument_contract["required"]
+    optional = argument_contract["optional"]
+    _require(fields.issubset(set(required) | set(optional)), "boundary_arguments_unknown")
+    return version
 
 
 def validate_inventory(payload: Mapping[str, Any], source_contract_path: Path) -> None:
-    _exact(
-        payload,
-        {
-            "schema",
-            "artifact_kind",
-            "verification_scope",
-            "qualification_status",
-            "candidate_identity",
-            "evidence_binding",
-            "boundary",
-            "protocols",
-            "adapter_requirements",
-            "deferred_qualification",
-        },
-        "inventory_fields_invalid",
-    )
-    _require(payload["schema"] == SCHEMA, "inventory_schema_invalid")
-    _require(payload["artifact_kind"] == ARTIFACT_KIND, "inventory_kind_invalid")
-    _require(payload["verification_scope"] == "structural_contract_only", "inventory_scope_invalid")
-    _require(payload["qualification_status"] == "structural_boundary_only", "inventory_qualification_invalid")
-    _validate_source_contract(_load_json(source_contract_path))
-    _require(_sha256_file(source_contract_path) == EXPECTED_SOURCE_CONTRACT_SHA256, "source_contract_digest_invalid")
-
-    candidate = _exact(
-        payload["candidate_identity"],
-        {
-            "cli_version",
-            "source_commit",
-            "source_tag",
-            "source_commit_status",
-            "source_capture_status",
-            "source_contract_file",
-        },
-        "candidate_fields_invalid",
-    )
-    _require(
-        dict(candidate)
-        == {
-            "cli_version": "0.146.0",
-            "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
-            "source_tag": "rust-v0.146.0",
-            "source_commit_status": "published_attested",
-            "source_capture_status": "not_observed",
-            "source_contract_file": source_contract_path.name,
-        },
-        "candidate_identity_invalid",
-    )
-    binding = _exact(payload["evidence_binding"], {"source_contract", "basis"}, "evidence_binding_invalid")
-    source_binding = _exact(binding["source_contract"], {"file", "sha256"}, "evidence_binding_source_invalid")
-    _require(source_binding["file"] == source_contract_path.name, "evidence_binding_source_file_invalid")
-    _require(source_binding["sha256"] == EXPECTED_SOURCE_CONTRACT_SHA256, "evidence_binding_source_digest_invalid")
-    _require(binding["basis"] == "accepted_issue_62_source_contract_and_repository_evidence", "evidence_binding_basis_invalid")
-
-    boundary = _exact(
-        payload["boundary"],
-        {
-            "pre_exposure_stage",
-            "discriminator_fields",
-            "protocol_markers",
-            "flattened_name_policy",
-            "unknown_action",
-            "ambiguous_action",
-            "mixed_v1_v2_action",
-        },
-        "boundary_fields_invalid",
-    )
-    _require(
-        boundary["pre_exposure_stage"] == "before_tool_exposure_or_semantic_repair",
-        "boundary_pre_exposure_stage_invalid",
-    )
-    _require(boundary["discriminator_fields"] == ["namespace", "name"], "boundary_discriminator_fields_invalid")
-    _require(boundary["unknown_action"] == "fail_closed" and boundary["ambiguous_action"] == "fail_closed", "boundary_fail_closed_invalid")
-    _require(boundary["mixed_v1_v2_action"] == "fail_closed", "boundary_mixed_action_invalid")
-    markers = _exact(boundary["protocol_markers"], {V1_ID, V2_ID}, "boundary_markers_invalid")
-    _require(markers[V1_ID] == {"namespace": V1_NAMESPACE, "tool_names": list(V1_TOOLS)}, "boundary_v1_marker_invalid")
-    _require(markers[V2_ID] == {"namespace": V2_NAMESPACE, "tool_names": list(V2_TOOLS)}, "boundary_v2_marker_invalid")
-    _require(boundary["flattened_name_policy"] == "not_decidable_without_namespace", "boundary_flattened_policy_invalid")
-
-    protocols = payload["protocols"]
-    _require(isinstance(protocols, list) and len(protocols) == 2, "protocols_invalid")
-    _validate_protocol(protocols[0], V1_ID, V1_NAMESPACE)
-    _validate_protocol(protocols[1], V2_ID, V2_NAMESPACE)
-    _require(classify_boundary({"namespace": V1_NAMESPACE, "name": "spawn_agent"}) == V1_ID, "boundary_v1_not_decidable")
-    _require(classify_boundary({"namespace": V2_NAMESPACE, "name": "spawn_agent"}) == V2_ID, "boundary_v2_not_decidable")
-
-    adapter = _exact(payload["adapter_requirements"], {"owner", "adaptation_owner", "protocol_shape_decisions", "requirements", "forbidden_gateway_actions", "scope"}, "adapter_requirements_invalid")
-    _require(adapter["owner"] == "codex_client" and adapter["adaptation_owner"] == "codexhub_gateway", "adapter_owner_invalid")
-    _require(adapter["scope"] == "requirements_only_for_198_and_58", "adapter_scope_invalid")
-    _require(adapter["protocol_shape_decisions"] == {
-        V1_ID: {
-            "shape_kind": "current_gateway_compatibility_surface",
-            "namespace_to_function": "required_when_selected_protocol_lacks_namespace",
-            "official_cli_capture_status": "not_observed",
-            "inverse_mapping": "request_scoped_and_lossless",
-        },
-        V2_ID: {
-            "shape_kind": "accepted_structural_contract",
-            "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
-            "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
-            "official_cli_capture_status": "not_observed",
-            "inverse_mapping": "request_scoped_and_lossless",
-            "preserved_fields": ["task_path", "continuation_id", "task_name", "fork_turns"],
-        },
-    }, "adapter_shape_decisions_invalid")
-    _require(adapter["requirements"] == [
-        "namespace_to_function",
-        "injective_request_scoped_aliases",
-        "preserve_task_path_identity",
-        "preserve_continuation_id_and_fork_turns",
-        "preserve_call_result_history_links",
-        "preserve_inverse_declaration_call_result_history_mapping",
-        "assemble_stream_before_validation",
-        "reject_unknown_or_ambiguous_boundary",
-        "keep_v1_and_v2_isolated",
-    ], "adapter_requirements_list_invalid")
-    _require(
-        adapter["forbidden_gateway_actions"] == ["execute_tools", "schedule_agents", "forge_results", "downgrade_v2_to_v1"],
-        "adapter_forbidden_actions_invalid",
-    )
-    _require(payload["deferred_qualification"] == DEFERRED_QUALIFICATION, "deferred_qualification_invalid")
+    expected = build_inventory(source_contract_path)
+    _require(isinstance(payload, Mapping), "inventory_invalid")
+    _require(payload.get("schema") == SCHEMA, "inventory_schema_invalid")
+    _require(dict(payload) == expected, "inventory_content_invalid")
 
 
-def reconcile_inventory(payload: Mapping[str, Any], *, source_contract_path: Path) -> dict[str, Any]:
-    mismatches: list[str] = []
+def reconcile_inventory(
+    payload: Mapping[str, Any], *, source_contract_path: Path
+) -> dict[str, Any]:
     try:
         validate_inventory(payload, source_contract_path)
     except InventoryValidationError as error:
-        mismatches.append(str(error))
-    return {"reconciled": not mismatches, "mismatches": mismatches}
+        return {"reconciled": False, "mismatches": [str(error)]}
+    return {"reconciled": True, "mismatches": []}
 
 
 def replay_inventory(payload: Mapping[str, Any], case: str) -> dict[str, Any]:
@@ -652,7 +350,7 @@ def replay_inventory(payload: Mapping[str, Any], case: str) -> dict[str, Any]:
     elif case == "deletion":
         clone["protocols"] = clone["protocols"][:1]
     else:
-        clone["candidate_identity"].pop("source_commit", None)
+        clone["candidate_identity"].pop("desktop_source_commit", None)
     return clone
 
 
@@ -661,28 +359,38 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-contract", type=Path, default=DEFAULT_SOURCE_CONTRACT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--check", action="store_true")
-    parser.add_argument("--replay-case", choices=("identity", "mutation", "deletion", "loss"), default="identity")
+    parser.add_argument(
+        "--replay-case",
+        choices=("identity", "mutation", "deletion", "loss"),
+        default="identity",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        inventory = _build_inventory(args.source_contract)
+        inventory = build_inventory(args.source_contract)
         validate_inventory(inventory, args.source_contract)
         if args.replay_case != "identity":
-            report = reconcile_inventory(replay_inventory(inventory, args.replay_case), source_contract_path=args.source_contract)
+            report = reconcile_inventory(
+                replay_inventory(inventory, args.replay_case),
+                source_contract_path=args.source_contract,
+            )
             print(json.dumps(report, sort_keys=True))
             return 0 if not report["reconciled"] else 1
         if args.check:
-            existing = _load_json(args.out)
-            report = reconcile_inventory(existing, source_contract_path=args.source_contract)
-            if not report["reconciled"]:
-                print(json.dumps(report, sort_keys=True))
-                return 1
-            return 0
+            report = reconcile_inventory(
+                _load_json(args.out), source_contract_path=args.source_contract
+            )
+            print(json.dumps(report, sort_keys=True))
+            return 0 if report["reconciled"] else 1
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(inventory, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        args.out.write_text(
+            json.dumps(inventory, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         print(json.dumps({"schema": SCHEMA, "reconciled": True}, sort_keys=True))
         return 0
     except InventoryValidationError as error:
