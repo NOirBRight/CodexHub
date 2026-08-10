@@ -18666,18 +18666,31 @@ class RoutingTests(unittest.TestCase):
         phase_event = next(
             call.kwargs
             for call in self.write_proxy_event.call_args_list
-            if call.args and call.args[0] == "v2_chat_message_phase_removed"
+            if call.args and call.args[0] == "chat_message_phase_removed"
         )
         self.assertEqual(phase_event["count"], 1)
         for forbidden in ("id", "phase", "content", "text"):
             self.assertNotIn(forbidden, phase_event)
 
-    def test_collaboration_v2_responses_preserves_message_phase(self):
+    def test_codex_app_chat_adapts_message_phase_without_collaboration_signal(self):
+        summary_text = "PRIVATE_REASONING_SUMMARY"
+        encrypted_content = "gAAAA-private-reasoning"
+        event_context = {
+            "request_id": "request-codex-app-chat-message-phase",
+            "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+            "client_id": "codex-app",
+        }
         transformed = compatible_request_body(
             json.dumps(
                 {
-                    "model": "glm-5.2",
+                    "model": "kimi-k3",
                     "input": [
+                        {
+                            "id": "rs_private",
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": summary_text}],
+                            "encrypted_content": encrypted_content,
+                        },
                         {
                             "id": "msg_final",
                             "type": "message",
@@ -18685,30 +18698,134 @@ class RoutingTests(unittest.TestCase):
                             "phase": "final_answer",
                             "content": [{"type": "output_text", "text": "Earlier answer."}],
                         },
-                        {"type": "message", "role": "user", "content": "Continue."},
+                        {"type": "message", "role": "user", "content": "continue"},
                     ],
+                    "stream": True,
                 }
             ).encode("utf-8"),
             {
-                "name": "ollama_cloud",
-                "upstream_format": "responses",
-                "tool_protocol": "responses_structured",
+                "name": "kimi",
+                "upstream_model": "kimi-k3",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
             },
-            event_context={
+            event_context=event_context,
+            inject_codex_tools=False,
+        )
+
+        self.assertNotIn("collaboration_protocol", event_context)
+        payload = json.loads(transformed)
+        self.assertEqual([item["type"] for item in payload["input"]], ["message", "message"])
+        self.assertNotIn("phase", payload["input"][0])
+        chat_payload = json.loads(
+            _responses_request_to_chat_completion_body(
+                transformed,
+                drop_client_transport_fields=True,
+                drop_reasoning=True,
+            )
+        )
+        self.assertEqual(
+            chat_payload["messages"],
+            [
+                {"role": "assistant", "content": "Earlier answer."},
+                {"role": "user", "content": "continue"},
+            ],
+        )
+        serialized = json.dumps(chat_payload, ensure_ascii=False)
+        self.assertNotIn(summary_text, serialized)
+        self.assertNotIn(encrypted_content, serialized)
+        phase_event = next(
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "chat_message_phase_removed"
+        )
+        self.assertEqual(phase_event["count"], 1)
+        for forbidden in ("id", "phase", "content", "text"):
+            self.assertNotIn(forbidden, phase_event)
+
+    def test_generic_chat_keeps_message_phase_for_strict_translation(self):
+        transformed = compatible_request_body(
+            json.dumps(
+                {
+                    "model": "chat-model",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "final_answer",
+                            "content": [{"type": "output_text", "text": "Earlier answer."}],
+                        }
+                    ],
+                    "stream": True,
+                }
+            ).encode("utf-8"),
+            {
+                "name": "generic",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
+            },
+            event_context={"request_id": "request-generic-chat-message-phase"},
+            inject_codex_tools=False,
+        )
+
+        self.assertEqual(json.loads(transformed)["input"][0]["phase"], "final_answer")
+        with self.assertRaises(codex_proxy.UnsupportedProtocolTranslationError):
+            _responses_request_to_chat_completion_body(
+                transformed,
+                drop_client_transport_fields=True,
+                drop_reasoning=True,
+            )
+
+    def test_responses_upstreams_preserve_message_phase(self):
+        contexts = {
+            "collaboration_v2": {
                 "request_id": "request-v2-responses-message-phase",
                 "collaboration_protocol": "collaboration_v2",
             },
-            inject_codex_tools=False,
-        )
-        payload = json.loads(transformed)
+            "codex_app": {
+                "request_id": "request-codex-app-responses-message-phase",
+                "behavior_profile": codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+                "client_id": "codex-app",
+            },
+        }
+        for context_name, event_context in contexts.items():
+            with self.subTest(context=context_name):
+                self.write_proxy_event.reset_mock()
+                transformed = compatible_request_body(
+                    json.dumps(
+                        {
+                            "model": "glm-5.2",
+                            "input": [
+                                {
+                                    "id": "msg_final",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "phase": "final_answer",
+                                    "content": [
+                                        {"type": "output_text", "text": "Earlier answer."}
+                                    ],
+                                },
+                                {"type": "message", "role": "user", "content": "Continue."},
+                            ],
+                        }
+                    ).encode("utf-8"),
+                    {
+                        "name": "ollama_cloud",
+                        "upstream_format": "responses",
+                        "tool_protocol": "responses_structured",
+                    },
+                    event_context=event_context,
+                    inject_codex_tools=False,
+                )
+                payload = json.loads(transformed)
 
-        self.assertEqual(payload["input"][0]["phase"], "final_answer")
-        self.assertFalse(
-            any(
-                call.args and call.args[0] == "v2_chat_message_phase_removed"
-                for call in self.write_proxy_event.call_args_list
-            )
-        )
+                self.assertEqual(payload["input"][0]["phase"], "final_answer")
+                self.assertFalse(
+                    any(
+                        call.args and call.args[0] == "chat_message_phase_removed"
+                        for call in self.write_proxy_event.call_args_list
+                    )
+                )
 
     def test_selected_native_responses_codec_round_trips_apply_patch_and_next_history_once(self):
         fixture = _load_glm_apply_patch_history_native_ids_fixture()
