@@ -101,6 +101,7 @@ from codex_semantic_adapter import (
     normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
     strict_json_object as _semantic_strict_json_object,
+    synthesize_effective_worker_binding_readback as _semantic_synthesize_effective_worker_binding_readback,
     validate_effective_worker_binding as _semantic_validate_effective_worker_binding,
     validate_requested_worker_binding as _semantic_validate_requested_worker_binding,
     validate_worker_selector as _semantic_validate_worker_selector,
@@ -590,7 +591,7 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "agent_type": {"type": "string", "enum": ["worker", "general"]},
+                        "agent_type": {"type": "string", "enum": ["worker", "default"]},
                         "fork_context": {"type": "boolean"},
                         "message": {"type": "string"},
                     },
@@ -5972,7 +5973,7 @@ def _multi_agent_explicit_function_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
-    worker_selector_values: tuple[str, ...] = ("worker", "general"),
+    worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> list[dict[str, Any]]:
     namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
     tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
@@ -6970,7 +6971,7 @@ def _inject_explicit_codex_tools(
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
-    worker_selector_values: tuple[str, ...] = ("worker", "general"),
+    worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> bool:
     if tool_surface_counts is not None:
         tool_surface_counts.update(
@@ -7756,7 +7757,7 @@ def _validate_external_worker_selectors(
         arguments = _json_object_from_arguments(raw_arguments)
         if arguments is not None and raw_arguments not in (None, ""):
             agent_type = arguments.get("agent_type")
-            if agent_type == "general":
+            if agent_type in {"general", "default"}:
                 pass
             elif agent_type == "worker":
                 if not _worker_caller_carrier_supported(event_context):
@@ -8191,7 +8192,7 @@ def _validate_worker_binding_history(
         if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
             arguments = _json_object_from_arguments(item.get("arguments"))
             agent_type = arguments.get("agent_type") if arguments is not None else None
-            if agent_type == "general":
+            if agent_type in {"general", "default"}:
                 continue
             selector_validation = _semantic_validate_worker_selector(arguments)
             if selector_validation.outcome != _BINDING_ACCEPTED:
@@ -8249,6 +8250,10 @@ def _validate_worker_binding_history(
                 classification="malformed_readback",
             )
         requested = worker_calls[call_id]
+        readback = _semantic_synthesize_effective_worker_binding_readback(
+            requested,
+            readback,
+        )
         validation = _semantic_validate_effective_worker_binding(
             requested,
             readback,
@@ -12023,9 +12028,9 @@ def compatible_request_body(
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
                 worker_selector_values=(
-                    ("worker", "general")
+                    ("worker", "default")
                     if worker_caller_carrier_supported
-                    else ("general",)
+                    else ("default",)
                 ),
             )
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
