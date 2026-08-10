@@ -355,6 +355,48 @@ def test_outputs_stream_terminal_and_same_home_shapes_are_complete() -> None:
         "response.incomplete",
         "response.failed",
     ]
+    event_shapes = lifecycle["function_call_stream"]["event_shapes"]
+    assert event_shapes["response.output_item.added"]["field_types"] == {
+        "item": "object",
+        "output_index": "number",
+        "type": "string",
+    }
+    assert event_shapes["response.function_call_arguments.delta"]["field_types"] == {
+        "delta": "string",
+        "item_id": "string",
+        "output_index": "number",
+        "type": "string",
+    }
+    terminal_shapes = lifecycle["terminal"]["event_shapes"]
+    assert terminal_shapes["response.completed"]["response_fields"] == [
+        "id",
+        "model",
+        "object",
+        "output",
+        "status",
+        "usage",
+    ]
+    assert terminal_shapes["response.incomplete"]["response_fields"] == [
+        "error",
+        "id",
+        "incomplete_details",
+        "object",
+        "status",
+    ]
+    assert terminal_shapes["response.failed"]["response_fields"] == ["error", "id"]
+    assert lifecycle["terminal"]["stream_close_without_completed"] == (
+        "rejected_nonzero_exit"
+    )
+    for controls in lifecycle["terminal"]["controls_by_client"].values():
+        assert set(controls) == {"incomplete", "failed", "truncated"}
+        assert all(
+            control["client_disposition"] == "rejected_nonzero_exit"
+            and control["completed_event_present"] is False
+            for control in controls.values()
+        )
+        assert controls["incomplete"]["terminal_event_present"] is True
+        assert controls["failed"]["terminal_event_present"] is True
+        assert controls["truncated"]["terminal_event_present"] is False
     readback = lifecycle["same_home_readback"]
     assert readback["clients"] == ["codex_cli", "codex_desktop"]
     assert readback["call_output_order_preserved"] is True
@@ -400,14 +442,17 @@ def test_runtime_observations_bind_unique_homes_and_exact_readback_envelopes() -
 
     scenarios = observations["scenarios"]
     bindings = [scenario["home_binding_sha256"] for scenario in scenarios.values()]
-    assert len(bindings) == 5
-    assert len(set(bindings)) == 5
+    assert len(bindings) == 11
+    assert len(set(bindings)) == 11
     assert all(re.fullmatch(r"[0-9a-f]{64}", binding) for binding in bindings)
     assert all(
         scenario["fresh_empty_home_before_marker"] is True
         and scenario["workspace_created_under_home"] is True
         for scenario in scenarios.values()
     )
+    controls = observations["controls"]
+    assert controls["external_config_environment_removed"] == ["CODEX_CONFIG"]
+    assert controls["xdg_roots_under_isolated_home"] is True
 
     cli = scenarios["cli_v2_lifecycle"]["observed"]
     assert set(cli["requests_by_phase"]) == {
@@ -451,7 +496,10 @@ def test_runtime_observations_bind_unique_homes_and_exact_readback_envelopes() -
     }.issubset(pairs)
 
 
-@pytest.mark.parametrize("case", ["mutation", "deletion", "loss", "home", "replay"])
+@pytest.mark.parametrize(
+    "case",
+    ["mutation", "deletion", "loss", "home", "replay", "identity", "stream"],
+)
 def test_runtime_observation_mutation_deletion_loss_and_replay_fail_closed(
     case: str,
 ) -> None:
@@ -474,11 +522,29 @@ def test_runtime_observation_mutation_deletion_loss_and_replay_fail_closed(
         candidate["scenarios"]["desktop_v1_request"]["home_binding_sha256"] = (
             candidate["scenarios"]["cli_v1_request"]["home_binding_sha256"]
         )
-    else:
+    elif case == "replay":
         replay = candidate["scenarios"]["cli_v2_lifecycle"]["observed"][
             "requests_by_phase"
         ]["restart_replay"]["collaboration_items"]
         replay[0], replay[1] = replay[1], replay[0]
+    elif case == "identity":
+        call = candidate["scenarios"]["cli_v2_lifecycle"]["observed"][
+            "requests_by_phase"
+        ]["root_after_spawn"]["collaboration_items"][0]
+        call["fields"].remove("id")
+        del call["field_types"]["id"]
+    else:
+        sequences = candidate["scenarios"]["cli_v2_lifecycle"]["observed"][
+            "served_event_sequences"
+        ]
+        delta = next(
+            event
+            for sequence in sequences
+            for event in sequence["events"]
+            if event["type"] == "response.function_call_arguments.delta"
+        )
+        delta["fields"].remove("item_id")
+        del delta["field_types"]["item_id"]
     candidate["capture_run_binding_sha256"] = module._capture_run_binding(candidate)
     with pytest.raises(module.ContractValidationError):
         module.validate_runtime_observations(candidate)

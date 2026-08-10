@@ -450,6 +450,18 @@ def _validate_safe_request(value: Any) -> None:
                 item.get("arguments_json_type") == "object",
                 "observation_function_arguments_invalid",
             )
+            required_types = {
+                "type": "string",
+                "id": "string",
+                "name": "string",
+                "namespace": "string",
+                "arguments": "string",
+                "call_id": "string",
+            }
+            _require(
+                all(item["field_types"].get(key) == value for key, value in required_types.items()),
+                "observation_function_call_identity_invalid",
+            )
         elif item_type == "function_call_output":
             _require_exact_fields(
                 item,
@@ -467,6 +479,16 @@ def _validate_safe_request(value: Any) -> None:
                 item.get("output_wire_type") == "string",
                 "observation_function_output_wire_invalid",
             )
+            required_types = {
+                "type": "string",
+                "id": "string",
+                "call_id": "string",
+                "output": "string",
+            }
+            _require(
+                all(item["field_types"].get(key) == value for key, value in required_types.items()),
+                "observation_function_output_identity_invalid",
+            )
         elif item_type == "agent_message":
             _require_exact_fields(
                 item,
@@ -474,6 +496,17 @@ def _validate_safe_request(value: Any) -> None:
                 "observation_agent_message_fields_invalid",
             )
             variants = item.get("content_variants")
+            required_types = {
+                "type": "string",
+                "id": "string",
+                "author": "string",
+                "recipient": "string",
+                "content": "array",
+            }
+            _require(
+                all(item["field_types"].get(key) == value for key, value in required_types.items()),
+                "observation_agent_message_identity_invalid",
+            )
             _require(isinstance(variants, list), "observation_agent_message_invalid")
             for variant in variants:
                 _require(
@@ -492,6 +525,14 @@ def _validate_safe_request(value: Any) -> None:
                 _require(
                     variant.get("fields") == sorted(variant.get("field_types", {})),
                     "observation_agent_message_variant_type_keys_invalid",
+                )
+                content_field = (
+                    "text" if variant.get("type") == "input_text" else "encrypted_content"
+                )
+                _require(
+                    variant["field_types"].get("type") == "string"
+                    and variant["field_types"].get(content_field) == "string",
+                    "observation_agent_message_variant_content_invalid",
                 )
         else:
             raise ContractValidationError("observation_collaboration_item_type_invalid")
@@ -517,6 +558,256 @@ def _collaboration_signature(request: Mapping[str, Any]) -> list[Any]:
                 ]
             )
     return result
+
+
+def _validate_event_envelope(value: Any) -> None:
+    _require(isinstance(value, Mapping), "observation_event_envelope_invalid")
+    base_fields = {"type", "fields", "field_types"}
+    optional_groups = {
+        "item_fields": {"item_fields", "item_field_types"},
+        "part_fields": {"part_fields", "part_field_types"},
+        "response_fields": {"response_fields", "response_field_types"},
+        "response_error_fields": {
+            "response_error_fields",
+            "response_error_field_types",
+        },
+        "response_incomplete_details_fields": {
+            "response_incomplete_details_fields",
+            "response_incomplete_details_field_types",
+        },
+    }
+    allowed = base_fields | {
+        child for group in optional_groups.values() for child in group
+    } | {
+        "item_type",
+        "item_status",
+        "item_name",
+        "item_namespace",
+        "part_type",
+        "response_status",
+        "response_output_item_types",
+    }
+    _require(base_fields <= set(value) <= allowed, "observation_event_envelope_fields_invalid")
+    event_type = value.get("type")
+    _require(
+        event_type
+        in {
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        },
+        "observation_event_type_invalid",
+    )
+    _require(
+        value.get("fields") == sorted(value.get("field_types", {})),
+        "observation_event_field_type_keys_invalid",
+    )
+    expected_event_field_types = {
+        "response.created": {"response": "object", "type": "string"},
+        "response.output_item.added": {
+            "item": "object",
+            "output_index": "number",
+            "type": "string",
+        },
+        "response.content_part.added": {
+            "content_index": "number",
+            "item_id": "string",
+            "output_index": "number",
+            "part": "object",
+            "type": "string",
+        },
+        "response.output_text.delta": {
+            "content_index": "number",
+            "delta": "string",
+            "item_id": "string",
+            "output_index": "number",
+            "type": "string",
+        },
+        "response.output_text.done": {
+            "content_index": "number",
+            "item_id": "string",
+            "output_index": "number",
+            "text": "string",
+            "type": "string",
+        },
+        "response.function_call_arguments.delta": {
+            "delta": "string",
+            "item_id": "string",
+            "output_index": "number",
+            "type": "string",
+        },
+        "response.function_call_arguments.done": {
+            "arguments": "string",
+            "item_id": "string",
+            "output_index": "number",
+            "type": "string",
+        },
+        "response.output_item.done": {
+            "item": "object",
+            "output_index": "number",
+            "type": "string",
+        },
+        "response.completed": {"response": "object", "type": "string"},
+        "response.incomplete": {"response": "object", "type": "string"},
+        "response.failed": {"response": "object", "type": "string"},
+    }
+    _require(
+        value.get("field_types") == expected_event_field_types[event_type],
+        "observation_event_field_types_invalid",
+    )
+    for field_name, group in optional_groups.items():
+        present = group & set(value)
+        _require(not present or present == group, "observation_event_nested_pair_invalid")
+        if present:
+            type_field = next(name for name in group if name.endswith("_field_types"))
+            _require(
+                value[field_name] == sorted(value[type_field]),
+                "observation_event_nested_type_keys_invalid",
+            )
+    if "item_type" in value:
+        _require(
+            value["item_type"] in {"function_call", "message"},
+            "observation_event_item_type_invalid",
+        )
+    if "item_status" in value:
+        _require(
+            value["item_status"] in {"in_progress", "completed"},
+            "observation_event_item_status_invalid",
+        )
+    if "item_name" in value:
+        _require(value["item_name"] in V2_TOOLS, "observation_event_item_name_invalid")
+    if "item_namespace" in value:
+        _require(
+            value["item_namespace"] == V2_NAMESPACE,
+            "observation_event_item_namespace_invalid",
+        )
+    if "part_type" in value:
+        _require(value["part_type"] == "output_text", "observation_event_part_type_invalid")
+    if "response_status" in value:
+        _require(
+            value["response_status"] in {"in_progress", "completed", "incomplete"},
+            "observation_event_response_status_invalid",
+        )
+    if "response_output_item_types" in value:
+        _require(
+            isinstance(value["response_output_item_types"], list)
+            and all(
+                item_type in {"function_call", "message"}
+                for item_type in value["response_output_item_types"]
+            ),
+            "observation_event_response_output_invalid",
+        )
+    if value.get("item_type") == "function_call":
+        item_types = value.get("item_field_types")
+        _require(isinstance(item_types, Mapping), "observation_event_function_item_invalid")
+        required_types = {
+            "type": "string",
+            "id": "string",
+            "status": "string",
+            "name": "string",
+            "namespace": "string",
+            "arguments": "string",
+            "call_id": "string",
+        }
+        _require(
+            dict(item_types) == required_types,
+            "observation_event_function_identity_invalid",
+        )
+    elif value.get("item_type") == "message":
+        _require(
+            value.get("item_field_types")
+            == {
+                "content": "array",
+                "id": "string",
+                "role": "string",
+                "type": "string",
+            },
+            "observation_event_message_item_invalid",
+        )
+    if "part_field_types" in value:
+        _require(
+            value["part_field_types"]
+            == {"annotations": "array", "text": "string", "type": "string"},
+            "observation_event_part_fields_invalid",
+        )
+    expected_response_types = {
+        "response.created": {
+            "id": "string",
+            "model": "string",
+            "object": "string",
+            "output": "array",
+            "status": "string",
+        },
+        "response.completed": {
+            "id": "string",
+            "model": "string",
+            "object": "string",
+            "output": "array",
+            "status": "string",
+            "usage": "object",
+        },
+        "response.incomplete": {
+            "error": "null",
+            "id": "string",
+            "incomplete_details": "object",
+            "object": "string",
+            "status": "string",
+        },
+        "response.failed": {"error": "object", "id": "string"},
+    }
+    if event_type in expected_response_types:
+        _require(
+            value.get("response_field_types") == expected_response_types[event_type],
+            "observation_event_response_fields_invalid",
+        )
+    if event_type == "response.failed":
+        _require(
+            value.get("response_error_field_types")
+            == {"code": "string", "message": "string"},
+            "observation_event_response_error_invalid",
+        )
+    if event_type == "response.incomplete":
+        _require(
+            value.get("response_incomplete_details_field_types")
+            == {"reason": "string"},
+            "observation_event_incomplete_details_invalid",
+        )
+
+
+def _validate_event_sequences(value: Any) -> None:
+    _require(isinstance(value, list) and value, "observation_event_sequences_invalid")
+    request_indices: list[int] = []
+    for sequence in value:
+        _require(isinstance(sequence, Mapping), "observation_event_sequence_invalid")
+        _require_exact_fields(
+            sequence,
+            {"request_index", "events"},
+            "observation_event_sequence_fields_invalid",
+        )
+        request_index = sequence.get("request_index")
+        _require(
+            isinstance(request_index, int)
+            and not isinstance(request_index, bool)
+            and request_index >= 1,
+            "observation_event_sequence_index_invalid",
+        )
+        request_indices.append(request_index)
+        events = sequence.get("events")
+        _require(isinstance(events, list) and events, "observation_event_sequence_empty")
+        for event in events:
+            _validate_event_envelope(event)
+    _require(
+        sorted(request_indices) == list(range(1, len(request_indices) + 1)),
+        "observation_event_sequence_indices_invalid",
+    )
 
 
 def _validate_v2_phase_requests(
@@ -735,6 +1026,8 @@ def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
         "protocol_upstream_loopback": True,
         "plugin_services_disabled": ["plugins", "remote_plugin", "plugin_sharing"],
         "sensitive_environment_credentials_removed": True,
+        "external_config_environment_removed": ["CODEX_CONFIG"],
+        "xdg_roots_under_isolated_home": True,
         "existing_user_home_read": False,
         "existing_user_task_read": False,
         "known_crash_task_read": False,
@@ -773,6 +1066,12 @@ def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
         "desktop_v1_request": ("codex_desktop", 1, 1),
         "cli_v2_lifecycle": ("codex_cli", 5, 2),
         "desktop_v2_lifecycle": ("codex_desktop", 5, 2),
+        "cli_terminal_incomplete": ("codex_cli", 1, 1),
+        "cli_terminal_failed": ("codex_cli", 1, 1),
+        "cli_terminal_truncated": ("codex_cli", 1, 1),
+        "desktop_terminal_incomplete": ("codex_desktop", 1, 1),
+        "desktop_terminal_failed": ("codex_desktop", 1, 1),
+        "desktop_terminal_truncated": ("codex_desktop", 1, 1),
         "desktop_app_v2_lifecycle": ("codex_desktop", 4, 2),
     }
     _require(set(scenarios) == set(scenario_contract), "observations_scenario_set_invalid")
@@ -841,6 +1140,7 @@ def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
                 "requests_by_phase",
                 "served_function_call_event_order",
                 "served_function_names",
+                "served_event_sequences",
                 "identity_relationships",
                 "rollout_readback",
             },
@@ -871,11 +1171,99 @@ def validate_runtime_observations(payload: Mapping[str, Any]) -> None:
             observed["served_function_names"] == ["spawn_agent", "wait_agent"],
             "observation_served_functions_invalid",
         )
+        _validate_event_sequences(observed["served_event_sequences"])
+        _require(
+            len(observed["served_event_sequences"])
+            == scenarios[name]["loopback_request_count"],
+            "observation_event_sequence_count_invalid",
+        )
+        function_sequences = [
+            sequence["events"]
+            for sequence in observed["served_event_sequences"]
+            if any(
+                event["type"] == "response.function_call_arguments.delta"
+                for event in sequence["events"]
+            )
+        ]
+        _require(len(function_sequences) == 2, "observation_function_stream_count_invalid")
+        expected_function_stream = [
+            "response.created",
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        _require(
+            all(
+                [event["type"] for event in sequence] == expected_function_stream
+                for sequence in function_sequences
+            ),
+            "observation_function_stream_invalid",
+        )
         _require_all_true(
             observed["identity_relationships"],
             "observation_identity_relationship_invalid",
         )
         _validate_rollout_readback(observed["rollout_readback"])
+
+    for client_prefix in ("cli", "desktop"):
+        for terminal in ("incomplete", "failed", "truncated"):
+            name = f"{client_prefix}_terminal_{terminal}"
+            observed = scenarios[name]["observed"]
+            _require(isinstance(observed, Mapping), "observation_terminal_control_invalid")
+            _require_exact_fields(
+                observed,
+                {
+                    "terminal_control",
+                    "client_disposition",
+                    "request",
+                    "declaration",
+                    "served_event_envelopes",
+                    "terminal_event_present",
+                    "completed_event_present",
+                },
+                "observation_terminal_control_fields_invalid",
+            )
+            _require(
+                observed["terminal_control"] == terminal,
+                "observation_terminal_control_kind_invalid",
+            )
+            _require(
+                observed["client_disposition"] == "rejected_nonzero_exit",
+                "observation_terminal_disposition_invalid",
+            )
+            _validate_safe_request(observed["request"])
+            _require(
+                observed["declaration"] == _expected_observed_declaration(V2),
+                "observation_terminal_declaration_invalid",
+            )
+            events = observed["served_event_envelopes"]
+            _require(isinstance(events, list) and events, "observation_terminal_events_invalid")
+            for event in events:
+                _validate_event_envelope(event)
+            event_types = [event["type"] for event in events]
+            expected_terminal_type = f"response.{terminal}"
+            if terminal == "truncated":
+                _require(
+                    observed["terminal_event_present"] is False
+                    and not any(
+                        event_type
+                        in {"response.completed", "response.incomplete", "response.failed"}
+                        for event_type in event_types
+                    ),
+                    "observation_truncated_terminal_invalid",
+                )
+            else:
+                _require(
+                    observed["terminal_event_present"] is True
+                    and event_types[-1] == expected_terminal_type,
+                    "observation_terminal_event_invalid",
+                )
+            _require(
+                observed["completed_event_present"] is False,
+                "observation_terminal_completed_invalid",
+            )
 
     app_observed = scenarios["desktop_app_v2_lifecycle"]["observed"]
     _require(isinstance(app_observed, Mapping), "observation_desktop_app_invalid")
@@ -1013,10 +1401,16 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
     cli_scenarios = [
         "cli_v1_request",
         "cli_v2_lifecycle",
+        "cli_terminal_incomplete",
+        "cli_terminal_failed",
+        "cli_terminal_truncated",
     ]
     desktop_scenarios = [
         "desktop_v1_request",
         "desktop_v2_lifecycle",
+        "desktop_terminal_incomplete",
+        "desktop_terminal_failed",
+        "desktop_terminal_truncated",
         "desktop_app_v2_lifecycle",
     ]
     cli_home_bindings = [
@@ -1028,6 +1422,50 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
     cli_lifecycle = scenarios["cli_v2_lifecycle"]["observed"]
     desktop_lifecycle = scenarios["desktop_v2_lifecycle"]["observed"]
     desktop_app = scenarios["desktop_app_v2_lifecycle"]["observed"]
+    cli_function_sequence = next(
+        sequence["events"]
+        for sequence in cli_lifecycle["served_event_sequences"]
+        if any(
+            event["type"] == "response.function_call_arguments.delta"
+            for event in sequence["events"]
+        )
+    )
+    function_core_types = {
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+    }
+    function_event_order = [
+        event["type"]
+        for event in cli_function_sequence
+        if event["type"] in function_core_types
+    ]
+    function_event_shapes = {
+        event["type"]: copy.deepcopy(event)
+        for event in cli_function_sequence
+        if event["type"] in function_core_types
+    }
+    terminal_controls = {
+        client: {
+            terminal: copy.deepcopy(
+                scenarios[f"{client}_terminal_{terminal}"]["observed"]
+            )
+            for terminal in ("incomplete", "failed", "truncated")
+        }
+        for client in ("cli", "desktop")
+    }
+    completed_event = next(
+        copy.deepcopy(event)
+        for event in cli_function_sequence
+        if event["type"] == "response.completed"
+    )
+    incomplete_event = copy.deepcopy(
+        terminal_controls["cli"]["incomplete"]["served_event_envelopes"][-1]
+    )
+    failed_event = copy.deepcopy(
+        terminal_controls["cli"]["failed"]["served_event_envelopes"][-1]
+    )
     return {
         "schema": SCHEMA,
         "qualification_status": "accepted_request_call_result_agent_message_and_readback",
@@ -1190,45 +1628,11 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
         },
         "wire_lifecycle": {
             "function_call_stream": {
-                "event_order": [
-                    "response.output_item.added",
-                    "response.function_call_arguments.delta",
-                    "response.function_call_arguments.done",
-                    "response.output_item.done",
-                ],
-                "event_shapes": {
-                    "response.output_item.added": {
-                        "fields": ["type", "output_index", "item"],
-                        "item_fields": [
-                            "type",
-                            "id",
-                            "status",
-                            "name",
-                            "namespace",
-                            "arguments",
-                            "call_id",
-                        ],
-                        "status": "in_progress",
-                    },
-                    "response.function_call_arguments.delta": {
-                        "fields": ["type", "item_id", "output_index", "delta"]
-                    },
-                    "response.function_call_arguments.done": {
-                        "fields": ["type", "item_id", "output_index", "arguments"]
-                    },
-                    "response.output_item.done": {
-                        "fields": ["type", "output_index", "item"],
-                        "item_fields": [
-                            "type",
-                            "id",
-                            "status",
-                            "name",
-                            "namespace",
-                            "arguments",
-                            "call_id",
-                        ],
-                        "status": "completed",
-                    },
+                "event_order": function_event_order,
+                "event_shapes": function_event_shapes,
+                "captured_event_sequences": {
+                    "codex_cli": cli_lifecycle["served_event_sequences"],
+                    "codex_desktop": desktop_lifecycle["served_event_sequences"],
                 },
                 "assembly_rule": "ordered_delta_assembly_must_equal_done_arguments",
             },
@@ -1240,23 +1644,12 @@ def build_contract(observations: Mapping[str, Any] | None = None) -> dict[str, A
                     "response.failed",
                 ],
                 "event_shapes": {
-                    "response.completed": {
-                        "fields": ["type", "response"],
-                        "response_fields": ["id", "status", "output", "usage"],
-                        "status": "completed",
-                    },
-                    "response.incomplete": {
-                        "fields": ["type", "response"],
-                        "response_required_fields": ["id", "status", "incomplete_details"],
-                        "status": "incomplete",
-                    },
-                    "response.failed": {
-                        "fields": ["type", "response"],
-                        "response_required_fields": ["id", "status", "error"],
-                        "status": "failed",
-                    },
+                    "response.completed": completed_event,
+                    "response.incomplete": incomplete_event,
+                    "response.failed": failed_event,
                 },
-                "stream_close_without_completed": "terminal_error",
+                "controls_by_client": terminal_controls,
+                "stream_close_without_completed": "rejected_nonzero_exit",
             },
             "history_items": ["function_call", "function_call_output", "agent_message"],
             "request_replay_envelopes": {

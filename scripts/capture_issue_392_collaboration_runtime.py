@@ -346,6 +346,107 @@ def _response_completed(output: list[dict[str, Any]], index: int) -> dict[str, A
     }
 
 
+def _response_incomplete(index: int) -> dict[str, Any]:
+    return {
+        "type": "response.incomplete",
+        "response": {
+            "id": f"response_{index}",
+            "object": "response",
+            "status": "incomplete",
+            "error": None,
+            "incomplete_details": {"reason": "content_filter"},
+        },
+    }
+
+
+def _response_failed(index: int) -> dict[str, Any]:
+    return {
+        "type": "response.failed",
+        "response": {
+            "id": f"response_{index}",
+            "error": {
+                "code": "invalid_prompt",
+                "message": "bounded fixture failure",
+            },
+        },
+    }
+
+
+def _partial_message_events(index: int) -> list[dict[str, Any]]:
+    item_id = f"message_{index}"
+    return [
+        _response_created(index),
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+            },
+        },
+        {
+            "type": "response.content_part.added",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "partial",
+        },
+    ]
+
+
+def _event_envelope(event: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "type": event.get("type"),
+        "fields": sorted(event),
+        "field_types": _field_types(event),
+    }
+    item = event.get("item")
+    if isinstance(item, Mapping):
+        result["item_fields"] = sorted(item)
+        result["item_field_types"] = _field_types(item)
+        for field in ("type", "status", "name", "namespace"):
+            value = item.get(field)
+            if isinstance(value, str):
+                result[f"item_{field}"] = value
+    part = event.get("part")
+    if isinstance(part, Mapping):
+        result["part_fields"] = sorted(part)
+        result["part_field_types"] = _field_types(part)
+        if isinstance(part.get("type"), str):
+            result["part_type"] = part["type"]
+    response = event.get("response")
+    if isinstance(response, Mapping):
+        result["response_fields"] = sorted(response)
+        result["response_field_types"] = _field_types(response)
+        if isinstance(response.get("status"), str):
+            result["response_status"] = response["status"]
+        output = response.get("output")
+        if isinstance(output, list):
+            result["response_output_item_types"] = [
+                child.get("type")
+                for child in output
+                if isinstance(child, Mapping) and isinstance(child.get("type"), str)
+            ]
+        error = response.get("error")
+        if isinstance(error, Mapping):
+            result["response_error_fields"] = sorted(error)
+            result["response_error_field_types"] = _field_types(error)
+        incomplete = response.get("incomplete_details")
+        if isinstance(incomplete, Mapping):
+            result["response_incomplete_details_fields"] = sorted(incomplete)
+            result["response_incomplete_details_field_types"] = _field_types(incomplete)
+    return result
+
+
 def _message_events(index: int) -> list[dict[str, Any]]:
     item_id = f"message_{index}"
     done = {
@@ -431,10 +532,15 @@ def _function_events(
 class _FixtureServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, lifecycle: bool) -> None:
+    def __init__(self, mode: str) -> None:
         super().__init__(("127.0.0.1", 0), _FixtureHandler)
-        self.lifecycle = lifecycle
+        _require(
+            mode in {"message", "lifecycle", "incomplete", "failed", "truncated"},
+            "fixture_mode_invalid",
+        )
+        self.mode = mode
         self.requests: list[dict[str, Any]] = []
+        self.served_event_sequences: list[dict[str, Any]] = []
         self.lock = threading.Lock()
         self.root_thread: str | None = None
         self.root_request_count = 0
@@ -453,17 +559,32 @@ class _FixtureServer(ThreadingHTTPServer):
                 root_stage = self.root_request_count
             else:
                 root_stage = 0
-        if not self.lifecycle:
-            return _message_events(index)
-        if is_root and root_stage == 1:
-            return _function_events(
+        if self.mode == "message":
+            events = _message_events(index)
+        elif self.mode == "incomplete":
+            events = [*_partial_message_events(index), _response_incomplete(index)]
+        elif self.mode == "failed":
+            events = [_response_created(index), _response_failed(index)]
+        elif self.mode == "truncated":
+            events = _partial_message_events(index)
+        elif is_root and root_stage == 1:
+            events = _function_events(
                 "spawn_agent",
                 {"task_name": "worker", "message": "bounded child task"},
                 index,
             )
-        if is_root and root_stage == 2:
-            return _function_events("wait_agent", {"timeout_ms": 10000}, index)
-        return _message_events(index)
+        elif is_root and root_stage == 2:
+            events = _function_events("wait_agent", {"timeout_ms": 10000}, index)
+        else:
+            events = _message_events(index)
+        with self.lock:
+            self.served_event_sequences.append(
+                {
+                    "request_index": index,
+                    "events": [_event_envelope(event) for event in events],
+                }
+            )
+        return events
 
 
 class _FixtureHandler(BaseHTTPRequestHandler):
@@ -495,8 +616,8 @@ class _FixtureHandler(BaseHTTPRequestHandler):
 
 
 class FixtureServer:
-    def __init__(self, *, lifecycle: bool) -> None:
-        self._server = _FixtureServer(lifecycle)
+    def __init__(self, *, mode: str) -> None:
+        self._server = _FixtureServer(mode)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     def __enter__(self) -> _FixtureServer:
@@ -545,8 +666,12 @@ class IsolatedHome:
 
 def _isolated_environment(home: Path) -> dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("CODEX_CONFIG", None)
     for name in SENSITIVE_ENVIRONMENT_NAMES:
         environment.pop(name, None)
+    xdg_config = home / "Xdg/Config"
+    xdg_data = home / "Xdg/Data"
+    xdg_cache = home / "Xdg/Cache"
     environment.update(
         CODEX_HOME=str(home),
         HOME=str(home),
@@ -558,9 +683,18 @@ def _isolated_environment(home: Path) -> dict[str, str]:
         HTTP_PROXY="",
         HTTPS_PROXY="",
         ALL_PROXY="",
+        XDG_CONFIG_HOME=str(xdg_config),
+        XDG_DATA_HOME=str(xdg_data),
+        XDG_CACHE_HOME=str(xdg_cache),
     )
-    Path(environment["APPDATA"]).mkdir(parents=True)
-    Path(environment["LOCALAPPDATA"]).mkdir(parents=True)
+    for path in (
+        Path(environment["APPDATA"]),
+        Path(environment["LOCALAPPDATA"]),
+        xdg_config,
+        xdg_data,
+        xdg_cache,
+    ):
+        path.mkdir(parents=True)
     return environment
 
 
@@ -585,6 +719,8 @@ base_url="http://127.0.0.1:{port}/v1"
 wire_api="responses"
 requires_openai_auth=false
 experimental_bearer_token="fixture-key"
+request_max_retries=0
+stream_max_retries=0
 {feature_config}''',
         encoding="utf-8",
         newline="\n",
@@ -621,8 +757,13 @@ def _resume_options(session_id: str) -> list[str]:
 
 
 def _run_codex(
-    command: Sequence[str], *, prompt: str, cwd: Path, environment: Mapping[str, str]
-) -> None:
+    command: Sequence[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    environment: Mapping[str, str],
+    expect_success: bool = True,
+) -> int:
     try:
         completed = subprocess.run(
             list(command),
@@ -638,7 +779,11 @@ def _run_codex(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CaptureFailure("frozen_runtime_execution_failed") from error
-    _require(completed.returncode == 0, "frozen_runtime_execution_failed")
+    if expect_success:
+        _require(completed.returncode == 0, "frozen_runtime_execution_failed")
+    else:
+        _require(completed.returncode != 0, "terminal_control_was_not_rejected")
+    return completed.returncode
 
 
 def _base_scenario(
@@ -665,7 +810,7 @@ def _capture_request_scenario(
         home = isolated.path
         workspace = home / "workspace"
         workspace.mkdir()
-        with FixtureServer(lifecycle=False) as server:
+        with FixtureServer(mode="message") as server:
             _write_config(home, server.server_port, v2=version == contract.V2, app_server=False)
             environment = _isolated_environment(home)
             _run_codex(
@@ -770,25 +915,49 @@ def _identity_relationships(
     ]
     before_agents = [item for item in before if item.get("type") == "agent_message"]
     replay_agents = [item for item in replay if item.get("type") == "agent_message"]
+    before_call_item_ids = [item.get("id") for item in before_calls]
+    replay_call_item_ids = [item.get("id") for item in replay_calls]
+    before_call_ids = [item.get("call_id") for item in before_calls]
+    replay_call_ids = [item.get("call_id") for item in replay_calls]
+    before_output_item_ids = [item.get("id") for item in before_outputs]
+    replay_output_item_ids = [item.get("id") for item in replay_outputs]
+    before_output_call_ids = [item.get("call_id") for item in before_outputs]
+    replay_output_call_ids = [item.get("call_id") for item in replay_outputs]
+    before_agent_item_ids = [item.get("id") for item in before_agents]
+    replay_agent_item_ids = [item.get("id") for item in replay_agents]
+    all_identity_values = (
+        before_call_item_ids
+        + replay_call_item_ids
+        + before_call_ids
+        + replay_call_ids
+        + before_output_item_ids
+        + replay_output_item_ids
+        + before_output_call_ids
+        + replay_output_call_ids
+        + before_agent_item_ids
+        + replay_agent_item_ids
+    )
+    identities_nonempty = bool(all_identity_values) and all(
+        isinstance(value, str) and bool(value) for value in all_identity_values
+    )
+    agent_addresses_nonempty = all(
+        isinstance(item.get(field), str) and bool(item.get(field))
+        for item in before_agents + replay_agents
+        for field in ("author", "recipient")
+    )
     call_output_links = all(
         any(output.get("call_id") == call.get("call_id") for output in before_outputs)
         for call in before_calls
     )
     return {
-        "function_call_item_ids_preserved": [item.get("id") for item in before_calls]
-        == [item.get("id") for item in replay_calls],
-        "function_call_call_ids_preserved": [
-            item.get("call_id") for item in before_calls
-        ]
-        == [item.get("call_id") for item in replay_calls],
-        "function_output_item_ids_preserved": [
-            item.get("id") for item in before_outputs
-        ]
-        == [item.get("id") for item in replay_outputs],
-        "function_output_call_ids_preserved": [
-            item.get("call_id") for item in before_outputs
-        ]
-        == [item.get("call_id") for item in replay_outputs],
+        "all_identity_fields_nonempty": identities_nonempty,
+        "function_call_item_ids_preserved": before_call_item_ids
+        == replay_call_item_ids,
+        "function_call_call_ids_preserved": before_call_ids == replay_call_ids,
+        "function_output_item_ids_preserved": before_output_item_ids
+        == replay_output_item_ids,
+        "function_output_call_ids_preserved": before_output_call_ids
+        == replay_output_call_ids,
         "function_outputs_link_to_calls": call_output_links,
         "collaboration_item_order_preserved": [
             _item_signature(item) for item in before
@@ -818,6 +987,9 @@ def _identity_relationships(
             )
             for item in replay_agents
         ],
+        "agent_message_item_ids_preserved": before_agent_item_ids
+        == replay_agent_item_ids,
+        "agent_message_addresses_nonempty": agent_addresses_nonempty,
     }
 
 
@@ -888,7 +1060,7 @@ def _capture_v2_lifecycle(
         home = isolated.path
         workspace = home / "workspace"
         workspace.mkdir()
-        with FixtureServer(lifecycle=True) as server:
+        with FixtureServer(mode="lifecycle") as server:
             _write_config(home, server.server_port, v2=True, app_server=False)
             environment = _isolated_environment(home)
             _run_codex(
@@ -907,6 +1079,7 @@ def _capture_v2_lifecycle(
                 environment=environment,
             )
             requests = copy.deepcopy(server.requests)
+            served_event_sequences = copy.deepcopy(server.served_event_sequences)
         phases = _phase_requests(requests, root_thread, restart_offset)
         declaration = _declaration(phases["root_initial"], contract.V2_NAMESPACE)
         rollout = _rollout_summary(home, root_thread)
@@ -935,8 +1108,63 @@ def _capture_v2_lifecycle(
                 "response.completed",
             ],
             "served_function_names": ["spawn_agent", "wait_agent"],
+            "served_event_sequences": served_event_sequences,
             "identity_relationships": _identity_relationships(phases),
             "rollout_readback": rollout,
+        }
+        return result
+
+
+def _capture_terminal_control(
+    *, client: str, executable: Path, terminal: str
+) -> dict[str, Any]:
+    _require(
+        terminal in {"incomplete", "failed", "truncated"},
+        "terminal_control_invalid",
+    )
+    scenario_name = f"{client}_terminal_{terminal}"
+    with IsolatedHome(scenario_name) as isolated:
+        _require(isolated.path is not None, "isolated_home_missing")
+        home = isolated.path
+        workspace = home / "workspace"
+        workspace.mkdir()
+        with FixtureServer(mode=terminal) as server:
+            _write_config(home, server.server_port, v2=True, app_server=False)
+            environment = _isolated_environment(home)
+            _run_codex(
+                (str(executable), "exec", *_exec_options(workspace)),
+                prompt="Reject the controlled terminal stream.",
+                cwd=workspace,
+                environment=environment,
+                expect_success=False,
+            )
+            requests = copy.deepcopy(server.requests)
+            served_event_sequences = copy.deepcopy(server.served_event_sequences)
+        _require(len(requests) == 1, "terminal_control_request_count_invalid")
+        _require(
+            len(served_event_sequences) == 1,
+            "terminal_control_event_sequence_invalid",
+        )
+        event_types = [
+            event["type"] for event in served_event_sequences[0]["events"]
+        ]
+        terminal_event = f"response.{terminal}"
+        result = _base_scenario(
+            client=client,
+            home=isolated,
+            request_count=len(requests),
+            process_runs=1,
+        )
+        result["observed"] = {
+            "terminal_control": terminal,
+            "client_disposition": "rejected_nonzero_exit",
+            "request": _safe_request_shape(requests[0]),
+            "declaration": _declaration(requests[0], contract.V2_NAMESPACE),
+            "served_event_envelopes": served_event_sequences[0]["events"],
+            "terminal_event_present": (
+                terminal_event in event_types if terminal != "truncated" else False
+            ),
+            "completed_event_present": "response.completed" in event_types,
         }
         return result
 
@@ -1040,12 +1268,23 @@ def _desktop_identity_relationships(
         for turn in after_turns
         if isinstance(turn, Mapping)
     ]
+    before_turn_ids = [
+        turn.get("id") for turn in before_turns if isinstance(turn, Mapping)
+    ]
+    after_turn_ids = [
+        turn.get("id") for turn in after_turns if isinstance(turn, Mapping)
+    ]
+    identity_values = (
+        [before.get("id"), after.get("id")]
+        + before_turn_ids
+        + after_turn_ids
+        + [value for values in before_item_ids + after_item_ids for value in values]
+    )
     return {
+        "all_identity_fields_nonempty": bool(identity_values)
+        and all(isinstance(value, str) and bool(value) for value in identity_values),
         "thread_id_preserved": before.get("id") == after.get("id"),
-        "turn_ids_preserved": [
-            turn.get("id") for turn in before_turns if isinstance(turn, Mapping)
-        ]
-        == [turn.get("id") for turn in after_turns if isinstance(turn, Mapping)],
+        "turn_ids_preserved": before_turn_ids == after_turn_ids,
         "item_ids_preserved": before_item_ids == after_item_ids,
         "item_order_preserved": before_types == after_types,
         "structural_readback_preserved": _thread_structure(before)
@@ -1073,7 +1312,7 @@ def _capture_desktop_app_lifecycle(executable: Path) -> dict[str, Any]:
         home = isolated.path
         workspace = home / "workspace"
         workspace.mkdir()
-        with FixtureServer(lifecycle=True) as server:
+        with FixtureServer(mode="lifecycle") as server:
             _write_config(home, server.server_port, v2=True, app_server=True)
             environment = _isolated_environment(home)
             app = start_issue106_app_server(executable, home, environment)
@@ -1223,6 +1462,32 @@ def capture(
         "desktop_v2_lifecycle": _capture_v2_lifecycle(
             client="codex_desktop", executable=desktop_executable
         ),
+        "cli_terminal_incomplete": _capture_terminal_control(
+            client="codex_cli",
+            executable=cli_executable,
+            terminal="incomplete",
+        ),
+        "cli_terminal_failed": _capture_terminal_control(
+            client="codex_cli", executable=cli_executable, terminal="failed"
+        ),
+        "cli_terminal_truncated": _capture_terminal_control(
+            client="codex_cli", executable=cli_executable, terminal="truncated"
+        ),
+        "desktop_terminal_incomplete": _capture_terminal_control(
+            client="codex_desktop",
+            executable=desktop_executable,
+            terminal="incomplete",
+        ),
+        "desktop_terminal_failed": _capture_terminal_control(
+            client="codex_desktop",
+            executable=desktop_executable,
+            terminal="failed",
+        ),
+        "desktop_terminal_truncated": _capture_terminal_control(
+            client="codex_desktop",
+            executable=desktop_executable,
+            terminal="truncated",
+        ),
         "desktop_app_v2_lifecycle": _capture_desktop_app_lifecycle(
             desktop_executable
         ),
@@ -1238,6 +1503,8 @@ def capture(
             "protocol_upstream_loopback": True,
             "plugin_services_disabled": list(DISABLED_FEATURES),
             "sensitive_environment_credentials_removed": True,
+            "external_config_environment_removed": ["CODEX_CONFIG"],
+            "xdg_roots_under_isolated_home": True,
             "existing_user_home_read": False,
             "existing_user_task_read": False,
             "known_crash_task_read": False,

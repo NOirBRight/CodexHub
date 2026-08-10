@@ -33,12 +33,16 @@ change.
   encryption flags, required fields, strictness, and additional-properties
   behavior.
 - `collaboration-runtime-observations.json` is the sanitized output of the
-  runtime capture, not a hand-authored status list. Its five distinct
-  `home_binding_sha256` values bind the five newly empty Homes, and
+  runtime capture, not a hand-authored status list. Its eleven distinct
+  `home_binding_sha256` values bind the eleven newly empty Homes, and
   `capture_run_binding_sha256` binds the complete observation set.
 - `collaboration-runtime-contract.json` is generated from that committed
   observation artifact. The builder rejects missing, mutated, replay-reordered,
   identity-losing, or duplicate-Home observations before producing a contract.
+- Both frozen runtimes also consume controlled `response.incomplete`,
+  `response.failed`, and terminal-less truncated streams with retries disabled.
+  The artifact retains the exact sanitized event fields/types and the observed
+  non-zero client disposition for each control.
 
 ## Observed decision
 

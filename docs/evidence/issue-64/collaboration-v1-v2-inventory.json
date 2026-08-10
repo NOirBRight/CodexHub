@@ -79,7 +79,7 @@
     "basis": "accepted_issue392_exact_runtime_contract",
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
-      "sha256": "5688d0730e6c0270a74b512fd43b4b96094e131481fb5847bd82b6149179e6a9"
+      "sha256": "7ed254a4171eabf59e9d8f0ab8c0133ccf13cfad6c83b0b57b122c244c71d2e2"
     }
   },
   "protocol_layers": {
@@ -1322,54 +1322,104 @@
         ],
         "event_shapes": {
           "response.function_call_arguments.delta": {
+            "field_types": {
+              "delta": "string",
+              "item_id": "string",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "delta",
               "item_id",
               "output_index",
-              "delta"
-            ]
+              "type"
+            ],
+            "type": "response.function_call_arguments.delta"
           },
           "response.function_call_arguments.done": {
+            "field_types": {
+              "arguments": "string",
+              "item_id": "string",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "arguments",
               "item_id",
               "output_index",
-              "arguments"
-            ]
+              "type"
+            ],
+            "type": "response.function_call_arguments.done"
           },
           "response.output_item.added": {
+            "field_types": {
+              "item": "object",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "item",
               "output_index",
-              "item"
+              "type"
             ],
+            "item_field_types": {
+              "arguments": "string",
+              "call_id": "string",
+              "id": "string",
+              "name": "string",
+              "namespace": "string",
+              "status": "string",
+              "type": "string"
+            },
             "item_fields": [
-              "type",
+              "arguments",
+              "call_id",
               "id",
-              "status",
               "name",
               "namespace",
-              "arguments",
-              "call_id"
+              "status",
+              "type"
             ],
-            "status": "in_progress"
+            "item_name": "spawn_agent",
+            "item_namespace": "collaboration",
+            "item_status": "in_progress",
+            "item_type": "function_call",
+            "type": "response.output_item.added"
           },
           "response.output_item.done": {
+            "field_types": {
+              "item": "object",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "item",
               "output_index",
-              "item"
+              "type"
             ],
+            "item_field_types": {
+              "arguments": "string",
+              "call_id": "string",
+              "id": "string",
+              "name": "string",
+              "namespace": "string",
+              "status": "string",
+              "type": "string"
+            },
             "item_fields": [
-              "type",
+              "arguments",
+              "call_id",
               "id",
-              "status",
               "name",
               "namespace",
-              "arguments",
-              "call_id"
+              "status",
+              "type"
             ],
-            "status": "completed"
+            "item_name": "spawn_agent",
+            "item_namespace": "collaboration",
+            "item_status": "completed",
+            "item_type": "function_call",
+            "type": "response.output_item.done"
           }
         },
         "terminal_events": [
@@ -1379,41 +1429,94 @@
         ],
         "terminal_shapes": {
           "response.completed": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
+            "response_field_types": {
+              "id": "string",
+              "model": "string",
+              "object": "string",
+              "output": "array",
+              "status": "string",
+              "usage": "object"
+            },
             "response_fields": [
               "id",
-              "status",
+              "model",
+              "object",
               "output",
+              "status",
               "usage"
             ],
-            "status": "completed"
+            "response_output_item_types": [
+              "function_call"
+            ],
+            "response_status": "completed",
+            "type": "response.completed"
           },
           "response.failed": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
-            "response_required_fields": [
-              "id",
-              "status",
-              "error"
+            "response_error_field_types": {
+              "code": "string",
+              "message": "string"
+            },
+            "response_error_fields": [
+              "code",
+              "message"
             ],
-            "status": "failed"
+            "response_field_types": {
+              "error": "object",
+              "id": "string"
+            },
+            "response_fields": [
+              "error",
+              "id"
+            ],
+            "type": "response.failed"
           },
           "response.incomplete": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
-            "response_required_fields": [
+            "response_field_types": {
+              "error": "null",
+              "id": "string",
+              "incomplete_details": "object",
+              "object": "string",
+              "status": "string"
+            },
+            "response_fields": [
+              "error",
               "id",
-              "status",
-              "incomplete_details"
+              "incomplete_details",
+              "object",
+              "status"
             ],
-            "status": "incomplete"
+            "response_incomplete_details_field_types": {
+              "reason": "string"
+            },
+            "response_incomplete_details_fields": [
+              "reason"
+            ],
+            "response_status": "incomplete",
+            "type": "response.incomplete"
           }
         }
       }
@@ -1973,54 +2076,104 @@
         ],
         "event_shapes": {
           "response.function_call_arguments.delta": {
+            "field_types": {
+              "delta": "string",
+              "item_id": "string",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "delta",
               "item_id",
               "output_index",
-              "delta"
-            ]
+              "type"
+            ],
+            "type": "response.function_call_arguments.delta"
           },
           "response.function_call_arguments.done": {
+            "field_types": {
+              "arguments": "string",
+              "item_id": "string",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "arguments",
               "item_id",
               "output_index",
-              "arguments"
-            ]
+              "type"
+            ],
+            "type": "response.function_call_arguments.done"
           },
           "response.output_item.added": {
+            "field_types": {
+              "item": "object",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "item",
               "output_index",
-              "item"
+              "type"
             ],
+            "item_field_types": {
+              "arguments": "string",
+              "call_id": "string",
+              "id": "string",
+              "name": "string",
+              "namespace": "string",
+              "status": "string",
+              "type": "string"
+            },
             "item_fields": [
-              "type",
+              "arguments",
+              "call_id",
               "id",
-              "status",
               "name",
               "namespace",
-              "arguments",
-              "call_id"
+              "status",
+              "type"
             ],
-            "status": "in_progress"
+            "item_name": "spawn_agent",
+            "item_namespace": "collaboration",
+            "item_status": "in_progress",
+            "item_type": "function_call",
+            "type": "response.output_item.added"
           },
           "response.output_item.done": {
+            "field_types": {
+              "item": "object",
+              "output_index": "number",
+              "type": "string"
+            },
             "fields": [
-              "type",
+              "item",
               "output_index",
-              "item"
+              "type"
             ],
+            "item_field_types": {
+              "arguments": "string",
+              "call_id": "string",
+              "id": "string",
+              "name": "string",
+              "namespace": "string",
+              "status": "string",
+              "type": "string"
+            },
             "item_fields": [
-              "type",
+              "arguments",
+              "call_id",
               "id",
-              "status",
               "name",
               "namespace",
-              "arguments",
-              "call_id"
+              "status",
+              "type"
             ],
-            "status": "completed"
+            "item_name": "spawn_agent",
+            "item_namespace": "collaboration",
+            "item_status": "completed",
+            "item_type": "function_call",
+            "type": "response.output_item.done"
           }
         },
         "terminal_events": [
@@ -2030,41 +2183,94 @@
         ],
         "terminal_shapes": {
           "response.completed": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
+            "response_field_types": {
+              "id": "string",
+              "model": "string",
+              "object": "string",
+              "output": "array",
+              "status": "string",
+              "usage": "object"
+            },
             "response_fields": [
               "id",
-              "status",
+              "model",
+              "object",
               "output",
+              "status",
               "usage"
             ],
-            "status": "completed"
+            "response_output_item_types": [
+              "function_call"
+            ],
+            "response_status": "completed",
+            "type": "response.completed"
           },
           "response.failed": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
-            "response_required_fields": [
-              "id",
-              "status",
-              "error"
+            "response_error_field_types": {
+              "code": "string",
+              "message": "string"
+            },
+            "response_error_fields": [
+              "code",
+              "message"
             ],
-            "status": "failed"
+            "response_field_types": {
+              "error": "object",
+              "id": "string"
+            },
+            "response_fields": [
+              "error",
+              "id"
+            ],
+            "type": "response.failed"
           },
           "response.incomplete": {
+            "field_types": {
+              "response": "object",
+              "type": "string"
+            },
             "fields": [
-              "type",
-              "response"
+              "response",
+              "type"
             ],
-            "response_required_fields": [
+            "response_field_types": {
+              "error": "null",
+              "id": "string",
+              "incomplete_details": "object",
+              "object": "string",
+              "status": "string"
+            },
+            "response_fields": [
+              "error",
               "id",
-              "status",
-              "incomplete_details"
+              "incomplete_details",
+              "object",
+              "status"
             ],
-            "status": "incomplete"
+            "response_incomplete_details_field_types": {
+              "reason": "string"
+            },
+            "response_incomplete_details_fields": [
+              "reason"
+            ],
+            "response_status": "incomplete",
+            "type": "response.incomplete"
           }
         }
       }

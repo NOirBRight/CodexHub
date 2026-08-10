@@ -6,11 +6,17 @@
     "existing_user_task_read": false,
     "home": "new_isolated_home_per_runtime",
     "isolated_home_bindings_sha256": [
-      "b7da348dba582272740fa1392545e7b468a5fbe50f08d257de451631fc8490a8",
-      "1d36f56fcb0744f35ade8cdc621e9588f24c55ad5efcf556c69f12ff1a9f8b28",
-      "8da0a0440f5dba6de038e2343dcf0a90aad1e9df7107f5f734031243fd50d551",
-      "c99dd6202b2a2fddc017c522c869e619b72803c8ec1393209ab3bb8c66528007",
-      "9ff014546ee3d0495ea5d21413bd8cc5e7ecf23f1e09bf0023e2b218526b7e04"
+      "a058ffe406e7af055b87f98bff09077031ffd72c21389c4e89f1ffa265b15fb9",
+      "17c8b4e96cc0744441c00a314e6ae14bc49454d0128559b35d2a00db7b4c7a50",
+      "f930beb2814989e633629ccc809f7f78b297e8e19ec3766f8cbcb813d7ac47ef",
+      "feb22d28648102219916510e7dfee43d38c2dd3a1fed7620ac8bd0b3d53e1733",
+      "8fe4b7034c95a910bfa3b42c5d6fc8f8e8422e50581405ba0d01871219f38836",
+      "8c77bace3858ed27914840ef6a7927f19b8effc9614b2af55279ad47fa82663d",
+      "772155b18d258cc15cd032c7b9a86423969968125802e9871214767a1479b4cb",
+      "824b4e8ff0667006a27c27c8b8b1668e574409585406da559d7e5f238234cfe0",
+      "6a5cbbb31fff06d91ebac181d783c6b569b7450e2212b6212ee75d3b5f2a7d14",
+      "15cf38a729af04feca92e316512bdfc7592fbc23704a0b524ef256718f2f2ea8",
+      "dee87876f539a243364378b32892cecb50ac21524d1262f96328247091cc57ab"
     ],
     "isolated_observations": [
       "cli_v1_request",
@@ -1345,12 +1351,18 @@
       "client": "codex_cli",
       "client_version": "0.146.1",
       "isolated_home_bindings_sha256": [
-        "b7da348dba582272740fa1392545e7b468a5fbe50f08d257de451631fc8490a8",
-        "1d36f56fcb0744f35ade8cdc621e9588f24c55ad5efcf556c69f12ff1a9f8b28"
+        "feb22d28648102219916510e7dfee43d38c2dd3a1fed7620ac8bd0b3d53e1733",
+        "8fe4b7034c95a910bfa3b42c5d6fc8f8e8422e50581405ba0d01871219f38836",
+        "17c8b4e96cc0744441c00a314e6ae14bc49454d0128559b35d2a00db7b4c7a50",
+        "a058ffe406e7af055b87f98bff09077031ffd72c21389c4e89f1ffa265b15fb9",
+        "f930beb2814989e633629ccc809f7f78b297e8e19ec3766f8cbcb813d7ac47ef"
       ],
       "observation_scenarios": [
         "cli_v1_request",
-        "cli_v2_lifecycle"
+        "cli_v2_lifecycle",
+        "cli_terminal_incomplete",
+        "cli_terminal_failed",
+        "cli_terminal_truncated"
       ],
       "observations": {
         "desktop_thread_items_and_notifications": "not_applicable",
@@ -1433,13 +1445,19 @@
       "client": "codex_desktop",
       "client_version": "26.803.5235.0",
       "isolated_home_bindings_sha256": [
-        "c99dd6202b2a2fddc017c522c869e619b72803c8ec1393209ab3bb8c66528007",
-        "9ff014546ee3d0495ea5d21413bd8cc5e7ecf23f1e09bf0023e2b218526b7e04",
-        "8da0a0440f5dba6de038e2343dcf0a90aad1e9df7107f5f734031243fd50d551"
+        "15cf38a729af04feca92e316512bdfc7592fbc23704a0b524ef256718f2f2ea8",
+        "dee87876f539a243364378b32892cecb50ac21524d1262f96328247091cc57ab",
+        "824b4e8ff0667006a27c27c8b8b1668e574409585406da559d7e5f238234cfe0",
+        "772155b18d258cc15cd032c7b9a86423969968125802e9871214767a1479b4cb",
+        "6a5cbbb31fff06d91ebac181d783c6b569b7450e2212b6212ee75d3b5f2a7d14",
+        "8c77bace3858ed27914840ef6a7927f19b8effc9614b2af55279ad47fa82663d"
       ],
       "observation_scenarios": [
         "desktop_v1_request",
         "desktop_v2_lifecycle",
+        "desktop_terminal_incomplete",
+        "desktop_terminal_failed",
+        "desktop_terminal_truncated",
         "desktop_app_v2_lifecycle"
       ],
       "observations": {
@@ -2244,14 +2262,1734 @@
     "unknown_missing_duplicate_conflicting_or_mixed": "fail_closed"
   },
   "source_observations": {
-    "canonical_sha256": "1d689f4521ae654b910eec849bc4cb7f6abafa116ecbfb730250f10c1d64e9b6",
-    "capture_run_binding_sha256": "beb7668c5330c396e38457446d7985ae0c126a7a690d964b682744a6609c52c1",
+    "canonical_sha256": "be54d311a4e1b0f1ef8f608d20885cbc7ef6e40b248a76653afed41642dbbbbd",
+    "capture_run_binding_sha256": "5dcc331df5a1be35dce1ffe9a10f9902416d954e9c4c1321bd66c9675d24fdfe",
     "path": "docs/evidence/issue-392/collaboration-runtime-observations.json",
     "schema": "codexhub.issue392.collaboration-runtime-observations.v1"
   },
   "wire_lifecycle": {
     "function_call_stream": {
       "assembly_rule": "ordered_delta_assembly_must_equal_done_arguments",
+      "captured_event_sequences": {
+        "codex_cli": [
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "spawn_agent",
+                "item_namespace": "collaboration",
+                "item_status": "in_progress",
+                "item_type": "function_call",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.delta"
+              },
+              {
+                "field_types": {
+                  "arguments": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "arguments",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "spawn_agent",
+                "item_namespace": "collaboration",
+                "item_status": "completed",
+                "item_type": "function_call",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "function_call"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 1
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "wait_agent",
+                "item_namespace": "collaboration",
+                "item_status": "in_progress",
+                "item_type": "function_call",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.delta"
+              },
+              {
+                "field_types": {
+                  "arguments": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "arguments",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "wait_agent",
+                "item_namespace": "collaboration",
+                "item_status": "completed",
+                "item_type": "function_call",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "function_call"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 2
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 3
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 4
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 5
+          }
+        ],
+        "codex_desktop": [
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "spawn_agent",
+                "item_namespace": "collaboration",
+                "item_status": "in_progress",
+                "item_type": "function_call",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.delta"
+              },
+              {
+                "field_types": {
+                  "arguments": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "arguments",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "spawn_agent",
+                "item_namespace": "collaboration",
+                "item_status": "completed",
+                "item_type": "function_call",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "function_call"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 1
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "wait_agent",
+                "item_namespace": "collaboration",
+                "item_status": "in_progress",
+                "item_type": "function_call",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.delta"
+              },
+              {
+                "field_types": {
+                  "arguments": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "arguments",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.function_call_arguments.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "arguments": "string",
+                  "call_id": "string",
+                  "id": "string",
+                  "name": "string",
+                  "namespace": "string",
+                  "status": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "arguments",
+                  "call_id",
+                  "id",
+                  "name",
+                  "namespace",
+                  "status",
+                  "type"
+                ],
+                "item_name": "wait_agent",
+                "item_namespace": "collaboration",
+                "item_status": "completed",
+                "item_type": "function_call",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "function_call"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 2
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 3
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 4
+          },
+          {
+            "events": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "text": "string",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "text",
+                  "type"
+                ],
+                "type": "response.output_text.done"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.done"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string",
+                  "usage": "object"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status",
+                  "usage"
+                ],
+                "response_output_item_types": [
+                  "message"
+                ],
+                "response_status": "completed",
+                "type": "response.completed"
+              }
+            ],
+            "request_index": 5
+          }
+        ]
+      },
       "event_order": [
         "response.output_item.added",
         "response.function_call_arguments.delta",
@@ -2260,54 +3998,104 @@
       ],
       "event_shapes": {
         "response.function_call_arguments.delta": {
+          "field_types": {
+            "delta": "string",
+            "item_id": "string",
+            "output_index": "number",
+            "type": "string"
+          },
           "fields": [
-            "type",
+            "delta",
             "item_id",
             "output_index",
-            "delta"
-          ]
+            "type"
+          ],
+          "type": "response.function_call_arguments.delta"
         },
         "response.function_call_arguments.done": {
+          "field_types": {
+            "arguments": "string",
+            "item_id": "string",
+            "output_index": "number",
+            "type": "string"
+          },
           "fields": [
-            "type",
+            "arguments",
             "item_id",
             "output_index",
-            "arguments"
-          ]
+            "type"
+          ],
+          "type": "response.function_call_arguments.done"
         },
         "response.output_item.added": {
+          "field_types": {
+            "item": "object",
+            "output_index": "number",
+            "type": "string"
+          },
           "fields": [
-            "type",
+            "item",
             "output_index",
-            "item"
+            "type"
           ],
+          "item_field_types": {
+            "arguments": "string",
+            "call_id": "string",
+            "id": "string",
+            "name": "string",
+            "namespace": "string",
+            "status": "string",
+            "type": "string"
+          },
           "item_fields": [
-            "type",
+            "arguments",
+            "call_id",
             "id",
-            "status",
             "name",
             "namespace",
-            "arguments",
-            "call_id"
+            "status",
+            "type"
           ],
-          "status": "in_progress"
+          "item_name": "spawn_agent",
+          "item_namespace": "collaboration",
+          "item_status": "in_progress",
+          "item_type": "function_call",
+          "type": "response.output_item.added"
         },
         "response.output_item.done": {
+          "field_types": {
+            "item": "object",
+            "output_index": "number",
+            "type": "string"
+          },
           "fields": [
-            "type",
+            "item",
             "output_index",
-            "item"
+            "type"
           ],
+          "item_field_types": {
+            "arguments": "string",
+            "call_id": "string",
+            "id": "string",
+            "name": "string",
+            "namespace": "string",
+            "status": "string",
+            "type": "string"
+          },
           "item_fields": [
-            "type",
+            "arguments",
+            "call_id",
             "id",
-            "status",
             "name",
             "namespace",
-            "arguments",
-            "call_id"
+            "status",
+            "type"
           ],
-          "status": "completed"
+          "item_name": "spawn_agent",
+          "item_namespace": "collaboration",
+          "item_status": "completed",
+          "item_type": "function_call",
+          "type": "response.output_item.done"
         }
       }
     },
@@ -4566,7 +6354,10 @@
       "call_namespace_preserved": true,
       "call_output_order_preserved": true,
       "cli_identity_relationships": {
+        "agent_message_addresses_nonempty": true,
         "agent_message_author_recipient_and_content_preserved": true,
+        "agent_message_item_ids_preserved": true,
+        "all_identity_fields_nonempty": true,
         "collaboration_item_order_preserved": true,
         "function_call_call_ids_preserved": true,
         "function_call_item_ids_preserved": true,
@@ -4579,6 +6370,7 @@
         "codex_desktop"
       ],
       "desktop_app_identity_relationships": {
+        "all_identity_fields_nonempty": true,
         "item_ids_preserved": true,
         "item_order_preserved": true,
         "structural_readback_preserved": true,
@@ -4586,7 +6378,10 @@
         "turn_ids_preserved": true
       },
       "desktop_identity_relationships": {
+        "agent_message_addresses_nonempty": true,
         "agent_message_author_recipient_and_content_preserved": true,
+        "agent_message_item_ids_preserved": true,
+        "all_identity_fields_nonempty": true,
         "collaboration_item_order_preserved": true,
         "function_call_call_ids_preserved": true,
         "function_call_item_ids_preserved": true,
@@ -4599,44 +6394,2071 @@
       "turn_context_multi_agent_version": "v2"
     },
     "terminal": {
+      "controls_by_client": {
+        "cli": {
+          "failed": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_error_field_types": {
+                  "code": "string",
+                  "message": "string"
+                },
+                "response_error_fields": [
+                  "code",
+                  "message"
+                ],
+                "response_field_types": {
+                  "error": "object",
+                  "id": "string"
+                },
+                "response_fields": [
+                  "error",
+                  "id"
+                ],
+                "type": "response.failed"
+              }
+            ],
+            "terminal_control": "failed",
+            "terminal_event_present": true
+          },
+          "incomplete": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "error": "null",
+                  "id": "string",
+                  "incomplete_details": "object",
+                  "object": "string",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "error",
+                  "id",
+                  "incomplete_details",
+                  "object",
+                  "status"
+                ],
+                "response_incomplete_details_field_types": {
+                  "reason": "string"
+                },
+                "response_incomplete_details_fields": [
+                  "reason"
+                ],
+                "response_status": "incomplete",
+                "type": "response.incomplete"
+              }
+            ],
+            "terminal_control": "incomplete",
+            "terminal_event_present": true
+          },
+          "truncated": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              }
+            ],
+            "terminal_control": "truncated",
+            "terminal_event_present": false
+          }
+        },
+        "desktop": {
+          "failed": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_error_field_types": {
+                  "code": "string",
+                  "message": "string"
+                },
+                "response_error_fields": [
+                  "code",
+                  "message"
+                ],
+                "response_field_types": {
+                  "error": "object",
+                  "id": "string"
+                },
+                "response_fields": [
+                  "error",
+                  "id"
+                ],
+                "type": "response.failed"
+              }
+            ],
+            "terminal_control": "failed",
+            "terminal_event_present": true
+          },
+          "incomplete": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              },
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "error": "null",
+                  "id": "string",
+                  "incomplete_details": "object",
+                  "object": "string",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "error",
+                  "id",
+                  "incomplete_details",
+                  "object",
+                  "status"
+                ],
+                "response_incomplete_details_field_types": {
+                  "reason": "string"
+                },
+                "response_incomplete_details_fields": [
+                  "reason"
+                ],
+                "response_status": "incomplete",
+                "type": "response.incomplete"
+              }
+            ],
+            "terminal_control": "incomplete",
+            "terminal_event_present": true
+          },
+          "truncated": {
+            "client_disposition": "rejected_nonzero_exit",
+            "completed_event_present": false,
+            "declaration": {
+              "children": [
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "followup_task",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "interrupt_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "list_agents",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path_prefix": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "send_message",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "target"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "spawn_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_type": {
+                        "type": "string"
+                      },
+                      "fork_turns": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "encrypted": true,
+                        "type": "string"
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "task_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message",
+                      "task_name"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description_type": "string",
+                  "fields": [
+                    "description",
+                    "name",
+                    "parameters",
+                    "strict",
+                    "type"
+                  ],
+                  "name": "wait_agent",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeout_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "description_type": "string",
+              "fields": [
+                "description",
+                "name",
+                "tools",
+                "type"
+              ],
+              "name": "collaboration",
+              "type": "namespace"
+            },
+            "request": {
+              "collaboration_items": [],
+              "field_types": {
+                "client_metadata": "object",
+                "include": "array",
+                "input": "array",
+                "instructions": "string",
+                "model": "string",
+                "parallel_tool_calls": "boolean",
+                "prompt_cache_key": "string",
+                "reasoning": "object",
+                "store": "boolean",
+                "stream": "boolean",
+                "tool_choice": "string",
+                "tools": "array"
+              },
+              "fields": [
+                "client_metadata",
+                "include",
+                "input",
+                "instructions",
+                "model",
+                "parallel_tool_calls",
+                "prompt_cache_key",
+                "reasoning",
+                "store",
+                "stream",
+                "tool_choice",
+                "tools"
+              ],
+              "input_type_order": [
+                "message",
+                "message",
+                "message",
+                "message",
+                "message"
+              ],
+              "multi_agent_version_locations": [],
+              "tool_choice": "auto"
+            },
+            "served_event_envelopes": [
+              {
+                "field_types": {
+                  "response": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "response",
+                  "type"
+                ],
+                "response_field_types": {
+                  "id": "string",
+                  "model": "string",
+                  "object": "string",
+                  "output": "array",
+                  "status": "string"
+                },
+                "response_fields": [
+                  "id",
+                  "model",
+                  "object",
+                  "output",
+                  "status"
+                ],
+                "response_output_item_types": [],
+                "response_status": "in_progress",
+                "type": "response.created"
+              },
+              {
+                "field_types": {
+                  "item": "object",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "item",
+                  "output_index",
+                  "type"
+                ],
+                "item_field_types": {
+                  "content": "array",
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                },
+                "item_fields": [
+                  "content",
+                  "id",
+                  "role",
+                  "type"
+                ],
+                "item_type": "message",
+                "type": "response.output_item.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "part": "object",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "item_id",
+                  "output_index",
+                  "part",
+                  "type"
+                ],
+                "part_field_types": {
+                  "annotations": "array",
+                  "text": "string",
+                  "type": "string"
+                },
+                "part_fields": [
+                  "annotations",
+                  "text",
+                  "type"
+                ],
+                "part_type": "output_text",
+                "type": "response.content_part.added"
+              },
+              {
+                "field_types": {
+                  "content_index": "number",
+                  "delta": "string",
+                  "item_id": "string",
+                  "output_index": "number",
+                  "type": "string"
+                },
+                "fields": [
+                  "content_index",
+                  "delta",
+                  "item_id",
+                  "output_index",
+                  "type"
+                ],
+                "type": "response.output_text.delta"
+              }
+            ],
+            "terminal_control": "truncated",
+            "terminal_event_present": false
+          }
+        }
+      },
       "event_order_boundary": "after_output_item_done",
       "event_shapes": {
         "response.completed": {
+          "field_types": {
+            "response": "object",
+            "type": "string"
+          },
           "fields": [
-            "type",
-            "response"
+            "response",
+            "type"
           ],
+          "response_field_types": {
+            "id": "string",
+            "model": "string",
+            "object": "string",
+            "output": "array",
+            "status": "string",
+            "usage": "object"
+          },
           "response_fields": [
             "id",
-            "status",
+            "model",
+            "object",
             "output",
+            "status",
             "usage"
           ],
-          "status": "completed"
+          "response_output_item_types": [
+            "function_call"
+          ],
+          "response_status": "completed",
+          "type": "response.completed"
         },
         "response.failed": {
+          "field_types": {
+            "response": "object",
+            "type": "string"
+          },
           "fields": [
-            "type",
-            "response"
+            "response",
+            "type"
           ],
-          "response_required_fields": [
-            "id",
-            "status",
-            "error"
+          "response_error_field_types": {
+            "code": "string",
+            "message": "string"
+          },
+          "response_error_fields": [
+            "code",
+            "message"
           ],
-          "status": "failed"
+          "response_field_types": {
+            "error": "object",
+            "id": "string"
+          },
+          "response_fields": [
+            "error",
+            "id"
+          ],
+          "type": "response.failed"
         },
         "response.incomplete": {
+          "field_types": {
+            "response": "object",
+            "type": "string"
+          },
           "fields": [
-            "type",
-            "response"
+            "response",
+            "type"
           ],
-          "response_required_fields": [
+          "response_field_types": {
+            "error": "null",
+            "id": "string",
+            "incomplete_details": "object",
+            "object": "string",
+            "status": "string"
+          },
+          "response_fields": [
+            "error",
             "id",
-            "status",
-            "incomplete_details"
+            "incomplete_details",
+            "object",
+            "status"
           ],
-          "status": "incomplete"
+          "response_incomplete_details_field_types": {
+            "reason": "string"
+          },
+          "response_incomplete_details_fields": [
+            "reason"
+          ],
+          "response_status": "incomplete",
+          "type": "response.incomplete"
         }
       },
       "events": [
@@ -4644,7 +8466,7 @@
         "response.incomplete",
         "response.failed"
       ],
-      "stream_close_without_completed": "terminal_error"
+      "stream_close_without_completed": "rejected_nonzero_exit"
     }
   }
 }
