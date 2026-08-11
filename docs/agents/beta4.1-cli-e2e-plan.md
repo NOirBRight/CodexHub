@@ -1,7 +1,8 @@
 # Beta4.1 CLI E2E plan
 
-This is the release qualification plan for the Beta4.1 Collaboration and
-session-compatibility fixes. It complements the general Windows gate in
+This is the release qualification plan for the Beta4.1 Collaboration,
+session-compatibility, and external tool-surface fixes. It complements the
+general Windows gate in
 [`real-client-e2e.md`](real-client-e2e.md); it is intentionally CLI-only.
 
 ## Scope
@@ -33,11 +34,16 @@ previous turn's model before it sends the current-model turn.
 | `new-binding-integrity` | Beta4.1 worker binding | create a new worker with model/reasoning binding, then replay unchanged and tampered histories | Signed binding/readback matches; model, reasoning, signature, missing, duplicate, and malformed cases fail closed |
 | `cli-restart-continuity` | real CLI process | stop and restart the CLI/Gateway while retaining the isolated home, then resume | Same Session identity, prior history, worker state, and selected version are read back after restart |
 | `external-v1-boundary` | real CLI request to an external V1 route | capture the unmodified V1 declaration emitted by CLI `0.146.1` with the default role | The exact default-role schema and the full `agent_type` schema are accepted; any other schema difference is rejected |
+| `stable-tool-alias-replay` | external runtime compatibility | privately capture one unmodified CLI request, then transform the exact same bytes twice with fresh request contexts on the same route | Caller and upstream input hashes prove identical input; upstream body hashes and adapted aliases are identical; `prompt_cache_key` is preserved |
+| `deferred-core-bounded` | external `deferred_core` route | capture a real request containing the 249-child namespace surface and pair it with the checked-in zero-child fixture | Both final surfaces contain the established eight-tool bounded core; no namespace-child alias survives; the eager and Official controls retain their existing behavior |
 
 The `legacy-session-resume` case is the regression gate for #418. The
 `new-binding-integrity` case must prove that the compatibility exception is
 limited to the exact old V1 shape; an extended or partially edited old call
-must still be rejected.
+must still be rejected. `stable-tool-alias-replay` and
+`deferred-core-bounded` are the release regressions for #424 and #425. The
+private replay body may not be attached to an Issue or Release; publish only
+its stable hash and bounded structural counts.
 
 ## Execution phases
 
@@ -59,7 +65,21 @@ must still be rejected.
      any CodexHub compatibility translation. The harness may hash the input;
      it must not patch it.
 
-3. **Lifecycle and history**
+3. **Tool-prefix and surface checks**
+   - Preserve one external CLI request only inside the private isolated root.
+     Transform those byte-identical caller bytes twice with fresh request
+     contexts and the same route/capability configuration.
+   - Compare the complete upstream-body hashes, ordered generated aliases,
+     and `prompt_cache_key`; any request-scoped difference is a failure.
+   - For the real 249-child request, record only the caller namespace/child
+     counts and final upstream tool count. Run the checked-in zero-child
+     fixture separately and require the same established eight-tool bounded
+     core with no child alias; do not edit the captured CLI request.
+   - Run the deterministic eager and Official controls from the candidate test
+     suite. Eager must still expand its namespace children; Official must keep
+     the native namespace and must not introduce a `__codexhub_*` alias.
+
+4. **Lifecycle and history**
    - Execute the V1 and V2 cases in fresh Session roots.
    - Assert exactly one successful terminal outcome per turn, paired call and
      output IDs, preserved call order, and readable assistant/worker history.
@@ -69,13 +89,13 @@ must still be rejected.
      `0.146.1` pins Collaboration V2 in existing Session state, so an in-place
      V2-to-V1 downgrade is not a product acceptance condition.
 
-4. **Historical recovery**
+5. **Historical recovery**
    - Start from the copied operator-supplied historical Session.
    - Resume without rewriting its old `multi_agent_v1.spawn_agent` calls.
    - Complete a new turn and verify that the old worker readbacks plus the new
      turn are accepted by the same Gateway process.
 
-5. **Binding and tamper checks**
+6. **Binding and tamper checks**
    - Record a new worker call with its model/reasoning binding and effective
      readback.
    - Replay the unchanged history, then independently alter the model,
@@ -83,7 +103,7 @@ must still be rejected.
    - Require a bounded, sanitized rejection classification for every altered
      case. Do not log the prompt, model secrets, signatures, or raw payload.
 
-6. **Restart and readback**
+7. **Restart and readback**
    - Stop the CLI after a completed worker turn and restart it against the same
      isolated home; repeat once with a Gateway restart if the candidate runner
      supports it.
@@ -105,6 +125,8 @@ contain:
 - lifecycle phase names and bounded counts for calls, outputs, stream events,
   restarts, and Gateway correlations;
 - stable hashes for request/response bodies and the preserved Session history;
+- stable hashes for the repeated caller/upstream tool-prefix bodies plus
+  bounded namespace, child, deferred, eager, and final tool counts;
 - safe result codes such as `accepted`, `legacy_native_spawn`,
   `binding_rejected`, `history_replayed`, or `restart_readback`.
 
@@ -119,9 +141,11 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all seven cases pass with the exact CLI version and candidate SHA;
+- all nine cases pass with the exact CLI version and candidate SHA;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
+- repeated caller hashes and upstream hashes match for #424, and the 249-child
+  #425 replay has the same final bounded-core count as the zero-child control;
 - restart readback passes for both selected versions;
 - no secret-bearing or raw Session artifact is written to the repository.
 

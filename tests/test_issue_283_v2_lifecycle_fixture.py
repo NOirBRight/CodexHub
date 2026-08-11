@@ -375,7 +375,7 @@ def test_c1_native_history_round_trips_unchanged() -> None:
 
 
 def test_c2_adapted_alias_encoding_is_injective_and_reversible() -> None:
-    """C2: alias adapter produces reversible, request-scoped aliases."""
+    """C2: alias adapter produces reversible aliases with request-local mappings."""
     body_with_history = _request_body(input_items=_v2_history())
     fixture = _ProtocolFixture(body_with_history, _adapted_upstream())
     payload = fixture.request()
@@ -430,8 +430,8 @@ def test_c2_adapted_alias_encoding_is_injective_and_reversible() -> None:
         assert item["call_id"] == f"adapted-call-{index}"
 
 
-def test_c2_adapted_aliases_are_request_scoped() -> None:
-    """C2: the same declaration shape produces different aliases per request token."""
+def test_c2_adapted_aliases_are_stable_for_identical_requests() -> None:
+    """C2: identical declaration shapes produce the same cache-stable aliases."""
     fixture_a = _ProtocolFixture(_request_body(), _adapted_upstream())
     payload_a = fixture_a.request()
     aliases_a = {tool["name"] for tool in payload_a["tools"] if tool.get("type") == "function"}
@@ -440,7 +440,8 @@ def test_c2_adapted_aliases_are_request_scoped() -> None:
     payload_b = fixture_b.request()
     aliases_b = {tool["name"] for tool in payload_b["tools"] if tool.get("type") == "function"}
 
-    assert aliases_a.isdisjoint(aliases_b)
+    assert aliases_a == aliases_b
+    assert payload_a == payload_b
 
 
 def test_c3_stream_arguments_delta_assembly_and_terminal() -> None:

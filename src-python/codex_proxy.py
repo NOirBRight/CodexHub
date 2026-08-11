@@ -81,6 +81,7 @@ from protocol_translation import (
     responses_tools_to_chat_tools,
 )
 from runtime_tool_compatibility import (
+    HostedCapabilityFacts as RuntimeHostedCapabilityFacts,
     ProtocolCapabilities as RuntimeProtocolCapabilities,
     ToolCompatibilityError as RuntimeToolCompatibilityError,
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
@@ -91,6 +92,7 @@ from codex_semantic_adapter import (
     BINDING_ACCEPTED as _BINDING_ACCEPTED,
     COLLABORATION_V1 as _COLLABORATION_V1,
     COLLABORATION_V2 as _COLLABORATION_V2,
+    COLLABORATION_V2_NAMESPACE as _COLLABORATION_V2_NAMESPACE,
     CollaborationBoundaryError as _CollaborationBoundaryError,
     classify_collaboration_payload as _classify_collaboration_payload,
     collaboration_protocols as _collaboration_protocols,
@@ -6358,6 +6360,46 @@ def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError
     ) from error
 
 
+def _runtime_tool_alias_token(
+    declarations: list[Any],
+    *,
+    selected_protocol: str,
+    protocol_capabilities: RuntimeProtocolCapabilities,
+    provider_hosted_capabilities: Any,
+    tool_choice: Any,
+) -> str:
+    capability_set = {
+        "function_lifecycle": protocol_capabilities.function_lifecycle,
+        "namespace_lifecycle": protocol_capabilities.namespace_lifecycle,
+        "custom_lifecycle": protocol_capabilities.custom_lifecycle,
+        "tool_search_lifecycle": protocol_capabilities.tool_search_lifecycle,
+        "hosted_lifecycles": sorted(protocol_capabilities.hosted_lifecycles),
+        "unknown_lifecycles": sorted(protocol_capabilities.unknown_lifecycles),
+        "accepts_namespace_adapter": protocol_capabilities.accepts_namespace_adapter,
+        "accepts_custom_adapter": protocol_capabilities.accepts_custom_adapter,
+        "accepts_tool_search_adapter": protocol_capabilities.accepts_tool_search_adapter,
+        "max_tool_name_length": protocol_capabilities.max_tool_name_length,
+        "max_alias_attempts": protocol_capabilities.max_alias_attempts,
+        "provider_hosted_kinds": sorted(
+            RuntimeHostedCapabilityFacts.from_value(
+                provider_hosted_capabilities
+            ).supported_kinds
+        ),
+    }
+    canonical = json.dumps(
+        {
+            "capability_set": capability_set,
+            "declarations": declarations,
+            "selected_protocol": selected_protocol,
+            "tool_choice": tool_choice,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _prepare_runtime_tool_compatibility(
     payload: dict[str, Any],
     upstream: Mapping[str, Any],
@@ -6411,13 +6453,21 @@ def _prepare_runtime_tool_compatibility(
         )
     ]
     try:
+        provider_hosted_capabilities = upstream.get("hosted_tool_capabilities")
+        protocol_capabilities = _runtime_tool_protocol_capabilities(tool_protocol, upstream)
         plan = build_tool_compatibility_plan(
             planned_declarations,
             selected_protocol=tool_protocol,
-            provider_hosted_capabilities=upstream.get("hosted_tool_capabilities"),
+            provider_hosted_capabilities=provider_hosted_capabilities,
             tool_choice=payload.get("tool_choice"),
-            protocol_capabilities=_runtime_tool_protocol_capabilities(tool_protocol, upstream),
-            request_token=uuid.uuid4().hex,
+            protocol_capabilities=protocol_capabilities,
+            request_token=_runtime_tool_alias_token(
+                planned_declarations,
+                selected_protocol=tool_protocol,
+                protocol_capabilities=protocol_capabilities,
+                provider_hosted_capabilities=provider_hosted_capabilities,
+                tool_choice=payload.get("tool_choice"),
+            ),
         )
     except RuntimeToolCompatibilityError as exc:
         write_proxy_event(
@@ -6979,6 +7029,7 @@ def _inject_explicit_codex_tools(
     strip_all_namespace_tools: bool = False,
     include_flattened_namespace_tools: bool = True,
     tool_surface_counts: dict[str, int] | None = None,
+    tool_surface_source_tools: list[Any] | None = None,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
@@ -7001,13 +7052,16 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    surface_source_tools = tool_surface_source_tools if tool_surface_source_tools is not None else tools
     caller_non_namespace_tools = tuple(
         tool
-        for tool in tools
+        for tool in surface_source_tools
         if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
     )
-    namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
-    flattened_namespace_tools = _flatten_namespace_function_tools(tools)
+    namespace_declaration_count = sum(
+        1 for tool in surface_source_tools if _is_flattened_namespace_schema(tool)
+    )
+    flattened_namespace_tools = _flatten_namespace_function_tools(surface_source_tools)
     if strip_namespace_tools:
         # Eager preserves the #105 compatibility surface: only declarations the
         # existing flattener understands are removed. deferred_core is the
@@ -7171,6 +7225,41 @@ def _inject_explicit_codex_tools(
             }
         )
     return changed
+
+
+def _restore_deferred_core_node_repl_namespace(
+    payload: dict[str, Any],
+    source_tools: list[Any] | None,
+) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not isinstance(source_tools, list):
+        return False
+    if any(_is_node_repl_tool_schema(tool) for tool in tools):
+        return False
+    namespaces = [
+        tool
+        for tool in source_tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and tool.get("name") == NODE_REPL_NAMESPACE
+    ]
+    if len(namespaces) != 1:
+        return False
+    source_namespace = namespaces[0]
+    children = source_namespace.get("tools")
+    if not isinstance(children, list):
+        return False
+    js_children = [
+        child
+        for child in children
+        if isinstance(child, Mapping)
+        and child.get("type") == "function"
+        and child.get("name") == "js"
+    ]
+    if len(js_children) != 1:
+        return False
+    tools.append({**source_namespace, "tools": [js_children[0]]})
+    return True
 
 
 def _filter_tools_for_subagent_coordinator(
@@ -11676,9 +11765,60 @@ def compatible_request_body(
             )
         changed = True
     runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
+    pending_tool_surface_event: dict[str, Any] | None = None
+    tool_surface_source_tools: list[Any] | None = None
     if isinstance(event_context, dict) and not raw_provider_probe:
         if _hoist_additional_tools_input_items(payload):
             changed = True
+        if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
+            tools = payload["tools"]
+            tool_surface_source_tools = list(tools)
+            retained_tools = [
+                tool
+                for tool in tools
+                if not (
+                    _is_raw_namespace_schema(tool)
+                    and not (
+                        collaboration_v2
+                        and isinstance(tool, Mapping)
+                        and tool.get("name") == _COLLABORATION_V2_NAMESPACE
+                    )
+                )
+            ]
+            if len(retained_tools) != len(tools):
+                tools[:] = retained_tools
+                changed = True
+            if collaboration_v2:
+                retained_names = {
+                    name
+                    for name in (_tool_schema_name(tool) for tool in retained_tools)
+                    if name is not None
+                }
+                deferred_tool_count = 0
+                for flattened_tool in _flatten_namespace_function_tools(
+                    tool_surface_source_tools
+                ):
+                    name = _tool_schema_name(flattened_tool)
+                    if name and name not in retained_names:
+                        retained_names.add(name)
+                        deferred_tool_count += 1
+                retained_tool_ids = {id(tool) for tool in retained_tools}
+                pending_tool_surface_event = {
+                    "tool_surface_strategy": tool_surface_strategy,
+                    "namespace_declaration_count": sum(
+                        1
+                        for tool in tool_surface_source_tools
+                        if _is_flattened_namespace_schema(tool)
+                    ),
+                    "eager_tool_count": 0,
+                    "retained_core_count": sum(
+                        1
+                        for tool in tool_surface_source_tools
+                        if not _is_raw_namespace_schema(tool)
+                        and id(tool) in retained_tool_ids
+                    ),
+                    "deferred_tool_count": deferred_tool_count,
+                }
         if _prepare_runtime_tool_compatibility(
             payload,
             upstream,
@@ -12136,6 +12276,22 @@ def compatible_request_body(
                 and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
+            if (
+                tool_surface_strategy == "deferred_core"
+                and include_node_repl_for_subagent_workflow
+                and _restore_deferred_core_node_repl_namespace(
+                    payload,
+                    tool_surface_source_tools,
+                )
+            ):
+                changed = True
+                if runtime_tool_plan is not None:
+                    runtime_tool_plan = runtime_tool_plan.with_final_declarations(
+                        payload["tools"],
+                        tool_choice=payload.get("tool_choice"),
+                    )
+                    if isinstance(event_context, dict):
+                        event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = runtime_tool_plan
             if subagent_worker_context and _filter_tools_for_subagent_worker(
                 payload,
                 compatibility_plan=runtime_tool_plan,
@@ -12201,6 +12357,7 @@ def compatible_request_body(
                     runtime_tool_plan is None and tool_surface_strategy == "eager"
                 ),
                 tool_surface_counts=tool_surface_counts,
+                tool_surface_source_tools=tool_surface_source_tools,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
@@ -12212,11 +12369,20 @@ def compatible_request_body(
             )
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
-            write_proxy_event(
-                "external_tool_surface_prepared",
-                tool_surface_strategy=tool_surface_strategy,
-                **tool_surface_counts,
-            )
+            if tool_surface_counts:
+                if runtime_tool_plan is not None and tool_surface_strategy == "eager":
+                    tool_surface_counts["eager_tool_count"] = sum(
+                        len(entry.aliases)
+                        for entry in runtime_tool_plan.entries
+                        if entry.family == "namespace"
+                        and entry.disposition == "adapt"
+                        and _is_flattened_namespace_schema(entry.declaration)
+                    )
+                    tool_surface_counts["deferred_tool_count"] = 0
+                pending_tool_surface_event = {
+                    "tool_surface_strategy": tool_surface_strategy,
+                    **tool_surface_counts,
+                }
             if explicit_tools_injected:
                 added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
                 _write_adapter_event(
@@ -12296,6 +12462,13 @@ def compatible_request_body(
         runtime_tool_plan,
     ):
         changed = True
+    if pending_tool_surface_event is not None:
+        final_tools = payload.get("tools")
+        write_proxy_event(
+            "external_tool_surface_prepared",
+            **pending_tool_surface_event,
+            final_tool_count=len(final_tools) if isinstance(final_tools, list) else 0,
+        )
     model_id = payload.get("model")
     max_output_tokens, context_window_fallback = (
         _catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)

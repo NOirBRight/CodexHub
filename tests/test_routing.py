@@ -20716,7 +20716,7 @@ Required sequence:
         )
         self.assertTrue(event_context["subagent_spawn_allowed"])
 
-    def test_chat_tools_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
+    def test_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
         workflow_prompt = """
 Use the real subagent-driven-development skill.
 
@@ -20741,36 +20741,68 @@ Execution constraints:
                     {
                         "type": "namespace",
                         "name": "mcp__node_repl",
-                        "tools": [{"type": "function", "name": "js", "parameters": {"type": "object"}}],
+                        "tools": [
+                            {"type": "function", "name": "js", "parameters": {"type": "object"}},
+                            {
+                                "type": "function",
+                                "name": "unrelated",
+                                "parameters": {"type": "object"},
+                            },
+                        ],
                     },
                     {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
                 ],
             }
         ).encode("utf-8")
-        event_context = {"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
-
-        transformed = compatible_request_body(
-            body,
-            {
+        upstreams = {
+            "chat-eager": {
                 "name": "ollama_cloud",
                 "upstream_format": "chat_completions",
                 "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "eager",
             },
-            event_context=event_context,
-        )
-        payload = json.loads(transformed)
-        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
-        transcript = json.dumps(payload, ensure_ascii=False)
+            "chat-deferred": {
+                "name": "ollama_cloud",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "deferred_core",
+            },
+            "responses-deferred": {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+        }
 
-        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
-        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
-        self.assertEqual(len(node_repl_aliases), 1)
-        self.assertFalse(event_context["subagent_spawn_allowed"])
-        self.assertIn("status: workflow_plan_read_required", transcript)
-        self.assertEqual(
-            payload["tool_choice"],
-            {"type": "function", "name": node_repl_aliases[0]},
-        )
+        for case, upstream in upstreams.items():
+            with self.subTest(case=case):
+                event_context = {
+                    "request_id": "req",
+                    "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                }
+                transformed = compatible_request_body(
+                    body,
+                    upstream,
+                    event_context=event_context,
+                )
+                payload = json.loads(transformed)
+                tools_by_name = {
+                    tool["name"]: tool
+                    for tool in payload["tools"]
+                    if tool.get("type") == "function"
+                }
+                transcript = json.dumps(payload, ensure_ascii=False)
+
+                self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+                node_repl_aliases = [
+                    name for name in tools_by_name if name.startswith("__codexhub_ns_")
+                ]
+                self.assertEqual(len(node_repl_aliases), 2 if case == "chat-eager" else 1)
+                self.assertFalse(event_context["subagent_spawn_allowed"])
+                self.assertIn("status: workflow_plan_read_required", transcript)
+                self.assertEqual(payload["tool_choice"]["type"], "function")
+                self.assertIn(payload["tool_choice"]["name"], node_repl_aliases)
 
     def test_chat_tools_workflow_after_plan_read_hides_node_repl_and_other_mcp_tools(self):
         workflow_prompt = """
@@ -23011,6 +23043,16 @@ Execution constraints:
             {
                 "name": "ollama_cloud",
                 "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "eager",
+                "tool_protocol_capabilities": {"namespace_lifecycle": True},
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "chat_tools",
                 "tool_surface_strategy": "deferred_core",
             },
             event_context={"request_id": "<sanitized-request-id>"},
@@ -23032,9 +23074,48 @@ Execution constraints:
                 },
                 {
                     "counts": [
-                        {"family": "namespace", "disposition": "adapt", "count": 2},
+                        {"family": "namespace", "disposition": "native", "count": 2},
                         {"family": "plain_function", "disposition": "native", "count": 1},
                     ]
+                },
+                {
+                    "counts": [
+                        {"family": "plain_function", "disposition": "native", "count": 1},
+                    ]
+                },
+            ],
+        )
+        surface_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_prepared"
+        ]
+        self.assertEqual(
+            surface_events,
+            [
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 2,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                    "final_tool_count": 10,
+                },
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                    "final_tool_count": 9,
+                },
+                {
+                    "tool_surface_strategy": "deferred_core",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 2,
+                    "final_tool_count": 8,
                 },
             ],
         )

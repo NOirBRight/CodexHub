@@ -109,6 +109,184 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
     assert "__codexhub_" not in serialized
 
 
+def test_runtime_plan_aliases_are_deterministic_for_identical_external_request():
+    tools = [
+        {"type": "function", "name": "plain", "parameters": {"type": "object"}},
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "tools": [{"type": "function", "name": "run", "parameters": {"type": "object"}}],
+        },
+        {"type": "custom", "name": "editor", "format": {"type": "text"}},
+        {"type": "tool_search", "execution": "client"},
+    ]
+    request = json.loads(_request(tools))
+    request["prompt_cache_key"] = "stable-runtime-tool-prefix"
+    body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        _external_chat_upstream(),
+        event_context={},
+        inject_codex_tools=False,
+    )
+    second = codex_proxy.compatible_request_body(
+        body,
+        _external_chat_upstream(),
+        event_context={},
+        inject_codex_tools=False,
+    )
+
+    assert first == second
+    payload = json.loads(first)
+    assert payload["prompt_cache_key"] == "stable-runtime-tool-prefix"
+    assert [tool["name"].rsplit("_", 2)[0] for tool in payload["tools"][1:]] == [
+        "__codexhub_ns",
+        "__codexhub_custom",
+        "__codexhub_search",
+    ]
+
+
+def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
+    body = _request(
+        [
+            {
+                "type": "namespace",
+                "name": "vendor",
+                "tools": [
+                    {"type": "function", "name": "run", "parameters": {"type": "object"}}
+                ],
+            }
+        ]
+    )
+    first_upstream = {
+        **_external_chat_upstream(),
+        "hosted_tool_capabilities": {"web_search": True, "file_search": True},
+        "tool_protocol_capabilities": {
+            "hosted_lifecycles": ["web_search", "file_search"],
+            "max_alias_attempts": 128,
+        },
+    }
+    equivalent_upstream = {
+        **_external_chat_upstream(),
+        "hosted_tool_capabilities": {"file_search": True, "web_search": True},
+        "tool_protocol_capabilities": {
+            "hosted_lifecycles": ["file_search", "web_search"],
+            "max_alias_attempts": 128,
+        },
+    }
+    changed_capabilities = copy.deepcopy(first_upstream)
+    changed_capabilities["tool_protocol_capabilities"]["max_alias_attempts"] = 127
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        first_upstream,
+        event_context={},
+        inject_codex_tools=False,
+    )
+    equivalent = codex_proxy.compatible_request_body(
+        body,
+        equivalent_upstream,
+        event_context={},
+        inject_codex_tools=False,
+    )
+    changed = codex_proxy.compatible_request_body(
+        body,
+        changed_capabilities,
+        event_context={},
+        inject_codex_tools=False,
+    )
+
+    assert first == equivalent
+    assert json.loads(first)["tools"][0]["name"] != json.loads(changed)["tools"][0]["name"]
+
+
+def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
+    core_tools = [
+        {"type": "function", "name": "plain", "parameters": {"type": "object"}},
+        {"type": "custom", "name": "editor", "format": {"type": "text"}},
+    ]
+    namespace = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+
+    def prepare(tools: list[dict], strategy: str) -> tuple[dict, dict]:
+        context: dict = {}
+        upstream = {**_external_chat_upstream(), "tool_surface_strategy": strategy}
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request(tools),
+                upstream,
+                event_context=context,
+            )
+        )
+        return payload, context
+
+    bounded, bounded_context = prepare(core_tools, "deferred_core")
+    deferred, deferred_context = prepare([*core_tools, namespace], "deferred_core")
+    eager_baseline, _ = prepare(core_tools, "eager")
+    eager, eager_context = prepare([*core_tools, namespace], "eager")
+
+    assert len(bounded["tools"]) == 8
+    assert len(deferred["tools"]) == len(bounded["tools"])
+    assert not any(tool.get("type") == "namespace" for tool in deferred["tools"])
+    assert not any(
+        entry.family == "namespace"
+        for entry in deferred_context["_runtime_tool_compatibility_plan"].entries
+    )
+    assert len(eager["tools"]) == len(eager_baseline["tools"]) + 249
+    eager_namespace_entries = [
+        entry
+        for entry in eager_context["_runtime_tool_compatibility_plan"].entries
+        if entry.family == "namespace"
+    ]
+    assert len(eager_namespace_entries) == 1
+    assert len(eager_namespace_entries[0].aliases) == 249
+    assert bounded_context["_runtime_tool_compatibility_plan"].entries
+
+
+def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespaces():
+    namespace = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+    request = json.loads(_request([namespace], model="gpt-5.6-luna"))
+    request["prompt_cache_key"] = "stable-official-prefix"
+    body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    first_context: dict = {}
+    second_context: dict = {}
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        {"name": "official"},
+        event_context=first_context,
+        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    )
+    second = codex_proxy.compatible_request_body(
+        body,
+        {"name": "official"},
+        event_context=second_context,
+        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    )
+
+    assert first == second
+    payload = json.loads(first)
+    assert payload["prompt_cache_key"] == "stable-official-prefix"
+    assert payload["tools"] == [namespace]
+    assert "__codexhub_" not in first.decode("utf-8")
+    assert "_runtime_tool_compatibility_plan" not in first_context
+    assert "_runtime_tool_compatibility_plan" not in second_context
+
+
 def test_required_unsupported_hosted_tool_fails_before_request_is_returned():
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
         codex_proxy.compatible_request_body(
@@ -737,6 +915,49 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
     entries = context["_runtime_tool_compatibility_plan"].entries
     assert [entry.disposition for entry in entries] == ["native", "native", "native"]
     assert payload["tools"] == tools
+
+
+def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_namespaces():
+    collaboration = _collaboration_namespace(COLLABORATION_V2)
+    vendor = {
+        "type": "namespace",
+        "name": "mcp__vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+    context: dict = {}
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request([collaboration, vendor]),
+                {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
+                event_context=context,
+            )
+        )
+
+    plan = context["_runtime_tool_compatibility_plan"]
+    namespace_entries = [entry for entry in plan.entries if entry.family == "namespace"]
+    assert len(namespace_entries) == 1
+    assert namespace_entries[0].namespace == "collaboration"
+    assert len(namespace_entries[0].aliases) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert not any("child_" in tool.get("name", "") for tool in payload["tools"])
+    surface_event = next(
+        call.kwargs
+        for call in write_proxy_event.call_args_list
+        if call.args and call.args[0] == "external_tool_surface_prepared"
+    )
+    assert surface_event == {
+        "tool_surface_strategy": "deferred_core",
+        "namespace_declaration_count": 1,
+        "eager_tool_count": 0,
+        "retained_core_count": 0,
+        "deferred_tool_count": 249,
+        "final_tool_count": len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+    }
 
 
 def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required_choice():
