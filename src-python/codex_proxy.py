@@ -8208,7 +8208,10 @@ def _attach_worker_requested_binding_sidecars(
         )
     sidecar = _worker_requested_binding_sidecar(requested, call_id)
     persisted_arguments = dict(arguments)
-    persisted_arguments["model"] = requested["model"]
+    # Keep one native field as the post-Beta4 marker so removing only the
+    # private carrier cannot turn a new call into the exact legacy shape. The
+    # model remains inherited: explicitly overriding a custom provider model
+    # makes Codex CLI reject an otherwise valid spawn as unavailable.
     persisted_arguments["reasoning_effort"] = requested["reasoning"]
     persisted_arguments[WORKER_REQUESTED_BINDING_FIELD] = sidecar
     encoded_arguments = _dump_arguments_like(raw_arguments, persisted_arguments)
@@ -8329,20 +8332,7 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification=sidecar_failure or "unknown_requested_binding_sidecar",
                 )
-            if nested_sidecar_present:
-                if strict_arguments.get("model") != requested["model"]:
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_model",
-                    )
-                if strict_arguments.get("reasoning_effort") != requested["reasoning"]:
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_reasoning",
-                    )
-            elif strict_arguments is not None:
+            if strict_arguments is not None:
                 if (
                     "model" in strict_arguments
                     and strict_arguments.get("model") != requested["model"]
@@ -8352,8 +8342,17 @@ def _validate_worker_binding_history(
                         error_code=WORKER_BINDING_ERROR_CODE,
                         classification="contradictory_requested_model",
                     )
+                if nested_sidecar_present and strict_arguments.get(
+                    "reasoning_effort"
+                ) != requested["reasoning"]:
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_reasoning",
+                    )
                 if (
-                    "reasoning_effort" in strict_arguments
+                    not nested_sidecar_present
+                    and "reasoning_effort" in strict_arguments
                     and strict_arguments.get("reasoning_effort") != requested["reasoning"]
                 ):
                     _raise_worker_contract_error(

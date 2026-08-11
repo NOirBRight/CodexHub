@@ -24724,7 +24724,7 @@ Execution constraints:
         call_arguments = json.loads(call_item["arguments"])
         self.assertNotIn("_codexhub_worker_requested_binding", call_item)
         self.assertIn("_codexhub_worker_requested_binding", call_arguments)
-        self.assertEqual(call_arguments["model"], "synthetic-original-model")
+        self.assertNotIn("model", call_arguments)
         self.assertEqual(call_arguments["reasoning_effort"], "high")
 
         replay = compatible_request_body(
@@ -25236,7 +25236,7 @@ Execution constraints:
             done_arguments["_codexhub_worker_requested_binding"],
             completed_arguments["_codexhub_worker_requested_binding"],
         )
-        self.assertEqual(done_arguments["model"], "glm-5.2")
+        self.assertNotIn("model", done_arguments)
         self.assertEqual(done_arguments["reasoning_effort"], "high")
 
         replay = compatible_request_body(
@@ -26088,7 +26088,6 @@ Execution constraints:
         spawn_call["_codexhub_worker_requested_binding"] = arguments.pop(
             "_codexhub_worker_requested_binding"
         )
-        arguments.pop("model")
         arguments.pop("reasoning_effort")
         spawn_call["arguments"] = json.dumps(arguments)
 
@@ -26145,11 +26144,6 @@ Execution constraints:
                 "contradictory_requested_model",
             ),
             (
-                "missing_model",
-                lambda call, arguments: arguments.pop("model"),
-                "contradictory_requested_model",
-            ),
-            (
                 "reasoning",
                 lambda call, arguments: arguments.__setitem__("reasoning_effort", "low"),
                 "contradictory_requested_reasoning",
@@ -26203,7 +26197,7 @@ Execution constraints:
         )
         self.assertNotIn("_codexhub_worker_requested_binding", spawn_call)
         self.assertEqual(spawn_arguments["agent_type"], "worker")
-        self.assertEqual(spawn_arguments["model"], "synthetic-original-model")
+        self.assertNotIn("model", spawn_arguments)
         self.assertEqual(spawn_arguments["reasoning_effort"], "high")
 
         replay = json.dumps(
