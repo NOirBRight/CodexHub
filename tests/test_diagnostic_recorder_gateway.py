@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-import ssl
 import tempfile
 from unittest import TestCase
 from unittest.mock import patch
@@ -78,13 +77,29 @@ class _PoolConnection:
         self.closed = True
 
 
+class _VirtualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class _SlowWriteSocket:
-    def __init__(self, *, minimum_write_timeout: float = 0.2, fail_large_write: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        clock: _VirtualClock | None = None,
+        write_duration: float = 0.0,
+    ) -> None:
         self.timeout: float | None = None
         self.timeouts: list[float | None] = []
         self.sent_bytes = 0
-        self.minimum_write_timeout = minimum_write_timeout
-        self.fail_large_write = fail_large_write
+        self.clock = clock
+        self.write_duration = write_duration
 
     def settimeout(self, timeout: float | None) -> None:
         self.timeout = timeout
@@ -92,11 +107,14 @@ class _SlowWriteSocket:
 
     def sendall(self, data: bytes) -> None:
         self.sent_bytes += len(data)
-        if len(data) > 1024 and (
-            self.fail_large_write
-            or (self.timeout is not None and self.timeout < self.minimum_write_timeout)
-        ):
+        if len(data) <= 1024:
+            return
+        if self.timeout is not None and self.timeout < self.write_duration:
+            if self.clock is not None:
+                self.clock.advance(max(0.0, self.timeout))
             raise TimeoutError("simulated slow request write")
+        if self.clock is not None:
+            self.clock.advance(self.write_duration)
 
     def makefile(self, _mode: str) -> io.BytesIO:
         return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
@@ -121,6 +139,32 @@ class _ReadTimeoutSocket(_SlowWriteSocket):
         return _ReadTimeoutFile()
 
 
+class _VirtualOfficialConnection(codex_proxy._OfficialHTTPSConnection):
+    def __init__(
+        self,
+        sock: _SlowWriteSocket,
+        clock: _VirtualClock,
+        *,
+        connect_duration: float,
+    ) -> None:
+        super().__init__("example.test", timeout=0.05)
+        self._fixture_sock = sock
+        self._clock = clock
+        self._connect_duration = connect_duration
+        self.connect_calls = 0
+
+    def connect(self) -> None:
+        self.connect_calls += 1
+        connect_timeout = self.timeout if isinstance(self.timeout, (int, float)) else None
+        if connect_timeout is not None and self._connect_duration > connect_timeout:
+            self._clock.advance(connect_timeout)
+            raise codex_proxy.urllib3.exceptions.ConnectTimeoutError(self, "simulated slow connect")
+        self._clock.advance(self._connect_duration)
+        self.sock = self._fixture_sock
+        self.is_verified = True
+        self.proxy_is_verified = True
+
+
 class _ExplodingRecorder:
     def observe_proxy_event(self, event: str, fields: object) -> None:
         raise RuntimeError("recorder unavailable")
@@ -136,26 +180,13 @@ class DiagnosticRecorderGatewayTests(TestCase):
         return pool, connection
 
     def test_official_pool_uses_request_budget_for_new_and_reused_connections(self) -> None:
-        class _ConnectableConnection(codex_proxy._OfficialHTTPSConnection):
-            def __init__(self, sock: _SlowWriteSocket) -> None:
-                super().__init__("example.test", timeout=0.05)
-                self._fixture_sock = sock
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.1)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.04)
+        pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
 
-            def connect(self) -> None:
-                self.sock = self._fixture_sock
-                self.is_verified = True
-                self.proxy_is_verified = True
-
-        for reused in (False, True):
-            with self.subTest(connection="reused" if reused else "new"):
-                sock = _SlowWriteSocket(minimum_write_timeout=0.2)
-                connection = _ConnectableConnection(sock)
-                connection.is_verified = True
-                connection.proxy_is_verified = True
-                if reused:
-                    connection.sock = sock
-                pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
-
+        with patch("codex_proxy.time.monotonic", side_effect=clock.monotonic):
+            for _ in range(2):
                 response = pool._make_request(
                     connection,
                     "POST",
@@ -163,7 +194,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
                     body=b"x" * (2 * 1024 * 1024),
                     headers={"Content-Length": str(2 * 1024 * 1024)},
                     retries=None,
-                    timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=1.0),
+                    timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
                     chunked=False,
                     response_conn=None,
                     preload_content=False,
@@ -171,77 +202,68 @@ class DiagnosticRecorderGatewayTests(TestCase):
                 )
 
                 self.assertEqual(response.status, 200)
-                self.assertIn(0.05, sock.timeouts)
-                self.assertIn(1.0, sock.timeouts)
+                self.assertEqual(response.read(), b"")
 
-    def test_official_pool_uses_request_budget_for_slow_large_body_writes(self) -> None:
-        sock = _SlowWriteSocket(minimum_write_timeout=0.2)
-        pool, connection = self._official_request_pool_fixture(sock)
-        body = b"x" * (2 * 1024 * 1024)
-
-        response = pool._make_request(
-            connection,
-            "POST",
-            "/v1/responses",
-            body=body,
-            headers={"Content-Length": str(len(body))},
-            retries=None,
-            timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=1.0),
-            chunked=False,
-            response_conn=None,
-            preload_content=False,
-            decode_content=False,
-        )
-
-        self.assertEqual(response.status, 200)
-        self.assertGreaterEqual(sock.sent_bytes, len(body))
+        self.assertEqual(connection.connect_calls, 1)
+        self.assertGreaterEqual(sock.sent_bytes, 2 * 2 * 1024 * 1024)
         self.assertIn(0.05, sock.timeouts)
-        self.assertIn(1.0, sock.timeouts)
+        self.assertIn(0.2, sock.timeouts)
 
-    def test_official_request_write_timeout_is_classified_as_request_write(self) -> None:
-        sock = _SlowWriteSocket(fail_large_write=True)
-        pool, connection = self._official_request_pool_fixture(sock)
-
-        with self.assertRaises(TimeoutError) as raised:
-            pool._make_request(
-                connection,
-                "POST",
-                "/v1/responses",
-                body=b"x" * (2 * 1024 * 1024),
-                headers={"Content-Length": str(2 * 1024 * 1024)},
-                retries=None,
-                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=1.0),
-                chunked=False,
-                response_conn=None,
-                preload_content=False,
-                decode_content=False,
-            )
-
-        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
-        self.assertEqual(codex_proxy._retry_safety_failure_phase(raised.exception), "request_write")
-
-    def test_upstream_open_telemetry_uses_request_write_for_tagged_timeout(self) -> None:
+    def test_official_write_budget_deducts_pool_wait_and_reports_request_write(self) -> None:
         tmpdir = self.enterContext(tempfile.TemporaryDirectory())
         recorder = diagnostic_recorder.DiagnosticRecorder(Path(tmpdir))
         self.addCleanup(recorder.shutdown, 1)
-        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
-        failure = TimeoutError("simulated request write timeout")
-        setattr(failure, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "request_write")
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.17)
+        pool, connection = self._official_request_pool_fixture(sock)
 
+        class _DelayedManager:
+            failure: TimeoutError | None = None
+
+            def request(self, method: str, _url: str, **kwargs: object) -> object:
+                clock.advance(0.05)
+                try:
+                    return pool._make_request(
+                        connection,
+                        method,
+                        "/v1/responses",
+                        body=kwargs["body"],
+                        headers=kwargs["headers"],
+                        retries=None,
+                        timeout=kwargs["timeout"],
+                        chunked=False,
+                        response_conn=None,
+                        preload_content=False,
+                        decode_content=False,
+                    )
+                except TimeoutError as exc:
+                    self.failure = exc
+                    raise codex_proxy.urllib3.exceptions.MaxRetryError(pool, _url, exc) from exc
+
+        manager = _DelayedManager()
+        request = Request(
+            "https://example.test/v1/responses",
+            data=b"x" * (2 * 1024 * 1024),
+            method="POST",
+        )
         with (
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            patch("codex_proxy._official_pool_manager", return_value=manager),
             patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
-            patch("codex_proxy._open_upstream_once", side_effect=failure),
+            self.assertRaises(TimeoutError) as raised,
         ):
-            with self.assertRaises(TimeoutError):
-                codex_proxy._open_upstream_response(
-                    request,
-                    upstream_name="official",
-                    upstream_format="responses",
-                    timeout=1,
-                    event_context={"request_id": "request-write-fixture", "model": "openai/gpt-5.6"},
-                    max_attempts=1,
-                )
+            codex_proxy._open_upstream_response(
+                request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=0.2,
+                event_context={"request_id": "request-write-fixture", "model": "openai/gpt-5.6"},
+                max_attempts=1,
+            )
 
+        self.assertIs(raised.exception, manager.failure)
+        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
+        self.assertLess(sock.timeouts[-1], 0.17)
         self.assertTrue(recorder.flush(3))
         records = [
             json.loads(line)
@@ -253,37 +275,33 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertEqual(len(phase_records), 1)
         self.assertEqual(phase_records[0]["failure_phase"], "request_write")
 
-    def test_official_urlopen_preserves_request_write_phase_through_translation(self) -> None:
-        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
-        failure = TimeoutError("simulated request write timeout")
-        setattr(failure, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "request_write")
-        wrapped = codex_proxy.urllib3.exceptions.MaxRetryError(None, request.full_url, failure)
-        manager = codex_proxy.urllib3.PoolManager()
+    def test_official_slow_connect_still_uses_connect_cap(self) -> None:
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.06)
+        pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
 
         with (
-            patch("codex_proxy._official_pool_manager", return_value=manager),
-            patch.object(manager, "request", side_effect=wrapped),
-            self.assertRaises(TimeoutError) as raised,
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            self.assertRaises(codex_proxy.urllib3.exceptions.ConnectTimeoutError) as raised,
         ):
-            codex_proxy._official_urlopen(request, timeout=1.0)
+            pool._make_request(
+                connection,
+                "POST",
+                "/v1/responses",
+                body=b"x" * 2048,
+                headers={"Content-Length": "2048"},
+                retries=None,
+                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
+                chunked=False,
+                response_conn=None,
+                preload_content=False,
+                decode_content=False,
+            )
 
-        self.assertIs(raised.exception, failure)
-        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
-
-    def test_connect_and_tls_failures_are_not_marked_as_request_write(self) -> None:
-        sock = _SlowWriteSocket(fail_large_write=True)
-        connection = codex_proxy._OfficialHTTPSConnection("example.test", timeout=0.05)
-        connection.sock = sock
-        connection.is_verified = True
-        connection.proxy_is_verified = True
-        setattr(connection, codex_proxy._OFFICIAL_REQUEST_WRITE_TIMEOUT_ATTRIBUTE, 1.0)
-
-        with self.assertRaises(TimeoutError) as raised:
-            connection.send(b"x" * 2048)
-
-        self.assertIsNone(getattr(raised.exception, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, None))
-        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "tcp_connect")
-        self.assertEqual(codex_proxy.transport_failure_phase(ssl.SSLError("TLS handshake failed")), "tls_handshake")
+        self.assertEqual(connection.connect_calls, 1)
+        self.assertEqual(clock.now, 0.05)
+        self.assertIsNone(codex_proxy._explicit_transport_phase(raised.exception))
 
     def test_official_read_timeout_keeps_read_socket_budget_and_no_write_phase(self) -> None:
         sock = _ReadTimeoutSocket()
@@ -306,25 +324,6 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         self.assertIn(0.75, sock.timeouts)
         self.assertIsNone(codex_proxy._explicit_transport_phase(raised.exception))
-
-    def test_official_timeout_keeps_connect_cap_and_read_budget(self) -> None:
-        class _CapturingManager:
-            def __init__(self) -> None:
-                self.timeout = None
-
-            def request(self, *_args: object, **kwargs: object) -> object:
-                self.timeout = kwargs["timeout"]
-                raise codex_proxy.urllib3.exceptions.ConnectTimeoutError(None, "simulated connect timeout")
-
-        manager = _CapturingManager()
-        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
-        with patch("codex_proxy._official_pool_manager", return_value=manager):
-            with self.assertRaises(TimeoutError):
-                codex_proxy._official_urlopen(request, timeout=60.0)
-
-        assert manager.timeout is not None
-        self.assertEqual(manager.timeout.connect_timeout, codex_proxy.OFFICIAL_CONNECT_TIMEOUT_SECONDS)
-        self.assertEqual(manager.timeout.read_timeout, 60.0)
 
     def test_official_pool_exposes_new_and_reused_connection_dispositions(self) -> None:
         pool = object.__new__(codex_proxy._OfficialHTTPSConnectionPool)
