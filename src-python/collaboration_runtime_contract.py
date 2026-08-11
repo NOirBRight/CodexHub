@@ -210,6 +210,25 @@ def _normalize_schema(value: Any) -> Any:
     return value
 
 
+def _parameter_schema_matches(version: str, name: str, parameters: Mapping[str, Any]) -> bool:
+    normalized = _normalize_schema(parameters)
+    expected = _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name])
+    if normalized == expected:
+        return True
+    if version != COLLABORATION_V1 or name != "spawn_agent":
+        return False
+
+    # Codex CLI 0.146.1 omits only ``agent_type`` from the V1 declaration
+    # when no agent role is configured. The Rust argument type still accepts
+    # the field, so keep the full frozen schema as the canonical contract while
+    # recognizing this one exact declaration variant.
+    default_role_expected = dict(expected)
+    default_role_properties = dict(expected["properties"])
+    default_role_properties.pop("agent_type")
+    default_role_expected["properties"] = default_role_properties
+    return normalized == default_role_expected
+
+
 def _namespace_candidates(tools: Sequence[Any]) -> list[Mapping[str, Any]]:
     return [
         tool
@@ -310,8 +329,7 @@ def classify_collaboration_tools(tools: Sequence[Any]) -> str:
             "namespace_child_parameters_invalid",
         )
         _require(
-            _normalize_schema(parameters)
-            == _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name]),
+            _parameter_schema_matches(version, name, parameters),
             "namespace_child_parameter_schema_mismatch",
         )
     return version

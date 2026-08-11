@@ -24721,9 +24721,11 @@ Execution constraints:
             event_context=event_context,
         )
         call_item = json.loads(normalized)["output"][0]
-        self.assertIn("_codexhub_worker_requested_binding", call_item)
-        self.assertNotIn("model", json.loads(call_item["arguments"]))
-        self.assertNotIn("reasoning", json.loads(call_item["arguments"]))
+        call_arguments = json.loads(call_item["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", call_item)
+        self.assertIn("_codexhub_worker_requested_binding", call_arguments)
+        self.assertEqual(call_arguments["model"], "synthetic-original-model")
+        self.assertEqual(call_arguments["reasoning_effort"], "high")
 
         replay = compatible_request_body(
             self._worker_replay_body(
@@ -24737,9 +24739,11 @@ Execution constraints:
             },
             event_context={"inbound_format": "responses"},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
@@ -24856,10 +24860,12 @@ Execution constraints:
         completed = next(event for event in normalized_events if event.get("type") == "response.completed")
         call_item = done["item"]
         self.assertEqual(status, 200)
-        self.assertIn("_codexhub_worker_requested_binding", call_item)
+        done_arguments = json.loads(call_item["arguments"])
+        completed_arguments = json.loads(completed["response"]["output"][0]["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", call_item)
         self.assertEqual(
-            completed["response"]["output"][0]["_codexhub_worker_requested_binding"],
-            call_item["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
         )
 
         replay = compatible_request_body(
@@ -24874,9 +24880,11 @@ Execution constraints:
             },
             event_context={"inbound_format": "responses"},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
@@ -25119,10 +25127,12 @@ Execution constraints:
         ]
 
         self.assertEqual(len(accepted), 1)
-        self.assertEqual(json.loads(done_call["arguments"])["agent_type"], "worker")
+        done_arguments = json.loads(done_call["arguments"])
+        completed_arguments = json.loads(completed_call["arguments"])
+        self.assertEqual(done_arguments["agent_type"], "worker")
         self.assertEqual(
-            completed_call["_codexhub_worker_requested_binding"],
-            done_call["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
         )
 
     def test_native_responses_sse_streaming_worker_sidecar_survives_empty_item_arguments(self):
@@ -25218,22 +25228,24 @@ Execution constraints:
             if payload.get("type") == "response.completed"
         )
 
-        self.assertIn("_codexhub_worker_requested_binding", done_call)
-        self.assertIn("_codexhub_worker_requested_binding", completed_call)
+        done_arguments = json.loads(done_call["arguments"])
+        completed_arguments = json.loads(completed_call["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", done_call)
+        self.assertNotIn("_codexhub_worker_requested_binding", completed_call)
         self.assertEqual(
-            done_call["_codexhub_worker_requested_binding"],
-            completed_call["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
         )
+        self.assertEqual(done_arguments["model"], "glm-5.2")
+        self.assertEqual(done_arguments["reasoning_effort"], "high")
 
-        reconstructed_history_call = json.loads(json.dumps(completed_call))
-        reconstructed_history_call["arguments"] = worker_arguments
         replay = compatible_request_body(
             json.dumps(
                 {
                     "model": "glm-5.2",
                     "reasoning": {"effort": "high"},
                     "input": [
-                        reconstructed_history_call,
+                        completed_call,
                         self._worker_effective_output(
                             "call_glm_stream",
                             model="glm-5.2",
@@ -25251,9 +25263,11 @@ Execution constraints:
             },
             event_context={},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
 
     def test_native_responses_sse_streaming_general_spawn_keeps_worker_sidecar_absent(self):
@@ -26014,10 +26028,14 @@ Execution constraints:
             reasoning="high",
             call_id="worker-call-b",
         )
-        first["_codexhub_worker_requested_binding"], second["_codexhub_worker_requested_binding"] = (
-            second["_codexhub_worker_requested_binding"],
-            first["_codexhub_worker_requested_binding"],
+        first_arguments = json.loads(first["arguments"])
+        second_arguments = json.loads(second["arguments"])
+        first_arguments["_codexhub_worker_requested_binding"], second_arguments["_codexhub_worker_requested_binding"] = (
+            second_arguments["_codexhub_worker_requested_binding"],
+            first_arguments["_codexhub_worker_requested_binding"],
         )
+        first["arguments"] = json.dumps(first_arguments)
+        second["arguments"] = json.dumps(second_arguments)
         self._assert_worker_history_rejected(
             [
                 first,
@@ -26035,7 +26053,9 @@ Execution constraints:
             reasoning="high",
             call_id="tampered-worker-call",
         )
-        spawn_call["_codexhub_worker_requested_binding"]["reasoning"] = "low"
+        arguments = json.loads(spawn_call["arguments"])
+        arguments["_codexhub_worker_requested_binding"]["reasoning"] = "low"
+        spawn_call["arguments"] = json.dumps(arguments)
         self._assert_worker_history_rejected(
             [spawn_call, self._worker_effective_output("tampered-worker-call")],
             "unknown_requested_binding_sidecar",
@@ -26058,19 +26078,133 @@ Execution constraints:
             event="worker_requested_binding_validated",
         )
 
+    def test_external_worker_binding_accepts_legacy_top_level_sidecar(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="legacy-top-level-sidecar",
+        )
+        arguments = json.loads(spawn_call["arguments"])
+        spawn_call["_codexhub_worker_requested_binding"] = arguments.pop(
+            "_codexhub_worker_requested_binding"
+        )
+        arguments.pop("model")
+        arguments.pop("reasoning_effort")
+        spawn_call["arguments"] = json.dumps(arguments)
+
+        normalized = compatible_request_body(
+            self._worker_replay_body(
+                [
+                    spawn_call,
+                    self._worker_effective_output("legacy-top-level-sidecar"),
+                ]
+            ),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={},
+        )
+
+        replayed_call = json.loads(normalized)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replayed_call)
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replayed_call["arguments"]),
+        )
+
+    def test_external_worker_binding_rejects_conflicting_nested_and_top_level_sidecars(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="conflicting-sidecars",
+        )
+        arguments = json.loads(spawn_call["arguments"])
+        top_level = json.loads(json.dumps(arguments["_codexhub_worker_requested_binding"]))
+        top_level["reasoning"] = "low"
+        spawn_call["_codexhub_worker_requested_binding"] = top_level
+
+        self._assert_worker_history_rejected(
+            [spawn_call, self._worker_effective_output("conflicting-sidecars")],
+            "conflicting_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_rejects_missing_or_tampered_nested_carrier_fields(self):
+        cases = (
+            (
+                "missing_carrier",
+                lambda call, arguments: arguments.pop("_codexhub_worker_requested_binding"),
+                "missing_requested_binding_sidecar",
+            ),
+            (
+                "model",
+                lambda call, arguments: arguments.__setitem__("model", "synthetic-other-model"),
+                "contradictory_requested_model",
+            ),
+            (
+                "missing_model",
+                lambda call, arguments: arguments.pop("model"),
+                "contradictory_requested_model",
+            ),
+            (
+                "reasoning",
+                lambda call, arguments: arguments.__setitem__("reasoning_effort", "low"),
+                "contradictory_requested_reasoning",
+            ),
+            (
+                "missing_reasoning",
+                lambda call, arguments: arguments.pop("reasoning_effort"),
+                "contradictory_requested_reasoning",
+            ),
+            (
+                "signature",
+                lambda call, arguments: arguments["_codexhub_worker_requested_binding"].__setitem__(
+                    "signature", "invalid"
+                ),
+                "unknown_requested_binding_sidecar",
+            ),
+            (
+                "call_identity",
+                lambda call, arguments: call.__setitem__("call_id", "tampered-call-identity"),
+                "unknown_requested_binding_sidecar",
+            ),
+        )
+        for field, mutate, classification in cases:
+            with self.subTest(field=field):
+                original_call_id = f"nested-tamper-{field}"
+                spawn_call = self._normalized_worker_spawn_call(
+                    model="synthetic-original-model",
+                    reasoning="high",
+                    call_id=original_call_id,
+                )
+                arguments = json.loads(spawn_call["arguments"])
+                mutate(spawn_call, arguments)
+                spawn_call["arguments"] = json.dumps(arguments)
+                output_call_id = spawn_call["call_id"]
+                self._assert_worker_history_rejected(
+                    [spawn_call, self._worker_effective_output(output_call_id)],
+                    classification,
+                    event="worker_requested_binding_validated",
+                )
+
     def test_external_worker_binding_uses_original_call_sidecar_when_next_turn_changes(self):
         spawn_call = self._normalized_worker_spawn_call(
             model="synthetic-original-model",
             reasoning="high",
         )
-        sidecar = spawn_call["_codexhub_worker_requested_binding"]
+        spawn_arguments = json.loads(spawn_call["arguments"])
+        sidecar = spawn_arguments["_codexhub_worker_requested_binding"]
         self.assertEqual(
             set(sidecar),
             {"contract_version", "agent_type", "model", "reasoning", "signature"},
         )
-        self.assertEqual(json.loads(spawn_call["arguments"])["agent_type"], "worker")
-        self.assertNotIn("model", json.loads(spawn_call["arguments"]))
-        self.assertNotIn("reasoning", json.loads(spawn_call["arguments"]))
+        self.assertNotIn("_codexhub_worker_requested_binding", spawn_call)
+        self.assertEqual(spawn_arguments["agent_type"], "worker")
+        self.assertEqual(spawn_arguments["model"], "synthetic-original-model")
+        self.assertEqual(spawn_arguments["reasoning_effort"], "high")
 
         replay = json.dumps(
             {
@@ -26111,6 +26245,10 @@ Execution constraints:
         )
         replayed_call = json.loads(normalized_replay)["input"][0]
         self.assertNotIn("_codexhub_worker_requested_binding", replayed_call)
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replayed_call["arguments"]),
+        )
 
     def test_external_worker_binding_rejects_next_turn_values_that_only_match_effective_readback(self):
         spawn_call = self._normalized_worker_spawn_call(

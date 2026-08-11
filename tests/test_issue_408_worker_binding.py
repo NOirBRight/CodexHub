@@ -78,9 +78,14 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
                                 "call_id": call_id,
                                 "name": "multi_agent_v1__spawn_agent",
                                 "arguments": json.dumps(
-                                    {"agent_type": "worker", "message": "do work"}
+                                    {
+                                        "agent_type": "worker",
+                                        "message": "do work",
+                                        "model": "glm-5.2",
+                                        "reasoning_effort": "high",
+                                        "_codexhub_worker_requested_binding": sidecar,
+                                    }
                                 ),
-                                "_codexhub_worker_requested_binding": sidecar,
                             },
                             {
                                 "type": "function_call_output",
@@ -111,6 +116,11 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
                 # Must not raise external_worker_binding_rejected.
                 payload = json.loads(
                     codex_proxy.compatible_request_body(body, upstream, model_id="glm-5.2")
+                )
+                forwarded_arguments = json.loads(payload["input"][1]["arguments"])
+                self.assertNotIn(
+                    "_codexhub_worker_requested_binding",
+                    forwarded_arguments,
                 )
                 self.assertEqual(payload["input"][-1]["content"], "continue")
             finally:

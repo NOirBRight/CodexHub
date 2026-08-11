@@ -15,9 +15,12 @@ synthetic-fixture evidence because its `_inject_collaboration_agent_type()`
 helper changes the request shape; it is not direct-schema evidence for this
 plan.
 
-The run requires a dedicated authenticated account and a disposable copy of
-the historical Session `019fe193-d396-7293-86ea-4bc2c204ca9f`. Never modify
-the user's original Session or shared Codex home.
+The run requires a dedicated authenticated account, the credentials for the
+historical Session's previous Provider, and a disposable copy of the
+operator-supplied historical Session. Never modify the user's original Session
+or shared Codex home. A current-model override does not remove the previous
+Provider requirement: Codex CLI performs pre-sampling compaction with the
+previous turn's model before it sends the current-model turn.
 
 ## Matrix
 
@@ -25,10 +28,11 @@ the user's original Session or shared Codex home.
 | --- | --- | --- | --- |
 | `v1-lifecycle` | `multi_agent_v1` | spawn worker, send input, wait, close; verify terminal result | Native V1 namespace and argument shape remain unchanged; one complete lifecycle |
 | `v2-lifecycle` | `collaboration` | spawn/list, send message, follow-up, wait, interrupt, and final readback | Native V2 lifecycle completes without a V1 rewrite or duplicate terminal event |
-| `model-switch-replay` | V1 then V2, and V2 then V1 | switch the selected Luna Collaboration version between turns; replay prior history | Each request uses the selected model/version and prior messages/call IDs remain ordered and readable |
+| `version-selection-replay` | V1 Session, then V2; fresh/forked V1 after V2 selection | replay a V1 Session after selecting V2, then prove a later V1 selection on a new Session or explicit fork | Existing history remains readable; each newly created/forked Session uses the selected version |
 | `legacy-session-resume` | historical V1 Session | restore the supplied pre-Beta4 Session, continue it, wait, and close | Old worker calls with the exact native shape are accepted; continuation and history are preserved |
 | `new-binding-integrity` | Beta4.1 worker binding | create a new worker with model/reasoning binding, then replay unchanged and tampered histories | Signed binding/readback matches; model, reasoning, signature, missing, duplicate, and malformed cases fail closed |
 | `cli-restart-continuity` | real CLI process | stop and restart the CLI/Gateway while retaining the isolated home, then resume | Same Session identity, prior history, worker state, and selected version are read back after restart |
+| `external-v1-boundary` | real CLI request to an external V1 route | capture the unmodified V1 declaration emitted by CLI `0.146.1` with the default role | The exact default-role schema and the full `agent_type` schema are accepted; any other schema difference is rejected |
 
 The `legacy-session-resume` case is the regression gate for #418. The
 `new-binding-integrity` case must prove that the compatibility exception is
@@ -59,12 +63,14 @@ must still be rejected.
    - Execute the V1 and V2 cases in fresh Session roots.
    - Assert exactly one successful terminal outcome per turn, paired call and
      output IDs, preserved call order, and readable assistant/worker history.
-   - Run the model-switch case with at least one follow-up turn after each
-     switch; verify that old turns are replayed rather than dropped or
-     reclassified.
+   - Replay a V1 Session after selecting V2 and verify that old turns are not
+     dropped or reclassified.
+   - Verify a later V1 selection with a new Session or explicit fork. Codex CLI
+     `0.146.1` pins Collaboration V2 in existing Session state, so an in-place
+     V2-to-V1 downgrade is not a product acceptance condition.
 
 4. **Historical recovery**
-   - Start from the copied Session `019fe193-d396-7293-86ea-4bc2c204ca9f`.
+   - Start from the copied operator-supplied historical Session.
    - Resume without rewriting its old `multi_agent_v1.spawn_agent` calls.
    - Complete a new turn and verify that the old worker readbacks plus the new
      turn are accepted by the same Gateway process.
@@ -83,6 +89,9 @@ must still be rejected.
      supports it.
    - Query/read the existing Session before creating a new one. Verify the
      Session ID, selected version, history, worker IDs, and next legal action.
+   - For V1, restore the persisted worker with `resume_agent`, then wait/read
+     its status before `close_agent`; a restarted CLI does not retain the old
+     process-local worker registry.
    - Finish with a new turn and confirm no duplicate spawn or terminal event.
 
 ## Evidence contract
@@ -110,7 +119,7 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all six cases pass with the exact CLI version and candidate SHA;
+- all seven cases pass with the exact CLI version and candidate SHA;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
 - restart readback passes for both selected versions;

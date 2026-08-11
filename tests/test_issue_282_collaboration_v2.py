@@ -195,6 +195,23 @@ def test_exact_runtime_namespaces_classify_and_descriptions_are_dynamic() -> Non
         assert classify_collaboration_payload(body) == version
 
 
+def test_v1_default_role_spawn_schema_without_agent_type_classifies_exactly() -> None:
+    body = _request(COLLABORATION_V1)
+    spawn = next(
+        child
+        for child in body["tools"][0]["tools"]
+        if child["name"] == "spawn_agent"
+    )
+    del spawn["parameters"]["properties"]["agent_type"]
+
+    assert classify_collaboration_payload(body) == COLLABORATION_V1
+
+    del spawn["parameters"]["properties"]["model"]
+    with pytest.raises(CollaborationBoundaryError) as caught:
+        classify_collaboration_payload(body)
+    assert caught.value.classification == "namespace_child_parameter_schema_mismatch"
+
+
 @pytest.mark.parametrize(
     ("mutate", "classification"),
     [

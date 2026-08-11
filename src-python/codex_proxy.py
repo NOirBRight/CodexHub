@@ -4837,6 +4837,17 @@ def _request_kind_from_headers_and_payload(
     payload: Mapping[str, Any] | None,
     inbound_format: str,
 ) -> str:
+    turn_metadata = _get_header(headers, "x-codex-turn-metadata")
+    if isinstance(turn_metadata, str):
+        try:
+            parsed_turn_metadata = json.loads(turn_metadata)
+        except json.JSONDecodeError:
+            parsed_turn_metadata = None
+        if (
+            isinstance(parsed_turn_metadata, Mapping)
+            and parsed_turn_metadata.get("request_kind") == "compaction"
+        ):
+            return RETRY_REQUEST_COMPACT
     for header_name in ("x-request-kind", "x-query-source"):
         header_value = _get_header(headers, header_name)
         if isinstance(header_value, str) and header_value.strip().lower() == RETRY_REQUEST_COMPACT:
@@ -8141,9 +8152,11 @@ def _attach_worker_requested_binding_sidecars(
     # normalizer intentionally accepts a valid JSON prefix for other repair
     # paths, but that would let malformed streamed arguments inherit a worker
     # binding after the strict stream state has already been cleared.
-    arguments = _semantic_strict_json_object(rewritten.get("arguments"))
+    raw_arguments = rewritten.get("arguments")
+    arguments = _semantic_strict_json_object(raw_arguments)
     context = event_context or {}
     pending_agent_type = None
+    pending_arguments = None
     stream_item_tracked = False
     stream_selector_invalid = False
     stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
@@ -8154,6 +8167,7 @@ def _attach_worker_requested_binding_sidecars(
         if isinstance(record, Mapping):
             stream_item_tracked = True
             pending_agent_type = record.get("agent_type")
+            pending_arguments = _semantic_strict_json_object(record.get("arguments"))
             stream_selector_invalid = bool(record.get("selector_invalid"))
     if arguments is None:
         # Responses streams may publish the function-call item before its
@@ -8164,12 +8178,14 @@ def _attach_worker_requested_binding_sidecars(
         # worker call.  A normal body call has no lifecycle status and keeps the
         # old fail-closed behavior.
         if not (
-            rewritten.get("arguments") in (None, "")
+            raw_arguments in (None, "")
             and bool(context.get("_worker_binding_required"))
             and rewritten.get("status") in {"in_progress", "completed"}
             and pending_agent_type == "worker"
+            and pending_arguments is not None
         ):
             return (rewritten if changed else value), changed
+        arguments = pending_arguments
     elif arguments.get("agent_type") != "worker":
         return (rewritten if changed else value), changed
     elif stream_item_tracked and (
@@ -8191,8 +8207,16 @@ def _attach_worker_requested_binding_sidecars(
             classification="missing_requested_binding_sidecar",
         )
     sidecar = _worker_requested_binding_sidecar(requested, call_id)
-    if rewritten.get(WORKER_REQUESTED_BINDING_FIELD) != sidecar:
-        rewritten[WORKER_REQUESTED_BINDING_FIELD] = sidecar
+    persisted_arguments = dict(arguments)
+    persisted_arguments["model"] = requested["model"]
+    persisted_arguments["reasoning_effort"] = requested["reasoning"]
+    persisted_arguments[WORKER_REQUESTED_BINDING_FIELD] = sidecar
+    encoded_arguments = _dump_arguments_like(raw_arguments, persisted_arguments)
+    if raw_arguments != encoded_arguments:
+        rewritten["arguments"] = encoded_arguments
+        changed = True
+    if WORKER_REQUESTED_BINDING_FIELD in rewritten:
+        rewritten.pop(WORKER_REQUESTED_BINDING_FIELD, None)
         changed = True
     return (rewritten if changed else value), changed
 
@@ -8234,7 +8258,9 @@ def _validate_worker_binding_history(
             continue
         call_id = item.get("call_id")
         if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
-            arguments = _json_object_from_arguments(item.get("arguments"))
+            raw_arguments = item.get("arguments")
+            arguments = _json_object_from_arguments(raw_arguments)
+            strict_arguments = _semantic_strict_json_object(raw_arguments)
             agent_type = arguments.get("agent_type") if arguments is not None else None
             if agent_type in {"general", "default"}:
                 continue
@@ -8250,10 +8276,15 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification="duplicate_worker_call_identity",
                 )
-            legacy_arguments = _semantic_strict_json_object(item.get("arguments"))
+            nested_sidecar_present = (
+                isinstance(arguments, Mapping)
+                and WORKER_REQUESTED_BINDING_FIELD in arguments
+            )
+            top_level_sidecar_present = WORKER_REQUESTED_BINDING_FIELD in item
             if (
-                WORKER_REQUESTED_BINDING_FIELD not in item
-                and _is_legacy_native_worker_spawn_call(item, legacy_arguments)
+                not nested_sidecar_present
+                and not top_level_sidecar_present
+                and _is_legacy_native_worker_spawn_call(item, strict_arguments)
             ):
                 legacy_worker_calls.add(call_id)
                 worker_calls[call_id] = None
@@ -8266,8 +8297,30 @@ def _validate_worker_binding_history(
                     classification=selector_validation.classification,
                     surface="history",
                 )
+            if nested_sidecar_present and strict_arguments is None:
+                _raise_worker_contract_error(
+                    event="worker_requested_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="unknown_requested_binding_sidecar",
+                )
+            nested_sidecar = (
+                strict_arguments.get(WORKER_REQUESTED_BINDING_FIELD)
+                if nested_sidecar_present and strict_arguments is not None
+                else None
+            )
+            top_level_sidecar = item.get(WORKER_REQUESTED_BINDING_FIELD)
+            if (
+                nested_sidecar_present
+                and top_level_sidecar_present
+                and nested_sidecar != top_level_sidecar
+            ):
+                _raise_worker_contract_error(
+                    event="worker_requested_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="conflicting_requested_binding_sidecar",
+                )
             requested, sidecar_failure = _verified_worker_requested_binding(
-                item.get(WORKER_REQUESTED_BINDING_FIELD),
+                nested_sidecar if nested_sidecar_present else top_level_sidecar,
                 call_id,
             )
             if requested is None:
@@ -8276,8 +8329,47 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification=sidecar_failure or "unknown_requested_binding_sidecar",
                 )
+            if nested_sidecar_present:
+                if strict_arguments.get("model") != requested["model"]:
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_model",
+                    )
+                if strict_arguments.get("reasoning_effort") != requested["reasoning"]:
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_reasoning",
+                    )
+            elif strict_arguments is not None:
+                if (
+                    "model" in strict_arguments
+                    and strict_arguments.get("model") != requested["model"]
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_model",
+                    )
+                if (
+                    "reasoning_effort" in strict_arguments
+                    and strict_arguments.get("reasoning_effort") != requested["reasoning"]
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_reasoning",
+                    )
             if isinstance(item, dict):
                 item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                if nested_sidecar_present and strict_arguments is not None:
+                    forwarded_arguments = dict(strict_arguments)
+                    forwarded_arguments.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                    item["arguments"] = _dump_arguments_like(
+                        raw_arguments,
+                        forwarded_arguments,
+                    )
             worker_calls[call_id] = requested
             continue
         if (
