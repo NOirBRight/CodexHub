@@ -362,6 +362,7 @@ const zhCN = {
     collaborationVersionForModel: "{{model}} 的 Collaboration 版本",
     collaborationVersionSaved: "Collaboration 版本已保存",
     collaborationVersionSaveFailed: "保存 Collaboration 版本失败：{{message}}",
+    collaborationVersionDefault: "（默认）",
     savingCollaborationVersion: "正在保存 Collaboration {{version}}...",
     catalogBaseline: "目录基线",
     officialCatalogRestartRequired: "目录刷新后请重启 Codex App。",

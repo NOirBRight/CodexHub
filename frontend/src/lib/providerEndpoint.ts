@@ -50,6 +50,10 @@ export function probeDetectedEndpointFormat(result: UpstreamFormatProbeResult): 
   return normalizedProbeEndpointFormat(result.recommended_format) ?? probeAvailableFormats(result)[0] ?? null;
 }
 
+export function probeSucceeded(result: UpstreamFormatProbeResult): boolean {
+  return !result.model_required && probeDetectedEndpointFormat(result) !== null;
+}
+
 export function normalizedProbeEndpointFormat(value?: string | null): UpstreamFormat | null {
   const normalized = value?.trim().toLowerCase().replace(/[-\s]+/g, "_");
   if (!normalized || normalized === "auto") {
@@ -68,6 +72,9 @@ export function normalizedProbeEndpointFormat(value?: string | null): UpstreamFo
 }
 
 export function applyProviderProbeResult(provider: Provider, result: UpstreamFormatProbeResult): Provider {
+  if (result.model_required) {
+    return provider;
+  }
   const detectedFormat = probeDetectedEndpointFormat(result);
   return {
     ...provider,
@@ -78,6 +85,9 @@ export function applyProviderProbeResult(provider: Provider, result: UpstreamFor
 }
 
 export function applyAddProviderProbeResult<TDraft extends EndpointProbeDraft>(form: TDraft, result: UpstreamFormatProbeResult): TDraft {
+  if (result.model_required) {
+    return form;
+  }
   const detectedFormat = probeDetectedEndpointFormat(result);
   return {
     ...form,

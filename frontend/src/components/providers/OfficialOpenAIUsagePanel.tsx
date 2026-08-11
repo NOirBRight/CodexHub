@@ -22,8 +22,7 @@ const OFFICIAL_USAGE_CELL_SIZE = 8;
 const USAGE_MONTH_LABEL_MIN_GAP_PX = 36;
 const OFFICIAL_USAGE_COLOR_STOPS = ["#eff2f5", "#d8ebff", "#acd7ff", "#7cc1ff", "#48a7fb", "#1687e8"];
 const OPENAI_USAGE_LIMIT_PLACEHOLDERS: OpenAIUsageLimit[] = [
-  { key: "five_hours", name: "5 hours", period: "five_hours" },
-  { key: "week", name: "Week", period: "week" },
+  { key: "week", name: "Weekly", period: "week" },
 ];
 
 function useElementContentWidth<T extends HTMLElement>(dependencies: ReadonlyArray<unknown> = []) {
@@ -547,7 +546,12 @@ function preferredOpenAIUsageLimits(limits: OpenAIUsageLimit[]) {
   const usable = limits.filter(limitHasUsageData);
   const fiveHour = usable.find(isFiveHourUsageLimit);
   const weekly = usable.find(isWeeklyUsageLimit);
-  const selected = [fiveHour, weekly].filter((limit): limit is OpenAIUsageLimit => Boolean(limit));
+  const selected: OpenAIUsageLimit[] = [];
+  for (const limit of [fiveHour, weekly]) {
+    if (limit && !selected.some((item) => item.key === limit.key)) {
+      selected.push(limit);
+    }
+  }
   for (const limit of usable) {
     if (selected.length >= 2) {
       break;
@@ -573,14 +577,18 @@ function isFiveHourUsageLimit(limit: OpenAIUsageLimit) {
   return (
     /\b5\s*h(?:our)?s?\b/.test(value) ||
     /\bfive[-_\s]?h(?:our)?s?\b/.test(value) ||
-    ((value.includes("5") || value.includes("five")) && value.includes("hour")) ||
-    /\bprimary\b/.test(value)
+    ((value.includes("5") || value.includes("five")) && value.includes("hour"))
   );
 }
 
 function isWeeklyUsageLimit(limit: OpenAIUsageLimit) {
   const value = usageLimitSearchText(limit);
-  return value.includes("week") || value.includes("weekly") || /\bsecondary\b/.test(value);
+  return (
+    value.includes("week") ||
+    value.includes("weekly") ||
+    /\bsecondary\b/.test(value) ||
+    /\bprimary\b/.test(value)
+  );
 }
 
 function usageLimitSearchText(limit: OpenAIUsageLimit) {

@@ -35,6 +35,7 @@ export function ModelSection({
   onReorder,
   onTestModel,
   officialDisabledModels,
+  officialCollaborationBaselines = {},
   officialCollaborationOverrides = {},
   providerId,
   reorderable = true,
@@ -61,6 +62,7 @@ export function ModelSection({
   onReorder: (models: Model[]) => void;
   onTestModel?: (model: Model) => Promise<boolean>;
   officialDisabledModels?: string[];
+  officialCollaborationBaselines?: Readonly<Record<string, "v1" | "v2">>;
   officialCollaborationOverrides?: Readonly<Record<string, "v1" | "v2">>;
   providerId?: string;
   reorderable?: boolean;
@@ -146,7 +148,11 @@ export function ModelSection({
           title={modelLimitDetails(model, contextWindow)}
         />
         {disabled && onOfficialCollaborationVersionChange && (() => {
-          const collaboration = officialCollaborationVersionOptions(model, officialCollaborationOverrides);
+          const collaboration = officialCollaborationVersionOptions(
+            model,
+            officialCollaborationOverrides,
+            officialCollaborationBaselines,
+          );
           if (!collaboration) {
             return null;
           }
@@ -168,22 +174,22 @@ export function ModelSection({
               <span>{t("providers.collaborationVersion")}</span>
               <select
                 className="h-5 bg-transparent text-[11px] font-semibold outline-none"
-                value={collaboration.explicit ?? ""}
+                value={collaboration.effective}
                 disabled={interactionDisabled}
                 aria-label={t("providers.collaborationVersionForModel", { model: model.id })}
                 onChange={(event) => {
                   event.stopPropagation();
+                  const selected = event.target.value === "v1" || event.target.value === "v2"
+                    ? event.target.value
+                    : null;
                   onOfficialCollaborationVersionChange(
                     model.id,
-                    event.target.value === "v1" || event.target.value === "v2"
-                      ? event.target.value
-                      : null,
+                    selected === collaboration.baseline ? null : selected,
                   );
                 }}
               >
-                <option value="">{t("providers.catalogBaseline")} (V{collaboration.baseline})</option>
-                <option value="v1">V1</option>
-                <option value="v2">V2</option>
+                <option value="v1">V1{collaboration.baseline === "v1" ? ` ${t("providers.collaborationVersionDefault")}` : ""}</option>
+                <option value="v2">V2{collaboration.baseline === "v2" ? ` ${t("providers.collaborationVersionDefault")}` : ""}</option>
               </select>
             </label>
           );

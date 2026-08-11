@@ -362,6 +362,7 @@ const enUS = {
     collaborationVersionForModel: "Collaboration version for {{model}}",
     collaborationVersionSaved: "Collaboration version saved",
     collaborationVersionSaveFailed: "Failed to save Collaboration version: {{message}}",
+    collaborationVersionDefault: "(Default)",
     savingCollaborationVersion: "Saving Collaboration {{version}}...",
     catalogBaseline: "catalog baseline",
     officialCatalogRestartRequired: "Restart Codex App after the catalog refresh.",

@@ -496,12 +496,8 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             to_value(models::save_model_metadata_override(model))
         }
         "save_official_multi_agent_version" => {
-            let model_id = request
-                .args
-                .get("model_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| "model_id argument is required".to_string())?;
+            let model_id = optional_string_arg(&request.args, &["modelId", "model_id"])
+                .ok_or_else(|| "modelId argument is required".to_string())?;
             let version = request
                 .args
                 .get("version")
@@ -511,6 +507,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         }
         "list_official_multi_agent_overrides" => {
             to_value(models::list_official_multi_agent_overrides())
+        }
+        "list_official_multi_agent_baselines" => {
+            to_value(models::list_official_multi_agent_baselines())
         }
         "sync_history" => {
             let target_provider = request
@@ -719,7 +718,7 @@ impl BridgeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, origin_allowed, BridgeRequest, BridgeResponse};
+    use super::{handle_request, optional_string_arg, origin_allowed, BridgeRequest, BridgeResponse};
     use serde_json::json;
 
     #[test]
@@ -728,6 +727,18 @@ mod tests {
         assert!(origin_allowed(Some("http://127.0.0.1:1420")));
         assert!(origin_allowed(Some("http://localhost:1420")));
         assert!(!origin_allowed(Some("http://example.com")));
+    }
+
+    #[test]
+    fn official_collaboration_save_accepts_camel_case_and_legacy_model_id() {
+        assert_eq!(
+            optional_string_arg(&json!({"modelId": "gpt-5.6-luna"}), &["modelId", "model_id"]),
+            Some("gpt-5.6-luna".to_string())
+        );
+        assert_eq!(
+            optional_string_arg(&json!({"model_id": "gpt-5.6-luna"}), &["modelId", "model_id"]),
+            Some("gpt-5.6-luna".to_string())
+        );
     }
 
     #[test]

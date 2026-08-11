@@ -151,6 +151,21 @@ class Issue408SemanticAdapterTests(unittest.TestCase):
         self.assertEqual(effective["model"], "glm-5.2")
         self.assertEqual(effective["reasoning"], "high")
 
+    def test_synthesize_effective_worker_binding_readback_accepts_nullable_native_nickname(self):
+        requested = {
+            "agent_type": "worker",
+            "model": "glm-5.2",
+            "reasoning": "high",
+        }
+        native_output = {"agent_id": "019f-child", "nickname": None}
+
+        readback = codex_semantic_adapter.synthesize_effective_worker_binding_readback(
+            requested, native_output
+        )
+
+        self.assertIsNotNone(readback)
+        self.assertIn("effective_binding", readback)
+
     def test_synthesize_effective_worker_binding_readback_preserves_existing_readback(self):
         requested = {
             "agent_type": "worker",

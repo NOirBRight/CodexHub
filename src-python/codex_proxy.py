@@ -7873,6 +7873,49 @@ def _verified_worker_requested_binding(
     return requested, None
 
 
+def _is_legacy_native_worker_spawn_call(
+    item: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize the pre-sidecar native V1 worker call shape.
+
+    Beta4 added signed model/reasoning sidecars to worker calls.  Sessions
+    created before that change contain the native CLI's original
+    ``multi_agent_v1.spawn_agent`` item instead, so they cannot be validated
+    against a binding that was never persisted.  The pre-selector native
+    schema omitted ``agent_type`` but included ``fork_context`` and
+    ``message``. Keep this compatibility predicate deliberately exact: only
+    the historical namespace/name and argument shape may bypass the new
+    sidecar contract.
+    """
+    if item.get("namespace") != "multi_agent_v1" or item.get("name") != "spawn_agent":
+        return False
+    if not isinstance(arguments, Mapping):
+        return False
+    if set(arguments) not in (
+        {"fork_context", "message"},
+        {"agent_type", "fork_context", "message"},
+    ):
+        return False
+    if "agent_type" in arguments and arguments.get("agent_type") != "worker":
+        return False
+    return (
+        isinstance(arguments.get("fork_context"), bool)
+        and isinstance(arguments.get("message"), str)
+    )
+
+
+def _is_legacy_native_worker_spawn_readback(value: Any) -> bool:
+    readback = _semantic_strict_json_object(value)
+    return (
+        isinstance(readback, Mapping)
+        and set(readback) == {"agent_id", "nickname"}
+        and isinstance(readback.get("agent_id"), str)
+        and bool(readback.get("agent_id"))
+        and (readback.get("nickname") is None or isinstance(readback.get("nickname"), str))
+    )
+
+
 _WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
 
 
@@ -8183,7 +8226,8 @@ def _validate_worker_binding_history(
     if not isinstance(input_items, list):
         return
 
-    worker_calls: dict[str, Mapping[str, Any]] = {}
+    worker_calls: dict[str, Mapping[str, Any] | None] = {}
+    legacy_worker_calls: set[str] = set()
     validated_call_ids: set[str] = set()
     for item in input_items:
         if not isinstance(item, Mapping):
@@ -8194,14 +8238,6 @@ def _validate_worker_binding_history(
             agent_type = arguments.get("agent_type") if arguments is not None else None
             if agent_type in {"general", "default"}:
                 continue
-            selector_validation = _semantic_validate_worker_selector(arguments)
-            if selector_validation.outcome != _BINDING_ACCEPTED:
-                _raise_worker_contract_error(
-                    event="worker_selector_validated",
-                    error_code=WORKER_SELECTOR_ERROR_CODE,
-                    classification=selector_validation.classification,
-                    surface="history",
-                )
             if not isinstance(call_id, str) or not call_id:
                 _raise_worker_contract_error(
                     event="worker_effective_binding_validated",
@@ -8213,6 +8249,22 @@ def _validate_worker_binding_history(
                     event="worker_effective_binding_validated",
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification="duplicate_worker_call_identity",
+                )
+            legacy_arguments = _semantic_strict_json_object(item.get("arguments"))
+            if (
+                WORKER_REQUESTED_BINDING_FIELD not in item
+                and _is_legacy_native_worker_spawn_call(item, legacy_arguments)
+            ):
+                legacy_worker_calls.add(call_id)
+                worker_calls[call_id] = None
+                continue
+            selector_validation = _semantic_validate_worker_selector(arguments)
+            if selector_validation.outcome != _BINDING_ACCEPTED:
+                _raise_worker_contract_error(
+                    event="worker_selector_validated",
+                    error_code=WORKER_SELECTOR_ERROR_CODE,
+                    classification=selector_validation.classification,
+                    surface="history",
                 )
             requested, sidecar_failure = _verified_worker_requested_binding(
                 item.get(WORKER_REQUESTED_BINDING_FIELD),
@@ -8242,6 +8294,20 @@ def _validate_worker_binding_history(
             )
 
         output = item.get("output")
+        if call_id in legacy_worker_calls:
+            if not _is_legacy_native_worker_spawn_readback(output):
+                _raise_worker_contract_error(
+                    event="worker_effective_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="malformed_readback",
+                )
+            write_proxy_event(
+                "worker_effective_binding_validated",
+                outcome="accepted",
+                classification="legacy_native_spawn",
+            )
+            validated_call_ids.add(call_id)
+            continue
         readback = _semantic_strict_json_object(output)
         if readback is None and isinstance(output, str) and output.strip():
             _raise_worker_contract_error(
