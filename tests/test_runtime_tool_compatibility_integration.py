@@ -921,7 +921,7 @@ def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_names
     collaboration = _collaboration_namespace(COLLABORATION_V2)
     vendor = {
         "type": "namespace",
-        "name": "mcp__vendor",
+        "name": "vendor",
         "tools": [
             {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
             for index in range(249)

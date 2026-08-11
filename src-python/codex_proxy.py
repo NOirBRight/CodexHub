@@ -580,6 +580,15 @@ WORKER_REQUESTED_BINDING_FIELDS = {
     "reasoning",
     "signature",
 }
+LEGACY_NATIVE_WORKER_SPAWN_FIELDS = {
+    "type",
+    "id",
+    "call_id",
+    "namespace",
+    "name",
+    "arguments",
+}
+LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {
         "type": "namespace",
@@ -6170,6 +6179,35 @@ def _is_raw_namespace_schema(value: Any) -> bool:
     return isinstance(value, Mapping) and value.get("type") == "namespace"
 
 
+def _deferred_namespace_surface_counts(tools: list[Any]) -> tuple[int, int]:
+    namespace_count = 0
+    child_count = 0
+    for namespace in tools:
+        if not _is_raw_namespace_schema(namespace):
+            continue
+        namespace_name = _tool_schema_name(namespace)
+        namespace_tools = namespace.get("tools")
+        if not isinstance(namespace_name, str) or not namespace_name or not isinstance(namespace_tools, list):
+            continue
+        child_names: list[str] = []
+        for tool in namespace_tools:
+            tool_name = _tool_schema_name(tool)
+            if (
+                not isinstance(tool, Mapping)
+                or tool.get("type") != "function"
+                or not isinstance(tool_name, str)
+                or not tool_name
+            ):
+                child_names = []
+                break
+            child_names.append(tool_name)
+        if not child_names or len(set(child_names)) != len(child_names):
+            continue
+        namespace_count += 1
+        child_count += len(child_names)
+    return namespace_count, child_count
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -7988,6 +8026,29 @@ def _is_legacy_native_worker_spawn_call(
     the historical namespace/name and argument shape may bypass the new
     sidecar contract.
     """
+    item_fields = set(item)
+    if item_fields not in (
+        LEGACY_NATIVE_WORKER_SPAWN_FIELDS,
+        LEGACY_NATIVE_WORKER_SPAWN_FIELDS | {LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
+    ):
+        return False
+    if (
+        item.get("type") != "function_call"
+        or not isinstance(item.get("id"), str)
+        or not item.get("id")
+        or not isinstance(item.get("call_id"), str)
+        or not item.get("call_id")
+    ):
+        return False
+    if LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD in item:
+        metadata = item.get(LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD)
+        if (
+            not isinstance(metadata, Mapping)
+            or set(metadata) != {"turn_id"}
+            or not isinstance(metadata.get("turn_id"), str)
+            or not metadata.get("turn_id")
+        ):
+            return False
     if item.get("namespace") != "multi_agent_v1" or item.get("name") != "spawn_agent":
         return False
     if not isinstance(arguments, Mapping):
@@ -11773,6 +11834,16 @@ def compatible_request_body(
         if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
             tools = payload["tools"]
             tool_surface_source_tools = list(tools)
+            deferred_namespace_tools = [
+                tool
+                for tool in tools
+                if _is_raw_namespace_schema(tool)
+                and not (
+                    collaboration_v2
+                    and isinstance(tool, Mapping)
+                    and tool.get("name") == _COLLABORATION_V2_NAMESPACE
+                )
+            ]
             retained_tools = [
                 tool
                 for tool in tools
@@ -11789,27 +11860,13 @@ def compatible_request_body(
                 tools[:] = retained_tools
                 changed = True
             if collaboration_v2:
-                retained_names = {
-                    name
-                    for name in (_tool_schema_name(tool) for tool in retained_tools)
-                    if name is not None
-                }
-                deferred_tool_count = 0
-                for flattened_tool in _flatten_namespace_function_tools(
-                    tool_surface_source_tools
-                ):
-                    name = _tool_schema_name(flattened_tool)
-                    if name and name not in retained_names:
-                        retained_names.add(name)
-                        deferred_tool_count += 1
+                namespace_declaration_count, deferred_tool_count = (
+                    _deferred_namespace_surface_counts(deferred_namespace_tools)
+                )
                 retained_tool_ids = {id(tool) for tool in retained_tools}
                 pending_tool_surface_event = {
                     "tool_surface_strategy": tool_surface_strategy,
-                    "namespace_declaration_count": sum(
-                        1
-                        for tool in tool_surface_source_tools
-                        if _is_flattened_namespace_schema(tool)
-                    ),
+                    "namespace_declaration_count": namespace_declaration_count,
                     "eager_tool_count": 0,
                     "retained_core_count": sum(
                         1
@@ -12370,7 +12427,12 @@ def compatible_request_body(
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
             if tool_surface_counts:
-                if runtime_tool_plan is not None and tool_surface_strategy == "eager":
+                if tool_surface_strategy == "deferred_core":
+                    (
+                        tool_surface_counts["namespace_declaration_count"],
+                        tool_surface_counts["deferred_tool_count"],
+                    ) = _deferred_namespace_surface_counts(tool_surface_source_tools or [])
+                elif runtime_tool_plan is not None and tool_surface_strategy == "eager":
                     tool_surface_counts["eager_tool_count"] = sum(
                         len(entry.aliases)
                         for entry in runtime_tool_plan.entries

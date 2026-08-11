@@ -23111,10 +23111,10 @@ Execution constraints:
                 },
                 {
                     "tool_surface_strategy": "deferred_core",
-                    "namespace_declaration_count": 1,
+                    "namespace_declaration_count": 2,
                     "eager_tool_count": 0,
                     "retained_core_count": 2,
-                    "deferred_tool_count": 2,
+                    "deferred_tool_count": 3,
                     "final_tool_count": 8,
                 },
             ],
@@ -25826,6 +25826,7 @@ Execution constraints:
             "type": "function_call",
             "id": "fc_legacy_native_worker",
             "call_id": call_id,
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_legacy_native_worker"},
             "namespace": "multi_agent_v1",
             "name": "spawn_agent",
             "arguments": json.dumps(
@@ -25976,6 +25977,71 @@ Execution constraints:
             "missing_requested_binding_sidecar",
             event="worker_requested_binding_validated",
         )
+
+    def test_external_worker_binding_history_does_not_legacy_accept_extended_top_level_spawn(self):
+        call_id = "legacy-extended-top-level-worker-call"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_extended_top_level_worker",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+            "model": "synthetic-model",
+        }
+        self._assert_worker_history_rejected(
+            [
+                spawn_call,
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+                },
+            ],
+            "missing_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_history_does_not_legacy_accept_invalid_native_metadata(self):
+        for metadata in (
+            {"turn_id": ""},
+            {"turn_id": "turn_legacy_worker", "model": "synthetic-model"},
+        ):
+            with self.subTest(metadata=metadata):
+                call_id = "legacy-invalid-native-metadata"
+                spawn_call = {
+                    "type": "function_call",
+                    "id": "fc_legacy_invalid_native_metadata",
+                    "call_id": call_id,
+                    "internal_chat_message_metadata_passthrough": metadata,
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {
+                            "agent_type": "worker",
+                            "fork_context": False,
+                            "message": "legacy worker task",
+                        }
+                    ),
+                }
+                self._assert_worker_history_rejected(
+                    [
+                        spawn_call,
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+                        },
+                    ],
+                    "missing_requested_binding_sidecar",
+                    event="worker_requested_binding_validated",
+                )
 
     def _normalized_worker_spawn_call(self, *, model, reasoning, call_id="synthetic-bound-call"):
         event_context = {}
