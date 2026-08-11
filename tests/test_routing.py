@@ -24724,8 +24724,8 @@ Execution constraints:
         call_arguments = json.loads(call_item["arguments"])
         self.assertNotIn("_codexhub_worker_requested_binding", call_item)
         self.assertIn("_codexhub_worker_requested_binding", call_arguments)
-        self.assertNotIn("model", call_arguments)
-        self.assertEqual(call_arguments["reasoning_effort"], "high")
+        self.assertIsNone(call_arguments["model"])
+        self.assertNotIn("reasoning_effort", call_arguments)
 
         replay = compatible_request_body(
             self._worker_replay_body(
@@ -24746,6 +24746,7 @@ Execution constraints:
             json.loads(replay_call["arguments"]),
         )
         self.assertNotIn("reasoning_effort", json.loads(replay_call["arguments"]))
+        self.assertNotIn("model", json.loads(replay_call["arguments"]))
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
     def _chat_spawn_sse_response(
@@ -25238,8 +25239,8 @@ Execution constraints:
             done_arguments["_codexhub_worker_requested_binding"],
             completed_arguments["_codexhub_worker_requested_binding"],
         )
-        self.assertNotIn("model", done_arguments)
-        self.assertEqual(done_arguments["reasoning_effort"], "high")
+        self.assertIsNone(done_arguments["model"])
+        self.assertNotIn("reasoning_effort", done_arguments)
 
         replay = compatible_request_body(
             json.dumps(
@@ -25271,6 +25272,7 @@ Execution constraints:
             "_codexhub_worker_requested_binding",
             json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("model", json.loads(replay_call["arguments"]))
 
     def test_native_responses_sse_streaming_general_spawn_keeps_worker_sidecar_absent(self):
         event_context = {
@@ -26090,7 +26092,7 @@ Execution constraints:
         spawn_call["_codexhub_worker_requested_binding"] = arguments.pop(
             "_codexhub_worker_requested_binding"
         )
-        arguments.pop("reasoning_effort")
+        arguments.pop("model")
         spawn_call["arguments"] = json.dumps(arguments)
 
         normalized = compatible_request_body(
@@ -26152,9 +26154,9 @@ Execution constraints:
                 "contradictory_requested_reasoning",
             ),
             (
-                "missing_reasoning",
-                lambda call, arguments: arguments.pop("reasoning_effort"),
-                "contradictory_requested_reasoning",
+                "missing_model_marker",
+                lambda call, arguments: arguments.pop("model"),
+                "contradictory_requested_model",
             ),
             (
                 "signature",
@@ -26200,8 +26202,8 @@ Execution constraints:
         )
         self.assertNotIn("_codexhub_worker_requested_binding", spawn_call)
         self.assertEqual(spawn_arguments["agent_type"], "worker")
-        self.assertNotIn("model", spawn_arguments)
-        self.assertEqual(spawn_arguments["reasoning_effort"], "high")
+        self.assertIsNone(spawn_arguments["model"])
+        self.assertNotIn("reasoning_effort", spawn_arguments)
 
         replay = json.dumps(
             {
@@ -26246,6 +26248,26 @@ Execution constraints:
             "_codexhub_worker_requested_binding",
             json.loads(replayed_call["arguments"]),
         )
+        self.assertNotIn("model", json.loads(replayed_call["arguments"]))
+
+    def test_worker_history_validation_reports_persistence_metadata_removal(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+        )
+        payload = {
+            "input": [
+                spawn_call,
+                self._worker_effective_output("synthetic-bound-call"),
+            ]
+        }
+
+        changed = codex_proxy._validate_worker_binding_history(payload)
+
+        self.assertIs(changed, True)
+        replayed_arguments = json.loads(payload["input"][0]["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", replayed_arguments)
+        self.assertNotIn("model", replayed_arguments)
 
     def test_external_worker_binding_rejects_next_turn_values_that_only_match_effective_readback(self):
         spawn_call = self._normalized_worker_spawn_call(

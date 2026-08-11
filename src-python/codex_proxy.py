@@ -8208,11 +8208,12 @@ def _attach_worker_requested_binding_sidecars(
         )
     sidecar = _worker_requested_binding_sidecar(requested, call_id)
     persisted_arguments = dict(arguments)
-    # Keep one native field as the post-Beta4 marker so removing only the
-    # private carrier cannot turn a new call into the exact legacy shape. The
-    # model remains inherited: explicitly overriding a custom provider model
-    # makes Codex CLI reject an otherwise valid spawn as unavailable.
-    persisted_arguments["reasoning_effort"] = requested["reasoning"]
+    # Keep one inert native field as the post-Beta4 marker so removing only the
+    # private carrier cannot turn a new call into the exact legacy shape. A
+    # null optional model is parsed by Codex CLI as no override, so the worker
+    # still inherits the external parent model and reasoning effort.
+    persisted_arguments["model"] = None
+    persisted_arguments.pop("reasoning_effort", None)
     persisted_arguments[WORKER_REQUESTED_BINDING_FIELD] = sidecar
     encoded_arguments = _dump_arguments_like(raw_arguments, persisted_arguments)
     if raw_arguments != encoded_arguments:
@@ -8248,11 +8249,12 @@ def _apply_external_worker_response_contract(
 
 def _validate_worker_binding_history(
     payload: Mapping[str, Any],
-) -> None:
+) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
-        return
+        return False
 
+    changed = False
     worker_calls: dict[str, Mapping[str, Any] | None] = {}
     legacy_worker_calls: set[str] = set()
     validated_call_ids: set[str] = set()
@@ -8333,22 +8335,30 @@ def _validate_worker_binding_history(
                     classification=sidecar_failure or "unknown_requested_binding_sidecar",
                 )
             if strict_arguments is not None:
-                if (
-                    "model" in strict_arguments
-                    and strict_arguments.get("model") != requested["model"]
+                if nested_sidecar_present and (
+                    "model" not in strict_arguments
+                    or strict_arguments.get("model") is not None
                 ):
                     _raise_worker_contract_error(
                         event="worker_requested_binding_validated",
                         error_code=WORKER_BINDING_ERROR_CODE,
                         classification="contradictory_requested_model",
                     )
-                if nested_sidecar_present and strict_arguments.get(
-                    "reasoning_effort"
-                ) != requested["reasoning"]:
+                if nested_sidecar_present and "reasoning_effort" in strict_arguments:
                     _raise_worker_contract_error(
                         event="worker_requested_binding_validated",
                         error_code=WORKER_BINDING_ERROR_CODE,
                         classification="contradictory_requested_reasoning",
+                    )
+                if (
+                    not nested_sidecar_present
+                    and "model" in strict_arguments
+                    and strict_arguments.get("model") != requested["model"]
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_model",
                     )
                 if (
                     not nested_sidecar_present
@@ -8361,18 +8371,22 @@ def _validate_worker_binding_history(
                         classification="contradictory_requested_reasoning",
                     )
             if isinstance(item, dict):
-                item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                if WORKER_REQUESTED_BINDING_FIELD in item:
+                    item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                    changed = True
                 if nested_sidecar_present and strict_arguments is not None:
                     forwarded_arguments = dict(strict_arguments)
                     forwarded_arguments.pop(WORKER_REQUESTED_BINDING_FIELD, None)
-                    # ``reasoning_effort`` is a persistence marker added after
-                    # the provider produced the call. Do not replay it as if
-                    # it were part of the provider's original tool arguments.
+                    # The null model is a persistence marker added after the
+                    # provider produced the call. Do not replay persistence
+                    # metadata as provider-authored tool arguments.
+                    forwarded_arguments.pop("model", None)
                     forwarded_arguments.pop("reasoning_effort", None)
                     item["arguments"] = _dump_arguments_like(
                         raw_arguments,
                         forwarded_arguments,
                     )
+                    changed = True
             worker_calls[call_id] = requested
             continue
         if (
@@ -8438,6 +8452,7 @@ def _validate_worker_binding_history(
             error_code=WORKER_BINDING_ERROR_CODE,
             classification="missing_readback",
         )
+    return changed
 
 
 def _normalize_third_party_tool_call(
@@ -11616,7 +11631,8 @@ def compatible_request_body(
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
     if not raw_provider_probe and not collaboration_v2:
-        _validate_worker_binding_history(payload)
+        if _validate_worker_binding_history(payload):
+            changed = True
     bounded_tool_search_terminal_calls = (
         {}
         if raw_provider_probe

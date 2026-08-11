@@ -81,8 +81,7 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
                                     {
                                         "agent_type": "worker",
                                         "message": "do work",
-                                        "model": "glm-5.2",
-                                        "reasoning_effort": "high",
+                                        "model": None,
                                         "_codexhub_worker_requested_binding": sidecar,
                                     }
                                 ),
