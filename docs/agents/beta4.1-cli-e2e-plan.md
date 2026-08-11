@@ -35,7 +35,7 @@ previous turn's model before it sends the current-model turn.
 | `cli-restart-continuity` | real CLI process | stop and restart the CLI/Gateway while retaining the isolated home, then resume | Same Session identity, prior history, worker state, and selected version are read back after restart |
 | `external-v1-boundary` | real CLI request to an external V1 route | capture the unmodified V1 declaration emitted by CLI `0.146.1` with the default role | The exact default-role schema and the full `agent_type` schema are accepted; any other schema difference is rejected |
 | `stable-tool-alias-replay` | external runtime compatibility | privately capture one unmodified CLI request, then transform the exact same bytes twice with fresh request contexts on the same route | Caller and upstream input hashes prove identical input; upstream body hashes and adapted aliases are identical; `prompt_cache_key` is preserved |
-| `deferred-core-bounded` | external `deferred_core` route | capture a real request containing the 249-child namespace surface and pair it with the checked-in zero-child fixture | Both final surfaces contain the established eight-tool bounded core; no namespace-child alias survives; the eager and Official controls retain their existing behavior |
+| `deferred-core-bounded` | external `deferred_core` route | capture a real request containing the 249-child namespace surface and pair it with the checked-in zero-child fixture | Both final surfaces retain the route's existing bounded core cardinality; no namespace-child alias survives; the eager and Official controls retain their existing behavior |
 
 The `legacy-session-resume` case is the regression gate for #418. The
 `new-binding-integrity` case must prove that the compatibility exception is
@@ -73,8 +73,8 @@ its stable hash and bounded structural counts.
      and `prompt_cache_key`; any request-scoped difference is a failure.
    - For the real 249-child request, record only the caller namespace/child
      counts and final upstream tool count. Run the checked-in zero-child
-     fixture separately and require the same established eight-tool bounded
-     core with no child alias; do not edit the captured CLI request.
+     fixture separately and require the same route-specific bounded core
+     cardinality with no child alias; do not edit the captured CLI request.
    - Run the deterministic eager and Official controls from the candidate test
      suite. Eager must still expand its namespace children; Official must keep
      the native namespace and must not introduce a `__codexhub_*` alias.
@@ -141,7 +141,7 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all nine cases pass with the exact CLI version and candidate SHA;
+- all ten cases pass with the exact CLI version and candidate SHA;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
 - repeated caller hashes and upstream hashes match for #424, and the 249-child

@@ -94,7 +94,7 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual(state.closed_agent_ids, ["agent-1"])
         self.assertFalse(state.lifecycle_complete)
 
-    def test_resume_closed_agent_is_protocol_defect_signal(self):
+    def test_resume_closed_agent_reopens_for_wait(self):
         state = reduce_protocol_events(
             [
                 ProtocolEvent.spawn(call_id="call_spawn", agent_id="agent-1", prompt="return ok"),
@@ -104,8 +104,11 @@ class SubagentProtocolTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual([violation.code for violation in state.violations], ["resume_closed_agent"])
-        self.assertEqual(state.closed_agent_ids, ["agent-1"])
+        self.assertFalse(state.violations)
+        self.assertEqual(state.open_agent_ids, ["agent-1"])
+        self.assertEqual(state.waitable_agent_ids, ["agent-1"])
+        self.assertEqual(state.closed_agent_ids, [])
+        self.assertEqual(state.agents["agent-1"].result, "")
         self.assertFalse(state.lifecycle_complete)
 
     def test_close_before_successful_wait_is_violation(self):
