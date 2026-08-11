@@ -157,6 +157,75 @@ class SubagentProtocolTests(unittest.TestCase):
         self.assertEqual(state.closeable_agent_ids, ["agent-1"])
         self.assertEqual(state.agents["agent-1"].result, "ok")
 
+    def test_protocol_parser_accepts_frozen_resume_id_argument(self):
+        from subagent_protocol import protocol_state_from_input_items
+
+        state = protocol_state_from_input_items(
+            [
+                call("call_spawn", "spawn_agent", {"message": "return ok"}),
+                output("call_spawn", {"agent_id": "agent-1"}),
+                call("call_resume", "resume_agent", {"id": "agent-1"}),
+                output("call_resume", {"agent_id": "agent-1"}),
+            ]
+        )
+
+        self.assertFalse(state.violations)
+        self.assertEqual(state.open_agent_ids, ["agent-1"])
+
+    def test_protocol_parser_accepts_frozen_resume_id_in_text_transcript(self):
+        from subagent_protocol import protocol_state_from_input_items
+
+        state = protocol_state_from_input_items(
+            [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Previous real Codex native multi_agent_v1.spawn_agent call transcript\n"
+                        "call_id: call_spawn\n"
+                        "arguments:\n"
+                        '{"message":"return ok"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Codex native multi_agent_v1.spawn_agent result\n"
+                        "call_id: call_spawn\n"
+                        "status: succeeded\n"
+                        "agent_id: agent-1\n"
+                        "raw_output:\n"
+                        '{"agent_id":"agent-1"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Previous real Codex native multi_agent_v1.resume_agent call transcript\n"
+                        "call_id: call_resume\n"
+                        "arguments:\n"
+                        '{"id":"agent-1"}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": (
+                        "Codex native multi_agent_v1.resume_agent result\n"
+                        "call_id: call_resume\n"
+                        "status: succeeded\n"
+                        "raw_output:\n"
+                        '{"agent_id":"agent-1"}'
+                    ),
+                },
+            ]
+        )
+
+        self.assertFalse(state.violations)
+        self.assertEqual(state.open_agent_ids, ["agent-1"])
+
     def test_wait_unknown_agent_is_protocol_defect_signal(self):
         state = reduce_protocol_events(
             [ProtocolEvent.wait(call_id="call_wait", targets=("missing",), results={"missing": "ok"})]
