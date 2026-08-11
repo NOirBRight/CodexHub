@@ -917,6 +917,36 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
     assert payload["tools"] == tools
 
 
+def test_deferred_core_v1_telemetry_uses_removed_surface_without_request_context():
+    collaboration = _collaboration_namespace(COLLABORATION_V1)
+    vendor = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request([collaboration, vendor]),
+                {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
+            )
+        )
+
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V1]) + 1
+    assert not any("child_" in tool.get("name", "") for tool in payload["tools"])
+    surface_event = next(
+        call.kwargs
+        for call in write_proxy_event.call_args_list
+        if call.args and call.args[0] == "external_tool_surface_prepared"
+    )
+    assert surface_event["namespace_declaration_count"] == 2
+    assert surface_event["deferred_tool_count"] == 249
+
+
 def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_namespaces():
     collaboration = _collaboration_namespace(COLLABORATION_V2)
     vendor = {

@@ -6179,32 +6179,76 @@ def _is_raw_namespace_schema(value: Any) -> bool:
     return isinstance(value, Mapping) and value.get("type") == "namespace"
 
 
-def _deferred_namespace_surface_counts(tools: list[Any]) -> tuple[int, int]:
+def _valid_namespace_function_names(value: Any) -> tuple[str, tuple[str, ...]] | None:
+    if not _is_raw_namespace_schema(value):
+        return None
+    namespace_name = _tool_schema_name(value)
+    namespace_tools = value.get("tools")
+    if not isinstance(namespace_name, str) or not namespace_name or not isinstance(namespace_tools, list):
+        return None
+    child_names: list[str] = []
+    for tool in namespace_tools:
+        tool_name = _tool_schema_name(tool)
+        if (
+            not isinstance(tool, Mapping)
+            or tool.get("type") != "function"
+            or not isinstance(tool_name, str)
+            or not tool_name
+        ):
+            return None
+        child_names.append(tool_name)
+    if not child_names or len(set(child_names)) != len(child_names):
+        return None
+    return namespace_name, tuple(child_names)
+
+
+def _deferred_namespace_surface_counts(
+    source_tools: list[Any],
+    final_tools: list[Any],
+) -> tuple[int, int]:
+    final_function_names = {
+        name
+        for tool in final_tools
+        if isinstance(tool, Mapping) and tool.get("type") == "function"
+        for name in (_tool_schema_name(tool),)
+        if name is not None
+    }
+    final_qualified_functions = {
+        (tool.get("namespace"), name)
+        for tool in final_tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("namespace"), str)
+        for name in (_tool_schema_name(tool),)
+        if name is not None
+    }
+    final_namespace_children: dict[str, set[str]] = {}
+    for tool in final_tools:
+        details = _valid_namespace_function_names(tool)
+        if details is None:
+            continue
+        namespace_name, child_names = details
+        final_namespace_children.setdefault(namespace_name, set()).update(child_names)
+
     namespace_count = 0
     child_count = 0
-    for namespace in tools:
-        if not _is_raw_namespace_schema(namespace):
+    for namespace in source_tools:
+        details = _valid_namespace_function_names(namespace)
+        if details is None:
             continue
-        namespace_name = _tool_schema_name(namespace)
-        namespace_tools = namespace.get("tools")
-        if not isinstance(namespace_name, str) or not namespace_name or not isinstance(namespace_tools, list):
-            continue
-        child_names: list[str] = []
-        for tool in namespace_tools:
-            tool_name = _tool_schema_name(tool)
+        namespace_name, child_names = details
+        surviving_namespace_children = final_namespace_children.get(namespace_name, set())
+        if not set(child_names).issubset(surviving_namespace_children):
+            namespace_count += 1
+        for child_name in child_names:
             if (
-                not isinstance(tool, Mapping)
-                or tool.get("type") != "function"
-                or not isinstance(tool_name, str)
-                or not tool_name
+                child_name in surviving_namespace_children
+                or (namespace_name, child_name) in final_qualified_functions
+                or f"{namespace_name}__{child_name}" in final_function_names
+                or f"{namespace_name}.{child_name}" in final_function_names
             ):
-                child_names = []
-                break
-            child_names.append(tool_name)
-        if not child_names or len(set(child_names)) != len(child_names):
-            continue
-        namespace_count += 1
-        child_count += len(child_names)
+                continue
+            child_count += 1
     return namespace_count, child_count
 
 
@@ -7066,6 +7110,7 @@ def _inject_explicit_codex_tools(
     strip_namespace_tools: bool = True,
     strip_all_namespace_tools: bool = False,
     include_flattened_namespace_tools: bool = True,
+    deferred_core_surface: bool = False,
     tool_surface_counts: dict[str, int] | None = None,
     tool_surface_source_tools: list[Any] | None = None,
     open_agent_ids: list[str] | None = None,
@@ -7090,7 +7135,7 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
-    surface_source_tools = tool_surface_source_tools if tool_surface_source_tools is not None else tools
+    surface_source_tools = list(tool_surface_source_tools if tool_surface_source_tools is not None else tools)
     caller_non_namespace_tools = tuple(
         tool
         for tool in surface_source_tools
@@ -7251,6 +7296,11 @@ def _inject_explicit_codex_tools(
             eager_tool_count += 1
         changed = True
     if tool_surface_counts is not None:
+        if deferred_core_surface:
+            namespace_declaration_count, deferred_tool_count = _deferred_namespace_surface_counts(
+                surface_source_tools,
+                tools,
+            )
         surviving_tool_ids = {id(tool) for tool in tools}
         tool_surface_counts.update(
             {
@@ -11861,7 +11911,7 @@ def compatible_request_body(
                 changed = True
             if collaboration_v2:
                 namespace_declaration_count, deferred_tool_count = (
-                    _deferred_namespace_surface_counts(deferred_namespace_tools)
+                    _deferred_namespace_surface_counts(deferred_namespace_tools, retained_tools)
                 )
                 retained_tool_ids = {id(tool) for tool in retained_tools}
                 pending_tool_surface_event = {
@@ -12413,6 +12463,7 @@ def compatible_request_body(
                 include_flattened_namespace_tools=(
                     runtime_tool_plan is None and tool_surface_strategy == "eager"
                 ),
+                deferred_core_surface=tool_surface_strategy == "deferred_core",
                 tool_surface_counts=tool_surface_counts,
                 tool_surface_source_tools=tool_surface_source_tools,
                 open_agent_ids=open_agent_ids,
@@ -12427,12 +12478,7 @@ def compatible_request_body(
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
             if tool_surface_counts:
-                if tool_surface_strategy == "deferred_core":
-                    (
-                        tool_surface_counts["namespace_declaration_count"],
-                        tool_surface_counts["deferred_tool_count"],
-                    ) = _deferred_namespace_surface_counts(tool_surface_source_tools or [])
-                elif runtime_tool_plan is not None and tool_surface_strategy == "eager":
+                if runtime_tool_plan is not None and tool_surface_strategy == "eager":
                     tool_surface_counts["eager_tool_count"] = sum(
                         len(entry.aliases)
                         for entry in runtime_tool_plan.entries

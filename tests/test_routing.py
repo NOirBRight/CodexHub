@@ -20803,6 +20803,14 @@ Execution constraints:
                 self.assertIn("status: workflow_plan_read_required", transcript)
                 self.assertEqual(payload["tool_choice"]["type"], "function")
                 self.assertIn(payload["tool_choice"]["name"], node_repl_aliases)
+                if case != "chat-eager":
+                    surface_event = next(
+                        call.kwargs
+                        for call in reversed(self.write_proxy_event.call_args_list)
+                        if call.args and call.args[0] == "external_tool_surface_prepared"
+                    )
+                    self.assertEqual(surface_event["namespace_declaration_count"], 1)
+                    self.assertEqual(surface_event["deferred_tool_count"], 1)
 
     def test_chat_tools_workflow_after_plan_read_hides_node_repl_and_other_mcp_tools(self):
         workflow_prompt = """
