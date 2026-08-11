@@ -176,6 +176,9 @@ OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
 OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
 _OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
+_OFFICIAL_REQUEST_WRITE_TIMEOUT_ATTRIBUTE = "_codexhub_request_write_timeout"
+_OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE = "_codexhub_request_write_active"
+_TRANSPORT_PHASE_ATTRIBUTE = "_codexhub_transport_phase"
 
 
 def _reset_official_attempt_connection_disposition() -> None:
@@ -232,9 +235,48 @@ class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
         if self.sock is not None:
             _configure_official_windows_keepalive(self.sock)
 
+    def endheaders(self, message_body: Any = None, *, encode_chunked: bool = False) -> None:
+        request_write_timeout = getattr(self, _OFFICIAL_REQUEST_WRITE_TIMEOUT_ATTRIBUTE, None)
+        if isinstance(request_write_timeout, (int, float)) and request_write_timeout > 0 and self.sock is not None:
+            # urllib3 sets the socket to the connect timeout immediately before
+            # calling HTTPConnection.request(). Once the connection is ready,
+            # headers and the body need the request/pre-response budget instead.
+            self.sock.settimeout(request_write_timeout)
+        setattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, True)
+        super().endheaders(message_body=message_body, encode_chunked=encode_chunked)
+
+    def send(self, data: Any) -> None:
+        try:
+            super().send(data)
+        except TimeoutError as exc:
+            if getattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, False):
+                try:
+                    setattr(exc, _TRANSPORT_PHASE_ATTRIBUTE, "request_write")
+                except Exception:
+                    pass
+            raise
+
 
 class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     ConnectionCls = _OfficialHTTPSConnection
+
+    def _make_request(self, conn: Any, *args: Any, **kwargs: Any) -> Any:
+        timeout = kwargs.get("timeout")
+        request_write_timeout = getattr(timeout, "read_timeout", timeout)
+        if not isinstance(request_write_timeout, (int, float)) or request_write_timeout <= 0:
+            request_write_timeout = None
+        try:
+            setattr(conn, _OFFICIAL_REQUEST_WRITE_TIMEOUT_ATTRIBUTE, request_write_timeout)
+            return super()._make_request(conn, *args, **kwargs)
+        finally:
+            try:
+                delattr(conn, _OFFICIAL_REQUEST_WRITE_TIMEOUT_ATTRIBUTE)
+            except AttributeError:
+                pass
+            try:
+                delattr(conn, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE)
+            except AttributeError:
+                pass
 
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
@@ -350,6 +392,35 @@ def _connection_disposition(connection: Any) -> str:
     return disposition if disposition in {"new", "reused"} else "unobserved"
 
 
+def _explicit_transport_phase(exc: BaseException | None) -> str | None:
+    if exc is None:
+        return None
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if not isinstance(candidate, BaseException) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        try:
+            phase = getattr(candidate, _TRANSPORT_PHASE_ATTRIBUTE, None)
+        except Exception:
+            phase = None
+        if phase in {"dns", "tcp_connect", "tls", "request_write"}:
+            return phase
+        pending.extend(
+            value
+            for value in (
+                getattr(candidate, "reason", None),
+                candidate.__cause__,
+                candidate.__context__,
+                *candidate.args,
+            )
+            if isinstance(value, BaseException)
+        )
+    return None
+
+
 def _official_proxy_url(url: str) -> str | None:
     parsed = urlsplit(url)
     if parsed.hostname:
@@ -446,6 +517,12 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
         )
     except urllib3.exceptions.HTTPError as exc:
         translated = _stdlib_transport_error(exc)
+        transport_phase = _explicit_transport_phase(exc)
+        if transport_phase is not None:
+            try:
+                setattr(translated, _TRANSPORT_PHASE_ATTRIBUTE, transport_phase)
+            except Exception:
+                pass
         disposition = _official_attempt_connection_disposition()
         if disposition != "unobserved":
             try:
@@ -13563,6 +13640,9 @@ def transport_failure_phase(exc: BaseException | None) -> str | None:
     """Best-effort phase label for failures before an upstream response is relayed."""
     if exc is None:
         return None
+    explicit_phase = _explicit_transport_phase(exc)
+    if explicit_phase is not None:
+        return explicit_phase
     reason = getattr(exc, "reason", None)
     if isinstance(exc, URLError) and isinstance(reason, BaseException):
         nested = transport_failure_phase(reason)
@@ -13606,6 +13686,9 @@ def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
     """
     if exc is None:
         return None
+    explicit_phase = _explicit_transport_phase(exc)
+    if explicit_phase is not None:
+        return explicit_phase
     if isinstance(exc, (UpstreamStreamIncompleteError, UpstreamStreamErrorEvent)):
         return "stream_body"
     if isinstance(exc, HTTPError):
