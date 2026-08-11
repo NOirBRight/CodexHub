@@ -13,6 +13,7 @@ import {
   normalizedEndpointFormat,
   normalizeEndpointFormats,
   normalizeProviderEndpointSelection,
+  probeSucceeded,
   probeAvailableFormats,
   toolProtocolLabel,
   upstreamFormatLabel,
@@ -88,7 +89,7 @@ export function ProviderDetail({
 
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState(probeResult.model_required ? "error" : "success");
+      setEndpointTestState(probeSucceeded(probeResult) ? "success" : "error");
     }
   }, [probeResult]);
 
@@ -132,7 +133,7 @@ export function ProviderDetail({
     if (result) {
       setDraft((current) => applyProviderProbeResult(current, result));
     }
-    setEndpointTestState(result ? "success" : "error");
+    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
   }
 
   async function testModel(model: Model) {
@@ -280,7 +281,7 @@ export function AddProviderPanel({
 
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState(probeResult.model_required ? "error" : "success");
+      setEndpointTestState(probeSucceeded(probeResult) ? "success" : "error");
     }
   }, [probeResult]);
 
@@ -308,7 +309,7 @@ export function AddProviderPanel({
     if (result) {
       onFormChange(applyAddProviderProbeResult(form, result));
     }
-    setEndpointTestState(result ? "success" : "error");
+    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
   }
 
   async function testModel(model: Model) {

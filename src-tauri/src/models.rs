@@ -554,6 +554,57 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
     Ok(result)
 }
 
+/// Return the managed catalog baseline for each visible Official model that
+/// supports the Collaboration selector. The generated catalog carries the
+/// effective value after applying a user override, so the UI needs this
+/// separate readback to keep the `(Default)` marker tied to the catalog.
+pub fn list_official_multi_agent_baselines() -> Result<HashMap<String, String>, String> {
+    let paths = ModelPaths::runtime()?;
+    let managed_baseline_exists = paths.managed_catalog_baseline_path().exists();
+    let explicit_overrides = list_official_multi_agent_overrides()?;
+    // Read the published catalog without applying the user-owned override
+    // sidecar.  If there is no managed baseline, use the raw row only when
+    // there is no explicit override; otherwise fall back to the pinned
+    // baseline rather than making an effective override look like a default.
+    let catalog_path = paths.existing_generated_catalog_path();
+    let visible_models = if catalog_path.exists() {
+        read_catalog_models(&catalog_path)?
+    } else {
+        Vec::new()
+    };
+    let mut result = HashMap::new();
+    for model in visible_models {
+        if model.source_kind.as_deref() != Some("official") || !model_is_catalog_visible(&model) {
+            continue;
+        }
+        let canonical = model
+            .id
+            .strip_prefix("openai/")
+            .unwrap_or(model.id.as_str());
+        if qualified_official_code_mode_multi_agent_version(canonical).is_none()
+            || !model_has_exact_official_upstream(&model, canonical)
+        {
+            continue;
+        }
+        let baseline = read_managed_catalog_multi_agent_version(&paths, canonical)
+            .or_else(|| {
+                if managed_baseline_exists || explicit_overrides.contains_key(canonical) {
+                    pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string)
+                } else {
+                    model
+                        .multi_agent_version
+                        .clone()
+                        .filter(|value| *value == "v1" || *value == "v2")
+                }
+            })
+            .or_else(|| pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string));
+        if let Some(baseline) = baseline {
+            result.insert(canonical.to_string(), baseline);
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 fn refresh_official_models_from_endpoint(
     endpoint: &str,
@@ -3162,7 +3213,8 @@ mod tests {
     use super::{
         desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
-        list_models, list_official_multi_agent_overrides, load_json_file,
+        list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
+        load_json_file,
         merge_metadata_with_overrides, ollama_show_endpoint,
         provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
@@ -4292,6 +4344,158 @@ for line in sys.stdin:
         assert_eq!(
             valid
                 .expect("exact upstream model should be listed")
+                .get("gpt-5.6-luna")
+                .map(String::as_str),
+            Some("v2")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_official_multi_agent_baselines_reads_managed_value_behind_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-catalog-multi-agent-baseline");
+        let codex_home = root.join("codex-home");
+        let paths = test_paths(&root);
+        let catalog_path = paths.generated_catalog_path();
+        let baseline_path = paths.managed_catalog_baseline_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "multi_agent_version": "v2",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &baseline_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "multi_agent_version": "v1",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let baselines = list_official_multi_agent_baselines();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            baselines
+                .expect("managed catalog baseline should be readable")
+                .get("gpt-5.6-luna")
+                .map(String::as_str),
+            Some("v1")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_official_multi_agent_baselines_does_not_treat_effective_override_as_default_when_managed_baseline_is_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-catalog-multi-agent-baseline-missing");
+        let codex_home = root.join("codex-home");
+        let paths = test_paths(&root);
+        let catalog_path = paths.generated_catalog_path();
+        let override_path = paths.catalog_overrides_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "multi_agent_version": "v2",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &override_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "overrides": [{
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-5.6-luna",
+                    "fields": {"multi_agent_version": "v1"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let baselines = list_official_multi_agent_baselines();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            baselines
+                .expect("catalog baseline should be readable")
+                .get("gpt-5.6-luna")
+                .map(String::as_str),
+            Some("v1")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_official_multi_agent_baselines_uses_catalog_value_when_no_managed_baseline_or_override_exists() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        let root = temp_root("list-catalog-multi-agent-baseline-no-override");
+        let codex_home = root.join("codex-home");
+        let paths = test_paths(&root);
+        let catalog_path = paths.generated_catalog_path();
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-luna",
+                    "multi_agent_version": "v2",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "upstream_model": "gpt-5.6-luna"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let baselines = list_official_multi_agent_baselines();
+
+        restore_env("CODEX_HOME", previous);
+        assert_eq!(
+            baselines
+                .expect("catalog baseline should be readable")
                 .get("gpt-5.6-luna")
                 .map(String::as_str),
             Some("v2")

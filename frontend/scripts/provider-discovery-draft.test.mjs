@@ -5,6 +5,7 @@ import ts from "typescript";
 
 const actionsPath = new URL("../src/hooks/useProviderCatalogActions.ts", import.meta.url);
 const editorPath = new URL("../src/components/providers/ProviderEditor.tsx", import.meta.url);
+const endpointPath = new URL("../src/lib/providerEndpoint.ts", import.meta.url);
 const formatPath = new URL("../src/lib/format.ts", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 
@@ -58,6 +59,30 @@ function makeModel(overrides = {}) {
     enabled: true,
     ...overrides,
   };
+}
+
+async function readEndpointModule() {
+  const source = (await readFile(endpointPath, "utf8"))
+    .replace(/^import i18n from "\.\.\/i18n";\r?\n/m, "const i18n = { t: () => \"\" };\n")
+    .replace(/^import \{ messageFromError \} from "\.\/tauri";\r?\n/m, "const messageFromError = (error) => String(error);\n")
+    .replace(/export function/g, "function");
+  const jsOutput = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      strict: false,
+    },
+  }).outputText;
+  const moduleExports = {};
+  const wrappedModule = new Function(
+    "exports",
+    jsOutput +
+      "\nexports.applyProviderProbeResult = applyProviderProbeResult;" +
+      " exports.applyAddProviderProbeResult = applyAddProviderProbeResult;" +
+      " exports.probeSucceeded = probeSucceeded;",
+  );
+  wrappedModule(moduleExports);
+  return moduleExports;
 }
 
 test("mergeDiscoveredModels preserves manual models absent from discovery", async () => {
@@ -145,5 +170,66 @@ test("ProviderDetail keeps draft models in sync with persisted provider models",
     source,
     /useEffect\(\(\)\s*=>\s*\{\s*setDraft\(\(current\)\s*=>\s*\{/,
     "should use an effect to update the draft",
+  );
+});
+
+test("model-required probe preserves existing endpoint capabilities", async () => {
+  const { applyAddProviderProbeResult, applyProviderProbeResult, probeSucceeded } = await readEndpointModule();
+  const provider = {
+    id: "provider-a",
+    name: "Provider A",
+    base_url: "https://example.test/v1",
+    api_key: "secret",
+    upstream_format: "chat_completions",
+    available_upstream_formats: ["chat_completions"],
+    tool_protocol: "chat_tools",
+    enabled: true,
+    models: [],
+  };
+  const form = { ...provider, id: "", name: "" };
+  const modelRequired = {
+    base_url: provider.base_url,
+    model: null,
+    model_required: true,
+    models_ok: false,
+    responses_text_ok: false,
+    responses_tool_ok: false,
+    responses_tool_stream_ok: false,
+    chat_text_ok: false,
+    chat_tool_ok: false,
+    chat_tool_stream_ok: false,
+    chat_tool_history_ok: false,
+    anthropic_text_ok: false,
+    recommended_format: "auto",
+    recommended_tool_protocol: "none",
+    notes: ["No model is available for POST probes."],
+  };
+
+  assert.equal(probeSucceeded(modelRequired), false);
+  assert.deepEqual(applyProviderProbeResult(provider, modelRequired), provider);
+  assert.deepEqual(applyAddProviderProbeResult(form, modelRequired), form);
+});
+
+test("model-required probe cannot be marked successful by a suggested format", async () => {
+  const { probeSucceeded } = await readEndpointModule();
+  assert.equal(
+    probeSucceeded({
+      base_url: "https://example.test/v1",
+      model: null,
+      model_required: true,
+      models_ok: false,
+      responses_text_ok: false,
+      responses_tool_ok: false,
+      responses_tool_stream_ok: false,
+      chat_text_ok: false,
+      chat_tool_ok: false,
+      chat_tool_stream_ok: false,
+      chat_tool_history_ok: false,
+      anthropic_text_ok: false,
+      recommended_format: "responses",
+      recommended_tool_protocol: "responses_structured",
+      notes: [],
+    }),
+    false,
   );
 });

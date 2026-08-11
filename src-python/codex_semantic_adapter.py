@@ -342,7 +342,9 @@ def synthesize_effective_worker_binding_readback(
     if "effective_binding" in readback:
         return readback
     # Require the minimum fields that identify a successful native spawn.
-    if not isinstance(readback.get("agent_id"), str) or not isinstance(readback.get("nickname"), str):
+    if not isinstance(readback.get("agent_id"), str) or not (
+        readback.get("nickname") is None or isinstance(readback.get("nickname"), str)
+    ):
         return readback
     return {
         **readback,

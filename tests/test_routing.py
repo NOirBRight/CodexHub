@@ -25721,6 +25721,163 @@ Execution constraints:
                     surface="history",
                 )
 
+    def test_external_worker_binding_history_accepts_pre_sidecar_native_spawn(self):
+        call_id = "legacy-native-worker-call"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_native_worker",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+        }
+        spawn_output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+        }
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized = compatible_request_body(
+                self._worker_replay_body([spawn_call, spawn_output]),
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-next-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        normalized_input = json.loads(normalized)["input"]
+        self.assertEqual(normalized_input[0]["name"], "multi_agent_v1__spawn_agent")
+        self.assertNotIn("namespace", normalized_input[0])
+        self.assertNotIn("id", normalized_input[0])
+        self.assertNotIn("_codexhub_worker_requested_binding", normalized_input[0])
+        self.assertEqual(normalized_input[1], spawn_output)
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="legacy_native_spawn",
+        )
+
+    def test_external_worker_binding_history_accepts_pre_selector_native_spawn(self):
+        call_id = "legacy-native-no-selector"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_native_no_selector",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+        }
+        spawn_output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"agent_id": "legacy-agent", "nickname": None}),
+        }
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized = compatible_request_body(
+                self._worker_replay_body([spawn_call, spawn_output]),
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-next-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        self.assertEqual(json.loads(normalized)["input"][1], spawn_output)
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="legacy_native_spawn",
+        )
+
+    def test_external_worker_binding_history_accepts_nullable_native_nickname(self):
+        call_id = "legacy-native-null-nickname"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_native_null_nickname",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+        }
+        spawn_output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"agent_id": "legacy-agent", "nickname": None}),
+        }
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized = compatible_request_body(
+                self._worker_replay_body([spawn_call, spawn_output]),
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-next-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        self.assertEqual(json.loads(normalized)["input"][1], spawn_output)
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="legacy_native_spawn",
+        )
+
+    def test_external_worker_binding_history_does_not_legacy_accept_extended_spawn(self):
+        call_id = "legacy-extended-worker-call"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_extended_worker",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                    "model": "synthetic-model",
+                }
+            ),
+        }
+        self._assert_worker_history_rejected(
+            [
+                spawn_call,
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+                },
+            ],
+            "missing_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
     def _normalized_worker_spawn_call(self, *, model, reasoning, call_id="synthetic-bound-call"):
         event_context = {}
         compatible_request_body(

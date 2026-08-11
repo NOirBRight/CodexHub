@@ -143,6 +143,9 @@ function ProvidersPageImpl({
   const [officialCollaborationOverrides, setOfficialCollaborationOverrides] = useState<
     Record<string, "v1" | "v2">
   >({});
+  const [officialCollaborationBaselines, setOfficialCollaborationBaselines] = useState<
+    Readonly<Record<string, "v1" | "v2">>
+  >({});
   const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
@@ -210,17 +213,21 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     let active = true;
-    void api.listOfficialMultiAgentOverrides()
-      .then((overrides) => {
+    void Promise.all([
+      api.listOfficialMultiAgentOverrides(),
+      api.listOfficialMultiAgentBaselines(),
+    ])
+      .then(([overrides, baselines]) => {
         if (active) {
           setOfficialCollaborationOverrides(overrides);
+          setOfficialCollaborationBaselines(baselines);
         }
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, []);
+  }, [catalogModels]);
 
   useEffect(() => {
     const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
@@ -470,7 +477,7 @@ function ProvidersPageImpl({
       return;
     }
     officialModelRefreshStartedRef.current = true;
-    await refreshOfficialModels({ quiet: true });
+    await refreshOfficialModelsAndCollaborationState({ quiet: true });
   }
 
   async function primeOfficialOpenAIUsage() {
@@ -812,6 +819,24 @@ function ProvidersPageImpl({
     );
   }
 
+  async function refreshOfficialModelsAndCollaborationState(
+    options?: { quiet?: boolean; throwOnError?: boolean },
+  ) {
+    const refreshed = await refreshOfficialModels(options);
+    try {
+      const [overrides, baselines] = await Promise.all([
+        api.listOfficialMultiAgentOverrides(),
+        api.listOfficialMultiAgentBaselines(),
+      ]);
+      setOfficialCollaborationOverrides(overrides);
+      setOfficialCollaborationBaselines(baselines);
+    } catch {
+      // The catalog refresh remains usable when the optional selector readback
+      // is unavailable; the next page refresh will retry it.
+    }
+    return refreshed;
+  }
+
   async function deleteProvider(providerId: string) {
     const target = providers.find((provider) => provider.id === providerId);
     if (!target) {
@@ -895,6 +920,7 @@ function ProvidersPageImpl({
                 busy={busy}
                 gatewayContextById={gatewayContextById}
                 models={officialModels}
+                officialCollaborationBaselines={officialCollaborationBaselines}
                 officialCollaborationOverrides={officialCollaborationOverrides}
                 onOfficialCollaborationOverridesChanged={setOfficialCollaborationOverrides}
                 officialDisabledModels={officialDisabledModels}
@@ -903,7 +929,7 @@ function ProvidersPageImpl({
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
-                onRefresh={(options) => refreshOfficialModels(options)}
+                onRefresh={(options) => refreshOfficialModelsAndCollaborationState(options)}
                 onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
@@ -1462,6 +1488,7 @@ function OfficialDetail({
   dirty,
   gatewayContextById,
   models,
+  officialCollaborationBaselines,
   officialCollaborationOverrides,
   onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
@@ -1489,6 +1516,7 @@ function OfficialDetail({
   dirty: boolean;
   gatewayContextById: Map<string, number>;
   models: Model[];
+  officialCollaborationBaselines: Readonly<Record<string, "v1" | "v2">>;
   officialCollaborationOverrides: Readonly<Record<string, "v1" | "v2">>;
   onOfficialCollaborationOverridesChanged: (overrides: Record<string, "v1" | "v2">) => void;
   officialDisabledModels: string[];
@@ -1756,6 +1784,7 @@ function OfficialDetail({
         }
         interactionDisabled={authState !== "authorized"}
         models={models}
+        officialCollaborationBaselines={officialCollaborationBaselines}
         officialCollaborationOverrides={officialCollaborationOverrides}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
