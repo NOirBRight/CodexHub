@@ -24745,6 +24745,7 @@ Execution constraints:
             "_codexhub_worker_requested_binding",
             json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("reasoning_effort", json.loads(replay_call["arguments"]))
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
     def _chat_spawn_sse_response(
@@ -24886,6 +24887,7 @@ Execution constraints:
             "_codexhub_worker_requested_binding",
             json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("reasoning_effort", json.loads(replay_call["arguments"]))
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
     def test_responses_caller_chat_upstream_sse_relay_rejects_missing_selector_before_call(self):
@@ -26113,6 +26115,7 @@ Execution constraints:
             "_codexhub_worker_requested_binding",
             json.loads(replayed_call["arguments"]),
         )
+        self.assertNotIn("reasoning_effort", json.loads(replayed_call["arguments"]))
 
     def test_external_worker_binding_rejects_conflicting_nested_and_top_level_sidecars(self):
         spawn_call = self._normalized_worker_spawn_call(

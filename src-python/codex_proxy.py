@@ -8365,6 +8365,10 @@ def _validate_worker_binding_history(
                 if nested_sidecar_present and strict_arguments is not None:
                     forwarded_arguments = dict(strict_arguments)
                     forwarded_arguments.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                    # ``reasoning_effort`` is a persistence marker added after
+                    # the provider produced the call. Do not replay it as if
+                    # it were part of the provider's original tool arguments.
+                    forwarded_arguments.pop("reasoning_effort", None)
                     item["arguments"] = _dump_arguments_like(
                         raw_arguments,
                         forwarded_arguments,
