@@ -1020,6 +1020,25 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertTrue(decision.transparent_metered)
 
+    def test_route_plan_standard_external_v2_keeps_existing_transparent_behavior(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
     def test_route_plan_official_codex_app_v2_remains_passthrough(self):
         decision = codex_proxy.route_plan_for_request(
             {

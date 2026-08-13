@@ -15235,6 +15235,7 @@ def _route_supports_transparent_metering(
         not raw_provider_probe
         and collaboration_protocol == _COLLABORATION_V2
         and upstream_name != "official"
+        and provider_hint is not None
     ):
         return False
     if _is_codex_app_context(request_context):
@@ -19754,7 +19755,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     proxy_request_context,
                     surface="request",
                 )
-                if upstream_name != "official"
+                if provider_hint is not None and upstream_name != "official"
                 else None
             )
             route_plan = route_plan_for_request(
