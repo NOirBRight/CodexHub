@@ -15224,7 +15224,19 @@ def _route_supports_transparent_metering(
     wire_format_adapter: str,
     request_context: Mapping[str, str],
     provider_hint: str | None,
+    collaboration_protocol: str | None = None,
+    raw_provider_probe: bool = False,
 ) -> bool:
+    # Collaboration V2 is a Gateway-owned compatibility surface for
+    # provider-scoped third-party routes.  It must not be sent through the
+    # transparent client-runtime path, otherwise the provider sees the native
+    # namespace and no runtime tool adapter can translate calls back.
+    if (
+        not raw_provider_probe
+        and collaboration_protocol == _COLLABORATION_V2
+        and upstream_name != "official"
+    ):
+        return False
     if _is_codex_app_context(request_context):
         return False
     explicit_client = _has_explicit_third_party_client_identity(request_context)
@@ -15368,6 +15380,7 @@ def route_plan_for_request(
     *,
     inbound_format: str,
     provider_hint: str | None = None,
+    collaboration_protocol: str | None = None,
     model_requested: str | None = None,
     canonical_route_model: str | None = None,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
@@ -15466,6 +15479,8 @@ def route_plan_for_request(
         wire_format_adapter=wire_adapter,
         request_context=request_context,
         provider_hint=provider_hint,
+        collaboration_protocol=collaboration_protocol,
+        raw_provider_probe=raw_provider_probe,
     )
     if codex_app_external:
         behavior_profile = BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
@@ -19733,11 +19748,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )
+            collaboration_protocol = (
+                _resolve_collaboration_boundary(
+                    inbound_payload,
+                    proxy_request_context,
+                    surface="request",
+                )
+                if upstream_name != "official"
+                else None
+            )
             route_plan = route_plan_for_request(
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
                 provider_hint=provider_hint,
+                collaboration_protocol=collaboration_protocol,
                 model_requested=model_requested,
                 canonical_route_model=model,
                 request_kind=request_kind,

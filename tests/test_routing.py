@@ -966,6 +966,151 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
         self.assertEqual(decision.repair_policy, codex_proxy.REPAIR_NONE)
 
+    def test_route_plan_provider_scoped_v2_uses_gateway_compatibility_adapter(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+        )
+        self.assertFalse(decision.transparent_metered)
+        self.assertEqual(
+            decision.codex_compatibility_policy,
+            codex_proxy.CodexCompatibilityPolicy.CURRENT_COMPATIBILITY,
+        )
+        self.assertEqual(
+            decision.collaboration_backend,
+            codex_proxy.CollaborationBackend.GATEWAY_COMPATIBILITY,
+        )
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+        self.assertEqual(
+            decision.tool_exposure.effective_mode,
+            codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+        )
+
+    def test_route_plan_provider_scoped_v1_keeps_transparent_metering(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V1,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
+    def test_route_plan_official_codex_app_v2_remains_passthrough(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "official",
+                "upstream_format": "responses",
+                "upstream_model": "gpt-5.5",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="openai/gpt-5.5",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        self.assertFalse(decision.transparent_metered)
+        self.assertEqual(
+            decision.collaboration_backend,
+            codex_proxy.CollaborationBackend.CODEX_RUNTIME,
+        )
+
+    def test_provider_scoped_v2_handler_adapts_namespace_before_upstream(self):
+        body = json.dumps(
+            {
+                "model": "ollama-cloud/glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Use the collaboration tools.",
+                    }
+                ],
+                "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                "tool_choice": "auto",
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/ollama-cloud/responses",
+            body,
+            headers={"X-Codex-Client-Id": "zcode"},
+        )
+        upstream = {
+            "name": "ollama_cloud",
+            "provider_id": "ollama-cloud",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "base_url": "https://ollama.example.test/v1",
+            "auth": "ollama_api_key",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=upstream),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-v2","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+                provider_hint="ollama-cloud",
+            )
+
+        self.assertEqual(fake.status, 200)
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(
+            [tool["type"] for tool in forwarded["tools"]],
+            ["function"] * len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+        )
+        self.assertTrue(
+            all(tool["name"].startswith("__codexhub_ns_") for tool in forwarded["tools"])
+        )
+        self.assertNotIn("namespace", json.dumps(forwarded["tools"]))
+        request_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "runtime_tool_adapter_request"
+        ]
+        self.assertEqual(len(request_events), 1)
+        self.assertEqual(request_events[0]["upstream_namespace_count"], 0)
+        self.assertEqual(
+            request_events[0]["adapted_alias_count"],
+            len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+        )
+
     def test_route_plan_third_party_app_official_responses_is_transparent_metered(self):
         upstream = {"name": "official", "upstream_format": "responses"}
         decision = codex_proxy.route_plan_for_request(
