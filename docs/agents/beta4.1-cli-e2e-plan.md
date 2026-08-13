@@ -34,6 +34,7 @@ previous turn's model before it sends the current-model turn.
 | `new-binding-integrity` | Beta4.1 worker binding | create a new worker with model/reasoning binding, then replay unchanged and tampered histories | Signed binding/readback matches; model, reasoning, signature, missing, duplicate, and malformed cases fail closed |
 | `cli-restart-continuity` | real CLI process | stop and restart the CLI/Gateway while retaining the isolated home, then resume | Same Session identity, prior history, worker state, and selected version are read back after restart |
 | `external-v1-boundary` | real CLI request to an external V1 route | capture the unmodified V1 declaration emitted by CLI `0.146.1` with the default role | The exact default-role schema and the full `agent_type` schema are accepted; any other schema difference is rejected |
+| `external-v2-lifecycle` | real CLI request to `ollama-cloud/glm-5.2` through the Gateway adapter | prove a normal third-party structured-tool model can use V2 after CodexHub adapts the native namespace to ordinary function tools and maps calls back; run spawn/list, message, follow-up, wait, interrupt, wait, and final list readback | The captured upstream request contains six deterministic function aliases and no native namespace; mapped calls complete the exact client-owned V2 lifecycle with provider/model wire binding, stream/history, restart/readback, terminal/error replay, and the same target in the final `list_agents` state |
 | `stable-tool-alias-replay` | external runtime compatibility | privately capture one unmodified CLI request, then transform the exact same bytes twice with fresh request contexts on the same route | Caller and upstream input hashes prove identical input; upstream body hashes and adapted aliases are identical; `prompt_cache_key` is preserved |
 | `deferred-core-bounded` | external `deferred_core` route | capture a real request containing the 249-child namespace surface and pair it with the checked-in zero-child fixture | Both final surfaces retain the route's existing bounded core cardinality; no namespace-child alias survives; the eager and Official controls retain their existing behavior |
 
@@ -42,8 +43,12 @@ The `legacy-session-resume` case is the regression gate for #418. The
 limited to the exact old V1 shape; an extended or partially edited old call
 must still be rejected. `stable-tool-alias-replay` and
 `deferred-core-bounded` are the release regressions for #424 and #425. The
-private replay body may not be attached to an Issue or Release; publish only
-its stable hash and bounded structural counts.
+`external-v2-lifecycle` is a mandatory Beta4.1 release gate, not a deferred
+Beta4.2/Beta5 qualification. Its result is specific to
+`ollama-cloud/glm-5.2`; this is support **via the CodexHub Gateway adapter**,
+not native provider V2 capability. A catalog entry, the CLI's initial namespace,
+or a successful text-only response is not capability evidence. The private replay body may not be attached to an
+Issue or Release; publish only its stable hash and bounded structural counts.
 
 ## Execution phases
 
@@ -88,6 +93,20 @@ its stable hash and bounded structural counts.
    - Verify a later V1 selection with a new Session or explicit fork. Codex CLI
      `0.146.1` pins Collaboration V2 in existing Session state, so an in-place
      V2-to-V1 downgrade is not a product acceptance condition.
+   - Run `external-v2-lifecycle` against the real `ollama-cloud/glm-5.2`
+      route. Require the exact eight-call order
+      `spawn_agent`, `list_agents`, `send_message`, `followup_task`,
+      `wait_agent`, `interrupt_agent`, `wait_agent`, `list_agents`; pair each
+      call with its output and require the final readback to contain the same
+      target ID in a terminal state. Record stream/history continuity,
+      restart/readback, and both terminal and error replay outcomes. Any
+     Require the private upstream capture to show six unique deterministic
+     `__codexhub_ns_*` function aliases, zero native namespaces, paired adapted
+     call/output history, and Gateway-owned evidence of inverse mapping back to
+     the native V2 lifecycle observed by the CLI. The pre-Gateway capture alone
+     is not adapter evidence. Any missing phase, provider/model mismatch,
+     absent Gateway adapter evidence, or synthetic/legacy fixture use fails the
+     gate.
 
 5. **Historical recovery**
    - Start from the copied operator-supplied historical Session.
@@ -141,7 +160,8 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all ten cases pass with the exact CLI version and candidate SHA;
+- all listed Beta4.1 matrix gates pass with the exact CLI version and candidate
+  SHA, including the real `ollama-cloud/glm-5.2` external-v2 qualification;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
 - repeated caller hashes and upstream hashes match for #424, and the 249-child

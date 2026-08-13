@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from unittest import TestCase
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import codex_proxy
@@ -139,6 +139,37 @@ class _ReadTimeoutSocket(_SlowWriteSocket):
         return _ReadTimeoutFile()
 
 
+class _PooledReadFailure:
+    status = 200
+    reason = "OK"
+    headers: dict[str, str] = {}
+
+    def __init__(self, error: BaseException, connection: object) -> None:
+        self.connection = connection
+        self._error = error
+
+    def read(self, _amount: int | None = None) -> bytes:
+        raise self._error
+
+    def readline(self, _limit: int = -1) -> bytes:
+        raise self._error
+
+
+class _ErrorResponse:
+    status = 503
+    reason = "Service Unavailable"
+    headers: dict[str, str] = {}
+
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+
+    def close(self) -> None:
+        return None
+
+    def release_conn(self) -> None:
+        return None
+
+
 class _VirtualOfficialConnection(codex_proxy._OfficialHTTPSConnection):
     def __init__(
         self,
@@ -208,6 +239,36 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertGreaterEqual(sock.sent_bytes, 2 * 2 * 1024 * 1024)
         self.assertIn(0.05, sock.timeouts)
         self.assertIn(0.2, sock.timeouts)
+
+    def test_official_pool_checkout_marks_new_then_reused_connection(self) -> None:
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.01)
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "example.test", maxsize=1, block=True
+        )
+        pool.pool.get_nowait()
+        pool.pool.put_nowait(connection)
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            patch("urllib3.connectionpool.is_connection_dropped", return_value=False),
+        ):
+            first = pool._get_conn()
+            self.assertIs(first, connection)
+            self.assertEqual(
+                first._codexhub_diagnostic_connection_disposition, "new"
+            )
+            first.connect()
+            pool._put_conn(first)
+            clock.advance(0.01)
+            second = pool._get_conn()
+            self.assertIs(second, connection)
+            self.assertEqual(
+                second._codexhub_diagnostic_connection_disposition, "reused"
+            )
+
+        second.close()
 
     def test_official_write_budget_deducts_pool_wait_and_reports_request_write(self) -> None:
         tmpdir = self.enterContext(tempfile.TemporaryDirectory())
@@ -324,6 +385,90 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         self.assertIn(0.75, sock.timeouts)
         self.assertIsNone(codex_proxy._explicit_transport_phase(raised.exception))
+
+    def test_official_pooled_read_translation_preserves_phase_and_disposition(self) -> None:
+        inner = TimeoutError("simulated response body timeout")
+        wrapped = codex_proxy.urllib3.exceptions.ProtocolError("response body failed", inner)
+        setattr(wrapped, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        for method in ("read", "readline"):
+            with self.subTest(method=method):
+                pooled = codex_proxy._OfficialPooledResponse(
+                    _PooledReadFailure(wrapped, connection)
+                )
+                with self.assertRaises(TimeoutError) as raised:
+                    getattr(pooled, method)()
+
+                self.assertEqual(
+                    codex_proxy._explicit_transport_phase(raised.exception),
+                    "stream_body",
+                )
+                self.assertEqual(
+                    codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+                    "reused",
+                )
+
+    def test_official_pooled_direct_read_transport_error_preserves_metadata(self) -> None:
+        direct = TimeoutError("simulated direct response body timeout")
+        setattr(direct, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        pooled = codex_proxy._OfficialPooledResponse(
+            _PooledReadFailure(direct, connection)
+        )
+        with self.assertRaises(TimeoutError) as raised:
+            pooled.read()
+
+        self.assertEqual(
+            codex_proxy._explicit_transport_phase(raised.exception),
+            "stream_body",
+        )
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "reused",
+        )
+
+    def test_official_urlopen_direct_stdlib_transport_error_preserves_attempt_disposition(self) -> None:
+        class _DirectFailureManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                codex_proxy._set_official_attempt_connection_disposition("new")
+                raise TimeoutError("simulated direct request write timeout")
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_DirectFailureManager()),
+            self.assertRaises(TimeoutError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "new",
+        )
+
+    def test_official_http_error_preserves_pooled_connection_disposition(self) -> None:
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        class _ErrorManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                codex_proxy._set_official_attempt_connection_disposition("reused")
+                return _ErrorResponse(connection)
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_ErrorManager()),
+            self.assertRaises(HTTPError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "reused",
+        )
 
     def test_official_pool_exposes_new_and_reused_connection_dispositions(self) -> None:
         pool = object.__new__(codex_proxy._OfficialHTTPSConnectionPool)

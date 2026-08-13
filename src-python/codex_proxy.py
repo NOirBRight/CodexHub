@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 import tomllib
-from typing import Any, Callable, Mapping, NoReturn
+from typing import Any, Callable, Iterable, Mapping, NoReturn
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
@@ -333,8 +333,13 @@ class _OfficialPooledResponse:
     def read(self, amount: int | None = None) -> bytes:
         try:
             data = self._response.read(amount)
-        except urllib3.exceptions.HTTPError as exc:
+        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
             translated = _stdlib_transport_error(exc)
+            _propagate_transport_metadata(
+                translated,
+                source=exc,
+                disposition=self.connection_disposition,
+            )
             raise translated from exc
         if amount is None or data == b"":
             self._exhausted = True
@@ -343,8 +348,13 @@ class _OfficialPooledResponse:
     def readline(self, limit: int = -1) -> bytes:
         try:
             data = self._response.readline(limit)
-        except urllib3.exceptions.HTTPError as exc:
+        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
             translated = _stdlib_transport_error(exc)
+            _propagate_transport_metadata(
+                translated,
+                source=exc,
+                disposition=self.connection_disposition,
+            )
             raise translated from exc
         if data == b"":
             self._exhausted = True
@@ -404,13 +414,56 @@ def _connection_disposition(connection: Any) -> str:
 
 
 def _explicit_transport_phase(exc: BaseException | None) -> str | None:
-    if exc is None:
-        return None
-    try:
-        phase = getattr(exc, _TRANSPORT_PHASE_ATTRIBUTE, None)
-    except Exception:
-        return None
-    return phase if phase == "request_write" else None
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    supported = {
+        "request_write",
+        "response_headers",
+        "response_body",
+        "stream_body",
+    }
+    while pending:
+        candidate = pending.pop(0)
+        if not isinstance(candidate, BaseException) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        try:
+            phase = getattr(candidate, _TRANSPORT_PHASE_ATTRIBUTE, None)
+        except Exception:
+            phase = None
+        if phase in supported:
+            return phase
+        pending.extend(
+            value
+            for value in (
+                getattr(candidate, "reason", None),
+                candidate.__cause__,
+                candidate.__context__,
+                *candidate.args,
+            )
+            if isinstance(value, BaseException)
+        )
+    return None
+
+
+def _propagate_transport_metadata(
+    target: BaseException,
+    *,
+    source: BaseException | None = None,
+    disposition: str | None = None,
+) -> BaseException:
+    phase = _explicit_transport_phase(source)
+    if phase is not None:
+        try:
+            setattr(target, _TRANSPORT_PHASE_ATTRIBUTE, phase)
+        except Exception:
+            pass
+    if disposition in {"new", "reused"}:
+        try:
+            setattr(target, "_codexhub_diagnostic_connection_disposition", disposition)
+        except Exception:
+            pass
+    return target
 
 
 def _official_proxy_url(url: str) -> str | None:
@@ -507,27 +560,31 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
             timeout=urllib3.Timeout(connect=min(timeout, OFFICIAL_CONNECT_TIMEOUT_SECONDS), read=timeout),
             pool_timeout=timeout,
         )
-    except urllib3.exceptions.HTTPError as exc:
+    except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
         translated = _stdlib_transport_error(exc)
-        disposition = _official_attempt_connection_disposition()
-        if disposition != "unobserved":
-            try:
-                setattr(translated, "_codexhub_diagnostic_connection_disposition", disposition)
-            except Exception:
-                pass
+        _propagate_transport_metadata(
+            translated,
+            source=exc,
+            disposition=_official_attempt_connection_disposition(),
+        )
         raise translated from exc
     finally:
         _clear_official_attempt_state()
 
     pooled_response = _OfficialPooledResponse(response)
     if response.status >= 400:
-        raise HTTPError(
+        error = HTTPError(
             request.full_url,
             response.status,
             str(response.reason or "upstream error"),
             response.headers,
             pooled_response,
         )
+        _propagate_transport_metadata(
+            error,
+            disposition=pooled_response.connection_disposition,
+        )
+        raise error
     return pooled_response
 
 
@@ -6511,7 +6568,6 @@ def _runtime_tool_alias_token(
     selected_protocol: str,
     protocol_capabilities: RuntimeProtocolCapabilities,
     provider_hosted_capabilities: Any,
-    tool_choice: Any,
 ) -> str:
     capability_set = {
         "function_lifecycle": protocol_capabilities.function_lifecycle,
@@ -6524,7 +6580,6 @@ def _runtime_tool_alias_token(
         "accepts_custom_adapter": protocol_capabilities.accepts_custom_adapter,
         "accepts_tool_search_adapter": protocol_capabilities.accepts_tool_search_adapter,
         "max_tool_name_length": protocol_capabilities.max_tool_name_length,
-        "max_alias_attempts": protocol_capabilities.max_alias_attempts,
         "provider_hosted_kinds": sorted(
             RuntimeHostedCapabilityFacts.from_value(
                 provider_hosted_capabilities
@@ -6536,7 +6591,6 @@ def _runtime_tool_alias_token(
             "capability_set": capability_set,
             "declarations": declarations,
             "selected_protocol": selected_protocol,
-            "tool_choice": tool_choice,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -6611,7 +6665,6 @@ def _prepare_runtime_tool_compatibility(
                 selected_protocol=tool_protocol,
                 protocol_capabilities=protocol_capabilities,
                 provider_hosted_capabilities=provider_hosted_capabilities,
-                tool_choice=payload.get("tool_choice"),
             ),
         )
     except RuntimeToolCompatibilityError as exc:
@@ -6698,6 +6751,177 @@ def _runtime_tool_compatibility_stream_for_attempt(
         stream = plan.new_stream()
         event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream
     return plan, stream
+
+
+def _runtime_tool_adapter_alias_hash(aliases: Iterable[str]) -> str:
+    """Hash the ordered generated alias surface without logging tool names."""
+
+    encoded = json.dumps(
+        list(aliases),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_tool_adapter_request_snapshot(
+    plan: RuntimeToolCompatibilityPlan,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return bounded evidence for the body sent to the selected upstream.
+
+    This is intentionally computed after ``encode_payload``.  The capture
+    proxy used by the private E2E runner sits before this boundary and can
+    therefore only prove the CLI's native collaboration surface; these
+    fields are the Gateway's own proof of the final provider wire shape.
+    """
+
+    tools = payload.get("tools")
+    tool_values = tools if isinstance(tools, list) else []
+    aliases = [
+        tool.get("name")
+        for tool in tool_values
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("name"), str)
+        and plan.registry.record_for_alias(tool.get("name")) is not None
+    ]
+    namespace_count = sum(
+        1
+        for tool in tool_values
+        if isinstance(tool, Mapping) and tool.get("type") == "namespace"
+    )
+    namespace_child_count = sum(
+        len(tool.get("tools"))
+        for tool in tool_values
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and isinstance(tool.get("tools"), list)
+    )
+    history_call_ids: set[str] = set()
+    history_output_ids: set[str] = set()
+    alias_call_ids: set[str] = set()
+    history_call_count = 0
+    history_output_count = 0
+    input_items = payload.get("input")
+    for item in input_items if isinstance(input_items, list) else ():
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if item_type == "function_call" and plan.registry.record_for_alias(item.get("name")) is not None:
+            history_call_count += 1
+            if isinstance(call_id, str) and call_id:
+                history_call_ids.add(call_id)
+                alias_call_ids.add(call_id)
+        elif item_type == "function_call_output":
+            record = plan.registry.record_for_call(call_id)
+            if record is not None or (isinstance(call_id, str) and call_id in alias_call_ids):
+                history_output_count += 1
+                if isinstance(call_id, str) and call_id:
+                    history_output_ids.add(call_id)
+    return {
+        "adapted_alias_count": len(aliases),
+        "adapted_alias_unique_count": len(set(aliases)),
+        "adapted_alias_hash": _runtime_tool_adapter_alias_hash(aliases),
+        "upstream_function_tool_count": sum(
+            1
+            for tool in tool_values
+            if isinstance(tool, Mapping) and tool.get("type") == "function"
+        ),
+        "upstream_namespace_count": namespace_count,
+        "upstream_namespace_child_count": namespace_child_count,
+        "adapted_history_call_count": history_call_count,
+        "adapted_history_output_count": history_output_count,
+        "adapted_history_pair_count": len(history_call_ids & history_output_ids),
+    }
+
+
+def _runtime_tool_adapter_item_snapshot(
+    plan: RuntimeToolCompatibilityPlan,
+    value: Any,
+) -> dict[str, Any]:
+    """Count alias-owned response items without retaining their contents."""
+
+    items = value if isinstance(value, list) else [value]
+    call_count = 0
+    output_count = 0
+    alias_call_ids: set[str] = set()
+    aliases: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        candidates = [item]
+        nested = item.get("item")
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+        for candidate in candidates:
+            if candidate.get("type") == "function_call":
+                name = candidate.get("name")
+                if plan.registry.record_for_alias(name) is not None:
+                    call_count += 1
+                    call_id = candidate.get("call_id")
+                    if isinstance(call_id, str) and call_id:
+                        alias_call_ids.add(call_id)
+                    if isinstance(name, str):
+                        aliases.append(name)
+            elif candidate.get("type") == "function_call_output":
+                call_id = candidate.get("call_id")
+                if (
+                    plan.registry.record_for_call(call_id) is not None
+                    or (isinstance(call_id, str) and call_id in alias_call_ids)
+                ):
+                    output_count += 1
+    return {
+        "wire_alias_call_count": call_count,
+        "wire_alias_output_count": output_count,
+        "wire_alias_hash": _runtime_tool_adapter_alias_hash(aliases),
+    }
+
+
+def _write_runtime_tool_adapter_request_evidence(
+    plan: RuntimeToolCompatibilityPlan,
+    payload: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    snapshot = _runtime_tool_adapter_request_snapshot(plan, payload)
+    if not plan.has_adaptations and not (
+        snapshot["adapted_history_call_count"]
+        or snapshot["adapted_history_output_count"]
+    ):
+        return
+    _write_adapter_event(
+        event_context,
+        "runtime_tool_adapter_request",
+        surface="request",
+        outcome="adapted",
+        **snapshot,
+    )
+
+
+def _write_runtime_tool_adapter_response_evidence(
+    plan: RuntimeToolCompatibilityPlan,
+    wire_value: Any,
+    decoded_value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    snapshot = _runtime_tool_adapter_item_snapshot(plan, wire_value)
+    wire_count = snapshot["wire_alias_call_count"] + snapshot["wire_alias_output_count"]
+    if not wire_count or wire_value == decoded_value:
+        return
+    _write_adapter_event(
+        event_context,
+        "runtime_tool_adapter_response",
+        surface=surface,
+        outcome="inverse_mapped",
+        adapted_alias_hash=_runtime_tool_adapter_alias_hash(plan.aliases),
+        reverse_mapping_count=wire_count,
+        reverse_mapped_call_count=snapshot["wire_alias_call_count"],
+        reverse_mapped_output_count=snapshot["wire_alias_output_count"],
+        **snapshot,
+    )
 
 
 def _runtime_required_tool_diagnostics(
@@ -12633,6 +12857,12 @@ def compatible_request_body(
         runtime_tool_plan,
     ):
         changed = True
+    if runtime_tool_plan is not None:
+        _write_runtime_tool_adapter_request_evidence(
+            runtime_tool_plan,
+            payload,
+            event_context,
+        )
     if pending_tool_surface_event is not None:
         final_tools = payload.get("tools")
         write_proxy_event(
@@ -13411,10 +13641,18 @@ def compatible_response_body(
     changed = False
     runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
     if runtime_tool_plan is not None:
+        wire_output = payload.get("output")
         try:
             decoded_payload = runtime_tool_plan.decode_payload(payload)
         except RuntimeToolCompatibilityError as exc:
             _raise_runtime_tool_compatibility_error(exc)
+        _write_runtime_tool_adapter_response_evidence(
+            runtime_tool_plan,
+            wire_output if wire_output is not None else payload,
+            decoded_payload.get("output") if isinstance(decoded_payload, Mapping) else decoded_payload,
+            event_context,
+            surface="body",
+        )
         if decoded_payload != payload:
             payload = decoded_payload
             changed = True
@@ -13513,10 +13751,18 @@ def compatible_sse_line(
         event_context
     )
     if runtime_tool_plan is not None and stream_state is not None:
+        wire_event = payload
         try:
             decoded_events = stream_state.decode_events_for_event(payload)
         except RuntimeToolCompatibilityError as exc:
             _raise_runtime_tool_compatibility_error(exc)
+        _write_runtime_tool_adapter_response_evidence(
+            runtime_tool_plan,
+            wire_event,
+            decoded_events,
+            event_context,
+            surface="sse",
+        )
         if not decoded_events:
             return b""
         if len(decoded_events) > 1:

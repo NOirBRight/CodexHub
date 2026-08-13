@@ -331,6 +331,7 @@ class RequestScopedToolAliasRegistry:
         self._max_length = max_tool_name_length
         self._max_attempts = max_alias_attempts
         self._aliases: dict[str, AliasRecord] = {}
+        self._remapped_aliases: dict[str, str] = {}
         self._by_declaration: dict[tuple[int, int | None], str] = {}
         self._calls: dict[str, AliasRecord] = {}
         # ``max_alias_attempts`` bounds collision probing for one allocation;
@@ -362,6 +363,7 @@ class RequestScopedToolAliasRegistry:
             }.get(record.family, _CUSTOM_ALIAS_PREFIX)
             replacement = self._allocate(record, prefix)
             remapped[alias] = replacement
+            self._remapped_aliases[alias] = replacement
         return remapped
 
     def is_native_name(self, value: Any) -> bool:
@@ -460,6 +462,19 @@ class RequestScopedToolAliasRegistry:
     def record_for_alias(self, alias: Any) -> AliasRecord | None:
         return self._aliases.get(alias) if isinstance(alias, str) else None
 
+    def remapped_alias(self, alias: Any) -> str | None:
+        if not isinstance(alias, str):
+            return None
+        current = alias
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            replacement = self._remapped_aliases.get(current)
+            if replacement is None:
+                return current if current != alias else None
+            current = replacement
+        return None
+
     def alias_for(self, declaration_index: int, child_index: int | None = None) -> str | None:
         return self._by_declaration.get((declaration_index, child_index))
 
@@ -494,6 +509,7 @@ class RequestScopedToolAliasRegistry:
         attempt._max_length = self._max_length
         attempt._max_attempts = self._max_attempts
         attempt._aliases = dict(self._aliases)
+        attempt._remapped_aliases = dict(self._remapped_aliases)
         attempt._by_declaration = dict(self._by_declaration)
         attempt._calls = {}
         attempt._next_ordinals = dict(self._next_ordinals)
@@ -602,6 +618,17 @@ def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
     # second search entry with a different alias.
     if family == TOOL_SEARCH:
         return (family, "tool_search")
+    if family == NAMESPACE:
+        namespace, children, version, _valid = _namespace_details(_copy_mapping(declaration))
+        return (
+            family,
+            declaration.get("type"),
+            declaration.get("name"),
+            declaration.get("namespace"),
+            namespace,
+            version,
+            tuple(str(child.get("name")) for child in children),
+        )
     return (
         family,
         declaration.get("type"),
@@ -1521,7 +1548,10 @@ class ToolCompatibilityPlan:
             if isinstance(effective_tool_choice, Mapping)
             else None
         )
-        choice_is_known_alias = self.registry.record_for_alias(choice_name) is not None
+        choice_is_known_alias = (
+            self.registry.record_for_alias(choice_name) is not None
+            or self.registry.remapped_alias(choice_name) is not None
+        )
         if _has_explicit_named_tool_choice(effective_tool_choice) and not choice_is_known_alias and not any(
             _tool_choice_matches_declaration(declaration, effective_tool_choice)
             for declaration in final
@@ -1806,6 +1836,11 @@ class ToolCompatibilityPlan:
     def _encode_tool_choice(self, value: Any) -> tuple[Any, bool]:
         thawed = _thaw(value)
         if isinstance(thawed, str):
+            if self.registry.is_native_name(thawed):
+                return thawed, False
+            remapped = self.registry.remapped_alias(thawed)
+            if remapped is not None:
+                return remapped, True
             entry = self._entry_for_name(thawed)
             if entry is None and thawed == "tool_search":
                 candidates = [
@@ -1822,6 +1857,14 @@ class ToolCompatibilityPlan:
         result = dict(thawed)
         name = result.get("name")
         choice_type = result.get("type")
+        if self.registry.is_native_name(name) and result.get("namespace") is None:
+            return result, False
+        remapped = self.registry.remapped_alias(name)
+        if remapped is not None:
+            result["name"] = remapped
+            result["type"] = "function"
+            result.pop("namespace", None)
+            return result, True
         namespace_choice = name if isinstance(name, str) else result.get("namespace")
         if choice_type == "namespace" and isinstance(namespace_choice, str):
             candidates = [
@@ -2546,7 +2589,7 @@ class ToolCompatibilityPlan:
                     surface="history",
                 )
 
-            seen_history_item_ids: set[str] = set()
+            seen_history_item_ids: dict[str, bool] = {}
             seen_history_output_call_ids: set[str] = set()
             for item_index, item in enumerate(raw_input):
                 if not isinstance(item, Mapping):
@@ -2559,13 +2602,22 @@ class ToolCompatibilityPlan:
                 if not is_optional_omitted_hosted:
                     item_id = _item_identity(item)
                     if item_id is not None:
-                        if item_id in seen_history_item_ids:
+                        # Older Codex Desktop rollouts reused a synthetic id
+                        # such as ``message_1`` for ordinary message items.
+                        # Permit only that message-to-message duplicate; dual
+                        # IDs and collisions with every other history family
+                        # remain fail-closed.
+                        legacy_message = item_type == "message"
+                        prior_legacy_message = seen_history_item_ids.get(item_id)
+                        if prior_legacy_message is not None and not (
+                            prior_legacy_message and legacy_message
+                        ):
                             raise ToolCompatibilityError(
                                 "tool_compatibility_boundary",
                                 "duplicate_item_identity",
                                 surface="history",
                             )
-                        seen_history_item_ids.add(item_id)
+                        seen_history_item_ids.setdefault(item_id, legacy_message)
                 if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                     call_id = item.get("call_id")
                     if omitted_entry is None and (not isinstance(call_id, str) or not call_id):

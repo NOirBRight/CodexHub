@@ -132,6 +132,190 @@ def test_namespace_alias_round_trip_preserves_fields_and_ids() -> None:
     assert plan.entries[0].aliases == (alias,)
 
 
+def test_history_allows_legacy_duplicate_ids_on_ordinary_messages() -> None:
+    plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "keep", "parameters": {"type": "object"}}],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="legacy-duplicate-message-id",
+    )
+    history = [
+        {"type": "message", "id": "message_1", "role": "assistant", "content": "first"},
+        {"type": "message", "id": "message_1", "role": "assistant", "content": "second"},
+    ]
+
+    assert plan.encode_payload({"input": history})["input"] == history
+
+
+def test_history_rejects_conflicting_dual_ids_on_ordinary_messages() -> None:
+    plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "keep", "parameters": {"type": "object"}}],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="legacy-message-ambiguous-id",
+    )
+
+    with pytest.raises(ToolCompatibilityError) as raised:
+        plan.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "message",
+                        "id": "message_1",
+                        "item_id": "message_2",
+                        "role": "assistant",
+                        "content": "legacy",
+                    }
+                ]
+            }
+        )
+
+    assert raised.value.classification == "ambiguous_native_identity"
+
+
+@pytest.mark.parametrize("message_first", [True, False])
+def test_history_rejects_message_tool_item_identity_collisions(
+    message_first: bool,
+) -> None:
+    plan = build_tool_compatibility_plan(
+        [{"type": "function", "name": "keep", "parameters": {"type": "object"}}],
+        selected_protocol="responses_structured",
+        protocol_capabilities=ProtocolCapabilities.responses_structured(),
+        request_token="legacy-message-tool-id-collision",
+    )
+    message = {
+        "type": "message",
+        "id": "shared_item",
+        "role": "assistant",
+        "content": "legacy",
+    }
+    call = {
+        "type": "function_call",
+        "id": "shared_item",
+        "name": "keep",
+        "call_id": "call_keep",
+        "arguments": "{}",
+    }
+
+    with pytest.raises(ToolCompatibilityError) as raised:
+        plan.encode_payload(
+            {"input": [message, call] if message_first else [call, message]}
+        )
+
+    assert raised.value.classification == "duplicate_item_identity"
+
+
+@pytest.mark.parametrize("tool_choice", ["string", "mapping"])
+def test_native_name_collision_preserves_explicit_native_tool_choice(tool_choice) -> None:
+    declaration = _namespace(namespace="vendor", tool="run")
+    initial = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="native-choice-collision",
+    )
+    old_alias = initial.entries[0].aliases[0]
+    assert old_alias != "__codexhub_ns_collision_1"
+
+    # Use the generated alias as the native name so the test exercises the
+    # actual reserve/remap path rather than a hand-written alias format.
+    native = {"type": "function", "name": old_alias}
+    original_choice = (
+        old_alias
+        if tool_choice == "string"
+        else {"type": "function", "name": old_alias}
+    )
+    finalized = initial.with_final_declarations(
+        [native],
+        tool_choice=original_choice,
+    )
+    new_alias = finalized.entries[0].aliases[0]
+    assert new_alias != old_alias
+
+    encoded = finalized.encode_payload(
+        {
+            "tools": [declaration, native],
+            "tool_choice": original_choice,
+        }
+    )
+    assert encoded["tool_choice"] == original_choice
+
+    decoded = finalized.decode_payload(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": new_alias,
+                    "call_id": "collision-call",
+                    "item_id": "collision-item",
+                    "arguments": "{}",
+                }
+            ]
+        }
+    )
+    assert decoded["output"][0]["namespace"] == "vendor"
+    assert decoded["output"][0]["name"] == "run"
+
+
+def test_native_name_collision_is_inverse_decoded_on_stream() -> None:
+    declaration = _namespace(namespace="vendor", tool="run")
+    initial = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="native-stream-collision",
+    )
+    old_alias = initial.entries[0].aliases[0]
+    finalized = initial.with_final_declarations(
+        [{"type": "function", "name": old_alias}],
+        tool_choice=old_alias,
+    )
+    alias = finalized.entries[0].aliases[0]
+    stream = CompatibilityStreamState(finalized)
+    added = stream.decode_events_for_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "name": alias,
+                "call_id": "stream-call",
+                "item_id": "stream-item",
+                "arguments": "",
+            },
+        }
+    )
+    assert added[0]["item"]["namespace"] == "vendor"
+    assert added[0]["item"]["name"] == "run"
+
+
+def test_repeated_native_collisions_keep_the_explicit_native_tool_choice() -> None:
+    declaration = _namespace(namespace="vendor", tool="run")
+    initial = build_tool_compatibility_plan(
+        [declaration],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="native-recollision",
+    )
+    first = initial.with_final_declarations(
+        [{"type": "function", "name": initial.entries[0].aliases[0]}],
+        tool_choice=initial.entries[0].aliases[0],
+    )
+    second = first.with_final_declarations(
+        [{"type": "function", "name": first.entries[0].aliases[0]}],
+        tool_choice=initial.entries[0].aliases[0],
+    )
+
+    current_alias = second.entries[0].aliases[0]
+    assert current_alias not in {initial.entries[0].aliases[0], first.entries[0].aliases[0]}
+    encoded = second.encode_payload(
+        {
+            "tools": [declaration],
+            "tool_choice": initial.entries[0].aliases[0],
+        }
+    )
+    assert encoded["tool_choice"] == initial.entries[0].aliases[0]
+
+
 def test_namespace_alias_count_is_not_limited_by_collision_attempt_budget() -> None:
     declaration = {
         "type": "namespace",
@@ -154,6 +338,23 @@ def test_namespace_alias_count_is_not_limited_by_collision_attempt_budget() -> N
     assert len(aliases) == 129
     assert len(set(aliases)) == 129
     assert aliases[-1].rsplit("_", 1)[-1] == "129"
+
+
+def test_namespace_child_names_are_part_of_final_declaration_identity() -> None:
+    initial = build_tool_compatibility_plan(
+        [_namespace(namespace="vendor", tool="run")],
+        selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(),
+        request_token="declaration-child-key",
+    )
+    finalized = initial.with_final_declarations(
+        [
+            _namespace(namespace="vendor", tool="stop"),
+        ]
+    )
+    assert len(finalized.entries) == 2
+    assert finalized.entries[0].child_names == ("run",)
+    assert finalized.entries[1].child_names == ("stop",)
 
 
 def test_native_plain_name_wins_over_unqualified_namespace_child() -> None:

@@ -147,6 +147,109 @@ def test_runtime_plan_aliases_are_deterministic_for_identical_external_request()
     ]
 
 
+def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "description": "dynamic",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "run",
+                    "description": "dynamic",
+                    "strict": False,
+                    "parameters": {"type": "object"},
+                }
+            ],
+        }
+    ]
+    events: list[tuple[str, dict]] = []
+    context: dict = {}
+    upstream = _external_chat_upstream()
+    with patch.object(
+        codex_proxy,
+        "write_proxy_event",
+        lambda name, **fields: events.append((name, fields)),
+    ):
+        encoded = json.loads(
+            codex_proxy.compatible_request_body(
+                _request(tools), upstream, event_context=context, inject_codex_tools=False
+            )
+        )
+        plan = context["_runtime_tool_compatibility_plan"]
+        alias = plan.aliases[0]
+        decoded = json.loads(
+            codex_proxy.compatible_response_body(
+                json.dumps(
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "name": alias,
+                                "call_id": "adapter-call",
+                                "item_id": "adapter-item",
+                                "arguments": "{}",
+                            }
+                        ]
+                    }
+                ).encode(),
+                upstream["name"],
+                event_context=context,
+            )
+        )
+
+    request_event = next(
+        fields for name, fields in events if name == "runtime_tool_adapter_request"
+    )
+    response_event = next(
+        fields for name, fields in events if name == "runtime_tool_adapter_response"
+    )
+    assert len(encoded["tools"]) == 1
+    assert encoded["tools"][0]["type"] == "function"
+    assert encoded["tools"][0]["name"] == alias
+    assert request_event["adapted_alias_count"] == 1
+    assert request_event["adapted_alias_unique_count"] == 1
+    assert request_event["upstream_namespace_count"] == 0
+    assert response_event["reverse_mapped_call_count"] == 1
+    assert response_event["reverse_mapped_output_count"] == 0
+    assert decoded["output"][0]["namespace"] == "vendor"
+    assert decoded["output"][0]["name"] == "run"
+
+
+def test_runtime_plan_aliases_do_not_change_with_tool_choice_policy():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "tools": [
+                {"type": "function", "name": "run", "parameters": {"type": "object"}}
+            ],
+        }
+    ]
+
+    def encoded(tool_choice) -> dict:
+        request = json.loads(_request(tools, tool_choice=tool_choice))
+        return json.loads(
+            codex_proxy.compatible_request_body(
+                json.dumps(request).encode("utf-8"),
+                _external_chat_upstream(),
+                event_context={},
+                inject_codex_tools=False,
+            )
+        )
+
+    automatic = encoded("auto")
+    required = encoded("required")
+    specific = encoded(
+        {"type": "function", "namespace": "vendor", "name": "run"}
+    )
+
+    aliases = [payload["tools"][0]["name"] for payload in (automatic, required, specific)]
+    assert aliases[0] == aliases[1] == aliases[2]
+    assert specific["tool_choice"] == {"type": "function", "name": aliases[0]}
+
+
 def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
     body = _request(
         [
@@ -198,7 +301,7 @@ def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
     )
 
     assert first == equivalent
-    assert json.loads(first)["tools"][0]["name"] != json.loads(changed)["tools"][0]["name"]
+    assert json.loads(first)["tools"][0]["name"] == json.loads(changed)["tools"][0]["name"]
 
 
 def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
@@ -248,6 +351,19 @@ def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
     assert len(eager_namespace_entries) == 1
     assert len(eager_namespace_entries[0].aliases) == 249
     assert bounded_context["_runtime_tool_compatibility_plan"].entries
+
+    def canonical_core(payload: dict) -> list[dict]:
+        return [
+            {
+                key: value
+                for key, value in tool.items()
+                if key not in {"name"} or not str(value).startswith("__codexhub_")
+            }
+            for tool in payload["tools"]
+            if not str(tool.get("name", "")).startswith("__codexhub_ns_")
+        ]
+
+    assert canonical_core(deferred) == canonical_core(bounded)
 
 
 def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespaces():
