@@ -217,6 +217,30 @@ def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
     assert decoded["output"][0]["name"] == "run"
 
 
+def test_v2_default_role_namespace_adapter_removes_encrypted_provider_schema_flags():
+    declaration = _collaboration_namespace(COLLABORATION_V2)
+    spawn = next(child for child in declaration["tools"] if child["name"] == "spawn_agent")
+    del spawn["parameters"]["properties"]["agent_type"]
+    context: dict = {}
+
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request([declaration]),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert all(tool["type"] == "function" for tool in payload["tools"])
+    assert all("encrypted" not in json.dumps(tool) for tool in payload["tools"])
+    assert all(
+        entry.disposition == "adapt"
+        for entry in context["_runtime_tool_compatibility_plan"].entries
+    )
+
+
 def test_runtime_plan_aliases_do_not_change_with_tool_choice_policy():
     tools = [
         {
@@ -894,6 +918,22 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     assert json.loads(payload["input"][0]["arguments"])["target"] == "/root/a"
     assert context["collaboration_protocol"] == COLLABORATION_V2
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
+
+
+def test_collaboration_v2_provider_wire_drops_encrypted_schema_extension():
+    context: dict = {}
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request([_collaboration_namespace(COLLABORATION_V2)]),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert all(tool.get("type") == "function" for tool in payload["tools"])
+    assert all("namespace" not in tool for tool in payload["tools"])
+    assert "encrypted" not in json.dumps(payload["tools"], sort_keys=True)
 
 
 @pytest.mark.parametrize(

@@ -588,6 +588,44 @@ def _namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tupl
     return namespace, tuple(children), version, bool(namespace and children)
 
 
+def _provider_function_declaration(
+    child: Mapping[str, Any],
+    alias: str,
+    *,
+    strip_encrypted_annotations: bool = False,
+) -> dict[str, Any]:
+    """Return the plain-function shape exposed to a non-Codex provider.
+
+    Collaboration V2 marks message fields as ``encrypted`` for the Codex
+    client contract. That annotation is not part of an ordinary provider
+    JSON-schema function contract: the value is already an opaque string at
+    this boundary, so forwarding the marker would ask a third party to
+    understand an Official-only schema extension. Keep all other declaration
+    fields and remove only that nested annotation.
+    """
+
+    def _strip_encrypted_annotations(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                key: _strip_encrypted_annotations(child)
+                for key, child in value.items()
+                if key != "encrypted"
+            }
+        if isinstance(value, list):
+            return [_strip_encrypted_annotations(child) for child in value]
+        return value
+
+    function = _copy_mapping(child)
+    function["type"] = "function"
+    function["name"] = alias
+    function.pop("namespace", None)
+    return (
+        _strip_encrypted_annotations(function)
+        if strip_encrypted_annotations
+        else function
+    )
+
+
 def classify_declaration(declaration: Mapping[str, Any]) -> str:
     item_type = declaration.get("type")
     if item_type == "namespace":
@@ -1788,10 +1826,11 @@ class ToolCompatibilityPlan:
                 if not valid:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_declaration")
                 for child_index, child in enumerate(children):
-                    function = _copy_mapping(child)
-                    function["type"] = "function"
-                    function["name"] = entry.aliases[child_index]
-                    function.pop("namespace", None)
+                    function = _provider_function_declaration(
+                        child,
+                        entry.aliases[child_index],
+                        strip_encrypted_annotations=namespace == "collaboration",
+                    )
                     encoded.append(function)
                 changed = True
                 continue

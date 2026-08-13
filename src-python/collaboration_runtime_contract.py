@@ -215,13 +215,15 @@ def _parameter_schema_matches(version: str, name: str, parameters: Mapping[str, 
     expected = _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name])
     if normalized == expected:
         return True
-    if version != COLLABORATION_V1 or name != "spawn_agent":
+    if version not in {COLLABORATION_V1, COLLABORATION_V2} or name != "spawn_agent":
         return False
 
-    # Codex CLI 0.146.1 omits only ``agent_type`` from the V1 declaration
-    # when no agent role is configured. The Rust argument type still accepts
+    # Codex CLI 0.146.1 omits only ``agent_type`` from the spawn declaration
+    # when no agent role is configured. The runtime argument type still accepts
     # the field, so keep the full frozen schema as the canonical contract while
-    # recognizing this one exact declaration variant.
+    # recognizing this one exact declaration variant for both protocol
+    # namespaces. No other property, annotation, or required-field drift is
+    # accepted.
     default_role_expected = dict(expected)
     default_role_properties = dict(expected["properties"])
     default_role_properties.pop("agent_type")

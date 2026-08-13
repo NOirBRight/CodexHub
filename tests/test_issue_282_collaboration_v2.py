@@ -385,6 +385,25 @@ def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior()
     )
 
 
+def test_v2_provider_adapter_removes_official_encryption_schema_annotations() -> None:
+    body = _request(COLLABORATION_V2)
+    context: dict[str, object] = {}
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _responses_upstream(native_namespace=False),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert transformed["tools"]
+    assert all(tool["type"] == "function" for tool in transformed["tools"])
+    assert all("namespace" not in tool for tool in transformed["tools"])
+    assert "encrypted" not in json.dumps(transformed["tools"], sort_keys=True)
+
+
 def test_v2_chat_surface_fails_before_sampling_instead_of_downgrading() -> None:
     body = _request(COLLABORATION_V2)
     upstream = {

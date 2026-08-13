@@ -148,6 +148,48 @@ def test_selection_uses_complete_namespace_schema_not_shared_names() -> None:
         )
 
 
+def test_selection_accepts_only_real_cli_default_role_spawn_variant() -> None:
+    module = load_module()
+    for version in (module.V1, module.V2):
+        candidate = declaration(module, version)
+        spawn = next(child for child in candidate["tools"] if child["name"] == "spawn_agent")
+        properties = spawn["parameters"]["properties"]
+        del properties["agent_type"]
+
+        assert module.classify_request({"tool_choice": "auto", "tools": [candidate]}) == version
+
+        strict_variant = copy.deepcopy(candidate)
+        strict_spawn = next(
+            child for child in strict_variant["tools"] if child["name"] == "spawn_agent"
+        )
+        strict_spawn["strict"] = True
+        with pytest.raises(module.ContractValidationError, match="namespace_child_strict_invalid"):
+            module.classify_request({"tool_choice": "auto", "tools": [strict_variant]})
+
+        encrypted_variant = copy.deepcopy(candidate)
+        encrypted_spawn = next(
+            child for child in encrypted_variant["tools"] if child["name"] == "spawn_agent"
+        )
+        if version == module.V2:
+            del encrypted_spawn["parameters"]["properties"]["message"]["encrypted"]
+        else:
+            encrypted_spawn["parameters"]["properties"]["message"]["type"] = "number"
+        with pytest.raises(
+            module.ContractValidationError, match="namespace_child_parameter_schema_mismatch"
+        ):
+            module.classify_request({"tool_choice": "auto", "tools": [encrypted_variant]})
+
+        extra_property_variant = copy.deepcopy(candidate)
+        extra_spawn = next(
+            child for child in extra_property_variant["tools"] if child["name"] == "spawn_agent"
+        )
+        extra_spawn["parameters"]["properties"]["unexpected"] = {"type": "string"}
+        with pytest.raises(
+            module.ContractValidationError, match="namespace_child_parameter_schema_mismatch"
+        ):
+            module.classify_request({"tool_choice": "auto", "tools": [extra_property_variant]})
+
+
 @pytest.mark.parametrize(
     ("mutate", "code"),
     [
