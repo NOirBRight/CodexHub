@@ -1039,6 +1039,27 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertTrue(decision.transparent_metered)
 
+    def test_route_plan_provider_scoped_raw_v2_probe_keeps_passthrough(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+            raw_provider_probe=True,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
     def test_route_plan_official_codex_app_v2_remains_passthrough(self):
         decision = codex_proxy.route_plan_for_request(
             {
@@ -1129,6 +1150,45 @@ class RoutingTests(unittest.TestCase):
             request_events[0]["adapted_alias_count"],
             len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
         )
+
+    def test_provider_scoped_mixed_collaboration_boundary_rejects_before_upstream(self):
+        body = json.dumps(
+            {
+                "model": "ollama-cloud/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "tools": [
+                    _model_switch_tool_surface(COLLABORATION_V1),
+                    _model_switch_tool_surface(COLLABORATION_V2),
+                ],
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/ollama-cloud/responses",
+            body,
+            headers={"X-Codex-Client-Id": "zcode"},
+        )
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+                provider_hint="ollama-cloud",
+            )
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        boundary_errors = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args
+            and call.args[0] == "request_error"
+            and call.kwargs.get("error") == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+        ]
+        self.assertEqual(len(boundary_errors), 1)
 
     def test_route_plan_third_party_app_official_responses_is_transparent_metered(self):
         upstream = {"name": "official", "upstream_format": "responses"}
