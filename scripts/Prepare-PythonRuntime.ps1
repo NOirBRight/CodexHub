@@ -7,7 +7,8 @@ param(
     [string]$ZstandardVersion = "0.25.0",
     [string]$ZstandardWheelUrl = "https://files.pythonhosted.org/packages/d9/82/b9c06c870f3bd8767c201f1edbdf9e8dc34be5b0fbc5682c4f80fe948475/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
     [string]$ZstandardWheelSha256 = "1f830a0dac88719af0ae43b8b2d6aef487d437036468ef3c2ea59c51f9d55fd5",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$CheckOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,7 +68,12 @@ function Invoke-Download([string]$Url, [string]$Destination) {
 }
 
 function Get-PythonRuntimeVersion([string]$PythonPath) {
-    $versionOutput = @(& $PythonPath -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3]))' 2>$null)
+    # Keep this probe free of nested quotes. Windows PowerShell 5.1 rewrites
+    # embedded double quotes while building a native command line, turning the
+    # previous ".join(...)" expression into invalid Python before it reaches
+    # the interpreter. The numeric probe is equivalent and works in both
+    # Windows PowerShell 5.1 and PowerShell 7.
+    $versionOutput = @(& $PythonPath -c 'import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2], sep=chr(46))' 2>$null)
     if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -eq 0) {
         return $null
     }
@@ -136,6 +142,14 @@ function Update-PythonPathFile {
 
 Assert-UnderPath $runtimeDir $repoRootPath
 Assert-UnderPath $downloadDir $repoRootPath
+
+if ($CheckOnly) {
+    if (Test-PythonRuntimeReady) {
+        Write-Output "Python runtime check passed: $runtimeDir"
+        exit 0
+    }
+    throw "Python runtime check failed: $runtimeDir is missing, incompatible, or incomplete."
+}
 
 New-Item -ItemType Directory -Force -Path $resourcesDir, $downloadDir | Out-Null
 

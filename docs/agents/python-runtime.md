@@ -77,6 +77,21 @@ also removes `PYTHONHOME`, `PYTHONSTARTUP`, `VIRTUAL_ENV`, Conda, and Pipenv
 runtime selectors before spawning Python; a selected executable must not inherit
 a different environment prefix from the host shell.
 
+The packaged-runtime preparation script is compatible with both Windows
+PowerShell 5.1 and PowerShell 7. Its version preflight deliberately uses a
+quote-free numeric Python probe, because Windows PowerShell 5.1 can rewrite
+embedded quotes in native `-c` arguments. To check an existing packaged runtime
+without downloading or changing anything, run:
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\scripts\Prepare-PythonRuntime.ps1 -CheckOnly
+```
+
+The same command may be run with `pwsh.exe`; both must select the bundled
+3.13.x runtime. A build failure in this preflight is a runtime-boundary issue,
+not a reason to retry with the ambient `python` or `pytest` command.
+
 The two source executables that are commonly launched directly,
 `src-python/codex_proxy.py` and `src-python/catalog_sync.py`, also fail before
 importing the 3.13-only provider module when an ambient 3.11 interpreter is

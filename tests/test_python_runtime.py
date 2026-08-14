@@ -14,6 +14,7 @@ SELECTOR = ROOT / "scripts" / "Resolve-CodexHubPython.ps1"
 LAUNCHER = ROOT / "scripts" / "codexhub-python.ps1"
 CMD_LAUNCHER = ROOT / "scripts" / "codexhub-python.cmd"
 ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
+PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
 
 def _powershell() -> str:
@@ -81,6 +82,36 @@ def test_repository_selector_returns_python_313_or_newer() -> None:
     ).strip()
     major, minor = (int(part) for part in version.split(".", 1))
     assert (major, minor) >= (3, 13)
+
+
+def test_prepare_runtime_check_is_compatible_with_windows_powershell_51() -> None:
+    """The packaged-runtime preflight must not depend on PS 7 quoting rules."""
+    powershell_51 = shutil.which("powershell.exe")
+    if powershell_51 is None:
+        pytest.skip("Windows PowerShell 5.1 is required for this compatibility check")
+
+    result = subprocess.run(
+        [
+            powershell_51,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(PREPARE_RUNTIME),
+            "-RepoRoot",
+            str(ROOT),
+            "-CheckOnly",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Python runtime check passed" in result.stdout
 
 
 def test_repository_selector_resolves_under_host_runtime_selector_contamination(
