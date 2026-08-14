@@ -13,7 +13,6 @@ import {
   normalizedEndpointFormat,
   normalizeEndpointFormats,
   normalizeProviderEndpointSelection,
-  probeSucceeded,
   probeAvailableFormats,
   toolProtocolLabel,
   upstreamFormatLabel,
@@ -75,21 +74,9 @@ export function ProviderDetail({
     setEndpointTestState(availableFormats.length ? "success" : "idle");
   }, [provider.id, provider.available_upstream_formats]);
 
-  // Keep the editor model list in sync with the persisted provider so that
-  // successful discovery is reflected immediately and a stale draft cannot be
-  // saved back over the discovered models.
-  useEffect(() => {
-    setDraft((current) => {
-      if (current.id !== normalizedProvider.id || current.models === normalizedProvider.models) {
-        return current;
-      }
-      return { ...current, models: normalizedProvider.models };
-    });
-  }, [normalizedProvider.id, normalizedProvider.models]);
-
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState(probeSucceeded(probeResult) ? "success" : "error");
+      setEndpointTestState("success");
     }
   }, [probeResult]);
 
@@ -133,7 +120,7 @@ export function ProviderDetail({
     if (result) {
       setDraft((current) => applyProviderProbeResult(current, result));
     }
-    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
+    setEndpointTestState(result ? "success" : "error");
   }
 
   async function testModel(model: Model) {
@@ -281,7 +268,7 @@ export function AddProviderPanel({
 
   useEffect(() => {
     if (probeResult) {
-      setEndpointTestState(probeSucceeded(probeResult) ? "success" : "error");
+      setEndpointTestState("success");
     }
   }, [probeResult]);
 
@@ -309,7 +296,7 @@ export function AddProviderPanel({
     if (result) {
       onFormChange(applyAddProviderProbeResult(form, result));
     }
-    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
+    setEndpointTestState(result ? "success" : "error");
   }
 
   async function testModel(model: Model) {

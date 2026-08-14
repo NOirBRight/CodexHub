@@ -1,7 +1,7 @@
-use crate::AppStatus;
 use crate::gateway_transaction::{
     GatewayLifecyclePhase, LifecycleGateAccess, LifecycleTransactionGate,
 };
+use crate::AppStatus;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -89,22 +89,21 @@ impl GatewayLifecycleCoordinator {
     where
         B: GatewayLifecycleBackend,
     {
-        let _transaction = match LifecycleTransactionGate::inspect_or_acquire(
-            backend.lifecycle_gate_path(),
-        )? {
-            LifecycleGateAccess::Held(phase) => {
-                let status = backend.transitional_status(phase)?;
-                let mut state = self.lock_state();
-                state.phase = phase;
-                state.published = None;
-                state.last_error = None;
-                return Ok(GatewayLifecycleSnapshot {
-                    status,
-                    identity: None,
-                });
-            }
-            LifecycleGateAccess::Acquired(transaction) => transaction,
-        };
+        let _transaction =
+            match LifecycleTransactionGate::inspect_or_acquire(backend.lifecycle_gate_path())? {
+                LifecycleGateAccess::Held(phase) => {
+                    let status = backend.transitional_status(phase)?;
+                    let mut state = self.lock_state();
+                    state.phase = phase;
+                    state.published = None;
+                    state.last_error = None;
+                    return Ok(GatewayLifecycleSnapshot {
+                        status,
+                        identity: None,
+                    });
+                }
+                LifecycleGateAccess::Acquired(transaction) => transaction,
+            };
         match backend.snapshot() {
             Ok(snapshot) if snapshot.identity.is_some() => {
                 let mut state = self.lock_state();
@@ -452,10 +451,9 @@ mod tests {
 
         let second_coordinator = Arc::clone(&coordinator);
         let second_backend = Arc::clone(&backend);
-        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
-            backend.lifecycle_gate_path(),
-        )
-        .expect("enable start contention acknowledgement");
+        let contention_ack =
+            LifecycleTransactionGate::enable_test_contention_ack(backend.lifecycle_gate_path())
+                .expect("enable start contention acknowledgement");
         let (second_done_tx, second_done_rx) = mpsc::channel();
         let second = thread::spawn(move || {
             let result = second_coordinator.start(second_backend.as_ref(), || Ok(()));
@@ -463,7 +461,10 @@ mod tests {
             result
         });
         wait_for_file(&contention_ack);
-        assert!(matches!(second_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            second_done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         pause.release.wait();
 
         let first = first
@@ -541,10 +542,9 @@ mod tests {
 
         let start_coordinator = Arc::clone(&coordinator);
         let start_backend = Arc::clone(&backend);
-        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
-            backend.lifecycle_gate_path(),
-        )
-        .expect("enable restart/start contention acknowledgement");
+        let contention_ack =
+            LifecycleTransactionGate::enable_test_contention_ack(backend.lifecycle_gate_path())
+                .expect("enable restart/start contention acknowledgement");
         let (start_done_tx, start_done_rx) = mpsc::channel();
         let concurrent_start = thread::spawn(move || {
             let result = start_coordinator.start(start_backend.as_ref(), || Ok(()));
@@ -552,7 +552,10 @@ mod tests {
             result
         });
         wait_for_file(&contention_ack);
-        assert!(matches!(start_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            start_done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         pause.release.wait();
 
         let replacement = restart
@@ -589,10 +592,9 @@ mod tests {
 
         let stop_coordinator = Arc::clone(&coordinator);
         let stop_backend = Arc::clone(&backend);
-        let contention_ack = LifecycleTransactionGate::enable_test_contention_ack(
-            backend.lifecycle_gate_path(),
-        )
-        .expect("enable start/stop contention acknowledgement");
+        let contention_ack =
+            LifecycleTransactionGate::enable_test_contention_ack(backend.lifecycle_gate_path())
+                .expect("enable start/stop contention acknowledgement");
         let (stop_done_tx, stop_done_rx) = mpsc::channel();
         let stop = thread::spawn(move || {
             let result = stop_coordinator.stop(stop_backend.as_ref());
@@ -600,7 +602,10 @@ mod tests {
             result
         });
         wait_for_file(&contention_ack);
-        assert!(matches!(stop_done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            stop_done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         pause.release.wait();
 
         assert!(start.join().expect("start thread").is_ok());
@@ -651,7 +656,9 @@ mod tests {
     fn start_from_definitively_stopped_clears_stale_session_before_preparation_failure() {
         let coordinator = GatewayLifecycleCoordinator::new();
         let backend = FakeLifecycleBackend::stopped();
-        coordinator.start(&backend, || Ok(())).expect("session start");
+        coordinator
+            .start(&backend, || Ok(()))
+            .expect("session start");
         backend.replace_identity(None);
 
         let error = coordinator
@@ -686,7 +693,9 @@ mod tests {
     fn poisoned_state_recovers_failed_without_dropping_session_handoff() {
         let coordinator = Arc::new(GatewayLifecycleCoordinator::new());
         let backend = FakeLifecycleBackend::stopped();
-        let started = coordinator.start(&backend, || Ok(())).expect("session start");
+        let started = coordinator
+            .start(&backend, || Ok(()))
+            .expect("session start");
         let poison_target = Arc::clone(&coordinator);
         let _ = thread::spawn(move || {
             let _guard = poison_target.state.lock().expect("state lock");
@@ -776,7 +785,10 @@ mod tests {
             }
             thread::yield_now();
         }
-        panic!("gate-boundary contention acknowledgement was not published: {}", path.display());
+        panic!(
+            "gate-boundary contention acknowledgement was not published: {}",
+            path.display()
+        );
     }
 
     struct FakeLifecycleBackend {
@@ -860,11 +872,7 @@ mod tests {
             self
         }
 
-        fn fail_next_start_with_recovery(
-            self,
-            message: &str,
-            recovery: GatewayIdentity,
-        ) -> Self {
+        fn fail_next_start_with_recovery(self, message: &str, recovery: GatewayIdentity) -> Self {
             let mut state = self.state.lock().unwrap();
             state.fail_next_start = Some(message.to_string());
             state.fail_next_start_recovery = Some(recovery);
@@ -924,10 +932,7 @@ mod tests {
             self.lifecycle_gate_path()
         }
 
-        fn transitional_status(
-            &self,
-            phase: GatewayLifecyclePhase,
-        ) -> Result<AppStatus, String> {
+        fn transitional_status(&self, phase: GatewayLifecyclePhase) -> Result<AppStatus, String> {
             Ok(fake_status(false, format!("Gateway is {phase:?}"), phase))
         }
 

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import copy
 import json
-from unittest.mock import patch
 
 import pytest
 
 import codex_proxy
-from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
-from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
+from codex_semantic_adapter import COLLABORATION_V2
 
 
 def _external_chat_upstream() -> dict:
@@ -29,30 +26,6 @@ def _request(tools: list[dict], *, model: str = "custom-model", tool_choice="aut
             "tool_choice": tool_choice,
         }
     ).encode("utf-8")
-
-
-def _collaboration_namespace(version: str) -> dict:
-    namespace = "multi_agent_v1" if version == COLLABORATION_V1 else "collaboration"
-    children = []
-    for name, schema in EXPECTED_PARAMETER_SCHEMAS[version].items():
-        parameters = copy.deepcopy(schema)
-        if not parameters["required"]:
-            del parameters["required"]
-        children.append(
-            {
-                "type": "function",
-                "name": name,
-                "description": "dynamic",
-                "strict": False,
-                "parameters": parameters,
-            }
-        )
-    return {
-        "type": "namespace",
-        "name": namespace,
-        "description": "dynamic",
-        "tools": children,
-    }
 
 
 def _decoded_sse(line: bytes) -> dict:
@@ -559,22 +532,27 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
         "request_id": "req",
         "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
     }
-    tools = [_collaboration_namespace(COLLABORATION_V2)]
+    tools = [
+        {
+            "type": "namespace",
+            "name": "collaboration",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "followup_task",
+                }
+            ],
+        }
+    ]
     history = [
         {
             "type": "function_call",
-            "id": "item_v2",
             "namespace": "collaboration",
             "name": "followup_task",
             "call_id": "call_v2",
-            "arguments": '{"target":"/root/a","message":"continue"}',
+            "arguments": '{"task_path":"/root/a","task_name":"a","fork_turns":"all"}',
         },
-        {
-            "type": "function_call_output",
-            "id": "item_v2_output",
-            "call_id": "call_v2",
-            "output": "null",
-        },
+        {"type": "function_call_output", "call_id": "call_v2", "output": "queued"},
     ]
 
     payload = json.loads(
@@ -584,29 +562,29 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
                     "model": "custom-model",
                     "input": history,
                     "tools": tools,
-                    "tool_choice": "auto",
                 }
             ).encode("utf-8"),
-            _external_responses_upstream(),
+            _external_chat_upstream(),
             event_context=context,
         )
     )
 
     aliases = [tool["name"] for tool in payload["tools"] if tool.get("type") == "function"]
-    assert len(aliases) == 6
-    assert all(alias.startswith("__codexhub_ns_") for alias in aliases)
-    assert payload["input"][0]["name"] in aliases
+    assert len(aliases) == 1
+    assert aliases[0].startswith("__codexhub_ns_")
+    assert payload["input"][0]["name"] == aliases[0]
     assert "namespace" not in payload["input"][0]
-    assert json.loads(payload["input"][0]["arguments"])["target"] == "/root/a"
+    assert json.loads(payload["input"][0]["arguments"])["task_path"] == "/root/a"
     assert context["collaboration_protocol"] == COLLABORATION_V2
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
 
 
 @pytest.mark.parametrize(
-    ("current_namespace", "foreign_history"),
+    ("current_namespace", "current_child", "foreign_history"),
     [
         (
             "multi_agent_v1",
+            "spawn_agent",
             [
                 {
                     "type": "function_call",
@@ -624,6 +602,7 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
         ),
         (
             "collaboration",
+            "followup_task",
             [
                 {
                     "type": "function_call",
@@ -642,35 +621,37 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     ],
     ids=["current-v1-foreign-v2", "current-v2-foreign-v1"],
 )
-def test_gateway_rejects_foreign_collaboration_history_before_planning(
+def test_gateway_plan_preserves_foreign_collaboration_history_in_both_directions(
     current_namespace: str,
+    current_child: str,
     foreign_history: list[dict],
 ) -> None:
     body = {
         "model": "custom-model",
         "input": foreign_history,
-        "tool_choice": "auto",
         "tools": [
-            _collaboration_namespace(
-                COLLABORATION_V1
-                if current_namespace == "multi_agent_v1"
-                else COLLABORATION_V2
-            )
+            {
+                "type": "namespace",
+                "name": current_namespace,
+                "tools": [{"type": "function", "name": current_child}],
+            }
         ],
     }
 
     context: dict = {}
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-            codex_proxy.compatible_request_body(
-                json.dumps(body).encode("utf-8"),
-                _external_responses_upstream(),
-                event_context=context,
-                inject_codex_tools=False,
-            )
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode("utf-8"),
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
-    prepare.assert_not_called()
+    assert payload["input"] == foreign_history
+    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "adapt"
+    assert payload["tools"][0]["type"] == "function"
+    assert payload["tools"][0]["name"].startswith("__codexhub_ns_")
 
 
 def _external_responses_upstream() -> dict:

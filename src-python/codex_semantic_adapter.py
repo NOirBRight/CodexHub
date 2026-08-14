@@ -14,11 +14,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from collaboration_runtime_contract import (
-    CollaborationContractError,
-    classify_collaboration_request,
-)
-
 MULTI_AGENT_TOOL_NAMES = {
     "spawn_agent",
     "send_input",
@@ -39,6 +34,11 @@ COLLABORATION_V2_TOOL_NAMES = frozenset(
 )
 COLLABORATION_V1_ONLY_FIELDS = frozenset({"agent_id", "fork_context"})
 COLLABORATION_V2_ONLY_FIELDS = frozenset({"task_name", "task_path", "fork_turns", "continuation_id"})
+COLLABORATION_PROTOCOL_METADATA_KEYS = frozenset(
+    {"collaboration_protocol", "multi_agent_version"}
+)
+
+
 class CollaborationBoundaryError(ValueError):
     """A malformed or ambiguous Collaboration boundary that must fail closed."""
 
@@ -127,9 +127,34 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
 
 
 def _metadata_protocol(value: Mapping[str, Any]) -> str | None:
-    """Metadata never selects the frozen Responses Collaboration version."""
+    """Resolve an explicit model/feature selection marker when present."""
 
-    return None
+    candidates: list[Any] = [value]
+    for key in ("metadata", "model_metadata", "capabilities", "features"):
+        nested = value.get(key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    protocols: set[str] = set()
+    for candidate in candidates:
+        for key in COLLABORATION_PROTOCOL_METADATA_KEYS:
+            if key not in candidate:
+                continue
+            marker = candidate.get(key)
+            if marker is None:
+                continue
+            if key == "multi_agent_version":
+                marker = {
+                    "v1": COLLABORATION_V1,
+                    "v2": COLLABORATION_V2,
+                }.get(marker)
+            elif marker in {"v1", "v2"}:
+                marker = f"collaboration_{marker}"
+            if marker not in {COLLABORATION_V1, COLLABORATION_V2}:
+                raise CollaborationBoundaryError("unknown_state")
+            protocols.add(marker)
+    if len(protocols) > 1:
+        raise CollaborationBoundaryError("mixed_v1_v2")
+    return next(iter(protocols), None)
 
 
 def collaboration_protocols(value: Any) -> frozenset[str]:
@@ -141,18 +166,12 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
     """
 
     protocols: set[str] = set()
-    exact_request_root: Mapping[str, Any] | None = None
-    if isinstance(value, Mapping):
-        try:
-            exact_protocol = classify_collaboration_request(value)
-        except CollaborationContractError as exc:
-            raise CollaborationBoundaryError(exc.classification) from exc
-        if exact_protocol is not None:
-            protocols.add(exact_protocol)
-            exact_request_root = value
 
     def visit(item: Any, inherited_namespace: str | None = None) -> None:
         if isinstance(item, Mapping):
+            metadata_protocol = _metadata_protocol(item)
+            if metadata_protocol is not None:
+                protocols.add(metadata_protocol)
             protocol = _classify_collaboration_item(item, inherited_namespace)
             if protocol is not None:
                 protocols.add(protocol)
@@ -171,8 +190,6 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
             }:
                 child_namespace = item["name"]
             for key, child in item.items():
-                if item is exact_request_root and key == "tools":
-                    continue
                 if key == "tools" and child_namespace is not None:
                     visit(child, child_namespace)
                 elif key not in {"arguments", "parameters", "properties"}:
@@ -204,7 +221,7 @@ WORKER_AGENT_TYPE = "worker"
 BINDING_ACCEPTED = "accepted"
 BINDING_REJECTED = "rejected"
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-SUPPORTED_AGENT_TYPES = {"worker", "general", "default"}
+SUPPORTED_AGENT_TYPES = {"worker", "general"}
 WORKER_BINDING_CONTRACT_VERSION = "codexhub.worker-binding.v1"
 WORKER_BINDING_FIELDS = {
     "contract_version",
@@ -322,41 +339,6 @@ def validate_effective_worker_binding(
     if effective_reasoning != requested_reasoning:
         return BindingValidation(BINDING_REJECTED, "contradictory_reasoning")
     return BindingValidation(BINDING_ACCEPTED, "matched")
-
-
-def synthesize_effective_worker_binding_readback(
-    requested: Mapping[str, Any],
-    readback: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    """Return a readback that includes an effective_binding for a successful native CLI spawn.
-
-    The native Codex CLI runtime does not emit the CodexHub-internal
-    ``effective_binding`` readback; it only returns ``{"agent_id", "nickname"}``
-    on success. When the historical output matches that successful native shape
-    and we already have a verified requested-binding sidecar, synthesize the
-    matching effective binding so the fail-closed history validator can succeed
-    without weakening its real safety boundary.
-    """
-    if readback is None:
-        return None
-    if "effective_binding" in readback:
-        return readback
-    # Require the minimum fields that identify a successful native spawn.
-    if not isinstance(readback.get("agent_id"), str) or not (
-        readback.get("nickname") is None or isinstance(readback.get("nickname"), str)
-    ):
-        return readback
-    return {
-        **readback,
-        "effective_binding": {
-            "contract_version": WORKER_BINDING_CONTRACT_VERSION,
-            "support": "supported",
-            "status": "accepted",
-            "agent_type": requested.get("agent_type"),
-            "model": requested.get("model"),
-            "reasoning": requested.get("reasoning"),
-        },
-    }
 
 
 def json_object_from_arguments(value: Any) -> dict[str, Any] | None:
@@ -501,13 +483,6 @@ def normalize_multi_agent_arguments(
     changed = changed or json_argument_string_needs_repair(value)
 
     if resolved_tool_name == "spawn_agent":
-        # The model-facing contract exposes "general" as the non-worker selector,
-        # but the native Codex runtime only accepts "default" (along with
-        # "worker" and "explorer"). Map at the semantic boundary before the
-        # call reaches the native runtime.
-        if arguments.get("agent_type") == "general":
-            arguments["agent_type"] = "default"
-            changed = True
         if "message" not in arguments:
             for alias in ("prompt", "input"):
                 alias_value = arguments.get(alias)

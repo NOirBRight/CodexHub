@@ -1,1097 +1,212 @@
 {
   "adapter_requirements": {
-    "adapt_only_when": "complete_lifecycle_inverse_is_proven",
     "adaptation_owner": "codexhub_gateway",
     "forbidden_gateway_actions": [
       "execute_tools",
       "schedule_agents",
-      "forge_results_or_identity",
-      "downgrade_v2_to_v1",
-      "rewrite_history"
+      "forge_results",
+      "downgrade_v2_to_v1"
     ],
-    "native_namespace": "pass_without_semantic_mutation",
     "owner": "codex_client",
+    "protocol_shape_decisions": {
+      "collaboration_v1": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "required_when_selected_protocol_lacks_namespace",
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface"
+      },
+      "collaboration_v2": {
+        "inverse_mapping": "request_scoped_and_lossless",
+        "namespace_to_function": "optional_only_when_selected_protocol_lacks_namespace",
+        "native_namespace": "may_pass_when_selected_protocol_supports_namespace",
+        "official_cli_capture_status": "not_observed",
+        "preserved_fields": [
+          "task_path",
+          "continuation_id",
+          "task_name",
+          "fork_turns"
+        ],
+        "shape_kind": "accepted_structural_contract"
+      }
+    },
     "requirements": [
+      "namespace_to_function",
       "injective_request_scoped_aliases",
-      "preserve_namespace_and_child_name",
-      "preserve_call_and_item_identity",
-      "preserve_order_and_stream_boundaries",
-      "preserve_task_name_and_agent_path_identity",
-      "preserve_agent_message_author_and_recipient",
-      "preserve_same_home_history_replay",
-      "reject_unknown_missing_duplicate_conflicting_or_mixed_boundary",
+      "preserve_task_path_identity",
+      "preserve_continuation_id_and_fork_turns",
+      "preserve_call_result_history_links",
+      "preserve_inverse_declaration_call_result_history_mapping",
+      "assemble_stream_before_validation",
+      "reject_unknown_or_ambiguous_boundary",
       "keep_v1_and_v2_isolated"
-    ]
+    ],
+    "scope": "requirements_only_for_198_and_58"
   },
   "artifact_kind": "collaboration_v1_v2_inventory",
   "boundary": {
-    "conflicting_action": "fail_closed",
-    "direct_function_policy": "not_a_frozen_runtime_collaboration_marker",
-    "duplicate_action": "fail_closed",
-    "matching_policy": "complete_namespace_and_child_schema",
-    "missing_action": "fail_closed",
+    "ambiguous_action": "fail_closed",
+    "discriminator_fields": [
+      "namespace",
+      "name"
+    ],
+    "flattened_name_policy": "not_decidable_without_namespace",
     "mixed_v1_v2_action": "fail_closed",
-    "pre_exposure_stage": "before_schema_repair_state_or_scheduler",
+    "pre_exposure_stage": "before_tool_exposure_or_semantic_repair",
     "protocol_markers": {
       "collaboration_v1": {
         "namespace": "multi_agent_v1",
         "tool_names": [
-          "close_agent",
-          "resume_agent",
-          "send_input",
           "spawn_agent",
-          "wait_agent"
+          "send_input",
+          "wait_agent",
+          "close_agent",
+          "resume_agent"
         ]
       },
       "collaboration_v2": {
         "namespace": "collaboration",
         "tool_names": [
-          "followup_task",
-          "interrupt_agent",
-          "list_agents",
-          "send_message",
           "spawn_agent",
-          "wait_agent"
+          "send_message",
+          "followup_task",
+          "wait_agent",
+          "interrupt_agent",
+          "list_agents"
         ]
       }
     },
-    "request_metadata_version_field": "absent_in_both_frozen_runtimes",
-    "shared_tool_name_policy": "never_classify_from_child_name_alone",
-    "tool_choice": "auto",
     "unknown_action": "fail_closed"
   },
   "candidate_identity": {
-    "candidate_revision": "be10f62f44b22fa8c84510238250ae11fb3ecab4",
-    "cli_source_commit": "79b4f03d35962b005b007a015113b38930711665",
-    "cli_version": "0.146.1",
-    "desktop_runtime_version": "0.147.0-alpha.6.5",
-    "desktop_source_commit": "618b8e9111da9f57fe380b09d0f6516e3f343536",
-    "desktop_version": "26.803.5235.0",
-    "source_capture_status": "observed",
-    "source_contract_file": "collaboration-runtime-contract.json"
+    "cli_version": "0.146.0",
+    "source_capture_status": "not_observed",
+    "source_commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+    "source_commit_status": "published_attested",
+    "source_contract_file": "codex-0.146-source-contract.json",
+    "source_tag": "rust-v0.146.0"
   },
   "deferred_qualification": [
-    "full_six_tool_two_child_lifecycle",
-    "cross_home_negative_cases",
-    "malformed_agent_message_and_identity_negative_cases"
+    "full_spawn_message_followup_wait_interrupt_list_lifecycle",
+    "restart_and_cold_root_resume",
+    "cross_home_topology_and_history"
   ],
   "evidence_binding": {
-    "basis": "accepted_issue392_exact_runtime_contract",
+    "basis": "accepted_issue_62_source_contract_and_repository_evidence",
     "source_contract": {
-      "file": "collaboration-runtime-contract.json",
-      "sha256": "f4de10e5898ed1bfe8381f825e7bd0e157057acc35e176f0662ef4aa1e6b3fb7"
-    }
-  },
-  "protocol_layers": {
-    "client_dispatch": {
-      "meaning": "client_tool_dispatch_group",
-      "recipient_namespace": "collaboration",
-      "wire_discriminator_by_itself": false
-    },
-    "desktop_app": {
-      "item_notifications": {
-        "agentMessage": [
-          "item/started",
-          "item/agentMessage/delta",
-          "item/completed"
-        ],
-        "collabAgentToolCall": [
-          "item/started",
-          "item/completed"
-        ],
-        "subAgentActivity": [
-          "item/started",
-          "item/completed"
-        ]
-      },
-      "notification_envelopes": [
-        {
-          "item_field_types": {
-            "agentPath": "string",
-            "agentThreadId": "string",
-            "id": "string",
-            "kind": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "agentPath",
-            "agentThreadId",
-            "id",
-            "kind",
-            "type"
-          ],
-          "item_kind": "started",
-          "item_type": "subAgentActivity",
-          "method": "item/started",
-          "params_field_types": {
-            "item": "object",
-            "startedAtMs": "number",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "item",
-            "startedAtMs",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "agentPath": "string",
-            "agentThreadId": "string",
-            "id": "string",
-            "kind": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "agentPath",
-            "agentThreadId",
-            "id",
-            "kind",
-            "type"
-          ],
-          "item_kind": "started",
-          "item_type": "subAgentActivity",
-          "method": "item/completed",
-          "params_field_types": {
-            "completedAtMs": "number",
-            "item": "object",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "completedAtMs",
-            "item",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "agentsStates": "object",
-            "id": "string",
-            "model": "null",
-            "prompt": "null",
-            "reasoningEffort": "null",
-            "receiverThreadIds": "array",
-            "senderThreadId": "string",
-            "status": "string",
-            "tool": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "agentsStates",
-            "id",
-            "model",
-            "prompt",
-            "reasoningEffort",
-            "receiverThreadIds",
-            "senderThreadId",
-            "status",
-            "tool",
-            "type"
-          ],
-          "item_status": "inProgress",
-          "item_tool": "wait",
-          "item_type": "collabAgentToolCall",
-          "method": "item/started",
-          "params_field_types": {
-            "item": "object",
-            "startedAtMs": "number",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "item",
-            "startedAtMs",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "id": "string",
-            "memoryCitation": "null",
-            "phase": "null",
-            "text": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "id",
-            "memoryCitation",
-            "phase",
-            "text",
-            "type"
-          ],
-          "item_type": "agentMessage",
-          "method": "item/started",
-          "params_field_types": {
-            "item": "object",
-            "startedAtMs": "number",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "item",
-            "startedAtMs",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "method": "item/agentMessage/delta",
-          "params_field_types": {
-            "delta": "string",
-            "itemId": "string",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "delta",
-            "itemId",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "id": "string",
-            "memoryCitation": "null",
-            "phase": "null",
-            "text": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "id",
-            "memoryCitation",
-            "phase",
-            "text",
-            "type"
-          ],
-          "item_type": "agentMessage",
-          "method": "item/completed",
-          "params_field_types": {
-            "completedAtMs": "number",
-            "item": "object",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "completedAtMs",
-            "item",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "agentsStates": "object",
-            "id": "string",
-            "model": "null",
-            "prompt": "null",
-            "reasoningEffort": "null",
-            "receiverThreadIds": "array",
-            "senderThreadId": "string",
-            "status": "string",
-            "tool": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "agentsStates",
-            "id",
-            "model",
-            "prompt",
-            "reasoningEffort",
-            "receiverThreadIds",
-            "senderThreadId",
-            "status",
-            "tool",
-            "type"
-          ],
-          "item_status": "completed",
-          "item_tool": "wait",
-          "item_type": "collabAgentToolCall",
-          "method": "item/completed",
-          "params_field_types": {
-            "completedAtMs": "number",
-            "item": "object",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "completedAtMs",
-            "item",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "id": "string",
-            "memoryCitation": "null",
-            "phase": "null",
-            "text": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "id",
-            "memoryCitation",
-            "phase",
-            "text",
-            "type"
-          ],
-          "item_type": "agentMessage",
-          "method": "item/started",
-          "params_field_types": {
-            "item": "object",
-            "startedAtMs": "number",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "item",
-            "startedAtMs",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "method": "item/agentMessage/delta",
-          "params_field_types": {
-            "delta": "string",
-            "itemId": "string",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "delta",
-            "itemId",
-            "threadId",
-            "turnId"
-          ]
-        },
-        {
-          "item_field_types": {
-            "id": "string",
-            "memoryCitation": "null",
-            "phase": "null",
-            "text": "string",
-            "type": "string"
-          },
-          "item_fields": [
-            "id",
-            "memoryCitation",
-            "phase",
-            "text",
-            "type"
-          ],
-          "item_type": "agentMessage",
-          "method": "item/completed",
-          "params_field_types": {
-            "completedAtMs": "number",
-            "item": "object",
-            "threadId": "string",
-            "turnId": "string"
-          },
-          "params_fields": [
-            "completedAtMs",
-            "item",
-            "threadId",
-            "turnId"
-          ]
-        }
-      ],
-      "same_home_thread_resume_and_read": "observed",
-      "thread_items": {
-        "agentMessage": [
-          "type",
-          "id",
-          "text",
-          "phase",
-          "memoryCitation"
-        ],
-        "collabAgentToolCall": [
-          "type",
-          "id",
-          "tool",
-          "status",
-          "senderThreadId",
-          "receiverThreadIds",
-          "prompt",
-          "model",
-          "reasoningEffort",
-          "agentsStates"
-        ],
-        "subAgentActivity": [
-          "type",
-          "id",
-          "kind",
-          "agentThreadId",
-          "agentPath"
-        ]
-      },
-      "thread_read_envelope": {
-        "field_types": {
-          "agentNickname": "null",
-          "agentRole": "null",
-          "canAcceptDirectInput": "boolean",
-          "cliVersion": "string",
-          "createdAt": "number",
-          "cwd": "string",
-          "ephemeral": "boolean",
-          "extra": "null",
-          "forkedFromId": "null",
-          "gitInfo": "object",
-          "historyMode": "string",
-          "id": "string",
-          "modelProvider": "string",
-          "name": "null",
-          "parentThreadId": "null",
-          "path": "string",
-          "preview": "string",
-          "recencyAt": "number",
-          "section": "null",
-          "sectionEnteredAt": "null",
-          "sessionId": "string",
-          "source": "string",
-          "status": "object",
-          "threadSource": "null",
-          "turns": "array",
-          "updatedAt": "number"
-        },
-        "fields": [
-          "agentNickname",
-          "agentRole",
-          "canAcceptDirectInput",
-          "cliVersion",
-          "createdAt",
-          "cwd",
-          "ephemeral",
-          "extra",
-          "forkedFromId",
-          "gitInfo",
-          "historyMode",
-          "id",
-          "modelProvider",
-          "name",
-          "parentThreadId",
-          "path",
-          "preview",
-          "recencyAt",
-          "section",
-          "sectionEnteredAt",
-          "sessionId",
-          "source",
-          "status",
-          "threadSource",
-          "turns",
-          "updatedAt"
-        ],
-        "status_field_types": {
-          "type": "string"
-        },
-        "status_fields": [
-          "type"
-        ],
-        "turns": [
-          {
-            "field_types": {
-              "completedAt": "number",
-              "durationMs": "number",
-              "error": "null",
-              "id": "string",
-              "items": "array",
-              "itemsView": "string",
-              "startedAt": "number",
-              "status": "string"
-            },
-            "fields": [
-              "completedAt",
-              "durationMs",
-              "error",
-              "id",
-              "items",
-              "itemsView",
-              "startedAt",
-              "status"
-            ],
-            "items": [
-              {
-                "field_types": {
-                  "clientId": "null",
-                  "content": "array",
-                  "id": "string",
-                  "type": "string"
-                },
-                "fields": [
-                  "clientId",
-                  "content",
-                  "id",
-                  "type"
-                ],
-                "type": "userMessage"
-              },
-              {
-                "field_types": {
-                  "agentPath": "string",
-                  "agentThreadId": "string",
-                  "id": "string",
-                  "kind": "string",
-                  "type": "string"
-                },
-                "fields": [
-                  "agentPath",
-                  "agentThreadId",
-                  "id",
-                  "kind",
-                  "type"
-                ],
-                "kind": "started",
-                "type": "subAgentActivity"
-              },
-              {
-                "field_types": {
-                  "id": "string",
-                  "memoryCitation": "null",
-                  "phase": "null",
-                  "text": "string",
-                  "type": "string"
-                },
-                "fields": [
-                  "id",
-                  "memoryCitation",
-                  "phase",
-                  "text",
-                  "type"
-                ],
-                "type": "agentMessage"
-              }
-            ],
-            "status": "completed"
-          }
-        ]
-      },
-      "thread_resume_result": {
-        "field_types": {
-          "activePermissionProfile": "object",
-          "approvalPolicy": "string",
-          "approvalsReviewer": "string",
-          "cwd": "string",
-          "initialTurnsPage": "null",
-          "instructionSources": "array",
-          "itemsBackwardsCursor": "null",
-          "model": "string",
-          "modelProvider": "string",
-          "multiAgentMode": "string",
-          "reasoningEffort": "string",
-          "runtimeWorkspaceRoots": "array",
-          "sandbox": "object",
-          "serviceTier": "null",
-          "thread": "object",
-          "turnsBackwardsCursor": "null"
-        },
-        "fields": [
-          "activePermissionProfile",
-          "approvalPolicy",
-          "approvalsReviewer",
-          "cwd",
-          "initialTurnsPage",
-          "instructionSources",
-          "itemsBackwardsCursor",
-          "model",
-          "modelProvider",
-          "multiAgentMode",
-          "reasoningEffort",
-          "runtimeWorkspaceRoots",
-          "sandbox",
-          "serviceTier",
-          "thread",
-          "turnsBackwardsCursor"
-        ]
-      },
-      "turn_terminal_notification": "turn/completed",
-      "wire_item_equivalent": false
-    },
-    "model_input_agent_message": {
-      "content_variants": {
-        "encrypted_content": [
-          "type",
-          "encrypted_content"
-        ],
-        "input_text": [
-          "type",
-          "text"
-        ]
-      },
-      "fields": [
-        "type",
-        "id",
-        "author",
-        "recipient",
-        "content"
-      ],
-      "function_result": false,
-      "source_optional_field": "internal_chat_message_metadata_passthrough",
-      "task_identity_fields": [
-        "author",
-        "recipient"
-      ],
-      "type": "agent_message"
-    },
-    "responses_declaration_and_call": {
-      "call_namespace_field": true,
-      "call_type": "function_call",
-      "declaration_type": "namespace",
-      "namespace": "collaboration",
-      "tool_choice": "auto"
-    },
-    "rollout_metadata": {
-      "sent_as_request_metadata": false,
-      "session_meta_field": "multi_agent_version",
-      "turn_context_field": "multi_agent_version",
-      "values": [
-        "v1",
-        "v2"
-      ]
+      "file": "codex-0.146-source-contract.json",
+      "sha256": "6f38b8b07b98c6f28edd7418b63449242ee41d6396694392a70c0d7fb2b70f2c"
     }
   },
   "protocols": [
     {
       "call": {
-        "fields": [
-          "type",
-          "id",
-          "name",
-          "namespace",
-          "arguments",
-          "call_id"
-        ],
-        "identity_fields": [
-          "id",
-          "call_id"
-        ],
-        "wire_type": "function_call"
-      },
-      "declaration": {
         "argument_fields": {
           "close_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "previous_status": {
-                  "oneOf": [
-                    {
-                      "enum": [
-                        "pending_init",
-                        "running",
-                        "interrupted",
-                        "shutdown",
-                        "not_found"
-                      ],
-                      "type": "string"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "completed": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "completed"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "errored": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "errored"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "previous_status"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "target": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "target"
-              ],
-              "type": "object"
-            },
             "optional": [],
-            "request_output_schema_field": "absent",
             "required": [
               "target"
             ]
           },
           "resume_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "status": {
-                  "oneOf": [
-                    {
-                      "enum": [
-                        "pending_init",
-                        "running",
-                        "interrupted",
-                        "shutdown",
-                        "not_found"
-                      ],
-                      "type": "string"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "completed": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "completed"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "errored": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "errored"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "status"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "id"
-              ],
-              "type": "object"
-            },
             "optional": [],
-            "request_output_schema_field": "absent",
             "required": [
               "id"
             ]
           },
           "send_input": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "submission_id": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "submission_id"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "interrupt": {
-                  "type": "boolean"
-                },
-                "items": {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "audio_url": {
-                        "type": "string"
-                      },
-                      "image_url": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "path": {
-                        "type": "string"
-                      },
-                      "text": {
-                        "type": "string"
-                      },
-                      "type": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [],
-                    "type": "object"
-                  },
-                  "type": "array"
-                },
-                "message": {
-                  "type": "string"
-                },
-                "target": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "target"
-              ],
-              "type": "object"
-            },
             "optional": [
               "interrupt",
-              "items",
               "message"
             ],
-            "request_output_schema_field": "absent",
             "required": [
               "target"
             ]
           },
           "spawn_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "agent_id": {
-                  "type": "string"
-                },
-                "nickname": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "agent_id",
-                "nickname"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "agent_type": {
-                  "type": "string"
-                },
-                "fork_context": {
-                  "type": "boolean"
-                },
-                "items": {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "audio_url": {
-                        "type": "string"
-                      },
-                      "image_url": {
-                        "type": "string"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "path": {
-                        "type": "string"
-                      },
-                      "text": {
-                        "type": "string"
-                      },
-                      "type": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [],
-                    "type": "object"
-                  },
-                  "type": "array"
-                },
-                "message": {
-                  "type": "string"
-                },
-                "model": {
-                  "type": "string"
-                },
-                "reasoning_effort": {
-                  "type": "string"
-                },
-                "service_tier": {
-                  "type": "string"
-                }
-              },
-              "required": [],
-              "type": "object"
-            },
             "optional": [
-              "agent_type",
               "fork_context",
-              "items",
-              "message",
-              "model",
-              "reasoning_effort",
-              "service_tier"
+              "message"
             ],
-            "request_output_schema_field": "absent",
-            "required": []
+            "required": [
+              "agent_type"
+            ]
           },
           "wait_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "status": {
-                  "additionalProperties": {
-                    "oneOf": [
-                      {
-                        "enum": [
-                          "pending_init",
-                          "running",
-                          "interrupted",
-                          "shutdown",
-                          "not_found"
-                        ],
-                        "type": "string"
-                      },
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "completed": {
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          }
-                        },
-                        "required": [
-                          "completed"
-                        ],
-                        "type": "object"
-                      },
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "errored": {
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "errored"
-                        ],
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "type": "object"
-                },
-                "timed_out": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "status",
-                "timed_out"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "targets": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "timeout_ms": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "targets"
-              ],
-              "type": "object"
-            },
             "optional": [
               "timeout_ms"
             ],
-            "request_output_schema_field": "absent",
             "required": [
               "targets"
             ]
           }
         },
+        "fields": [
+          "type",
+          "namespace",
+          "name",
+          "item_id",
+          "call_id",
+          "arguments"
+        ],
+        "identity_fields": [
+          "call_id",
+          "item_id"
+        ],
+        "wire_type": "function_call"
+      },
+      "declaration": {
         "child_wire_type": "function",
+        "discriminator": {
+          "namespace": "multi_agent_v1",
+          "tool_field": "name"
+        },
         "fields": [
           "type",
           "name",
-          "description",
           "tools"
         ],
+        "flattened_name_prefixes": [
+          "multi_agent_v1__",
+          "multi_agent_v1."
+        ],
         "tool_names": [
-          "close_agent",
-          "resume_agent",
-          "send_input",
           "spawn_agent",
-          "wait_agent"
+          "send_input",
+          "wait_agent",
+          "close_agent",
+          "resume_agent"
         ],
         "wire_type": "namespace"
       },
       "executor": "codex_client",
       "history": {
+        "continuation_identity": "agent_id",
         "identity_fields": [
-          "id",
+          "agent_id",
           "call_id",
-          "agent_id"
+          "call_item_id",
+          "output_item_id"
         ],
         "items": [
           "function_call",
           "function_call_output"
         ],
-        "rollout_version_field": "multi_agent_version"
+        "transcript_markers": [
+          "Previous real Codex native multi_agent_v1.<tool> call transcript",
+          "Codex native multi_agent_v1.<tool> result"
+        ]
       },
       "id": "collaboration_v1",
       "isolation": {
         "forbidden_v2_fields": [
+          "continuation_id",
           "fork_turns",
-          "path_prefix",
-          "task_name"
+          "task_name",
+          "task_path"
+        ],
+        "forbidden_v2_semantics": [
+          "task_path_continuation",
+          "fork_turns"
         ],
         "forbidden_v2_tools": [
           "followup_task",
@@ -1105,779 +220,197 @@
       "result": {
         "fields": [
           "type",
-          "id",
           "call_id",
+          "item_id",
           "output"
         ],
         "identity_fields": [
-          "id",
-          "call_id"
+          "call_id",
+          "item_id"
         ],
-        "output_wire_encoding": "json_text_string",
-        "spawn_identity": "agent_id",
-        "tool_output_schemas": {
-          "close_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "previous_status": {
-                "oneOf": [
-                  {
-                    "enum": [
-                      "pending_init",
-                      "running",
-                      "interrupted",
-                      "shutdown",
-                      "not_found"
-                    ],
-                    "type": "string"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "completed": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "completed"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "errored": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "errored"
-                    ],
-                    "type": "object"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "previous_status"
-            ],
-            "type": "object"
-          },
-          "resume_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "status": {
-                "oneOf": [
-                  {
-                    "enum": [
-                      "pending_init",
-                      "running",
-                      "interrupted",
-                      "shutdown",
-                      "not_found"
-                    ],
-                    "type": "string"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "completed": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "completed"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "errored": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "errored"
-                    ],
-                    "type": "object"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "status"
-            ],
-            "type": "object"
-          },
-          "send_input": {
-            "additionalProperties": false,
-            "properties": {
-              "submission_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "submission_id"
-            ],
-            "type": "object"
-          },
-          "spawn_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "agent_id": {
-                "type": "string"
-              },
-              "nickname": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "agent_id",
-              "nickname"
-            ],
-            "type": "object"
-          },
-          "wait_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "status": {
-                "additionalProperties": {
-                  "oneOf": [
-                    {
-                      "enum": [
-                        "pending_init",
-                        "running",
-                        "interrupted",
-                        "shutdown",
-                        "not_found"
-                      ],
-                      "type": "string"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "completed": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "completed"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "errored": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "errored"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                },
-                "type": "object"
-              },
-              "timed_out": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "status",
-              "timed_out"
-            ],
-            "type": "object"
-          }
+        "result_fields_by_tool": {
+          "close_agent": [
+            "previous_status"
+          ],
+          "resume_agent": [
+            "status"
+          ],
+          "send_input": [
+            "status"
+          ],
+          "spawn_agent": [
+            "agent_id",
+            "nickname"
+          ],
+          "wait_agent": [
+            "timed_out",
+            "status"
+          ]
         },
+        "result_identity": "agent_id",
         "wire_type": "function_call_output"
       },
       "shape_provenance": {
-        "cli_capture_status": "observed",
-        "desktop_capture_status": "observed",
-        "source": "issue392_exact_cli_and_desktop_runtime_contract"
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "current_gateway_compatibility_surface",
+        "source": "src-python/codex_proxy.py#MULTI_AGENT_DISCOVERY_TOOLS"
       },
-      "status": "runtime_observed",
+      "status": "legacy_structural_contract",
       "stream": {
+        "error_event": "response.failed",
         "event_order": [
           "response.output_item.added",
           "response.function_call_arguments.delta",
           "response.function_call_arguments.done",
           "response.output_item.done"
         ],
-        "event_shapes": {
-          "response.function_call_arguments.delta": {
-            "field_types": {
-              "delta": "string",
-              "item_id": "string",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "delta",
-              "item_id",
-              "output_index",
-              "type"
-            ],
-            "type": "response.function_call_arguments.delta"
-          },
-          "response.function_call_arguments.done": {
-            "field_types": {
-              "arguments": "string",
-              "item_id": "string",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "arguments",
-              "item_id",
-              "output_index",
-              "type"
-            ],
-            "type": "response.function_call_arguments.done"
-          },
-          "response.output_item.added": {
-            "field_types": {
-              "item": "object",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "item",
-              "output_index",
-              "type"
-            ],
-            "item_field_types": {
-              "arguments": "string",
-              "call_id": "string",
-              "id": "string",
-              "name": "string",
-              "namespace": "string",
-              "status": "string",
-              "type": "string"
-            },
-            "item_fields": [
-              "arguments",
-              "call_id",
-              "id",
-              "name",
-              "namespace",
-              "status",
-              "type"
-            ],
-            "item_name": "spawn_agent",
-            "item_namespace": "collaboration",
-            "item_status": "in_progress",
-            "item_type": "function_call",
-            "type": "response.output_item.added"
-          },
-          "response.output_item.done": {
-            "field_types": {
-              "item": "object",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "item",
-              "output_index",
-              "type"
-            ],
-            "item_field_types": {
-              "arguments": "string",
-              "call_id": "string",
-              "id": "string",
-              "name": "string",
-              "namespace": "string",
-              "status": "string",
-              "type": "string"
-            },
-            "item_fields": [
-              "arguments",
-              "call_id",
-              "id",
-              "name",
-              "namespace",
-              "status",
-              "type"
-            ],
-            "item_name": "spawn_agent",
-            "item_namespace": "collaboration",
-            "item_status": "completed",
-            "item_type": "function_call",
-            "type": "response.output_item.done"
-          }
-        },
+        "qualification": "not_observed",
         "terminal_events": [
           "response.completed",
           "response.incomplete",
           "response.failed"
+        ]
+      },
+      "terminal_error": {
+        "error_event": "response.failed",
+        "error_fields": [
+          "id",
+          "status",
+          "error"
         ],
-        "terminal_shapes": {
-          "response.completed": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_field_types": {
-              "id": "string",
-              "model": "string",
-              "object": "string",
-              "output": "array",
-              "status": "string",
-              "usage": "object"
-            },
-            "response_fields": [
-              "id",
-              "model",
-              "object",
-              "output",
-              "status",
-              "usage"
-            ],
-            "response_output_item_types": [
-              "function_call"
-            ],
-            "response_status": "completed",
-            "type": "response.completed"
-          },
-          "response.failed": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_error_field_types": {
-              "code": "string",
-              "message": "string"
-            },
-            "response_error_fields": [
-              "code",
-              "message"
-            ],
-            "response_field_types": {
-              "error": "object",
-              "id": "string"
-            },
-            "response_fields": [
-              "error",
-              "id"
-            ],
-            "type": "response.failed"
-          },
-          "response.incomplete": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_field_types": {
-              "error": "null",
-              "id": "string",
-              "incomplete_details": "object",
-              "object": "string",
-              "status": "string"
-            },
-            "response_fields": [
-              "error",
-              "id",
-              "incomplete_details",
-              "object",
-              "status"
-            ],
-            "response_incomplete_details_field_types": {
-              "reason": "string"
-            },
-            "response_incomplete_details_fields": [
-              "reason"
-            ],
-            "response_status": "incomplete",
-            "type": "response.incomplete"
-          }
-        }
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
       }
     },
     {
       "call": {
-        "fields": [
-          "type",
-          "id",
-          "name",
-          "namespace",
-          "arguments",
-          "call_id"
-        ],
-        "identity_fields": [
-          "id",
-          "call_id"
-        ],
-        "wire_type": "function_call"
-      },
-      "declaration": {
         "argument_fields": {
           "followup_task": {
-            "additional_properties": false,
-            "client_result_schema": null,
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "message": {
-                  "encrypted": true,
-                  "type": "string"
-                },
-                "target": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "target",
-                "message"
-              ],
-              "type": "object"
-            },
             "optional": [],
-            "request_output_schema_field": "absent",
             "required": [
-              "message",
-              "target"
+              "target",
+              "message"
             ]
           },
           "interrupt_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "previous_status": {
-                  "oneOf": [
-                    {
-                      "enum": [
-                        "pending_init",
-                        "running",
-                        "interrupted",
-                        "shutdown",
-                        "not_found"
-                      ],
-                      "type": "string"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "completed": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "completed"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "errored": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "errored"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "previous_status"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "target": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "target"
-              ],
-              "type": "object"
-            },
             "optional": [],
-            "request_output_schema_field": "absent",
             "required": [
               "target"
             ]
           },
           "list_agents": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "agents": {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "agent_name": {
-                        "type": "string"
-                      },
-                      "agent_status": {
-                        "oneOf": [
-                          {
-                            "enum": [
-                              "pending_init",
-                              "running",
-                              "interrupted",
-                              "shutdown",
-                              "not_found"
-                            ],
-                            "type": "string"
-                          },
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "completed": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ]
-                              }
-                            },
-                            "required": [
-                              "completed"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "errored": {
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "errored"
-                            ],
-                            "type": "object"
-                          }
-                        ]
-                      }
-                    },
-                    "required": [
-                      "agent_name",
-                      "agent_status"
-                    ],
-                    "type": "object"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "agents"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "path_prefix": {
-                  "type": "string"
-                }
-              },
-              "required": [],
-              "type": "object"
-            },
             "optional": [
               "path_prefix"
             ],
-            "request_output_schema_field": "absent",
             "required": []
           },
           "send_message": {
-            "additional_properties": false,
-            "client_result_schema": null,
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "message": {
-                  "encrypted": true,
-                  "type": "string"
-                },
-                "target": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "target",
-                "message"
-              ],
-              "type": "object"
-            },
             "optional": [],
-            "request_output_schema_field": "absent",
             "required": [
-              "message",
-              "target"
+              "target",
+              "message"
             ]
           },
           "spawn_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "task_name": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "task_name"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "agent_type": {
-                  "type": "string"
-                },
-                "fork_turns": {
-                  "type": "string"
-                },
-                "message": {
-                  "encrypted": true,
-                  "type": "string"
-                },
-                "model": {
-                  "type": "string"
-                },
-                "reasoning_effort": {
-                  "type": "string"
-                },
-                "task_name": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "task_name",
-                "message"
-              ],
-              "type": "object"
-            },
             "optional": [
-              "agent_type",
               "fork_turns",
+              "agent_type",
               "model",
               "reasoning_effort"
             ],
-            "request_output_schema_field": "absent",
             "required": [
-              "message",
-              "task_name"
+              "task_name",
+              "message"
             ]
           },
           "wait_agent": {
-            "additional_properties": false,
-            "client_result_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "message": {
-                  "type": "string"
-                },
-                "timed_out": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "message",
-                "timed_out"
-              ],
-              "type": "object"
-            },
-            "normalized_parameter_schema": {
-              "additionalProperties": false,
-              "properties": {
-                "timeout_ms": {
-                  "type": "number"
-                }
-              },
-              "required": [],
-              "type": "object"
-            },
             "optional": [
               "timeout_ms"
             ],
-            "request_output_schema_field": "absent",
             "required": []
           }
         },
+        "fields": [
+          "type",
+          "namespace",
+          "name",
+          "item_id",
+          "call_id",
+          "arguments"
+        ],
+        "fork_turns": {
+          "field": "fork_turns",
+          "values": [
+            "all",
+            "none",
+            "positive_decimal_string"
+          ]
+        },
+        "identity_fields": [
+          "call_id",
+          "item_id",
+          "task_path",
+          "continuation_id"
+        ],
+        "wire_type": "function_call"
+      },
+      "declaration": {
         "child_wire_type": "function",
+        "discriminator": {
+          "namespace": "collaboration",
+          "tool_field": "name"
+        },
         "fields": [
           "type",
           "name",
-          "description",
           "tools"
         ],
         "tool_names": [
-          "followup_task",
-          "interrupt_agent",
-          "list_agents",
-          "send_message",
           "spawn_agent",
-          "wait_agent"
+          "send_message",
+          "followup_task",
+          "wait_agent",
+          "interrupt_agent",
+          "list_agents"
         ],
         "wire_type": "namespace"
       },
       "executor": "codex_client",
       "history": {
-        "canonical_task_identity": "agent_path_serialized_as_task_name",
-        "identity_fields": [
-          "id",
-          "call_id",
-          "author",
-          "recipient"
+        "continuation_fields": [
+          "task_path",
+          "continuation_id",
+          "task_name",
+          "fork_turns"
         ],
+        "continuation_identity": "task_path",
+        "identity_fields": [
+          "task_path",
+          "continuation_id",
+          "call_id",
+          "call_item_id",
+          "output_item_id"
+        ],
+        "inherited_prefix": "deferred_qualification",
         "items": [
           "function_call",
-          "function_call_output",
-          "agent_message"
+          "function_call_output"
         ],
-        "rollout_version_field": "multi_agent_version",
-        "same_home_restart_readback": "observed"
+        "pagination": "deferred_qualification"
       },
       "id": "collaboration_v2",
       "isolation": {
         "forbidden_v1_fields": [
           "agent_id",
-          "fork_context",
-          "items",
-          "targets"
+          "fork_context"
+        ],
+        "forbidden_v1_semantics": [
+          "agent_id_close_resume",
+          "fork_context"
         ],
         "forbidden_v1_tools": [
           "close_agent",
@@ -1888,395 +421,65 @@
       "namespace": "collaboration",
       "owner": "codex_client",
       "result": {
-        "continuation_id_field": "not_present",
         "fields": [
           "type",
-          "id",
           "call_id",
+          "item_id",
           "output"
         ],
         "identity_fields": [
-          "id",
-          "call_id"
+          "call_id",
+          "item_id",
+          "task_path",
+          "continuation_id"
         ],
-        "output_wire_encoding": {
-          "followup_task": "plain_text",
-          "interrupt_agent": "json_text_string",
-          "list_agents": "json_text_string",
-          "send_message": "plain_text",
-          "spawn_agent": "json_text_string",
-          "wait_agent": "json_text_string"
-        },
-        "spawn_identity": "task_name",
-        "spawn_output_fields_default": [
-          "task_name"
+        "result_fields": [
+          "task_path",
+          "continuation_id",
+          "status"
         ],
-        "tool_output_schemas": {
-          "followup_task": null,
-          "interrupt_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "previous_status": {
-                "oneOf": [
-                  {
-                    "enum": [
-                      "pending_init",
-                      "running",
-                      "interrupted",
-                      "shutdown",
-                      "not_found"
-                    ],
-                    "type": "string"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "completed": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "completed"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "errored": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "errored"
-                    ],
-                    "type": "object"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "previous_status"
-            ],
-            "type": "object"
-          },
-          "list_agents": {
-            "additionalProperties": false,
-            "properties": {
-              "agents": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "agent_name": {
-                      "type": "string"
-                    },
-                    "agent_status": {
-                      "oneOf": [
-                        {
-                          "enum": [
-                            "pending_init",
-                            "running",
-                            "interrupted",
-                            "shutdown",
-                            "not_found"
-                          ],
-                          "type": "string"
-                        },
-                        {
-                          "additionalProperties": false,
-                          "properties": {
-                            "completed": {
-                              "type": [
-                                "string",
-                                "null"
-                              ]
-                            }
-                          },
-                          "required": [
-                            "completed"
-                          ],
-                          "type": "object"
-                        },
-                        {
-                          "additionalProperties": false,
-                          "properties": {
-                            "errored": {
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "errored"
-                          ],
-                          "type": "object"
-                        }
-                      ]
-                    }
-                  },
-                  "required": [
-                    "agent_name",
-                    "agent_status"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "agents"
-            ],
-            "type": "object"
-          },
-          "send_message": null,
-          "spawn_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "task_name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "task_name"
-            ],
-            "type": "object"
-          },
-          "wait_agent": {
-            "additionalProperties": false,
-            "properties": {
-              "message": {
-                "type": "string"
-              },
-              "timed_out": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "message",
-              "timed_out"
-            ],
-            "type": "object"
-          }
-        },
+        "result_identity": "task_path",
         "wire_type": "function_call_output"
       },
       "shape_provenance": {
-        "cli_capture_status": "observed",
-        "desktop_capture_status": "observed",
-        "source": "issue392_exact_cli_and_desktop_runtime_contract"
+        "official_cli_capture_status": "not_observed",
+        "shape_kind": "accepted_structural_contract",
+        "source": "accepted_issue_62_source_contract_and_repository_evidence"
       },
-      "status": "runtime_observed_request_shape_and_readback",
+      "status": "stable_surface_not_lifecycle_qualified",
       "stream": {
+        "call_semantics": "namespace_child_function_uses_function_call_lifecycle",
+        "error_event": "response.failed",
         "event_order": [
           "response.output_item.added",
           "response.function_call_arguments.delta",
           "response.function_call_arguments.done",
           "response.output_item.done"
         ],
-        "event_shapes": {
-          "response.function_call_arguments.delta": {
-            "field_types": {
-              "delta": "string",
-              "item_id": "string",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "delta",
-              "item_id",
-              "output_index",
-              "type"
-            ],
-            "type": "response.function_call_arguments.delta"
-          },
-          "response.function_call_arguments.done": {
-            "field_types": {
-              "arguments": "string",
-              "item_id": "string",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "arguments",
-              "item_id",
-              "output_index",
-              "type"
-            ],
-            "type": "response.function_call_arguments.done"
-          },
-          "response.output_item.added": {
-            "field_types": {
-              "item": "object",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "item",
-              "output_index",
-              "type"
-            ],
-            "item_field_types": {
-              "arguments": "string",
-              "call_id": "string",
-              "id": "string",
-              "name": "string",
-              "namespace": "string",
-              "status": "string",
-              "type": "string"
-            },
-            "item_fields": [
-              "arguments",
-              "call_id",
-              "id",
-              "name",
-              "namespace",
-              "status",
-              "type"
-            ],
-            "item_name": "spawn_agent",
-            "item_namespace": "collaboration",
-            "item_status": "in_progress",
-            "item_type": "function_call",
-            "type": "response.output_item.added"
-          },
-          "response.output_item.done": {
-            "field_types": {
-              "item": "object",
-              "output_index": "number",
-              "type": "string"
-            },
-            "fields": [
-              "item",
-              "output_index",
-              "type"
-            ],
-            "item_field_types": {
-              "arguments": "string",
-              "call_id": "string",
-              "id": "string",
-              "name": "string",
-              "namespace": "string",
-              "status": "string",
-              "type": "string"
-            },
-            "item_fields": [
-              "arguments",
-              "call_id",
-              "id",
-              "name",
-              "namespace",
-              "status",
-              "type"
-            ],
-            "item_name": "spawn_agent",
-            "item_namespace": "collaboration",
-            "item_status": "completed",
-            "item_type": "function_call",
-            "type": "response.output_item.done"
-          }
-        },
+        "qualification": "not_observed",
         "terminal_events": [
           "response.completed",
           "response.incomplete",
           "response.failed"
+        ]
+      },
+      "terminal_error": {
+        "error_event": "response.failed",
+        "error_fields": [
+          "id",
+          "status",
+          "error"
         ],
-        "terminal_shapes": {
-          "response.completed": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_field_types": {
-              "id": "string",
-              "model": "string",
-              "object": "string",
-              "output": "array",
-              "status": "string",
-              "usage": "object"
-            },
-            "response_fields": [
-              "id",
-              "model",
-              "object",
-              "output",
-              "status",
-              "usage"
-            ],
-            "response_output_item_types": [
-              "function_call"
-            ],
-            "response_status": "completed",
-            "type": "response.completed"
-          },
-          "response.failed": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_error_field_types": {
-              "code": "string",
-              "message": "string"
-            },
-            "response_error_fields": [
-              "code",
-              "message"
-            ],
-            "response_field_types": {
-              "error": "object",
-              "id": "string"
-            },
-            "response_fields": [
-              "error",
-              "id"
-            ],
-            "type": "response.failed"
-          },
-          "response.incomplete": {
-            "field_types": {
-              "response": "object",
-              "type": "string"
-            },
-            "fields": [
-              "response",
-              "type"
-            ],
-            "response_field_types": {
-              "error": "null",
-              "id": "string",
-              "incomplete_details": "object",
-              "object": "string",
-              "status": "string"
-            },
-            "response_fields": [
-              "error",
-              "id",
-              "incomplete_details",
-              "object",
-              "status"
-            ],
-            "response_incomplete_details_field_types": {
-              "reason": "string"
-            },
-            "response_incomplete_details_fields": [
-              "reason"
-            ],
-            "response_status": "incomplete",
-            "type": "response.incomplete"
-          }
-        }
+        "qualification": "not_observed",
+        "terminal_events": [
+          "response.completed",
+          "response.incomplete",
+          "response.failed"
+        ]
       }
     }
   ],
-  "qualification_status": "superseded_by_issue392_exact_runtime_contract",
+  "qualification_status": "structural_boundary_only",
   "schema": "codexhub.issue64.collaboration-v1-v2.v1",
-  "verification_scope": "runtime_observed_structural_contract"
+  "verification_scope": "structural_contract_only"
 }

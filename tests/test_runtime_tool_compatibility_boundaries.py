@@ -5,12 +5,6 @@ import json
 
 import pytest
 
-from collaboration_runtime_contract import (
-    COLLABORATION_V1,
-    COLLABORATION_V2,
-    CollaborationContractError,
-    validate_collaboration_arguments,
-)
 from codex_semantic_adapter import (
     CollaborationBoundaryError,
     classify_collaboration_payload,
@@ -1134,7 +1128,7 @@ def test_native_namespace_rejects_unqualified_child_without_plain_owner(surface)
 
 
 def test_foreign_collaboration_history_is_preserved_when_current_plan_is_different() -> None:
-    plan = _adapted_namespace_plan(_namespace("vendor", child="run"))
+    plan = _adapted_namespace_plan(_namespace("multi_agent_v1", child="spawn_agent"))
     history = [{
         "type": "function_call",
         "namespace": "collaboration",
@@ -2101,14 +2095,25 @@ def test_adapted_namespace_rejects_original_or_flattened_alias_without_exact_map
     ids=["v1-json-arguments", "v2-json-arguments"],
 )
 def test_v1_v2_forbidden_fields_inside_json_arguments_fail(namespace, forbidden):
-    version = COLLABORATION_V1 if namespace == "multi_agent_v1" else COLLABORATION_V2
-    with pytest.raises(CollaborationContractError) as caught:
-        validate_collaboration_arguments(
-            version,
-            "spawn_agent",
-            json.dumps({forbidden: "mixed"}),
+    declaration = _namespace(namespace, child="spawn_agent")
+    plan = _adapted_namespace_plan(declaration)
+    alias = plan.entries[0].aliases[0]
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "namespace": namespace,
+                        "name": "spawn_agent",
+                        "call_id": "call",
+                        "arguments": json.dumps({forbidden: "mixed"}),
+                    }
+                ],
+                "tools": [declaration],
+                "tool_choice": {"type": "function", "name": "spawn_agent"},
+            }
         )
-    assert caught.value.classification == "collaboration_arguments_schema_mismatch"
 
 
 def test_adapted_namespace_tool_choice_with_duplicate_child_name_fails_preflight():

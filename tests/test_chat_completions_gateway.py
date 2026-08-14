@@ -4619,7 +4619,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
     def test_post_chat_completions_404_for_unknown_path(self):
         handler = self._make_handler(b'{}', path="/v1/unknown")
         sent = []
-        handler._send_json_and_close = lambda status, payload: sent.append((status, payload))
+        handler._send_json = lambda status, payload: sent.append((status, payload))
         CodexProxyHandler.do_POST(handler)
         self.assertEqual(sent[0][0], 404)
 

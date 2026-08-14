@@ -234,6 +234,23 @@ fn validate_flavor_manifest(manifest: &str, expected_flavor: BuildFlavor) -> Res
     validate_flavor_manifest_data(&manifest, expected_flavor)
 }
 
+/// The tauri-plugin-updater platform key for this build target. Must match
+/// the key the release pipeline writes into latest.json for this OS/arch.
+fn current_updater_platform_key() -> &'static str {
+    #[cfg(windows)]
+    {
+        "windows-x86_64"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux-x86_64"
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        "windows-x86_64"
+    }
+}
+
 fn validate_flavor_manifest_data(
     manifest: &FlavorUpdateManifest,
     expected_flavor: BuildFlavor,
@@ -264,9 +281,10 @@ fn validate_flavor_manifest_data(
         }
     }
 
-    let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
+    let platform_key = current_updater_platform_key();
+    let platform = manifest.platforms.get(platform_key).ok_or_else(|| {
         format!(
-            "Rejected {} update manifest: windows-x86_64 artifact is missing.",
+            "Rejected {} update manifest: {platform_key} artifact is missing.",
             expected_flavor.as_str()
         )
     })?;
@@ -754,7 +772,7 @@ mod tests {
         let manifest = flavor_manifest(
             None,
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Normal),
         );
 
         assert_eq!(
@@ -768,7 +786,7 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Debug),
         );
 
         assert_eq!(
@@ -782,7 +800,7 @@ mod tests {
         let manifest = flavor_manifest(
             Some("normal"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Normal),
         );
 
         let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
@@ -796,13 +814,16 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Normal),
         );
 
         let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
             .expect_err("debug must reject a normal installer artifact");
 
-        assert!(error.contains("expected artifact CodexHub_0.1.5_debug_x64-setup.exe"));
+        assert!(error.contains(&format!(
+            "expected artifact {}",
+            BuildFlavor::Debug.installer_name("0.1.5")
+        )));
     }
 
     #[test]
@@ -810,13 +831,13 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Debug),
         );
 
         let error = validate_checked_update_payload(
             &manifest,
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Normal),
             BuildFlavor::Debug,
         )
         .expect_err("debug must reject a checked update that selects the normal artifact");
@@ -829,14 +850,14 @@ mod tests {
         let manifest = flavor_manifest(
             None,
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &release_artifact_url("0.1.5", BuildFlavor::Normal),
         );
 
         assert_eq!(
             validate_checked_update_payload(
                 &manifest,
                 "0.1.5",
-                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+                &release_artifact_url("0.1.5", BuildFlavor::Normal),
                 BuildFlavor::Normal,
             ),
             Ok(())
@@ -952,7 +973,10 @@ mod tests {
 
         write_pending_update(&path, "0.1.1").expect("write pending update");
 
-        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock text"),
+            "codexhub-atomic-lock=1\n"
+        );
         assert_eq!(
             read_pending_update(&path)
                 .expect("read pending update")
@@ -967,15 +991,21 @@ mod tests {
         assert!(checked_at_now().starts_with("unix:"));
     }
 
+    fn release_artifact_url(version: &str, flavor: BuildFlavor) -> String {
+        format!(
+            "https://github.com/NOirBRight/CodexHub/releases/download/v{version}/{}",
+            flavor.installer_name(version)
+        )
+    }
+
     fn flavor_manifest(flavor: Option<&str>, version: &str, url: &str) -> String {
         let mut manifest = serde_json::json!({
             "version": version,
-            "platforms": {
-                "windows-x86_64": {
-                    "signature": "signed-value",
-                    "url": url,
-                }
-            }
+            "platforms": {},
+        });
+        manifest["platforms"][super::current_updater_platform_key()] = serde_json::json!({
+            "signature": "signed-value",
+            "url": url,
         });
         if let Some(flavor) = flavor {
             manifest["codexhub_flavor"] = serde_json::Value::String(flavor.to_string());

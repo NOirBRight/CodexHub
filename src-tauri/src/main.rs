@@ -23,6 +23,7 @@ mod safe_file;
 mod web_bridge;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
@@ -661,11 +662,6 @@ fn list_official_multi_agent_overrides() -> Result<std::collections::HashMap<Str
 }
 
 #[tauri::command]
-fn list_official_multi_agent_baselines() -> Result<std::collections::HashMap<String, String>, String> {
-    models::list_official_multi_agent_baselines()
-}
-
-#[tauri::command]
 async fn sync_history(target_provider: Option<String>) -> Result<String, String> {
     run_blocking("sync_history", move || {
         history::sync_history(target_provider.as_deref())
@@ -1160,7 +1156,6 @@ fn run_gui() {
             save_model_metadata_override,
             save_official_multi_agent_version,
             list_official_multi_agent_overrides,
-            list_official_multi_agent_baselines,
             sync_history,
             reconcile_after_route_switch,
             migrate_official_history_to_unified,

@@ -654,13 +654,13 @@ fn get_codex_context_guard_status_with_paths(
         ],
         runner,
     )?;
-    let codex_status: CodexConfigContextGuardStatus =
-        serde_json::from_str(outcome.stdout.trim()).map_err(|error| {
-            format!(
-                "failed to parse context guard status JSON: {error}; stdout: {}",
-                outcome.stdout.trim()
-            )
-        })?;
+    let codex_status: CodexConfigContextGuardStatus = serde_json::from_str(outcome.stdout.trim())
+        .map_err(|error| {
+        format!(
+            "failed to parse context guard status JSON: {error}; stdout: {}",
+            outcome.stdout.trim()
+        )
+    })?;
     let gateway_enabled = get_settings_with_paths(paths)?.openai_context_guard_enabled;
     Ok(combined_context_guard_status(codex_status, gateway_enabled))
 }
@@ -679,8 +679,7 @@ fn set_codex_context_guard_with_paths(
         .as_deref()
         .and_then(codex_overlay_owner)
         .unwrap_or(current_app_owner);
-    let backup_path =
-        paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+    let backup_path = paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
     let script_args = |value: bool| {
         vec![
             "context-guard-set".to_string(),
@@ -694,7 +693,10 @@ fn set_codex_context_guard_with_paths(
                 .to_string_lossy()
                 .into_owned(),
             "--catalog".to_string(),
-            paths.generated_catalog_path().to_string_lossy().into_owned(),
+            paths
+                .generated_catalog_path()
+                .to_string_lossy()
+                .into_owned(),
             "--enabled".to_string(),
             value.to_string(),
         ]
@@ -828,8 +830,7 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
         crate::app_flavor::RoutingOwner::Release,
         crate::app_flavor::RoutingOwner::Beta,
     ] {
-        let candidate =
-            paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+        let candidate = paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
         if candidate.exists() && !backup_paths.contains(&candidate) {
             backup_paths.push(candidate);
         }
@@ -864,9 +865,10 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
         args,
         runner,
     )?;
-    let backups_changed = backup_paths.iter().zip(before_backups).any(|(path, before)| {
-        before != fs::read(path).unwrap_or_default()
-    });
+    let backups_changed = backup_paths
+        .iter()
+        .zip(before_backups)
+        .any(|(path, before)| before != fs::read(path).unwrap_or_default());
     Ok(before_config != fs::read(&config_path).unwrap_or_default() || backups_changed)
 }
 
@@ -973,13 +975,8 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
         .ok()
         .as_deref()
         .and_then(codex_overlay_owner);
-    ensure_codex_owner_mutation_allowed(
-        current_app_owner,
-        target_owner,
-        mode,
-        force_takeover,
-    )
-    .map_err(|error| error.to_string())?;
+    ensure_codex_owner_mutation_allowed(current_app_owner, target_owner, mode, force_takeover)
+        .map_err(|error| error.to_string())?;
 
     let settings = match get_settings_with_paths(paths) {
         Ok(settings) => settings,
@@ -1277,15 +1274,21 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
         .map_err(|error| format!("failed to create isolated src-python: {error}"))?;
     let src_python_source = production_root.join("src-python");
     if src_python_source.is_dir() {
-        for entry in fs::read_dir(&src_python_source).map_err(|error| {
-            format!("failed to read production src-python: {error}")
-        })? {
-            let entry = entry.map_err(|error| format!("failed to read src-python entry: {error}"))?;
+        for entry in fs::read_dir(&src_python_source)
+            .map_err(|error| format!("failed to read production src-python: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to read src-python entry: {error}"))?;
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) == Some("py") {
-                let name = path.file_name().ok_or_else(|| "src-python entry has no file name".to_string())?;
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| "src-python entry has no file name".to_string())?;
                 fs::copy(&path, src_python_target.join(name)).map_err(|error| {
-                    format!("failed to copy production src-python module {}: {error}", path.display())
+                    format!(
+                        "failed to copy production src-python module {}: {error}",
+                        path.display()
+                    )
                 })?;
             }
         }
@@ -1295,9 +1298,8 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
         .map_err(|error| format!("failed to create isolated config dir: {error}"))?;
     let bundled_providers_source = production_root.join("config").join("providers.toml");
     if bundled_providers_source.is_file() {
-        fs::copy(&bundled_providers_source, paths.bundled_providers_path()).map_err(|error| {
-            format!("failed to copy production providers.toml: {error}")
-        })?;
+        fs::copy(&bundled_providers_source, paths.bundled_providers_path())
+            .map_err(|error| format!("failed to copy production providers.toml: {error}"))?;
     }
     Ok(())
 }
@@ -1364,8 +1366,7 @@ pub(crate) fn preview_codex_config_isolated(
         .to_string()];
     // Build the overlay args that apply would invoke, expressed as relative
     // tokens so the structured output never leaks absolute paths.
-    let overlay_args_relative =
-        build_codex_overlay_args_relative(paths, mode, model, catalog_path);
+    let overlay_args_relative = build_codex_overlay_args_relative(paths, mode, model, catalog_path);
     Ok(IsolatedCodexPreview {
         client_id: "codex".to_string(),
         selector: format!("{CODEX_OVERLAY_PROVIDER_ID}/{model}"),
@@ -1434,16 +1435,18 @@ pub(crate) fn readback_codex_config_isolated(
     if provider.as_deref() != Some(CODEX_OVERLAY_PROVIDER_ID) {
         return Err(format!(
             "readback failed: Codex config model_provider is {:?}; expected {:?}",
-            provider,
-            CODEX_OVERLAY_PROVIDER_ID
+            provider, CODEX_OVERLAY_PROVIDER_ID
         ));
     }
-    let wire_api = section_toml_value(&text, &format!("model_providers.{CODEX_OVERLAY_PROVIDER_ID}"), "wire_api");
+    let wire_api = section_toml_value(
+        &text,
+        &format!("model_providers.{CODEX_OVERLAY_PROVIDER_ID}"),
+        "wire_api",
+    );
     if wire_api.as_deref() != Some(CODEX_OVERLAY_ROUTE_PROTOCOL) {
         return Err(format!(
             "readback failed: Codex config custom wire_api is {:?}; expected {:?}",
-            wire_api,
-            CODEX_OVERLAY_ROUTE_PROTOCOL
+            wire_api, CODEX_OVERLAY_ROUTE_PROTOCOL
         ));
     }
     Ok(IsolatedCodexReadback {
@@ -1535,7 +1538,11 @@ fn build_codex_overlay_args_relative(
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml.release.backup")
         .to_string();
-    let command = if mode == "official" { "restore" } else { "apply" };
+    let command = if mode == "official" {
+        "restore"
+    } else {
+        "apply"
+    };
     let mut args = vec![
         command.to_string(),
         "--config".to_string(),
@@ -1561,11 +1568,10 @@ mod tests {
         codex_overlay_owner, ensure_codex_owner_mutation_allowed,
         get_codex_context_guard_status_with_paths, get_providers_with_paths,
         get_settings_with_paths, migrate_legacy_context_guard_with_paths,
-        republish_managed_codex_context_budget_with_paths,
-        save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
-        switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner,
-        top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths,
-        ProcessCommandRunner,
+        republish_managed_codex_context_budget_with_paths, save_providers_with_paths,
+        save_settings_with_paths, set_codex_context_guard_with_paths, switch_mode_with_paths,
+        switch_mode_with_paths_takeover_as_owner, top_level_model_is_official, CommandOutcome,
+        CommandRunner, ConfigPaths, ProcessCommandRunner,
     };
     use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
     use std::cell::RefCell;
@@ -2251,9 +2257,15 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         let paths = ConfigPaths::new_isolated(&runtime, &target, root.join("repo"));
 
         assert_eq!(paths.settings_path(), runtime.join("proxy/settings.json"));
-        assert_eq!(paths.config_backup_path(), runtime.join("proxy/config.toml.release.backup"));
+        assert_eq!(
+            paths.config_backup_path(),
+            runtime.join("proxy/config.toml.release.backup")
+        );
         assert_eq!(paths.codex_config_path(), target.join("config.toml"));
-        assert_eq!(paths.generated_catalog_path(), runtime.join("model-catalogs/codexhub-model-catalog.json"));
+        assert_eq!(
+            paths.generated_catalog_path(),
+            runtime.join("model-catalogs/codexhub-model-catalog.json")
+        );
     }
 
     #[test]
@@ -2761,13 +2773,9 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             stderr: String::new(),
         }]);
 
-        let status = set_codex_context_guard_with_paths(
-            true,
-            &paths,
-            Path::new("python-test"),
-            &set_runner,
-        )
-        .expect("context guard enabled");
+        let status =
+            set_codex_context_guard_with_paths(true, &paths, Path::new("python-test"), &set_runner)
+                .expect("context guard enabled");
 
         assert!(status.enabled);
         assert!(status.codex_enabled);
@@ -2899,18 +2907,19 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         }
         let runner = RecordingRunner::successful();
 
-        migrate_legacy_context_guard_with_paths(
-            &paths,
-            Path::new("python-test"),
-            &runner,
-        )
-        .expect("startup context migration");
+        migrate_legacy_context_guard_with_paths(&paths, Path::new("python-test"), &runner)
+            .expect("startup context migration");
 
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 1);
         assert_contains_sequence(
             &commands[0].args,
-            &["migrate-context-guard", "--config", "--backup", "--context-guard-state"],
+            &[
+                "migrate-context-guard",
+                "--config",
+                "--backup",
+                "--context-guard-state",
+            ],
         );
         assert_eq!(
             commands[0]
@@ -3111,8 +3120,9 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
             preview_codex_config_isolated, readback_codex_config_isolated,
         };
         use super::{
-            assert_arg_literal, assert_arg_value, assert_contains_sequence, save_settings_with_paths,
-            temp_root, CommandOutcome, CommandRunner, ConfigPaths, RecordedCommand, Settings,
+            assert_arg_literal, assert_arg_value, assert_contains_sequence,
+            save_settings_with_paths, temp_root, CommandOutcome, CommandRunner, ConfigPaths,
+            RecordedCommand, Settings,
         };
         use std::cell::RefCell;
         use std::fs;
@@ -3238,7 +3248,11 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
                 "--context-guard-state",
                 &paths.context_guard_state_path(),
             );
-            assert_arg_value(&commands[0].args, "--catalog", &paths.generated_catalog_path());
+            assert_arg_value(
+                &commands[0].args,
+                "--catalog",
+                &paths.generated_catalog_path(),
+            );
             assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:9099");
             assert_arg_literal(&commands[0].args, "--gateway-key", "isolated-key");
             // All config/backup/catalog paths stay beneath the isolated root.

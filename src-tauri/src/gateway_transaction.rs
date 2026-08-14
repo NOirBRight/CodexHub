@@ -83,10 +83,7 @@ impl LifecycleTransactionGate {
         })
     }
 
-    pub(crate) fn acquire(
-        path: &Path,
-        phase: GatewayLifecyclePhase,
-    ) -> Result<Self, String> {
+    pub(crate) fn acquire(path: &Path, phase: GatewayLifecyclePhase) -> Result<Self, String> {
         let file = open_gate_file(path)?;
         lock_gate_file(&file, path)?;
         let phase_path = phase_path(path);
@@ -249,11 +246,8 @@ mod tests {
         let entered = PathBuf::from(std::env::var_os(ENTERED_ENV).expect("helper entered path"));
         let release = PathBuf::from(std::env::var_os(RELEASE_ENV).expect("helper release path"));
 
-        let _guard = LifecycleTransactionGate::acquire(
-            &lock_path,
-            GatewayLifecyclePhase::Starting,
-        )
-        .expect("helper acquire lifecycle gate");
+        let _guard = LifecycleTransactionGate::acquire(&lock_path, GatewayLifecyclePhase::Starting)
+            .expect("helper acquire lifecycle gate");
         fs::write(&entered, b"entered").expect("publish helper entry");
         wait_until(Duration::from_secs(10), || release.exists());
     }
@@ -267,19 +261,11 @@ mod tests {
         let second_entered = root.join("second-entered");
         let second_release = root.join("second-release");
 
-        let mut first = spawn_helper(
-            &lock_path,
-            &first_entered,
-            &first_release,
-        );
+        let mut first = spawn_helper(&lock_path, &first_entered, &first_release);
         wait_until(Duration::from_secs(10), || first_entered.exists());
         let second_attempted = LifecycleTransactionGate::enable_test_contention_ack(&lock_path)
             .expect("enable gate-boundary contention ack");
-        let mut second = spawn_helper(
-            &lock_path,
-            &second_entered,
-            &second_release,
-        );
+        let mut second = spawn_helper(&lock_path, &second_entered, &second_release);
 
         wait_until(Duration::from_secs(10), || second_attempted.exists());
         assert!(
@@ -315,9 +301,8 @@ mod tests {
         let attempted = LifecycleTransactionGate::enable_test_contention_ack(&lock_path)
             .expect("enable contention ack");
         let contender_path = lock_path.clone();
-        let contender = thread::spawn(move || {
-            LifecycleTransactionGate::inspect_or_acquire(&contender_path)
-        });
+        let contender =
+            thread::spawn(move || LifecycleTransactionGate::inspect_or_acquire(&contender_path));
 
         wait_until(Duration::from_secs(10), || attempted.exists());
         drop(holder);
@@ -331,11 +316,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    fn spawn_helper(
-        lock_path: &Path,
-        entered: &Path,
-        release: &Path,
-    ) -> std::process::Child {
+    fn spawn_helper(lock_path: &Path, entered: &Path, release: &Path) -> std::process::Child {
         Command::new(std::env::current_exe().expect("current test executable"))
             .args([
                 "--exact",

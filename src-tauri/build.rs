@@ -18,7 +18,11 @@ fn main() {
     if (flavor == "debug") != diagnostics_enabled {
         panic!(
             "CODEXHUB_BUILD_FLAVOR={flavor} must {} the debug-diagnostics Cargo feature",
-            if flavor == "debug" { "enable" } else { "not enable" }
+            if flavor == "debug" {
+                "enable"
+            } else {
+                "not enable"
+            }
         );
     }
 

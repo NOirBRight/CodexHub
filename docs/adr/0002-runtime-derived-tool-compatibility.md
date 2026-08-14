@@ -1,9 +1,9 @@
 # ADR-0002: Runtime-derived tool compatibility on an immutable selected route
 
 Date: 2026-08-04
-Status: Accepted for 0.1.8 Beta2; generic compatibility shipped in Beta3 and
-the exact frozen Collaboration V1/V2 contract was calibrated for Beta4 by
-#392.
+Status: Accepted for 0.1.8 Beta2; the generic implementation is delivered in
+Beta3, while generic third-party Collaboration V2 lifecycle work remains a
+later Beta4 follow-up.
 
 ## Context
 
@@ -58,46 +58,6 @@ user Provider/model selection
         -> ToolCompatibilityPlan (per declaration, per request)
         -> selected upstream wire request/response
 ```
-
-### Frozen Beta4 Collaboration selection contract
-
-Issue #392 supersedes the earlier source-only #64 assumption with isolated
-runtime captures from Codex CLI 0.146.1 and Codex Desktop 26.803.5235.0. On
-the Responses wire, both frozen clients expose:
-
-- Collaboration V1 as the `multi_agent_v1` namespace containing
-  `close_agent`, `resume_agent`, `send_input`, `spawn_agent`, and
-  `wait_agent`; and
-- Collaboration V2 as the `collaboration` namespace containing
-  `followup_task`, `interrupt_agent`, `list_agents`, `send_message`,
-  `spawn_agent`, and `wait_agent`.
-
-The V2 handlers begin as function specs inside the client, but the frozen
-request planner wraps them in the configured namespace before serialization.
-They are therefore not six top-level Responses function declarations. Both
-clients send `tool_choice: "auto"` and do not send `multi_agent_version` as
-request metadata. The authoritative request-visible discriminator is the
-complete namespace and normalized child schema. Dynamic descriptions are not
-a discriminator; child type, name, strictness, parameter types and nesting,
-encryption markers, required fields, and output-schema absence are. A shared
-name such as `spawn_agent` or `wait_agent`, or a partial/direct-function shape,
-cannot select a version. Missing, unknown, duplicate, mixed, or conflicting
-signals fail closed before repair, state, or scheduler behavior.
-
-Several uses of the word `collaboration` remain separate protocol layers:
-
-- the Codex client dispatch recipient group;
-- the Responses namespace declaration and `function_call.namespace`;
-- `function_call` / `function_call_output` stream and history items;
-- model-input `agent_message` items carrying author, recipient, and plaintext
-  or encrypted content parts;
-- rollout-only `multi_agent_version` fields; and
-- Desktop `agentMessage`, `collabAgentToolCall`, and `subAgentActivity` items.
-
-None of those layers authorizes the Gateway to create or schedule agents. The
-exact parameter/result schemas, stream boundaries, terminal forms, identity
-fields, and same-Home readback evidence are recorded in
-`docs/evidence/issue-392/collaboration-runtime-contract.json`.
 
 ### Four deterministic dispositions
 
@@ -242,17 +202,15 @@ isolated.
 - **#62** owns the bounded Codex CLI 0.146 runtime and Responses lifecycle
   inventory. Its fixtures are structural evidence, not a model qualification
   gate or a reason to proxy through another Provider.
-- **#64** owns the historical Collaboration V1/V2 inventory. Its source-only
-  structural assumption is superseded by the exact frozen-runtime contract in
-  **#392**, which owns the boundary selected before repair.
+- **#64** owns the Collaboration V1/V2 schema boundary and the signal selected
+  before repair. This ADR consumes that boundary and does not qualify the full
+  V2 workflow.
 - **#65** owns the model-agnostic compatibility table that applies these four
   dispositions to each observed declaration family. This ADR defines the
   contract; it is not the table or a production allowlist.
 - **#198** owns the implementation isolation that makes V1 repair structurally
   unable to run on V2. V2 namespace adaptation may establish representability,
   never Gateway-owned execution or a V2-to-V1 downgrade.
-- **#282** owns the Beta4 production implementation of the #392 contract, and
-  **#283** owns the final full-lifecycle CLI/Desktop qualification.
 - **#58** owns the runtime compatibility implementation, tests, diagnostics,
   and network/manual evidence. This ADR adds no product implementation and
   does not authorize behavior outside the contract above.

@@ -74,7 +74,6 @@ export interface Provider {
 export interface UpstreamFormatProbeResult {
   base_url: string;
   model: string | null;
-  model_required: boolean;
   models_ok: boolean;
   responses_text_ok: boolean;
   responses_tool_ok: boolean;

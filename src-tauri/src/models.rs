@@ -278,20 +278,16 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     let config_paths = config::ConfigPaths::runtime()?;
     let known_official_models = config::known_official_model_ids(&config_paths);
     let cached = read_metadata_cache(&paths).unwrap_or_default();
-    let cached = merge_metadata_with_overrides(
-        builtin_model_metadata(),
-        cached,
-        &known_official_models,
-    );
+    let cached =
+        merge_metadata_with_overrides(builtin_model_metadata(), cached, &known_official_models);
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    let merged = merge_metadata_with_overrides(
-        cached,
-        overrides,
-        &known_official_models,
-    );
+    let merged = merge_metadata_with_overrides(cached, overrides, &known_official_models);
     let mut merged = merged;
     apply_catalog_multi_agent_overrides(&paths, &mut merged);
-    Ok(merged.into_iter().filter(model_is_catalog_visible).collect())
+    Ok(merged
+        .into_iter()
+        .filter(model_is_catalog_visible)
+        .collect())
 }
 
 pub(crate) fn list_cached_official_subscription_models_with_presence(
@@ -332,7 +328,9 @@ pub fn save_official_multi_agent_version(
     let canonical = config::normalize_official_model_id(&model_id, &known_official_models)
         .ok_or_else(|| "official model identity is invalid".to_string())?;
     if qualified_official_code_mode_multi_agent_version(&canonical).is_none() {
-        return Err("this Official model has no qualified Collaboration V1/V2 selector".to_string());
+        return Err(
+            "this Official model has no qualified Collaboration V1/V2 selector".to_string(),
+        );
     }
     let version = version.map(|value| value.trim().to_ascii_lowercase());
     if let Some(value) = version.as_deref() {
@@ -405,7 +403,9 @@ pub fn save_official_multi_agent_version(
     models
         .into_iter()
         .find(|model| model.id == canonical)
-        .ok_or_else(|| "selected Official model is not present in the generated catalog".to_string())
+        .ok_or_else(|| {
+            "selected Official model is not present in the generated catalog".to_string()
+        })
 }
 
 fn update_catalog_override_payload(
@@ -427,8 +427,7 @@ fn update_catalog_override_payload(
     for entry in entries.iter_mut() {
         let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
             && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && entry.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && entry.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !is_exact_identity {
             continue;
         }
@@ -463,8 +462,7 @@ fn update_catalog_override_payload(
     entries.retain(|entry| {
         let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
             && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && entry.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && entry.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         !(is_exact_identity
             && entry
                 .get("fields")
@@ -494,8 +492,7 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
     let visible_qualified_ids: HashSet<String> = visible_models
         .iter()
         .filter_map(|model| {
-            if model.source_kind.as_deref() != Some("official")
-                || !model_is_catalog_visible(model)
+            if model.source_kind.as_deref() != Some("official") || !model_is_catalog_visible(model)
             {
                 return None;
             }
@@ -504,8 +501,7 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
                 .strip_prefix("openai/")
                 .unwrap_or(model.id.as_str())
                 .to_string();
-            (qualified_official_code_mode_multi_agent_version(&canonical)
-                .is_some()
+            (qualified_official_code_mode_multi_agent_version(&canonical).is_some()
                 && model_has_exact_official_upstream(model, &canonical))
             .then_some(canonical)
         })
@@ -550,57 +546,6 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
             continue;
         };
         result.insert(canonical.to_string(), version.to_string());
-    }
-    Ok(result)
-}
-
-/// Return the managed catalog baseline for each visible Official model that
-/// supports the Collaboration selector. The generated catalog carries the
-/// effective value after applying a user override, so the UI needs this
-/// separate readback to keep the `(Default)` marker tied to the catalog.
-pub fn list_official_multi_agent_baselines() -> Result<HashMap<String, String>, String> {
-    let paths = ModelPaths::runtime()?;
-    let managed_baseline_exists = paths.managed_catalog_baseline_path().exists();
-    let explicit_overrides = list_official_multi_agent_overrides()?;
-    // Read the published catalog without applying the user-owned override
-    // sidecar.  If there is no managed baseline, use the raw row only when
-    // there is no explicit override; otherwise fall back to the pinned
-    // baseline rather than making an effective override look like a default.
-    let catalog_path = paths.existing_generated_catalog_path();
-    let visible_models = if catalog_path.exists() {
-        read_catalog_models(&catalog_path)?
-    } else {
-        Vec::new()
-    };
-    let mut result = HashMap::new();
-    for model in visible_models {
-        if model.source_kind.as_deref() != Some("official") || !model_is_catalog_visible(&model) {
-            continue;
-        }
-        let canonical = model
-            .id
-            .strip_prefix("openai/")
-            .unwrap_or(model.id.as_str());
-        if qualified_official_code_mode_multi_agent_version(canonical).is_none()
-            || !model_has_exact_official_upstream(&model, canonical)
-        {
-            continue;
-        }
-        let baseline = read_managed_catalog_multi_agent_version(&paths, canonical)
-            .or_else(|| {
-                if managed_baseline_exists || explicit_overrides.contains_key(canonical) {
-                    pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string)
-                } else {
-                    model
-                        .multi_agent_version
-                        .clone()
-                        .filter(|value| *value == "v1" || *value == "v2")
-                }
-            })
-            .or_else(|| pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string));
-        if let Some(baseline) = baseline {
-            result.insert(canonical.to_string(), baseline);
-        }
     }
     Ok(result)
 }
@@ -650,13 +595,11 @@ fn refresh_official_models_direct_with_runner(
     paths: &ModelPaths,
     runner: &dyn AppServerModelListRunner,
 ) -> Result<Vec<Model>, String> {
-    let subscription_models = runner
-        .read_model_list()
-        .and_then(|payload| {
-            let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
-            let subscription_models = subscription_models_from_app_server_payload(&payload)?;
-            Ok((subscription_models, visibility_diagnostics))
-        })?;
+    let subscription_models = runner.read_model_list().and_then(|payload| {
+        let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
+        let subscription_models = subscription_models_from_app_server_payload(&payload)?;
+        Ok((subscription_models, visibility_diagnostics))
+    })?;
     let (subscription_models, visibility_diagnostics) = subscription_models;
     let models = subscription_models_to_metadata_models(&subscription_models);
     write_official_subscription_caches(
@@ -787,8 +730,7 @@ fn read_codex_app_server_model_list_with_cache_grace(
         kill_child(&mut child);
         return Err(error);
     }
-    if let Err(error) =
-        write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))
+    if let Err(error) = write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))
     {
         kill_child(&mut child);
         return Err(error);
@@ -1199,7 +1141,9 @@ fn validate_pinned_official_catalog_metadata(
         PINNED_OFFICIAL_LITE_ONLY_FIELDS
     };
     if metadata.len() != required_fields.len()
-        || required_fields.iter().any(|field| !metadata.contains_key(*field))
+        || required_fields
+            .iter()
+            .any(|field| !metadata.contains_key(*field))
     {
         return Err(format!(
             "official catalog metadata for {slug} has an invalid field set"
@@ -1207,11 +1151,7 @@ fn validate_pinned_official_catalog_metadata(
     }
     if let Some(expected_multi_agent_version) = pinned_official_code_mode_multi_agent_version(slug)
     {
-        if metadata
-            .get("prefer_websockets")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("prefer_websockets").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid websocket flag"
             ));
@@ -1221,30 +1161,20 @@ fn validate_pinned_official_catalog_metadata(
                 "official catalog metadata for {slug} has an invalid tool mode"
             ));
         }
-        if metadata
-            .get("multi_agent_version")
-            .and_then(Value::as_str)
+        if metadata.get("multi_agent_version").and_then(Value::as_str)
             != Some(expected_multi_agent_version)
         {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid multi-agent version"
             ));
         }
-        if metadata
-            .get("use_responses_lite")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid Responses Lite flag"
             ));
         }
     } else if is_pinned_official_legacy_model(slug) {
-        if metadata
-            .get("prefer_websockets")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("prefer_websockets").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid websocket flag"
             ));
@@ -1262,20 +1192,12 @@ fn validate_pinned_official_catalog_metadata(
                 "official catalog metadata for {slug} has an invalid multi-agent version"
             ));
         }
-        if metadata
-            .get("use_responses_lite")
-            .and_then(Value::as_bool)
-            != Some(false)
-        {
+        if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(false) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid Responses Lite flag"
             ));
         }
-    } else if metadata
-        .get("use_responses_lite")
-        .and_then(Value::as_bool)
-        != Some(false)
-    {
+    } else if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(false) {
         return Err(format!(
             "official catalog metadata for {slug} has an invalid Responses Lite flag"
         ));
@@ -1539,7 +1461,9 @@ fn read_official_subscription_models_from_cache_with_presence(
     }
     let payload = load_json_file(&paths.official_subscription_cache_path())?;
     let subscription_models = subscription_models_from_payload(&payload)?;
-    Ok(Some(subscription_models_to_metadata_models(&subscription_models)))
+    Ok(Some(subscription_models_to_metadata_models(
+        &subscription_models,
+    )))
 }
 
 fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
@@ -2399,8 +2323,7 @@ fn set_catalog_multi_agent_version(
         let is_exact_official_identity = metadata.get("provider").and_then(Value::as_str)
             == Some("openai")
             && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && metadata.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && metadata.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !is_exact_official_identity {
             continue;
         }
@@ -2433,11 +2356,12 @@ fn read_managed_catalog_multi_agent_version(
     let models = payload.get("models").and_then(Value::as_array)?;
     models.iter().find_map(|item| {
         let object = item.as_object()?;
-        let metadata = object.get("codex_proxy_metadata").and_then(Value::as_object)?;
+        let metadata = object
+            .get("codex_proxy_metadata")
+            .and_then(Value::as_object)?;
         let exact_identity = metadata.get("provider").and_then(Value::as_str) == Some("openai")
             && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && metadata.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && metadata.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !exact_identity {
             return None;
         }
@@ -2732,8 +2656,12 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
         visibility,
         context_window: override_model.context_window.or(base.context_window),
-        max_context_window: override_model.max_context_window.or(base.max_context_window),
-        effective_source: override_model.effective_source.or(base.effective_source.take()),
+        max_context_window: override_model
+            .max_context_window
+            .or(base.max_context_window),
+        effective_source: override_model
+            .effective_source
+            .or(base.effective_source.take()),
         max_source: override_model.max_source.or(base.max_source.take()),
         confidence: override_model.confidence.or(base.confidence.take()),
         verified_at: override_model.verified_at.or(base.verified_at.take()),
@@ -3045,10 +2973,22 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             "context",
         ),
         max_context_window: object.get("max_context_window").and_then(optional_u32),
-        effective_source: object.get("effective_source").and_then(Value::as_str).and_then(nonblank),
-        max_source: object.get("max_source").and_then(Value::as_str).and_then(nonblank),
-        confidence: object.get("confidence").and_then(Value::as_str).and_then(nonblank),
-        verified_at: object.get("verified_at").and_then(Value::as_str).and_then(nonblank),
+        effective_source: object
+            .get("effective_source")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        max_source: object
+            .get("max_source")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        confidence: object
+            .get("confidence")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        verified_at: object
+            .get("verified_at")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
         input_modalities: object.get("input_modalities").and_then(string_array),
         supported_reasoning_levels: object
@@ -3092,11 +3032,13 @@ fn catalog_source_kind(object: &Map<String, Value>) -> Option<String> {
     {
         let provider = metadata.get("provider").and_then(Value::as_str);
         let upstream_name = metadata.get("upstream_name").and_then(Value::as_str);
-        return Some(if provider == Some("openai") && upstream_name == Some("official") {
-            "official".to_string()
-        } else {
-            "external".to_string()
-        });
+        return Some(
+            if provider == Some("openai") && upstream_name == Some("official") {
+                "official".to_string()
+            } else {
+                "external".to_string()
+            },
+        );
     }
     None
 }
@@ -3149,15 +3091,32 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     {
         return Ok(path);
     }
-    if let Some(path) = desktop_codex_exe() {
-        return Ok(path);
-    }
-    if let Some(path) = npm_codex_vendor_exe() {
-        return Ok(path);
-    }
-    for candidate in codex_executable_candidates() {
-        if let Ok(path) = which::which(candidate) {
+    #[cfg(not(windows))]
+    {
+        // ADR-0003 Phase 1: on Unix, trust PATH first, then common npm global
+        // bin layouts, then the npm vendor tree.
+        if let Ok(path) = which::which("codex") {
             return Ok(path);
+        }
+        if let Some(path) = npm_codex_bin_shim() {
+            return Ok(path);
+        }
+        if let Some(path) = npm_codex_vendor_exe() {
+            return Ok(path);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(path) = desktop_codex_exe() {
+            return Ok(path);
+        }
+        if let Some(path) = npm_codex_vendor_exe() {
+            return Ok(path);
+        }
+        for candidate in codex_executable_candidates() {
+            if let Ok(path) = which::which(candidate) {
+                return Ok(path);
+            }
         }
     }
     Err(
@@ -3166,11 +3125,14 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     )
 }
 
+#[cfg(windows)]
 fn desktop_codex_exe() -> Option<PathBuf> {
     let local_appdata = std::env::var_os("LOCALAPPDATA")?;
     desktop_codex_exe_from_local_appdata(Path::new(&local_appdata))
 }
 
+// The Codex desktop app is Windows-only (ADR-0003 Phase 1).
+#[cfg(windows)]
 fn desktop_codex_exe_from_local_appdata(local_appdata: &Path) -> Option<PathBuf> {
     let bin_dir = local_appdata.join("OpenAI").join("Codex").join("bin");
     let mut candidates = fs::read_dir(bin_dir)
@@ -3188,22 +3150,96 @@ fn desktop_codex_exe_from_local_appdata(local_appdata: &Path) -> Option<PathBuf>
 }
 
 fn npm_codex_vendor_exe() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let path = PathBuf::from(appdata)
-        .join("npm")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("codex")
-        .join("codex.exe");
-    path.exists().then_some(path)
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        let path = PathBuf::from(appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("codex")
+            .join("codex.exe");
+        path.exists().then_some(path)
+    }
+    #[cfg(not(windows))]
+    {
+        // ADR-0003 Phase 1: mirror the Windows node_modules layout under the
+        // Unix npm global prefix (`<prefix>/lib/node_modules/...`).
+        npm_codex_vendor_exe_in(&npm_global_prefixes())
+    }
 }
 
+// ADR-0003 Phase 1: npm global install prefixes probed on Unix.
+#[cfg(not(windows))]
+fn npm_global_prefixes() -> Vec<PathBuf> {
+    let mut prefixes = Vec::new();
+    if let Some(prefix) = std::env::var_os("NPM_CONFIG_PREFIX").filter(|value| !value.is_empty()) {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        prefixes.push(PathBuf::from(home).join(".npm-global"));
+    }
+    prefixes.push(PathBuf::from("/usr/local"));
+    prefixes.push(PathBuf::from("/usr"));
+    prefixes
+}
+
+// ADR-0003 Phase 1: `<prefix>/bin/codex` shims created by npm global installs.
+#[cfg(not(windows))]
+fn npm_codex_bin_shim() -> Option<PathBuf> {
+    npm_codex_bin_shim_in(&npm_global_prefixes())
+}
+
+#[cfg(not(windows))]
+fn npm_codex_bin_shim_in(prefixes: &[PathBuf]) -> Option<PathBuf> {
+    prefixes
+        .iter()
+        .map(|prefix| prefix.join("bin").join("codex"))
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn npm_codex_vendor_exe_in(prefixes: &[PathBuf]) -> Option<PathBuf> {
+    let (package, triple) = codex_vendor_unix_target()?;
+    prefixes
+        .iter()
+        .map(|prefix| {
+            prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex")
+                .join("node_modules")
+                .join("@openai")
+                .join(package)
+                .join("vendor")
+                .join(triple)
+                .join("codex")
+                .join("codex")
+        })
+        .find(|path| path.is_file())
+}
+
+// ADR-0003 Phase 1: Codex npm vendor package name and Rust target triple for
+// the Linux port; other Unix targets are unsupported for now.
+#[cfg(not(windows))]
+fn codex_vendor_unix_target() -> Option<(&'static str, &'static str)> {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some(("codex-linux-x64", "x86_64-unknown-linux-gnu"))
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        Some(("codex-linux-arm64", "aarch64-unknown-linux-gnu"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
 fn codex_executable_candidates() -> Vec<&'static str> {
     vec!["codex.cmd", "codex", "codex.exe"]
 }
@@ -3211,18 +3247,20 @@ fn codex_executable_candidates() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
+        discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
-        list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
-        load_json_file,
-        merge_metadata_with_overrides, ollama_show_endpoint,
-        provider_api_endpoint,
+        list_models, list_official_multi_agent_overrides, load_json_file,
+        merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
         subscription_models_from_payload, subscription_models_to_metadata_models,
         test_model_endpoint_with_timeout, visibility_diagnostics_from_payload,
         AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
     };
+    #[cfg(windows)]
+    use super::desktop_codex_exe_from_local_appdata;
+    #[cfg(not(windows))]
+    use super::{codex_vendor_unix_target, npm_codex_bin_shim_in, npm_codex_vendor_exe_in};
     use crate::{MetadataProvenance, Model, Settings, ToolSurfaceStrategy, UpstreamFormat};
     use reqwest::blocking::Client;
     use serde_json::{json, Value};
@@ -3239,8 +3277,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const APP_SERVER_TEST_PROCESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS";
-    const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str =
-        "CODEXHUB_APP_SERVER_TEST_PROCESS_LIVENESS";
+    const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS_LIVENESS";
     const APP_SERVER_TEST_PROCESS_HELPER: &str =
         "models::tests::app_server_model_list_test_process_helper";
 
@@ -3294,10 +3331,7 @@ mod tests {
                 ("model".to_string(), json!("gpt-5.6-terra")),
                 ("visibility".to_string(), json!("list")),
                 ("hidden".to_string(), json!(false)),
-                (
-                    "effective_context_window_percent".to_string(),
-                    json!(95),
-                ),
+                ("effective_context_window_percent".to_string(), json!(95)),
             ]);
             if let Some(context) = context {
                 model.insert("context_window".to_string(), json!(context));
@@ -3378,6 +3412,8 @@ mod tests {
         }
     }
 
+    // The Codex desktop app is Windows-only (ADR-0003 Phase 1).
+    #[cfg(windows)]
     #[test]
     fn desktop_codex_exe_finds_the_app_managed_runtime() {
         let root = temp_root("desktop-codex-runtime");
@@ -3394,6 +3430,44 @@ mod tests {
             desktop_codex_exe_from_local_appdata(&root),
             Some(executable)
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn npm_codex_bin_shim_finds_npm_global_bin_layout() {
+        let root = temp_root("npm-codex-bin-shim");
+        let shim = root.join("bin").join("codex");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(npm_codex_bin_shim_in(&[root.clone()]), Some(shim));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn npm_codex_vendor_exe_mirrors_unix_node_modules_layout() {
+        let Some((package, triple)) = codex_vendor_unix_target() else {
+            return;
+        };
+        let root = temp_root("npm-codex-vendor");
+        let executable = root
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join(package)
+            .join("vendor")
+            .join(triple)
+            .join("codex")
+            .join("codex");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"vendor codex").unwrap();
+
+        assert_eq!(npm_codex_vendor_exe_in(&[root.clone()]), Some(executable));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3429,15 +3503,11 @@ for line in sys.stdin:
         )
         .unwrap();
         let mut command = std::process::Command::new(super::find_python());
-        command
-            .arg(&script)
-            .env("FAKE_MODELS_CACHE", &cache_path);
+        command.arg(&script).env("FAKE_MODELS_CACHE", &cache_path);
 
-        let result = super::read_codex_app_server_model_list_with_command(
-            command,
-            Duration::from_secs(5),
-        )
-        .expect("model list response");
+        let result =
+            super::read_codex_app_server_model_list_with_command(command, Duration::from_secs(5))
+                .expect("model list response");
 
         assert_eq!(
             result,
@@ -3499,9 +3569,7 @@ for line in sys.stdin:
                 .join("models_cache.json");
             fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
             let mut command = std::process::Command::new(super::find_python());
-            command
-                .arg(&script)
-                .env("MODEL_LIST_SHAPE", shape);
+            command.arg(&script).env("MODEL_LIST_SHAPE", shape);
 
             let result = super::read_codex_app_server_model_list_with_cache_path(
                 command,
@@ -3540,7 +3608,11 @@ for line in sys.stdin:
             ("empty-models", r#"{"models":[]}"#, false),
             ("null-model", r#"{"models":[null]}"#, false),
             ("string-model", r#"{"models":["gpt-5.6-terra"]}"#, false),
-            ("object-model", r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#, true),
+            (
+                "object-model",
+                r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#,
+                true,
+            ),
         ];
 
         for (name, payload, expected_readable) in cases {
@@ -3691,9 +3763,7 @@ for line in sys.stdin:
         )
         .unwrap();
         let mut command = std::process::Command::new(super::find_python());
-        command
-            .arg(&script)
-            .env("FAKE_MODELS_CACHE", &cache_path);
+        command.arg(&script).env("FAKE_MODELS_CACHE", &cache_path);
         let started = Instant::now();
 
         let result = super::read_codex_app_server_model_list_with_cache_path(
@@ -3705,8 +3775,7 @@ for line in sys.stdin:
         .expect("partial response context should use the bounded native-cache grace");
 
         assert_eq!(result["data"][0]["model"], "gpt-5.6-terra");
-        let cache: Value =
-            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert_eq!(cache["models"][0]["context_window"], 272000);
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -3764,11 +3833,9 @@ for line in sys.stdin:
         let command = silent_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        let error = super::read_codex_app_server_model_list_with_command(
-            command,
-            Duration::from_secs(1),
-        )
-        .expect_err("silent app-server must hit the response timeout");
+        let error =
+            super::read_codex_app_server_model_list_with_command(command, Duration::from_secs(1))
+                .expect_err("silent app-server must hit the response timeout");
 
         assert_eq!(
             error,
@@ -4339,163 +4406,15 @@ for line in sys.stdin:
         let valid = list_official_multi_agent_overrides();
 
         restore_env("CODEX_HOME", previous);
-        assert!(missing.expect("missing upstream model should be ignored").is_empty());
-        assert!(wrong.expect("wrong upstream model should be ignored").is_empty());
+        assert!(missing
+            .expect("missing upstream model should be ignored")
+            .is_empty());
+        assert!(wrong
+            .expect("wrong upstream model should be ignored")
+            .is_empty());
         assert_eq!(
             valid
                 .expect("exact upstream model should be listed")
-                .get("gpt-5.6-luna")
-                .map(String::as_str),
-            Some("v2")
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn list_official_multi_agent_baselines_reads_managed_value_behind_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("CODEX_HOME");
-        let root = temp_root("list-catalog-multi-agent-baseline");
-        let codex_home = root.join("codex-home");
-        let paths = test_paths(&root);
-        let catalog_path = paths.generated_catalog_path();
-        let baseline_path = paths.managed_catalog_baseline_path();
-        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
-        fs::write(
-            &catalog_path,
-            serde_json::to_vec(&json!({
-                "models": [{
-                    "slug": "gpt-5.6-luna",
-                    "multi_agent_version": "v2",
-                    "codex_proxy_metadata": {
-                        "provider": "openai",
-                        "upstream_name": "official",
-                        "upstream_model": "gpt-5.6-luna"
-                    }
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            &baseline_path,
-            serde_json::to_vec(&json!({
-                "models": [{
-                    "slug": "gpt-5.6-luna",
-                    "multi_agent_version": "v1",
-                    "codex_proxy_metadata": {
-                        "provider": "openai",
-                        "upstream_name": "official",
-                        "upstream_model": "gpt-5.6-luna"
-                    }
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::env::set_var("CODEX_HOME", &codex_home);
-
-        let baselines = list_official_multi_agent_baselines();
-
-        restore_env("CODEX_HOME", previous);
-        assert_eq!(
-            baselines
-                .expect("managed catalog baseline should be readable")
-                .get("gpt-5.6-luna")
-                .map(String::as_str),
-            Some("v1")
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn list_official_multi_agent_baselines_does_not_treat_effective_override_as_default_when_managed_baseline_is_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("CODEX_HOME");
-        let root = temp_root("list-catalog-multi-agent-baseline-missing");
-        let codex_home = root.join("codex-home");
-        let paths = test_paths(&root);
-        let catalog_path = paths.generated_catalog_path();
-        let override_path = paths.catalog_overrides_path();
-        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
-        fs::write(
-            &catalog_path,
-            serde_json::to_vec(&json!({
-                "models": [{
-                    "slug": "gpt-5.6-luna",
-                    "multi_agent_version": "v2",
-                    "codex_proxy_metadata": {
-                        "provider": "openai",
-                        "upstream_name": "official",
-                        "upstream_model": "gpt-5.6-luna"
-                    }
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            &override_path,
-            serde_json::to_vec(&json!({
-                "schema_version": 1,
-                "overrides": [{
-                    "provider": "openai",
-                    "upstream_name": "official",
-                    "upstream_model": "gpt-5.6-luna",
-                    "fields": {"multi_agent_version": "v1"}
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::env::set_var("CODEX_HOME", &codex_home);
-
-        let baselines = list_official_multi_agent_baselines();
-
-        restore_env("CODEX_HOME", previous);
-        assert_eq!(
-            baselines
-                .expect("catalog baseline should be readable")
-                .get("gpt-5.6-luna")
-                .map(String::as_str),
-            Some("v1")
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn list_official_multi_agent_baselines_uses_catalog_value_when_no_managed_baseline_or_override_exists() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("CODEX_HOME");
-        let root = temp_root("list-catalog-multi-agent-baseline-no-override");
-        let codex_home = root.join("codex-home");
-        let paths = test_paths(&root);
-        let catalog_path = paths.generated_catalog_path();
-        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
-        fs::write(
-            &catalog_path,
-            serde_json::to_vec(&json!({
-                "models": [{
-                    "slug": "gpt-5.6-luna",
-                    "multi_agent_version": "v2",
-                    "codex_proxy_metadata": {
-                        "provider": "openai",
-                        "upstream_name": "official",
-                        "upstream_model": "gpt-5.6-luna"
-                    }
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::env::set_var("CODEX_HOME", &codex_home);
-
-        let baselines = list_official_multi_agent_baselines();
-
-        restore_env("CODEX_HOME", previous);
-        assert_eq!(
-            baselines
-                .expect("catalog baseline should be readable")
                 .get("gpt-5.6-luna")
                 .map(String::as_str),
             Some("v2")
@@ -4541,10 +4460,9 @@ for line in sys.stdin:
         super::set_catalog_multi_agent_version(&paths, "gpt-5.6-luna", "v2")
             .expect("exact Official row should be writable");
 
-        let payload: Value = serde_json::from_str(
-            &fs::read_to_string(&catalog_path).expect("published catalog"),
-        )
-        .unwrap();
+        let payload: Value =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).expect("published catalog"))
+                .unwrap();
         assert_eq!(payload["models"][0]["multi_agent_version"], "v2");
         assert_eq!(payload["models"][1]["multi_agent_version"], "v1");
         let _ = fs::remove_dir_all(root);
@@ -4575,25 +4493,41 @@ for line in sys.stdin:
 
         super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
             .expect("exact Official override should update");
-        assert_eq!(payload["overrides"][0]["fields"]["multi_agent_version"], "v2");
-        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
-        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+        assert_eq!(
+            payload["overrides"][0]["fields"]["multi_agent_version"],
+            "v2"
+        );
+        assert_eq!(
+            payload["overrides"][0]["fields"]["tool_mode"],
+            "code_mode_only"
+        );
+        assert_eq!(
+            payload["overrides"][1]["fields"]["multi_agent_version"],
+            "v1"
+        );
 
         super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", None)
             .expect("clearing should remove only the model-level field");
         assert!(payload["overrides"][0]["fields"]
             .get("multi_agent_version")
             .is_none());
-        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
-        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+        assert_eq!(
+            payload["overrides"][0]["fields"]["tool_mode"],
+            "code_mode_only"
+        );
+        assert_eq!(
+            payload["overrides"][1]["fields"]["multi_agent_version"],
+            "v1"
+        );
     }
 
     #[test]
     fn catalog_override_update_rejects_invalid_payload_before_mutation() {
         let mut payload = json!({"schema_version": 1, "overrides": {}});
         let before = payload.clone();
-        let error = super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
-            .expect_err("non-array overrides must fail closed");
+        let error =
+            super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
+                .expect_err("non-array overrides must fail closed");
         assert_eq!(error, "catalog overrides are invalid");
         assert_eq!(payload, before);
     }
@@ -5093,8 +5027,7 @@ for line in sys.stdin:
             },
         ];
 
-        let merged =
-            merge_metadata_with_overrides(base, overrides, &known_official_models);
+        let merged = merge_metadata_with_overrides(base, overrides, &known_official_models);
         let ids = merged
             .iter()
             .map(|model| model.id.as_str())
@@ -5357,8 +5290,8 @@ for line in sys.stdin:
             "source_kind": "official",
             "upstream_model": "gpt-5.6-luna"
         });
-        let model = super::catalog_model_from_item(&same_slug_without_identity)
-            .expect("catalog row");
+        let model =
+            super::catalog_model_from_item(&same_slug_without_identity).expect("catalog row");
         assert_eq!(model.source_kind, None);
     }
 

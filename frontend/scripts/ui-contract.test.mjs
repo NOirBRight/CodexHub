@@ -1196,24 +1196,13 @@ test("Codex app-server probes time out and avoid visible Windows consoles", asyn
   assert.match(modelsSource, /CODEX_APP_SERVER_MODEL_LIST_TIMEOUT/);
 });
 
-test("OpenAI quota labels use explicit windows and keep a weekly-only limit weekly", async () => {
+test("OpenAI primary and secondary quota names render as 5 hours and weekly", async () => {
   const providersSource = await readProviderContractSource();
   const fiveHour = providersSource.match(/function isFiveHourUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
   const weekly = providersSource.match(/function isWeeklyUsageLimit[\s\S]*?^}/m)?.[0] ?? "";
-  const placeholders = providersSource.match(/const OPENAI_USAGE_LIMIT_PLACEHOLDERS[\s\S]*?;/)?.[0] ?? "";
 
-  assert.doesNotMatch(fiveHour, /\\bprimary\\b/);
-  assert.match(fiveHour, /hour/);
-  assert.match(weekly, /week/);
-  assert.match(weekly, /\\bprimary\\b/);
+  assert.match(fiveHour, /\\bprimary\\b/);
   assert.match(weekly, /\\bsecondary\\b/);
-  assert.match(providersSource, /const selected: OpenAIUsageLimit\[\] = \[\]/);
-  assert.match(providersSource, /for \(const limit of \[fiveHour, weekly\]\)/);
-  assert.match(providersSource, /!selected\.some\(\(item\) => item\.key === limit\.key\)/);
-  assert.match(providersSource, /name: "Weekly", period: "week"/);
-  assert.equal([...placeholders.matchAll(/\{ key:/g)].length, 1);
-  assert.doesNotMatch(placeholders, /five_hours|5 hours/);
-  assert.match(providersSource, /return selected\.slice\(0, 2\)/);
   assert.match(providersSource, /fiveHourLimit:|"providers\.fiveHourLimit"/);
   assert.match(providersSource, /weeklyLimit:|"providers\.weeklyLimit"/);
 });
@@ -1950,7 +1939,6 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.doesNotMatch(providerDetail, /const upstreamFormat = normalizedEndpointFormat\(provider\.upstream_format\);/);
   assert.match(addProviderPanel, /onFormChange\(applyAddProviderProbeResult\(form, result\)\);/);
   assert.match(endpointSource, /function probeDetectedEndpointFormat\([\s\S]*?normalizedProbeEndpointFormat\(result\.recommended_format\) \?\? probeAvailableFormats\(result\)\[0\] \?\? null/);
-  assert.match(endpointSource, /function probeSucceeded\([\s\S]*?!result\.model_required[\s\S]*?probeDetectedEndpointFormat\(result\) !== null/);
   assert.match(endpointSource, /function normalizedProbeEndpointFormat\([\s\S]*?normalized === "responses" \|\| normalized === "response"/);
   assert.match(endpointSource, /function applyProviderProbeResult\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? provider\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
   assert.match(endpointSource, /function applyAddProviderProbeResult(?:<[^>]+>)?\([\s\S]*?const detectedFormat = probeDetectedEndpointFormat\(result\);[\s\S]*?upstream_format: detectedFormat \?\? form\.upstream_format,[\s\S]*?available_upstream_formats: probeAvailableFormats\(result\),[\s\S]*?tool_protocol: result\.recommended_tool_protocol,/);
@@ -2056,54 +2044,6 @@ test("official model rows only toggle from the switch while provider rows can st
   assert.match(modelSection, /role=\{rowInteractable \? "button" : undefined\}/);
   assert.match(modelSection, /tabIndex=\{rowInteractable \? 0 : undefined\}/);
   assert.match(modelSection, /onClick=\{rowInteractable \? activateModelRow : undefined\}/);
-});
-
-test("Luna Collaboration selector shows only V1/V2 and marks the live catalog default", async () => {
-  const [providersSource, enSource, zhSource] = await Promise.all([
-    readProviderContractSource(),
-    readFile(enLocalePath, "utf8"),
-    readFile(zhLocalePath, "utf8"),
-  ]);
-  const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
-
-  assert.match(modelSection, /value=\{collaboration\.effective\}/);
-  assert.match(modelSection, /officialCollaborationVersionOptions\([\s\S]*officialCollaborationBaselines/);
-  assert.equal([...modelSection.matchAll(/<option value="v[12]">/g)].length, 2);
-  assert.doesNotMatch(modelSection, /<option value="">/);
-  assert.match(modelSection, /collaboration\.baseline === "v1"/);
-  assert.match(modelSection, /collaboration\.baseline === "v2"/);
-  assert.match(modelSection, /selected === collaboration\.baseline \? null : selected/);
-  assert.match(enSource, /collaborationVersionDefault: "\(Default\)"/);
-  assert.match(zhSource, /collaborationVersionDefault: "（默认）"/);
-});
-
-test("Luna Collaboration save uses the Tauri modelId contract and reloads persisted overrides", async () => {
-  const [tauriSource, bridgeSource, providersSource] = await Promise.all([
-    readFile(tauriSourcePath, "utf8"),
-    readFile(tauriWebBridgePath, "utf8"),
-    readFile(providersPagePath, "utf8"),
-  ]);
-  const saveApi = tauriSource.match(/saveOfficialMultiAgentVersion[\s\S]*?listOfficialMultiAgentOverrides/)?.[0] ?? "";
-
-  assert.match(saveApi, /call<Model>\("save_official_multi_agent_version"/);
-  assert.match(saveApi, /modelId,\s*version/);
-  assert.doesNotMatch(saveApi, /model_id/);
-  assert.match(tauriSource, /listOfficialMultiAgentBaselines:[\s\S]*list_official_multi_agent_baselines/);
-  assert.match(
-    bridgeSource,
-    /"save_official_multi_agent_version"[\s\S]*optional_string_arg\(&request\.args, &\["modelId", "model_id"\]\)/,
-  );
-  assert.match(providersSource, /api\.listOfficialMultiAgentOverrides\(\)/);
-  assert.match(providersSource, /api\.saveOfficialMultiAgentVersion\(modelId, version\)/);
-  assert.match(
-    providersSource,
-    /async function refreshOfficialModelsAndCollaborationState[\s\S]*api\.listOfficialMultiAgentBaselines\(\)/,
-  );
-  assert.match(
-    providersSource,
-    /async function primeOfficialModels\(\)[\s\S]*refreshOfficialModelsAndCollaborationState\(\{ quiet: true \}\)/,
-  );
-  assert.match(providersSource, /onRefresh\(\{ quiet: true, throwOnError: true \}\)/);
 });
 
 test("Gateway restart planning uses only the current Gateway running snapshot", async () => {
@@ -2497,8 +2437,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(zhSource, /copyCodexLoginCommand: "复制 CLI 登录命令"/);
   assert.match(enSource, /openCodexAppUnsupportedCopied/);
   assert.match(zhSource, /openCodexAppUnsupportedCopied/);
-  assert.match(enSource, /paste it into PowerShell, Windows Terminal, or another shell, and run codex login/);
-  assert.match(zhSource, /再到 PowerShell、Windows Terminal 或其他终端里粘贴运行 codex login/);
+  assert.match(enSource, /paste it into your terminal \(PowerShell or Windows Terminal on Windows\), and run codex login/);
+  assert.match(zhSource, /在终端里粘贴运行 codex login（Windows 上可用 PowerShell 或 Windows Terminal）/);
 });
 
 test("official include toggle is removed from the detail header", async () => {
@@ -2773,8 +2713,7 @@ test("provider discovery updates the selected provider and reports progress", as
   const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
-  assert.match(providersSource, /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
-  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(persistedProvider\.models, models\),\s*\}/s);
+  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.provider,\s*models: mergeDiscoveredModels\(provider\.models, models\),\s*\}/s);
   assert.match(providersSource, /setProviders\(nextProviders\)/);
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
 });

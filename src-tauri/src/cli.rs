@@ -233,8 +233,12 @@ fn load_settings_and_providers(
     let staged_catalog_path = stage_candidate_catalog(request.catalog_path.as_deref(), &paths)?;
     // Seed settings.json from the caller-supplied path if provided.
     if let Some(settings_path) = &request.settings_path {
-        let text = std::fs::read_to_string(settings_path)
-            .map_err(|error| format!("failed to read settings {}: {error}", settings_path.display()))?;
+        let text = std::fs::read_to_string(settings_path).map_err(|error| {
+            format!(
+                "failed to read settings {}: {error}",
+                settings_path.display()
+            )
+        })?;
         std::fs::create_dir_all(paths.settings_path().parent().unwrap_or(Path::new(".")))
             .map_err(|error| format!("failed to create settings dir: {error}"))?;
         std::fs::write(paths.settings_path(), text)
@@ -242,11 +246,13 @@ fn load_settings_and_providers(
     }
     if let Some(providers_path) = &request.providers_path {
         let text = std::fs::read_to_string(providers_path).map_err(|error| {
-            format!("failed to read providers {}: {error}", providers_path.display())
+            format!(
+                "failed to read providers {}: {error}",
+                providers_path.display()
+            )
         })?;
-        std::fs::write(paths.runtime_providers_path_for_cli(), text).map_err(|error| {
-            format!("failed to write isolated providers: {error}")
-        })?;
+        std::fs::write(paths.runtime_providers_path_for_cli(), text)
+            .map_err(|error| format!("failed to write isolated providers: {error}"))?;
     }
     let mut settings = config::get_settings_from_paths(&paths)?;
     let mut providers = config::get_providers_from_paths(&paths)?;
@@ -289,8 +295,9 @@ fn stage_candidate_catalog(
         .map_err(|_| "failed to create isolated candidate catalog directory".to_string())?;
 
     if staged_path.exists() {
-        let staged_bytes = read_bounded_single_link_file(&staged_path)
-            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        let staged_bytes = read_bounded_single_link_file(&staged_path).map_err(|_| {
+            "isolated candidate catalog is not a regular single-link file".to_string()
+        })?;
         if staged_bytes != source_bytes {
             return Err("isolated candidate catalog contradicts supplied source".to_string());
         }
@@ -305,8 +312,9 @@ fn stage_candidate_catalog(
             .and_then(|_| staged.sync_all())
             .map_err(|_| "failed to write isolated candidate catalog".to_string())?;
         drop(staged);
-        let staged_bytes = read_bounded_single_link_file(&staged_path)
-            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        let staged_bytes = read_bounded_single_link_file(&staged_path).map_err(|_| {
+            "isolated candidate catalog is not a regular single-link file".to_string()
+        })?;
         if staged_bytes != source_bytes {
             return Err("isolated candidate catalog copy verification failed".to_string());
         }
@@ -414,7 +422,10 @@ fn run_codex_managed_client_config(
     };
     let (_settings, _providers, paths, staged_catalog_path) =
         load_settings_and_providers(request, isolated.root())?;
-    let model = request.model.clone().unwrap_or_else(|| "gpt-5.5".to_string());
+    let model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| "gpt-5.5".to_string());
     match request.verb.as_str() {
         "preview" => {
             let preview = config::preview_codex_config_isolated(
@@ -937,8 +948,8 @@ gateway_exported = true
         }
 
         #[test]
-        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference()
-        {
+        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference(
+        ) {
             let root = temp_root("mcc-codex-volc-no-catalog");
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             let isolated = root.join("isolated");

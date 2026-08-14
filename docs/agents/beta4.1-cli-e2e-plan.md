@@ -1,7 +1,8 @@
 # Beta4.1 CLI E2E plan
 
-This is the release qualification plan for the Beta4.1 Collaboration and
-session-compatibility fixes. It complements the general Windows gate in
+This is the release qualification plan for the Beta4.1 Collaboration,
+session-compatibility, and external tool-surface fixes. It complements the
+general Windows gate in
 [`real-client-e2e.md`](real-client-e2e.md); it is intentionally CLI-only.
 
 ## Scope
@@ -15,9 +16,12 @@ synthetic-fixture evidence because its `_inject_collaboration_agent_type()`
 helper changes the request shape; it is not direct-schema evidence for this
 plan.
 
-The run requires a dedicated authenticated account and a disposable copy of
-the historical Session `019fe193-d396-7293-86ea-4bc2c204ca9f`. Never modify
-the user's original Session or shared Codex home.
+The run requires a dedicated authenticated account, the credentials for the
+historical Session's previous Provider, and a disposable copy of the
+operator-supplied historical Session. Never modify the user's original Session
+or shared Codex home. A current-model override does not remove the previous
+Provider requirement: Codex CLI performs pre-sampling compaction with the
+previous turn's model before it sends the current-model turn.
 
 ## Matrix
 
@@ -25,15 +29,66 @@ the user's original Session or shared Codex home.
 | --- | --- | --- | --- |
 | `v1-lifecycle` | `multi_agent_v1` | spawn worker, send input, wait, close; verify terminal result | Native V1 namespace and argument shape remain unchanged; one complete lifecycle |
 | `v2-lifecycle` | `collaboration` | spawn/list, send message, follow-up, wait, interrupt, and final readback | Native V2 lifecycle completes without a V1 rewrite or duplicate terminal event |
-| `model-switch-replay` | V1 then V2, and V2 then V1 | switch the selected Luna Collaboration version between turns; replay prior history | Each request uses the selected model/version and prior messages/call IDs remain ordered and readable |
+| `version-selection-replay` | V1 Session, then V2; fresh/forked V1 after V2 selection | replay a V1 Session after selecting V2, then prove a later V1 selection on a new Session or explicit fork | Existing history remains readable; each newly created/forked Session uses the selected version |
 | `legacy-session-resume` | historical V1 Session | restore the supplied pre-Beta4 Session, continue it, wait, and close | Old worker calls with the exact native shape are accepted; continuation and history are preserved |
 | `new-binding-integrity` | Beta4.1 worker binding | create a new worker with model/reasoning binding, then replay unchanged and tampered histories | Signed binding/readback matches; model, reasoning, signature, missing, duplicate, and malformed cases fail closed |
 | `cli-restart-continuity` | real CLI process | stop and restart the CLI/Gateway while retaining the isolated home, then resume | Same Session identity, prior history, worker state, and selected version are read back after restart |
+| `external-v1-boundary` | real CLI request to an external V1 route | capture the unmodified V1 declaration emitted by CLI `0.146.1` with the default role | The exact default-role schema and the full `agent_type` schema are accepted; any other schema difference is rejected |
+| `stable-tool-alias-replay` | external runtime compatibility | privately capture one unmodified CLI request, then transform the exact same bytes twice with fresh request contexts on the same route | Caller and upstream input hashes prove identical input; upstream body hashes and adapted aliases are identical; `prompt_cache_key` is preserved |
+| `deferred-core-bounded` | external `deferred_core` route | capture a real request containing the 249-child namespace surface and pair it with the checked-in zero-child fixture | Both final surfaces retain the route's existing bounded core cardinality; no namespace-child alias survives; the eager and Official controls retain their existing behavior |
+| `external-v2-lifecycle` | real external provider/model `ollama-cloud/glm-5.2` over collaboration V2 | run the complete 8-step lifecycle (`spawn_agent`, `list_agents`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, `wait_agent`, `list_agents`), qualified independently per provider/model, covering stream/history, restart/readback, and terminal/error replay | The full 8-step lifecycle completes against the real provider/model with paired call/output IDs, readable stream and history, post-restart readback, and a bounded terminal/error replay; V2 support is proven by direct execution only |
 
 The `legacy-session-resume` case is the regression gate for #418. The
 `new-binding-integrity` case must prove that the compatibility exception is
 limited to the exact old V1 shape; an extended or partially edited old call
-must still be rejected.
+must still be rejected. `stable-tool-alias-replay` and
+`deferred-core-bounded` are the release regressions for #424 and #425. The
+private replay body may not be attached to an Issue or Release; publish only
+its stable hash and bounded structural counts. `external-v2-lifecycle` is a
+Beta4.1 mandatory release gate; the next section fixes its provider/model,
+lifecycle steps, qualification scope, and inference caveats.
+
+## External V2 lifecycle gate
+
+`external-v2-lifecycle` is a Beta4.1 mandatory release gate. It must run
+end-to-end against the real external provider/model `ollama-cloud/glm-5.2`;
+no synthetic fixture, catalog stand-in, or text-response substitute satisfies
+it.
+
+The gate records one complete 8-step lifecycle, in order:
+
+1. `spawn_agent` — create the V2 agent against `ollama-cloud/glm-5.2`;
+2. `list_agents` — confirm the spawned agent is present with the correct
+   provider/model;
+3. `send_message` — send the first user message and stream the response;
+4. `followup_task` — issue a follow-up task in the same agent;
+5. `wait_agent` — wait for the agent to reach a waitable state;
+6. `interrupt_agent` — interrupt the in-flight turn;
+7. `wait_agent` — wait again and confirm the agent returns to a resting,
+   interruptible state with no duplicate terminal event; then
+8. `list_agents` — re-list agents and confirm the final state, IDs, and
+   history are consistent.
+
+Qualification is independent per provider/model. `ollama-cloud/glm-5.2` is
+the provider/model qualified for Beta4.1; a pass against it does not transfer
+to any other provider/model, and every additional provider/model must repeat
+this gate on its own. The gate must cover, at minimum:
+
+- **stream/history**: streaming events and persisted assistant/worker history
+  are both readable and consistent for every step;
+- **restart/readback**: stop and restart the CLI and Gateway against the same
+  isolated home, then read back the Session ID, selected version, agent IDs,
+  and history before any new action;
+- **terminal/error replay**: replay one terminal success path and one error
+  path; each must produce exactly one bounded terminal event with paired call
+  and output IDs and no duplicate.
+
+V2 lifecycle support for a provider/model cannot be inferred from the model
+catalog, a capabilities listing, or any assistant/tool text response. It is
+proven only by executing the 8-step lifecycle against that provider/model.
+Cached-token telemetry is not reliable evidence and must not be used to claim
+an actual cache hit rate; record only bounded, sanitized lifecycle counts and
+stable hashes, and do not report a cache hit-rate figure for this gate.
 
 ## Execution phases
 
@@ -55,21 +110,37 @@ must still be rejected.
      any CodexHub compatibility translation. The harness may hash the input;
      it must not patch it.
 
-3. **Lifecycle and history**
+3. **Tool-prefix and surface checks**
+   - Preserve one external CLI request only inside the private isolated root.
+     Transform those byte-identical caller bytes twice with fresh request
+     contexts and the same route/capability configuration.
+   - Compare the complete upstream-body hashes, ordered generated aliases,
+     and `prompt_cache_key`; any request-scoped difference is a failure.
+   - For the real 249-child request, record only the caller namespace/child
+     counts and final upstream tool count. Run the checked-in zero-child
+     fixture separately and require the same route-specific bounded core
+     cardinality with no child alias; do not edit the captured CLI request.
+   - Run the deterministic eager and Official controls from the candidate test
+     suite. Eager must still expand its namespace children; Official must keep
+     the native namespace and must not introduce a `__codexhub_*` alias.
+
+4. **Lifecycle and history**
    - Execute the V1 and V2 cases in fresh Session roots.
    - Assert exactly one successful terminal outcome per turn, paired call and
      output IDs, preserved call order, and readable assistant/worker history.
-   - Run the model-switch case with at least one follow-up turn after each
-     switch; verify that old turns are replayed rather than dropped or
-     reclassified.
+   - Replay a V1 Session after selecting V2 and verify that old turns are not
+     dropped or reclassified.
+   - Verify a later V1 selection with a new Session or explicit fork. Codex CLI
+     `0.146.1` pins Collaboration V2 in existing Session state, so an in-place
+     V2-to-V1 downgrade is not a product acceptance condition.
 
-4. **Historical recovery**
-   - Start from the copied Session `019fe193-d396-7293-86ea-4bc2c204ca9f`.
+5. **Historical recovery**
+   - Start from the copied operator-supplied historical Session.
    - Resume without rewriting its old `multi_agent_v1.spawn_agent` calls.
    - Complete a new turn and verify that the old worker readbacks plus the new
      turn are accepted by the same Gateway process.
 
-5. **Binding and tamper checks**
+6. **Binding and tamper checks**
    - Record a new worker call with its model/reasoning binding and effective
      readback.
    - Replay the unchanged history, then independently alter the model,
@@ -77,12 +148,15 @@ must still be rejected.
    - Require a bounded, sanitized rejection classification for every altered
      case. Do not log the prompt, model secrets, signatures, or raw payload.
 
-6. **Restart and readback**
+7. **Restart and readback**
    - Stop the CLI after a completed worker turn and restart it against the same
      isolated home; repeat once with a Gateway restart if the candidate runner
      supports it.
    - Query/read the existing Session before creating a new one. Verify the
      Session ID, selected version, history, worker IDs, and next legal action.
+   - For V1, restore the persisted worker with `resume_agent`, then wait/read
+     its status before `close_agent`; a restarted CLI does not retain the old
+     process-local worker registry.
    - Finish with a new turn and confirm no duplicate spawn or terminal event.
 
 ## Evidence contract
@@ -96,13 +170,17 @@ contain:
 - lifecycle phase names and bounded counts for calls, outputs, stream events,
   restarts, and Gateway correlations;
 - stable hashes for request/response bodies and the preserved Session history;
+- stable hashes for the repeated caller/upstream tool-prefix bodies plus
+  bounded namespace, child, deferred, eager, and final tool counts;
 - safe result codes such as `accepted`, `legacy_native_spawn`,
   `binding_rejected`, `history_replayed`, or `restart_readback`.
 
 It must not contain prompts, assistant text, authorization headers, tokens,
 signatures, account identifiers, PIDs, absolute paths, or raw upstream
-payloads. A missing, contradictory, duplicated, or unparseable event is a
-failure, not an omitted field.
+payloads. It must also not report a cached-token hit rate; cached-token
+telemetry is not reliable evidence of actual cache behavior. A missing,
+contradictory, duplicated, or unparseable event is a failure, not an omitted
+field.
 
 ## Local and release checks
 
@@ -110,17 +188,23 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all six cases pass with the exact CLI version and candidate SHA;
+- all ten matrix cases pass with the exact CLI version and candidate SHA —
+  the nine native cases plus the mandatory `external-v2-lifecycle` gate;
+- the `external-v2-lifecycle` gate passes against the real provider/model
+  `ollama-cloud/glm-5.2` for the full 8-step lifecycle, with per-provider/model
+  qualification and no catalog/text inference or cached-token hit-rate claim;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
+- repeated caller hashes and upstream hashes match for #424, and the 249-child
+  #425 replay has the same final bounded-core count as the zero-child control;
 - restart readback passes for both selected versions;
 - no secret-bearing or raw Session artifact is written to the repository.
 
 ## Manual confirmation still required
 
-- Real Codex CLI lifecycle, model switching, historical Session resume, and
-  process restart require the dedicated authenticated Windows environment and
-  cannot be proven by the local unit/UI checks alone.
+- Real Codex CLI lifecycle, model switching, external V2 lifecycle, historical
+  Session resume, and process restart require the dedicated authenticated
+  Windows environment and cannot be proven by the local unit/UI checks alone.
 - Desktop #419 still needs a manual UI check: select Luna V1 and V2, save each,
   restart CodexHub, and confirm the selected value and `(Default)` marker are
   retained. The CLI plan does not replace this Desktop verification.

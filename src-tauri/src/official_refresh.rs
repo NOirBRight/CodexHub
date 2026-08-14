@@ -11,8 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) const OFFICIAL_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
 const REFRESH_STATE_FILE: &str = "official-refresh-state.json";
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
-const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str =
-    "fresh_direct_official_cache_authority";
+const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str = "fresh_direct_official_cache_authority";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshTrigger {
@@ -172,17 +171,13 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
         return Ok(());
     }
     let outcome = refresh(RefreshTrigger::Activation)?;
-    allow_activation_without_official_snapshot(outcome)
-}
-
-fn allow_activation_without_official_snapshot(outcome: RefreshOutcome) -> Result<(), String> {
     if outcome.snapshot_available {
         Ok(())
     } else {
-        log::warn!(
-            "CodexHub Official snapshot is unavailable; activating Gateway without Official models until a safe snapshot is published"
-        );
-        Ok(())
+        Err(
+            "current Official context snapshot is unavailable; refuse to activate CodexHub Official without a safe budget"
+                .to_string(),
+        )
     }
 }
 
@@ -439,8 +434,8 @@ fn direct_official_refresh_failure_message(
         "authentication required",
         "unauthorized",
     ]
-        .iter()
-        .any(|marker| normalized.contains(*marker))
+    .iter()
+    .any(|marker| normalized.contains(*marker))
     {
         return "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
             .to_string();
@@ -573,7 +568,9 @@ fn published_context_budgets_from_catalog(
 pub(crate) fn published_official_context_windows() -> Result<BTreeMap<String, u32>, String> {
     let budgets = published_context_budgets_from_catalog()?;
     if budgets.is_empty() {
-        return Err("published Official catalog contains no safe resolved context budget".to_string());
+        return Err(
+            "published Official catalog contains no safe resolved context budget".to_string(),
+        );
     }
     Ok(budgets
         .into_iter()
@@ -619,7 +616,10 @@ fn published_context_budgets_from_catalog_payload(
         let trusted = matches!(
             (source, freshness),
             (Some("current_direct_official"), Some("fresh"))
-                | (Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE), Some("fresh"))
+                | (
+                    Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE),
+                    Some("fresh")
+                )
                 | (Some("degraded_last_known_official"), _)
         );
         if !trusted {
@@ -713,12 +713,13 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        allow_activation_without_official_snapshot, automatic_refresh_due,
-        finalize_published_snapshot, manual_refresh_models, read_state, record_attempt,
+        automatic_refresh_due, direct_official_refresh_failure_message,
+        finalize_published_snapshot, manual_refresh_models,
         published_context_budgets_from_catalog_payload, published_official_models_from_catalog,
-        refresh_with_flight, should_attempt, direct_official_refresh_failure_message,
-        update_published_context_budgets, write_state, OfficialRefreshState, PublishedOfficialBudget,
-        RefreshOutcome, RefreshTrigger, SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        read_state, record_attempt, refresh_with_flight, should_attempt,
+        update_published_context_budgets, write_state, OfficialRefreshState,
+        PublishedOfficialBudget, RefreshOutcome, RefreshTrigger, SingleFlight,
+        OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
     use crate::Model;
     use serde_json::json;
@@ -737,13 +738,7 @@ mod tests {
         let state = OfficialRefreshState {
             last_success_at: Some(1_000),
             publication_ready: true,
-            published_context_budgets: budget_map(
-                "gpt-5.6-terra",
-                272_000,
-                95,
-                258_400,
-                240_000,
-            ),
+            published_context_budgets: budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000),
             ..OfficialRefreshState::default()
         };
         let before_due = 1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS - 1;
@@ -800,20 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn activation_succeeds_without_official_models_when_safe_snapshot_is_unavailable() {
-        assert!(allow_activation_without_official_snapshot(outcome(
-            RefreshTrigger::Activation,
-            false,
-        ))
-        .is_ok());
-        assert!(allow_activation_without_official_snapshot(outcome(
-            RefreshTrigger::Activation,
-            true,
-        ))
-        .is_ok());
-    }
-
-    #[test]
     fn direct_refresh_failure_classifies_auth_required_without_hiding_other_failures() {
         assert_eq!(
             direct_official_refresh_failure_message(
@@ -867,8 +848,14 @@ mod tests {
         assert_eq!(models[0].id, "openai/gpt-5.6-terra");
         assert_eq!(models[0].context_window, Some(272_000));
         assert_eq!(models[0].max_context_window, Some(272_000));
-        assert_ne!(models[0].context_window, prepublication_model.context_window);
-        assert_ne!(models[0].max_context_window, prepublication_model.max_context_window);
+        assert_ne!(
+            models[0].context_window,
+            prepublication_model.context_window
+        );
+        assert_ne!(
+            models[0].max_context_window,
+            prepublication_model.max_context_window
+        );
     }
 
     #[test]
@@ -1132,7 +1119,8 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_runtime_change_persists_restart_requirement_for_later_manual_same_budget_refresh() {
+    fn scheduled_runtime_change_persists_restart_requirement_for_later_manual_same_budget_refresh()
+    {
         let root = temp_root("scheduled-restart-requirement");
         let path = root.join("official-refresh-state.json");
         fs::create_dir_all(&root).unwrap();

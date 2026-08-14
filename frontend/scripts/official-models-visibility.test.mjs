@@ -21,11 +21,11 @@ const wrappedModule = new Function(
   "exports",
   "normalizeOfficialModelId",
   jsOutput +
-    "\nexports.mergeOfficialModelSources = mergeOfficialModelSources; exports.filterCodexVisibleOfficialModels = filterCodexVisibleOfficialModels; exports.officialCollaborationVersionOptions = officialCollaborationVersionOptions;",
+    "\nexports.mergeOfficialModelSources = mergeOfficialModelSources; exports.filterCodexVisibleOfficialModels = filterCodexVisibleOfficialModels;",
 );
 wrappedModule(moduleExports, (value) => value.trim().replace(/^openai\//, ""));
 
-const { mergeOfficialModelSources, officialCollaborationVersionOptions } = moduleExports;
+const { mergeOfficialModelSources } = moduleExports;
 
 function model(id, overrides = {}) {
   return { id, enabled: true, ...overrides };
@@ -65,44 +65,4 @@ test("metadata cannot create an Official model absent from the catalog", () => {
   );
 
   assert.deepEqual(combined, []);
-});
-
-test("Luna collaboration options expose the catalog baseline and effective selection separately", () => {
-  const luna = model("gpt-5.6-luna", {
-    upstream_model: "gpt-5.6-luna",
-    source_kind: "official",
-    visibility: "list",
-    multi_agent_version: "v1",
-  });
-
-  assert.deepEqual(
-    officialCollaborationVersionOptions(luna),
-    {
-      baseline: "v1",
-      effective: "v1",
-      explicit: null,
-      candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2",
-    },
-  );
-  assert.equal(
-    officialCollaborationVersionOptions({ ...luna, multi_agent_version: "v2" }).baseline,
-    "v2",
-  );
-  assert.deepEqual(
-    officialCollaborationVersionOptions(luna, { "gpt-5.6-luna": "v2" }),
-    {
-      baseline: "v1",
-      effective: "v2",
-      explicit: "v2",
-      candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2",
-    },
-  );
-  assert.equal(
-    officialCollaborationVersionOptions(
-      { ...luna, multi_agent_version: "v1" },
-      { "gpt-5.6-luna": "v1" },
-      { "gpt-5.6-luna": "v2" },
-    ).baseline,
-    "v2",
-  );
 });

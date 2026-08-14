@@ -312,13 +312,11 @@ export const api = {
     call<Model>("save_model_metadata_override", { model }),
   saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null) =>
     call<Model>("save_official_multi_agent_version", {
-      modelId,
+      model_id: modelId,
       version,
     }),
   listOfficialMultiAgentOverrides: () =>
     call<Record<string, "v1" | "v2">>("list_official_multi_agent_overrides"),
-  listOfficialMultiAgentBaselines: () =>
-    call<Record<string, "v1" | "v2">>("list_official_multi_agent_baselines"),
   syncHistory: (targetProvider?: string) =>
     call<string>("sync_history", { targetProvider: targetProvider ?? null }),
   reconcileAfterRouteSwitch: (targetProvider?: string) =>

@@ -42,9 +42,24 @@ impl BuildFlavor {
     }
 
     pub fn installer_name(self, version: &str) -> String {
-        match self {
-            Self::Normal => format!("CodexHub_{version}_x64-setup.exe"),
-            Self::Debug => format!("CodexHub_{version}_debug_x64-setup.exe"),
+        let base = match self {
+            Self::Normal => format!("CodexHub_{version}"),
+            Self::Debug => format!("CodexHub_{version}_debug"),
+        };
+        // The updater consumes AppImage on Linux (the only Linux format
+        // tauri-plugin-updater can self-update); deb packages ship without
+        // self-update. Windows keeps the NSIS artifact name.
+        #[cfg(windows)]
+        {
+            format!("{base}_x64-setup.exe")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            format!("{base}_amd64.AppImage")
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            format!("{base}_x64-setup.exe")
         }
     }
 
@@ -100,14 +115,23 @@ mod tests {
             BuildFlavor::Debug.updater_manifest_name(),
             "latest-debug.json"
         );
-        assert_eq!(
-            BuildFlavor::Normal.installer_name(version),
-            "CodexHub_0.2.0_x64-setup.exe"
+        #[cfg(windows)]
+        let (normal_artifact, debug_artifact) = (
+            "CodexHub_0.2.0_x64-setup.exe",
+            "CodexHub_0.2.0_debug_x64-setup.exe",
         );
-        assert_eq!(
-            BuildFlavor::Debug.installer_name(version),
-            "CodexHub_0.2.0_debug_x64-setup.exe"
+        #[cfg(target_os = "linux")]
+        let (normal_artifact, debug_artifact) = (
+            "CodexHub_0.2.0_amd64.AppImage",
+            "CodexHub_0.2.0_debug_amd64.AppImage",
         );
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let (normal_artifact, debug_artifact) = (
+            "CodexHub_0.2.0_x64-setup.exe",
+            "CodexHub_0.2.0_debug_x64-setup.exe",
+        );
+        assert_eq!(BuildFlavor::Normal.installer_name(version), normal_artifact);
+        assert_eq!(BuildFlavor::Debug.installer_name(version), debug_artifact);
     }
 
     #[test]

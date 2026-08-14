@@ -72,7 +72,7 @@ def test_normalize_multi_agent_spawn_preserves_unknown_selector_for_rejection():
     assert json.loads(value)["agent_type"] == "synthetic-unknown"
 
 
-def test_normalize_multi_agent_spawn_maps_general_to_default_for_native_runtime():
+def test_normalize_multi_agent_spawn_retains_explicit_general_compatibility():
     value, tool_name, changed = normalize_multi_agent_arguments(
         '{"message":"do work","agent_type":"general"}',
         "spawn_agent",
@@ -80,7 +80,7 @@ def test_normalize_multi_agent_spawn_maps_general_to_default_for_native_runtime(
 
     assert changed is True
     assert tool_name == "spawn_agent"
-    assert json.loads(value)["agent_type"] == "default"
+    assert json.loads(value)["agent_type"] == "general"
 
 
 @pytest.mark.parametrize(

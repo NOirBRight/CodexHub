@@ -17,7 +17,7 @@ from runtime_tool_compatibility import (
 )
 
 
-def _namespace(namespace: str = "vendor", *, tool: str = "run") -> dict:
+def _namespace(namespace: str = "collaboration", *, tool: str = "spawn_agent") -> dict:
     return {
         "type": "namespace",
         "name": namespace,
@@ -48,7 +48,7 @@ def test_issue65_table_classifies_every_family_without_implicit_fallback() -> No
             accepts_namespace_adapter=True,
             accepts_custom_adapter=True,
         ),
-        required={"plain": False, "vendor": False, "freeform": False},
+        required={"plain": False, "collaboration": False, "freeform": False},
         request_token="table",
     )
 
@@ -83,7 +83,7 @@ def test_required_unavailable_fails_before_request_encoding() -> None:
     assert "tool_search" not in str(raised.value)
 
 
-def test_namespace_alias_round_trip_preserves_fields_and_ids() -> None:
+def test_namespace_alias_round_trip_preserves_version_fields_and_ids() -> None:
     declaration = _namespace()
     plan = build_tool_compatibility_plan(
         [declaration],
@@ -97,11 +97,11 @@ def test_namespace_alias_round_trip_preserves_fields_and_ids() -> None:
         "input": [
             {
                 "type": "function_call",
-                "namespace": "vendor",
-                "name": "run",
+                "namespace": "collaboration",
+                "name": "spawn_agent",
                 "call_id": "call_v2",
                 "item_id": "item_v2",
-                "arguments": '{"value":"opaque"}',
+                "arguments": '{"task_name":"worker","task_path":"root/1","continuation_id":"cont","fork_turns":"all"}',
             },
             {
                 "type": "function_call_output",
@@ -112,8 +112,8 @@ def test_namespace_alias_round_trip_preserves_fields_and_ids() -> None:
         ],
         "tool_choice": {
             "type": "function",
-            "namespace": "vendor",
-            "name": "run",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
         },
     }
 
@@ -126,8 +126,8 @@ def test_namespace_alias_round_trip_preserves_fields_and_ids() -> None:
     assert encoded["tool_choice"] == {"type": "function", "name": alias}
 
     decoded = plan.decode_payload({"output": [encoded["input"][0]]})
-    assert decoded["output"][0]["namespace"] == "vendor"
-    assert decoded["output"][0]["name"] == "run"
+    assert decoded["output"][0]["namespace"] == "collaboration"
+    assert decoded["output"][0]["name"] == "spawn_agent"
     assert decoded["output"][0]["call_id"] == "call_v2"
     assert plan.entries[0].aliases == (alias,)
 

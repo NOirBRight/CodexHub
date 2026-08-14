@@ -238,7 +238,9 @@ struct UsageRefreshState {
 impl UsageRefreshCoordinator<fn() -> u64> {
     const fn new(now: fn() -> u64) -> Self {
         Self {
-            state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            state: Mutex::new(UsageRefreshState {
+                last_completed_at: None,
+            }),
             now,
         }
     }
@@ -248,7 +250,9 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
     #[cfg(test)]
     fn with_clock(now: C) -> Self {
         Self {
-            state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            state: Mutex::new(UsageRefreshState {
+                last_completed_at: None,
+            }),
             now,
         }
     }
@@ -281,7 +285,10 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
             }
         }
 
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(completed) = state.last_completed_at {
             if completed >= call_started {
                 log::info!("openai usage refresh: coalesced onto a completed in-flight probe");
@@ -326,7 +333,8 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
     }
 }
 
-static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new(current_unix_time);
+static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator =
+    UsageRefreshCoordinator::new(current_unix_time);
 
 #[cfg(test)]
 fn openai_usage_completions_with_cache<F>(
@@ -544,18 +552,51 @@ fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) 
 /// Kills and reaps the probe child on every exit path (success, write/read
 /// error, timeout), so no CodexHub-owned app-server child is left behind.
 /// On Windows the child is also assigned to a kill-on-close Job Object so an
-/// abrupt application exit cannot orphan it.
+/// abrupt application exit cannot orphan it; on Linux the child arms
+/// PR_SET_PDEATHSIG for the same guarantee.
 struct AppServerChild {
     child: Child,
     #[cfg(windows)]
     _job: AppServerJob,
 }
 
+/// Linux parity for the Windows kill-on-close Job Object: the child receives
+/// SIGKILL when this process dies, so a crash cannot orphan the app-server
+/// probe. The ppid re-check inside pre_exec closes the race where the parent
+/// dies between fork and prctl; pdeathsig alone would then bind to the
+/// re-parented init process and never fire.
+///
+/// Caveat: the kernel ties the signal to the death of the spawning *thread*.
+/// Probes live only seconds, so a spurious kill requires the spawning thread
+/// to exit mid-probe; the next refresh tick self-heals.
+#[cfg(target_os = "linux")]
+fn arm_parent_death_signal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let parent_pid = std::process::id();
+    unsafe {
+        command.pre_exec(move || {
+            // pre_exec runs between fork and exec: async-signal-safe calls only.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid as libc::pid_t {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "parent process exited during codex app-server spawn",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
 impl AppServerChild {
     fn spawn(command: &mut Command) -> Result<Self, String> {
-        let child = command
-            .spawn()
-            .map_err(|error| format!("Failed to start codex app-server for Codex account usage: {error}"))?;
+        #[cfg(target_os = "linux")]
+        arm_parent_death_signal(command);
+        let child = command.spawn().map_err(|error| {
+            format!("Failed to start codex app-server for Codex account usage: {error}")
+        })?;
         #[cfg(windows)]
         {
             let job = AppServerJob::new()?;
@@ -917,34 +958,125 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     {
         return Ok(path);
     }
-    if let Some(path) = npm_codex_vendor_exe() {
-        return Ok(path);
-    }
-    for candidate in codex_executable_candidates() {
-        if let Ok(path) = which::which(candidate) {
+    #[cfg(not(windows))]
+    {
+        // ADR-0003 Phase 1: on Unix, trust PATH first, then common npm global
+        // bin layouts, then the npm vendor tree.
+        if let Ok(path) = which::which("codex") {
             return Ok(path);
+        }
+        if let Some(path) = npm_codex_bin_shim() {
+            return Ok(path);
+        }
+        if let Some(path) = npm_codex_vendor_exe() {
+            return Ok(path);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(path) = npm_codex_vendor_exe() {
+            return Ok(path);
+        }
+        for candidate in codex_executable_candidates() {
+            if let Ok(path) = which::which(candidate) {
+                return Ok(path);
+            }
         }
     }
     Err("Codex account usage requires the Codex CLI to be installed and on PATH.".to_string())
 }
 
 fn npm_codex_vendor_exe() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let path = PathBuf::from(appdata)
-        .join("npm")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("bin")
-        .join("codex.exe");
-    path.is_file().then_some(path)
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        let path = PathBuf::from(appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("codex.exe");
+        path.is_file().then_some(path)
+    }
+    #[cfg(not(windows))]
+    {
+        // ADR-0003 Phase 1: mirror the Windows node_modules layout under the
+        // Unix npm global prefix (`<prefix>/lib/node_modules/...`).
+        npm_codex_vendor_exe_in(&npm_global_prefixes())
+    }
 }
 
+// ADR-0003 Phase 1: npm global install prefixes probed on Unix.
+#[cfg(not(windows))]
+fn npm_global_prefixes() -> Vec<PathBuf> {
+    let mut prefixes = Vec::new();
+    if let Some(prefix) = std::env::var_os("NPM_CONFIG_PREFIX").filter(|value| !value.is_empty()) {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        prefixes.push(PathBuf::from(home).join(".npm-global"));
+    }
+    prefixes.push(PathBuf::from("/usr/local"));
+    prefixes.push(PathBuf::from("/usr"));
+    prefixes
+}
+
+// ADR-0003 Phase 1: `<prefix>/bin/codex` shims created by npm global installs.
+#[cfg(not(windows))]
+fn npm_codex_bin_shim() -> Option<PathBuf> {
+    npm_codex_bin_shim_in(&npm_global_prefixes())
+}
+
+#[cfg(not(windows))]
+fn npm_codex_bin_shim_in(prefixes: &[PathBuf]) -> Option<PathBuf> {
+    prefixes
+        .iter()
+        .map(|prefix| prefix.join("bin").join("codex"))
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn npm_codex_vendor_exe_in(prefixes: &[PathBuf]) -> Option<PathBuf> {
+    let (package, triple) = codex_vendor_unix_target()?;
+    prefixes
+        .iter()
+        .map(|prefix| {
+            prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex")
+                .join("node_modules")
+                .join("@openai")
+                .join(package)
+                .join("vendor")
+                .join(triple)
+                .join("bin")
+                .join("codex")
+        })
+        .find(|path| path.is_file())
+}
+
+// ADR-0003 Phase 1: Codex npm vendor package name and Rust target triple for
+// the Linux port; other Unix targets are unsupported for now.
+#[cfg(not(windows))]
+fn codex_vendor_unix_target() -> Option<(&'static str, &'static str)> {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some(("codex-linux-x64", "x86_64-unknown-linux-gnu"))
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        Some(("codex-linux-arm64", "aarch64-unknown-linux-gnu"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
 fn codex_executable_candidates() -> Vec<&'static str> {
     vec!["codex.cmd", "codex", "codex.exe"]
 }
@@ -2035,7 +2167,10 @@ mod tests {
 
         write_usage_cache(&cache_path, &cache).expect("write usage cache");
 
-        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock text"),
+            "codexhub-atomic-lock=1\n"
+        );
         let written = fs::read_to_string(&cache_path).expect("cache text");
         assert!(written.contains(r#""fetched_at":10300"#));
         assert!(written.contains("2026-07-07"));
@@ -2106,6 +2241,8 @@ mod tests {
         assert!(parse_utc_date_start("not-a-date").is_err());
     }
 
+    // Shim ordering only matters for Windows candidate names (ADR-0003 Phase 1).
+    #[cfg(windows)]
     #[test]
     fn codex_executable_candidates_put_shims_before_windows_app_alias() {
         let candidates = codex_executable_candidates();
@@ -2117,6 +2254,44 @@ mod tests {
             .position(|candidate| *candidate == "codex.exe");
 
         assert!(cmd_position < exe_position);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn npm_codex_bin_shim_finds_npm_global_bin_layout() {
+        let root = temp_root("npm-codex-bin-shim");
+        let shim = root.join("bin").join("codex");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(npm_codex_bin_shim_in(&[root.clone()]), Some(shim));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn npm_codex_vendor_exe_mirrors_unix_node_modules_layout() {
+        let Some((package, triple)) = codex_vendor_unix_target() else {
+            return;
+        };
+        let root = temp_root("npm-codex-vendor");
+        let executable = root
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join(package)
+            .join("vendor")
+            .join(triple)
+            .join("bin")
+            .join("codex");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"vendor codex").unwrap();
+
+        assert_eq!(npm_codex_vendor_exe_in(&[root.clone()]), Some(executable));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn write_test_cache(path: &PathBuf, fetched_at: u64, usage_json: &str) {

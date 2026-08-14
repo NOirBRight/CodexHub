@@ -169,7 +169,6 @@ const OFFICIAL_COLLABORATION_CAPABILITIES: Record<string, OfficialCollaborationC
 export function officialCollaborationVersionOptions(
   model: Model,
   explicitOverrides: Readonly<Record<string, "v1" | "v2">> = {},
-  catalogBaselines: Readonly<Record<string, "v1" | "v2">> = {},
 ) {
   const canonical = normalizeOfficialModelId(model.id);
   const capability = canonical ? OFFICIAL_COLLABORATION_CAPABILITIES[canonical] : undefined;
@@ -185,10 +184,10 @@ export function officialCollaborationVersionOptions(
     return null;
   }
   const explicit = explicitOverrides[canonical];
-  // The catalog row carries the effective value after an override is applied.
-  // Prefer the separate managed-baseline readback when it is available so a
-  // catalog default change remains visible even while an override is active.
-  const baseline = catalogBaselines[canonical] ?? (explicit ? capability.baseline : model.multi_agent_version);
+  // The catalog row carries the current managed baseline.  Once a user
+  // override is active the row's value is effective, so use the reviewed
+  // baseline only for that explicit state to keep the two values distinct.
+  const baseline = explicit ? capability.baseline : model.multi_agent_version;
   if (baseline !== "v1" && baseline !== "v2") {
     return null;
   }
