@@ -276,8 +276,7 @@ pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
-        let mut command = Command::new(program);
-        runtime_paths::configure_python_command(&mut command);
+        let mut command = runtime_paths::configured_python_command(program);
         command.args(args);
         configure_no_window(&mut command);
         let output = command

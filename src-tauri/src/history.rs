@@ -79,8 +79,7 @@ impl DeadlineCommandRunner {
         args: &[String],
         deadline: Instant,
     ) -> Result<config::CommandOutcome, String> {
-        let mut command = Command::new(program);
-        runtime_paths::configure_python_command(&mut command);
+        let mut command = runtime_paths::configured_python_command(program);
         command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_history_helper_no_window(&mut command);
         let mut child = command

@@ -19,8 +19,8 @@ impl Drop for DeadChildGuard {
 /// The returned guard must stay alive for the test duration: dropping its
 /// handle would make the dead PID unresolvable on Windows.
 pub(crate) fn write_dead_legacy_lock(lock: &Path) -> DeadChildGuard {
-    let mut command = std::process::Command::new(crate::runtime_paths::find_test_python());
-    crate::runtime_paths::configure_python_command(&mut command);
+    let python = crate::runtime_paths::find_test_python();
+    let mut command = crate::runtime_paths::configured_python_command(&python);
     let mut child = command
         .arg("-c")
         .arg("pass")

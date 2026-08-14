@@ -36,6 +36,14 @@ pub(crate) fn configure_python_command(command: &mut Command) {
     }
 }
 
+/// Construct a Python child command with the repository runtime boundary
+/// applied before callers add arguments or test-specific environment.
+pub(crate) fn configured_python_command(python: &Path) -> Command {
+    let mut command = Command::new(python);
+    configure_python_command(&mut command);
+    command
+}
+
 pub(crate) fn codex_home_dir() -> Result<PathBuf, String> {
     runtime_home_dir()
 }
@@ -391,12 +399,12 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_python_candidates, configure_python_command, find_test_python, homes_for_flavor,
+        bundled_python_candidates, configured_python_command, configure_python_command,
+        find_test_python, homes_for_flavor,
     };
     use crate::app_flavor::RuntimeFlavor;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -428,7 +436,7 @@ mod tests {
             "test Python resolver must return an absolute path: {}",
             python.display()
         );
-        let status = Command::new(&python)
+        let status = configured_python_command(&python)
             .args([
                 "-c",
                 "import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)",
@@ -445,7 +453,7 @@ mod tests {
     #[test]
     fn configure_python_command_removes_host_runtime_selectors() {
         let python = find_test_python();
-        let mut command = Command::new(&python);
+        let mut command = configured_python_command(&python);
         command
             .env("PYTHONHOME", r"C:\hermes-3.11")
             .env("PYTHONSTARTUP", r"C:\hermes-3.11\startup.py")

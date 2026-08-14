@@ -1917,8 +1917,7 @@ fn build_start_command_with_diagnostics(
     settings: &Settings,
     diagnostics_enabled: bool,
 ) -> Command {
-    let mut command = Command::new(python);
-    runtime_paths::configure_python_command(&mut command);
+    let mut command = runtime_paths::configured_python_command(python);
     if diagnostics_enabled {
         let build = build_info::current();
         command
@@ -3655,8 +3654,8 @@ mod tests {
         );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut command = Command::new(crate::runtime_paths::find_test_python());
-            crate::runtime_paths::configure_python_command(&mut command);
+            let python = crate::runtime_paths::find_test_python();
+            let mut command = crate::runtime_paths::configured_python_command(&python);
             command.args(["-c", &script]);
             super::configure_no_window(&mut command);
             let result = run_bounded_inspection_command(
@@ -4645,9 +4644,8 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(
-            find_python(&paths).expect("repository Python interpreter"),
-        );
+        let python = find_python(&paths).expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4685,9 +4683,8 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(
-            find_python(&paths).expect("repository Python interpreter"),
-        );
+        let python = find_python(&paths).expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4748,9 +4745,8 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(
-            find_python(&paths).expect("repository Python interpreter"),
-        );
+        let python = find_python(&paths).expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4923,9 +4919,8 @@ time.sleep(10)
     fn start_stdio_configuration_exposes_piped_child_handles() {
         let root = temp_root("start-command-stdio");
         let paths = test_paths(&root);
-        let mut command = Command::new(
-            find_python(&paths).expect("repository Python interpreter"),
-        );
+        let python = find_python(&paths).expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command.args(["-c", "import sys; sys.exit(0)"]);
         configure_start_stdio(&mut command);
 

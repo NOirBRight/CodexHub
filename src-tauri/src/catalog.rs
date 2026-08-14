@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const GENERATED_STATE_FILE: &str = "codex-proxy-state.json";
@@ -197,8 +196,7 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
         args: &[String],
         env: &[(String, PathBuf)],
     ) -> Result<CatalogCommandOutcome, String> {
-        let mut command = Command::new(program);
-        runtime_paths::configure_python_command(&mut command);
+        let mut command = runtime_paths::configured_python_command(program);
         command.args(args);
         for (name, value) in env {
             command.env(name, value);

@@ -35,11 +35,15 @@ That makes nested literal `python` calls use the same interpreter, while
 `scripts/pytest.cmd` forwards nested `pytest` calls to `python -m pytest` rather
 than the ambient 3.11 executable.
 Every Rust-to-Python launch and the Rust version probes also pass through
-`runtime_paths::configure_python_command`, which removes `PYTHONHOME` and the
+`runtime_paths::configured_python_command` (or its underlying
+`configure_python_command` boundary), which removes `PYTHONHOME` and the
 activated-environment selectors, including ambient `PYTHONPATH`, at the child
 boundary. This prevents a valid 3.13 executable from being redirected to a
 Hermes/Conda/Pipenv prefix or importing host modules in Catalog, Config,
 History, Model discovery, Gateway, and cross-language lock-test paths.
+The constructor is shared by production runners and Rust subprocess fixtures,
+so a newly added Python child cannot accidentally omit the environment
+sanitisation step.
 When the command is `-m pytest`, the resolver also verifies that pytest is
 installed in that exact interpreter; otherwise it fails before collection with
 the command needed to install it instead of silently switching to another

@@ -106,8 +106,7 @@ pub fn probe_upstream_format(
         ));
     }
 
-    let mut command = Command::new(&python);
-    runtime_paths::configure_python_command(&mut command);
+    let mut command = runtime_paths::configured_python_command(&python);
     command
         .arg(&script)
         .arg("--base-url")
@@ -2529,8 +2528,7 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         script: &Path,
         codex_dir: &Path,
     ) -> Result<CatalogCommandOutcome, String> {
-        let mut command = Command::new(python);
-        runtime_paths::configure_python_command(&mut command);
+        let mut command = runtime_paths::configured_python_command(python);
         command
             .arg(script)
             .arg("--sync")
@@ -3430,9 +3428,8 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(
-            super::find_python().expect("repository Python interpreter"),
-        );
+        let python = super::find_python().expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);
@@ -3502,9 +3499,8 @@ for line in sys.stdin:
                 .join(format!("{shape}-codex-home"))
                 .join("models_cache.json");
             fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-            let mut command = std::process::Command::new(
-                super::find_python().expect("repository Python interpreter"),
-            );
+            let python = super::find_python().expect("repository Python interpreter");
+            let mut command = crate::runtime_paths::configured_python_command(&python);
             command
                 .arg(&script)
                 .env("MODEL_LIST_SHAPE", shape);
@@ -3696,9 +3692,8 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(
-            super::find_python().expect("repository Python interpreter"),
-        );
+        let python = super::find_python().expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);
