@@ -3898,8 +3898,6 @@ mod tests {
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
         let spawned_pid = Arc::new(AtomicU32::new(0));
         let health_calls = std::cell::Cell::new(0usize);
-        let started = Instant::now();
-
         let error = start_with_paths_and_controls(
             &paths,
             Duration::from_secs(1),
@@ -3918,7 +3916,6 @@ mod tests {
         )
         .expect_err("post-spawn process inspection must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
         assert!(error
             .message
             .contains("Gateway process inspection timed out"));

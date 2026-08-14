@@ -220,7 +220,11 @@ fn supports_python_313(path: &Path) -> bool {
 /// point.
 pub(crate) fn compatible_python_path(candidate: &Path) -> Option<PathBuf> {
     let path = if candidate.is_file() {
-        candidate.to_path_buf()
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(candidate)
+        }
     } else if candidate.is_absolute() || candidate.components().count() > 1 {
         // Absolute and path-like candidates are already fully qualified. Do
         // not ask `which` to search PATH for a missing long path; that makes
@@ -391,6 +395,11 @@ mod tests {
     #[test]
     fn test_python_resolver_selects_a_compatible_interpreter() {
         let python = find_test_python();
+        assert!(
+            python.is_absolute(),
+            "test Python resolver must return an absolute path: {}",
+            python.display()
+        );
         let status = Command::new(&python)
             .args([
                 "-c",

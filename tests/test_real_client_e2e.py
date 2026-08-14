@@ -2079,6 +2079,35 @@ def test_native_gui_launch_explicitly_enables_visible_windows():
     assert "$startInfo.CreateNoWindow = $false" in gui_launch
 
 
+def test_packaged_gateway_and_materializer_bind_to_their_embedded_python():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    resolver = source[
+        source.index("function Resolve-E2EPythonPath"):
+        source.index("function Get-Sha256")
+    ]
+    shared_start_info = source[
+        source.index("function New-IsolatedStartInfo"):
+        source.index("function Invoke-IsolatedProcess")
+    ]
+    gateway_probe = source[
+        source.index("function Test-GatewayPythonProcess"):
+        source.index("function Write-CandidateStartupDiagnostic")
+    ]
+
+    assert "python\\python.exe" in resolver
+    assert "sys.version_info >= (3, 13)" in resolver
+    assert "if ($extension -iin @('.cmd', '.bat', '.ps1'))" in resolver
+    assert "[string]$PythonPath = ''" in shared_start_info
+    assert "CODEXHUB_E2E_PYTHON" in shared_start_info
+    assert "$owner.MainModule.FileName" in gateway_probe
+    assert "$ExpectedPythonPath" in gateway_probe
+    assert "CandidatePythonPath = Resolve-E2EPythonPath" in source
+    assert "MaterializerPythonPath = Resolve-E2EPythonPath" in source
+    assert "-PythonPath $script:CandidatePythonPath" in source
+    assert "-PythonPath $script:MaterializerPythonPath" in source
+
+
 def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     result = _run(
         tmp_path,

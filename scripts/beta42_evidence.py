@@ -9,12 +9,19 @@ raw request, Session, or credential-bearing artifact after the fact.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from python_runtime_contract import require_python_313  # noqa: E402
+
+require_python_313(__file__)
+
 import hashlib
 import json
 import re
 import argparse
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 

@@ -48,11 +48,15 @@ PowerShell session, activate the contract once by dot-sourcing:
 Running that script without the leading dot only changes its child process;
 PowerShell cannot let a child process rewrite its parent's environment.
 
-The isolated Windows real-client runner applies the selected interpreter's
-directory to child `PATH` and passes it to the fixture launcher through
-`CODEXHUB_E2E_PYTHON`. Fixture `.cmd` files therefore invoke an explicit
-3.13 interpreter rather than resolving a bare `python.exe` in a nested
-process.
+The isolated Windows real-client runner passes an explicit Python path only
+to a child that is expected to spawn Python. Fixture `.cmd` files use the
+validated repository 3.13 interpreter; a native candidate or managed-client
+materializer must use `<artifact>\python\python.exe` from its own packaged
+directory. The runner probes that bundled executable and compares the
+listening Gateway process's actual `MainModule.FileName` with the expected
+path. Native clients and packaged desktop processes do not receive the host
+Python override, so a test shell's Hermes 3.11 environment cannot silently
+replace the artifact runtime.
 
 For an explicit override:
 

@@ -954,7 +954,10 @@ def test_fixture_launcher_validates_python_launcher_before_using_it():
     )
 
     assert 'if exist "%~dp0python\\python.exe" goto run_bundled' in source
-    assert 'py.exe -3.13 -c "import sys;' in source
+    assert "if defined CODEXHUB_E2E_PYTHON goto run_explicit" in source
+    assert "if defined CODEXHUB_PYTHON goto run_repository" in source
+    assert "requires an explicit CODEXHUB_E2E_PYTHON binding" in source
+    assert 'py.exe -3.13 -c "import sys;' not in source
 
 
 def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():
