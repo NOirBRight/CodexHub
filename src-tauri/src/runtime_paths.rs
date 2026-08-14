@@ -14,6 +14,27 @@ pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
     }
 }
 
+/// Remove host-environment selectors before starting a Python child.
+///
+/// An already selected Python executable can still be redirected to another
+/// installation by `PYTHONHOME` (or by an activated environment's selectors).
+/// Keep this at the process boundary so Gateway, catalog, config, history, and
+/// model-probe children all receive the same runtime contract.
+pub(crate) fn configure_python_command(command: &mut Command) {
+    for name in [
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
+        "PIPENV_ACTIVE",
+    ] {
+        command.env_remove(name);
+    }
+}
+
 pub(crate) fn codex_home_dir() -> Result<PathBuf, String> {
     runtime_home_dir()
 }
@@ -184,7 +205,9 @@ fn discover_host_python_candidates() -> Vec<PathBuf> {
 /// hidden extra argument.
 #[cfg(windows)]
 fn resolve_python_launcher(launcher: &Path) -> Option<PathBuf> {
-    let output = Command::new(launcher)
+    let mut command = Command::new(launcher);
+    configure_python_command(&mut command);
+    let output = command
         .args([
             "-3.13",
             "-c",
@@ -202,7 +225,9 @@ fn resolve_python_launcher(launcher: &Path) -> Option<PathBuf> {
 }
 
 fn supports_python_313(path: &Path) -> bool {
-    Command::new(path)
+    let mut command = Command::new(path);
+    configure_python_command(&mut command);
+    command
         .args([
             "-c",
             "import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)",
@@ -364,7 +389,9 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bundled_python_candidates, find_test_python, homes_for_flavor};
+    use super::{
+        bundled_python_candidates, configure_python_command, find_test_python, homes_for_flavor,
+    };
     use crate::app_flavor::RuntimeFlavor;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -412,6 +439,36 @@ mod tests {
             "test Python must be 3.13 or newer: {}",
             python.display()
         );
+    }
+
+    #[test]
+    fn configure_python_command_removes_host_runtime_selectors() {
+        let python = find_test_python();
+        let mut command = Command::new(&python);
+        command
+            .env("PYTHONHOME", r"C:\hermes-3.11")
+            .env("PYTHONSTARTUP", r"C:\hermes-3.11\startup.py")
+            .env("PYTHONUSERBASE", r"C:\hermes-3.11\user")
+            .env("VIRTUAL_ENV", r"C:\hermes-3.11")
+            .env("CONDA_PREFIX", r"C:\hermes-3.11\conda")
+            .env("CONDA_DEFAULT_ENV", "hermes")
+            .env("CONDA_PROMPT_MODIFIER", "(hermes)")
+            .env("PIPENV_ACTIVE", "1")
+            .arg("-c")
+            .arg(
+                "import os, sys; names = ('PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER', 'PIPENV_ACTIVE'); print(sys.version_info[:2]); print([os.environ.get(name) for name in names])",
+            );
+        configure_python_command(&mut command);
+
+        let output = command.output().expect("configured Python should start");
+        assert!(
+            output.status.success(),
+            "configured Python failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("(3, 13)") || stdout.contains("(3, 14)"));
+        assert!(stdout.contains("[None, None, None, None, None, None, None, None]"));
     }
 
     #[test]

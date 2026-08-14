@@ -107,6 +107,7 @@ pub fn probe_upstream_format(
     }
 
     let mut command = Command::new(&python);
+    runtime_paths::configure_python_command(&mut command);
     command
         .arg(&script)
         .arg("--base-url")
@@ -2529,6 +2530,7 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         codex_dir: &Path,
     ) -> Result<CatalogCommandOutcome, String> {
         let mut command = Command::new(python);
+        runtime_paths::configure_python_command(&mut command);
         command
             .arg(script)
             .arg("--sync")

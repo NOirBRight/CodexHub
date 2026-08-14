@@ -61,6 +61,24 @@ function Test-CodexHubPythonPytest {
     return $status -eq 0
 }
 
+function Clear-CodexHubPythonRuntimeSelectors {
+    # PYTHONHOME can redirect a valid selected executable to an incompatible
+    # stdlib. Clear it before any version probe, not only before the final
+    # child launch; otherwise the resolver can reject Python 3.13 itself.
+    foreach ($name in @(
+        'PYTHONHOME',
+        'PYTHONSTARTUP',
+        'PYTHONUSERBASE',
+        'VIRTUAL_ENV',
+        'CONDA_PREFIX',
+        'CONDA_DEFAULT_ENV',
+        'CONDA_PROMPT_MODIFIER',
+        'PIPENV_ACTIVE'
+    )) {
+        Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-CodexHubPythonCandidate {
     param(
         [Parameter(Mandatory = $true)]
@@ -124,18 +142,7 @@ function Set-CodexHubPythonEnvironment {
     # interpreter's stdlib or prefix after the concrete executable is chosen.
     # PYTHONPATH is intentionally preserved: callers use it for the checked-in
     # src-python import root, while runtime-selection variables are removed.
-    foreach ($name in @(
-        'PYTHONHOME',
-        'PYTHONSTARTUP',
-        'PYTHONUSERBASE',
-        'VIRTUAL_ENV',
-        'CONDA_PREFIX',
-        'CONDA_DEFAULT_ENV',
-        'CONDA_PROMPT_MODIFIER',
-        'PIPENV_ACTIVE'
-    )) {
-        Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
-    }
+    Clear-CodexHubPythonRuntimeSelectors
     $env:CODEXHUB_PYTHON = $fullPath
     $env:CODEXHUB_PROXY_PYTHON = $fullPath
     $env:CODEXHUB_E2E_PYTHON = $fullPath
@@ -169,6 +176,8 @@ function Resolve-CodexHubPythonPath {
         [switch]$PreferBundled,
         [switch]$RequirePytest
     )
+
+    Clear-CodexHubPythonRuntimeSelectors
 
     $explicitValues = @(
         # E2E runners pass this value through isolated .cmd launchers. Treat

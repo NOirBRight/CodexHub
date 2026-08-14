@@ -33,6 +33,11 @@ interpreter directory and the repository `scripts` directory first on `PATH`.
 That makes nested literal `python` calls use the same interpreter, while
 `scripts/pytest.cmd` forwards nested `pytest` calls to `python -m pytest` rather
 than the ambient 3.11 executable.
+Every Rust-to-Python launch and the Rust version probes also pass through
+`runtime_paths::configure_python_command`, which removes `PYTHONHOME` and the
+activated-environment selectors at the child boundary. This prevents a valid
+3.13 executable from being redirected to a Hermes/Conda/Pipenv prefix in
+Catalog, Config, History, Model discovery, or Gateway paths.
 When the command is `-m pytest`, the resolver also verifies that pytest is
 installed in that exact interpreter; otherwise it fails before collection with
 the command needed to install it instead of silently switching to another

@@ -83,6 +83,29 @@ def test_repository_selector_returns_python_313_or_newer() -> None:
     assert (major, minor) >= (3, 13)
 
 
+def test_repository_selector_resolves_under_host_runtime_selector_contamination(
+    tmp_path: Path,
+) -> None:
+    result = _run_script(
+        SELECTOR,
+        "-PrintPath",
+        env={
+            "PYTHONHOME": str(tmp_path / "hermes-3.11"),
+            "VIRTUAL_ENV": str(tmp_path / "hermes-3.11"),
+            "CONDA_PREFIX": str(tmp_path / "conda-3.11"),
+            "PIPENV_ACTIVE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = result.stdout.strip().splitlines()[-1]
+    version = subprocess.check_output(
+        [path, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    assert (major, minor) >= (3, 13)
+
+
 def test_repository_selector_honors_the_e2e_runtime_binding(tmp_path: Path) -> None:
     selected = _write_python_without_pytest(tmp_path)
     conflicting = tmp_path / "conflicting-python.cmd"

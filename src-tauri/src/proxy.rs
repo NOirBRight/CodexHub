@@ -1918,6 +1918,7 @@ fn build_start_command_with_diagnostics(
     diagnostics_enabled: bool,
 ) -> Command {
     let mut command = Command::new(python);
+    runtime_paths::configure_python_command(&mut command);
     if diagnostics_enabled {
         let build = build_info::current();
         command
@@ -1941,17 +1942,6 @@ fn build_start_command_with_diagnostics(
         .arg("--port")
         .arg(settings.proxy_port.to_string())
         .current_dir(paths.proxy_script_dir())
-        // The executable has already been resolved and version-checked.
-        // Remove host environment selectors so Python cannot load a different
-        // stdlib/prefix from an activated 3.11/Conda/Pipenv environment.
-        .env_remove("PYTHONHOME")
-        .env_remove("PYTHONSTARTUP")
-        .env_remove("PYTHONUSERBASE")
-        .env_remove("VIRTUAL_ENV")
-        .env_remove("CONDA_PREFIX")
-        .env_remove("CONDA_DEFAULT_ENV")
-        .env_remove("CONDA_PROMPT_MODIFIER")
-        .env_remove("PIPENV_ACTIVE")
         .env("PYTHONPATH", paths.proxy_script_dir())
         .env("CODEX_HOME", paths.codex_dir.clone())
         .env("CODEXHUB_CODEX_TARGET_HOME", paths.codex_target_dir.clone())
@@ -3666,6 +3656,7 @@ mod tests {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
             let mut command = Command::new(crate::runtime_paths::find_test_python());
+            crate::runtime_paths::configure_python_command(&mut command);
             command.args(["-c", &script]);
             super::configure_no_window(&mut command);
             let result = run_bounded_inspection_command(

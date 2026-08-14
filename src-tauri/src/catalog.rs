@@ -198,6 +198,7 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
         env: &[(String, PathBuf)],
     ) -> Result<CatalogCommandOutcome, String> {
         let mut command = Command::new(program);
+        runtime_paths::configure_python_command(&mut command);
         command.args(args);
         for (name, value) in env {
             command.env(name, value);

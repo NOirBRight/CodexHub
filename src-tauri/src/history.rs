@@ -1,5 +1,6 @@
 use crate::app_flavor::RoutingOwner;
 use crate::config::{self, CommandRunner, ConfigPaths};
+use crate::runtime_paths;
 use crate::safe_file;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -79,6 +80,7 @@ impl DeadlineCommandRunner {
         deadline: Instant,
     ) -> Result<config::CommandOutcome, String> {
         let mut command = Command::new(program);
+        runtime_paths::configure_python_command(&mut command);
         command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_history_helper_no_window(&mut command);
         let mut child = command
