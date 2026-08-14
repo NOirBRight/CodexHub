@@ -241,6 +241,9 @@ the child `PATH` so nested processes cannot fall back to Python 3.11.
 where direct commands are desired, dot-source
 `.\scripts\Enter-CodexHubPython.ps1` once. `CODEXHUB_PYTHON` or
 `CODEXHUB_PROXY_PYTHON` may explicitly point to a Python 3.13+ executable.
+Test commands also verify that pytest is installed in that exact interpreter
+and fail with an install command instead of falling through to another 3.13
+environment.
 
 ## Comparison
 

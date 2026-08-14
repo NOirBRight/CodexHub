@@ -50,6 +50,27 @@ def _run_script(script: Path, *arguments: str, env: dict[str, str] | None = None
     )
 
 
+def _write_python_without_pytest(tmp_path: Path) -> Path:
+    wrapper = tmp_path / "python-without-pytest.cmd"
+    wrapper.write_text(
+        "\r\n".join(
+            [
+                "@echo off",
+                "if /I \"%~1\"==\"-m\" if /I \"%~2\"==\"pytest\" goto missing_pytest",
+                "if /I \"%~1\"==\"-c\" if /I \"%~2\"==\"import pytest\" goto missing_pytest",
+                f'\"{sys.executable}\" %*',
+                "exit /b %errorlevel%",
+                ":missing_pytest",
+                "echo No module named pytest 1>&2",
+                "exit /b 1",
+                "",
+            ]
+        ),
+        encoding="ascii",
+    )
+    return wrapper
+
+
 def test_repository_selector_returns_python_313_or_newer() -> None:
     result = _run_script(SELECTOR, "-PrintPath")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -77,13 +98,14 @@ def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
     result = _run_script(
         LAUNCHER,
         "-c",
-        "import os, sys; print(sys.executable); print(os.environ['CODEXHUB_PYTHON']); print(os.environ['CODEXHUB_PROXY_PYTHON'])",
+        "import os, sys; print(sys.executable); print(os.environ['CODEXHUB_PYTHON']); print(os.environ['CODEXHUB_PROXY_PYTHON']); print(os.environ['CODEXHUB_E2E_PYTHON'])",
     )
     assert result.returncode == 0, result.stdout + result.stderr
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    assert len(lines) >= 3
-    assert Path(lines[-3]).resolve() == Path(lines[-2]).resolve()
-    assert Path(lines[-3]).resolve() == Path(lines[-1]).resolve()
+    assert len(lines) >= 4
+    assert Path(lines[-4]).resolve() == Path(lines[-3]).resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-2]).resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-1]).resolve()
 
 
 def test_repository_launcher_puts_selected_interpreter_first_on_child_path() -> None:
@@ -124,6 +146,76 @@ def test_cmd_launcher_puts_selected_interpreter_first_on_child_path() -> None:
         (ROOT / "scripts").resolve(),
     }
     assert Path(lines[-1]).resolve() == (ROOT / "scripts").resolve()
+
+
+def test_cmd_launcher_exports_one_interpreter_to_all_children() -> None:
+    result = subprocess.run(
+        [
+            str(CMD_LAUNCHER),
+            "-c",
+            "import os, sys; print(sys.executable); print(os.environ['CODEXHUB_PYTHON']); print(os.environ['CODEXHUB_PROXY_PYTHON']); print(os.environ['CODEXHUB_E2E_PYTHON'])",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 4
+    assert Path(lines[-4]).resolve() == Path(lines[-3]).resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-2]).resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-1]).resolve()
+
+
+def test_pytest_command_rejects_a_compatible_interpreter_without_pytest(
+    tmp_path: Path,
+) -> None:
+    """A Python 3.13 executable without pytest must fail at the launcher boundary."""
+
+    wrapper = _write_python_without_pytest(tmp_path)
+    child_env = os.environ.copy()
+    child_env["CODEXHUB_PYTHON"] = str(wrapper)
+    child_env.pop("CODEXHUB_PROXY_PYTHON", None)
+    child_env.pop("CODEXHUB_E2E_PYTHON", None)
+
+    result = subprocess.run(
+        [str(CMD_LAUNCHER), "-m", "pytest", "--version"],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub test runtime requires pytest" in combined
+
+
+def test_powershell_launcher_rejects_a_compatible_interpreter_without_pytest(
+    tmp_path: Path,
+) -> None:
+    wrapper = _write_python_without_pytest(tmp_path)
+    result = _run_script(
+        LAUNCHER,
+        "-m",
+        "pytest",
+        "--version",
+        env={
+            "CODEXHUB_PYTHON": str(wrapper),
+            "CODEXHUB_PROXY_PYTHON": "",
+            "CODEXHUB_E2E_PYTHON": "",
+        },
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub test runtime requires pytest" in combined
 
 
 def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:

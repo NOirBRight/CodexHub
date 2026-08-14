@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
-    [switch]$PrintPath
+    [switch]$PrintPath,
+    [switch]$RequirePytest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +36,62 @@ function Test-CodexHubPython313 {
     return $versionNumber -ge 313
 }
 
+function Test-CodexHubPythonPytest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 promotes stderr from a .cmd wrapper to an
+        # ErrorRecord even when the native stream is redirected. The probe is
+        # expected to fail for a runtime without pytest, so keep that failure
+        # local and return its process status instead.
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $Path '-c' 'import pytest' 1>$null 2>$null
+        $status = $LASTEXITCODE
+    }
+    catch {
+        $status = 1
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return $status -eq 0
+}
+
+function Test-CodexHubPythonCandidate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$NeedsPytest
+    )
+
+    if (-not (Test-CodexHubPython313 -Path $Path)) {
+        return $false
+    }
+    if ($NeedsPytest -and -not (Test-CodexHubPythonPytest -Path $Path)) {
+        return $false
+    }
+    return $true
+}
+
+function Assert-CodexHubPythonRequirements {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$NeedsPytest
+    )
+
+    if (-not (Test-CodexHubPython313 -Path $Path)) {
+        throw "CodexHub requires Python 3.13 or newer; explicit interpreter is not compatible: $Path"
+    }
+    if ($NeedsPytest -and -not (Test-CodexHubPythonPytest -Path $Path)) {
+        throw "CodexHub test runtime requires pytest in the selected Python interpreter: $Path. Run .\scripts\codexhub-python.cmd -m pip install --upgrade pytest and retry."
+    }
+}
+
 function Get-CodexHubPythonLauncherPath {
     foreach ($commandName in @('py.exe', 'py')) {
         $launcher = Get-Command $commandName -ErrorAction SilentlyContinue
@@ -65,6 +122,7 @@ function Set-CodexHubPythonEnvironment {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $env:CODEXHUB_PYTHON = $fullPath
     $env:CODEXHUB_PROXY_PYTHON = $fullPath
+    $env:CODEXHUB_E2E_PYTHON = $fullPath
     # Some third-party helpers still spawn a literal `python` or `pytest`
     # instead of using the parent's executable. Put the selected interpreter
     # first on PATH so those nested processes cannot fall back to the Hermes
@@ -92,7 +150,8 @@ function Set-CodexHubPythonEnvironment {
 function Resolve-CodexHubPythonPath {
     param(
         [string]$Root = $RepoRoot,
-        [switch]$PreferBundled
+        [switch]$PreferBundled,
+        [switch]$RequirePytest
     )
 
     $explicitValues = @(
@@ -110,9 +169,7 @@ function Resolve-CodexHubPythonPath {
         else {
             [System.IO.Path]::GetFullPath($explicitText)
         }
-        if (-not (Test-CodexHubPython313 -Path $path)) {
-            throw "CodexHub requires Python 3.13 or newer; explicit interpreter is not compatible: $path"
-        }
+        Assert-CodexHubPythonRequirements -Path $path -NeedsPytest:$RequirePytest
         return (Set-CodexHubPythonEnvironment -Path $path)
     }
 
@@ -151,10 +208,21 @@ function Resolve-CodexHubPythonPath {
         }
     }
 
+    $compatibleWithoutPytest = $false
     foreach ($candidate in $candidatePaths) {
-        if (Test-CodexHubPython313 -Path $candidate) {
+        if ((Test-CodexHubPython313 -Path $candidate) -and
+            $RequirePytest -and
+            -not (Test-CodexHubPythonPytest -Path $candidate)) {
+            $compatibleWithoutPytest = $true
+            continue
+        }
+        if (Test-CodexHubPythonCandidate -Path $candidate -NeedsPytest:$RequirePytest) {
             return (Set-CodexHubPythonEnvironment -Path $candidate)
         }
+    }
+
+    if ($RequirePytest -and $compatibleWithoutPytest) {
+        throw 'CodexHub test runtime requires Python 3.13 or newer with pytest. Run .\scripts\codexhub-python.cmd -m pip install --upgrade pytest and retry.'
     }
 
     $ambient = Get-Command 'python' -ErrorAction SilentlyContinue
@@ -163,7 +231,7 @@ function Resolve-CodexHubPythonPath {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $resolved = Resolve-CodexHubPythonPath -Root $RepoRoot
+    $resolved = Resolve-CodexHubPythonPath -Root $RepoRoot -RequirePytest:$RequirePytest
     if ($PrintPath) {
         Write-Output $resolved
     }

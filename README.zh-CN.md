@@ -238,7 +238,9 @@ Shell 中直接使用 `python` 或 `pytest`；测试和脚本统一使用
 回退到 Python 3.11。`scripts\pytest.cmd` 是匹配的 pytest 转发入口。如需在
 当前 PowerShell 会话中直接使用这些命令，可一次性执行
 `. .\scripts\Enter-CodexHubPython.ps1`。也可以通过 `CODEXHUB_PYTHON` 或
-`CODEXHUB_PROXY_PYTHON` 显式指定 Python 3.13+ 可执行文件。
+`CODEXHUB_PROXY_PYTHON` 显式指定 Python 3.13+ 可执行文件。测试命令还会
+验证 pytest 是否安装在同一个解释器中；缺失时会直接给出安装命令，不会
+静默切换到另一个 3.13 环境。
 
 ## 和其他方式的区别
 

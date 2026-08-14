@@ -19,8 +19,8 @@ Use the repository entrypoint from the repository root:
 
 The entrypoint uses `Resolve-CodexHubPython.ps1`, validates the selected
 interpreter before running anything, and exports the selected path through
-`CODEXHUB_PYTHON` and `CODEXHUB_PROXY_PYTHON` for child processes. Gateway,
-packaging, and E2E PowerShell entrypoints use the same resolver in
+`CODEXHUB_PYTHON`, `CODEXHUB_PROXY_PYTHON`, and `CODEXHUB_E2E_PYTHON` for child
+processes. Gateway, packaging, and E2E PowerShell entrypoints use the same resolver in
 bundled-preferred mode; the development wrapper also accepts a checkout
 virtualenv before host discovery. Rust applies the same 3.13 probe to
 configured, bundled, checkout, and host candidates. An explicit override is a
@@ -31,6 +31,10 @@ interpreter directory and the repository `scripts` directory first on `PATH`.
 That makes nested literal `python` calls use the same interpreter, while
 `scripts/pytest.cmd` forwards nested `pytest` calls to `python -m pytest` rather
 than the ambient 3.11 executable.
+When the command is `-m pytest`, the resolver also verifies that pytest is
+installed in that exact interpreter; otherwise it fails before collection with
+the command needed to install it instead of silently switching to another
+3.13 environment.
 
 If direct `python` and `pytest` commands are needed in an interactive
 PowerShell session, activate the contract once by dot-sourcing:
