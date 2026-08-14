@@ -1,8 +1,9 @@
-# Beta4.1 CLI E2E plan
+# Beta4.2 CLI E2E and release plan
 
-This is the release qualification plan for the Beta4.1 Collaboration,
-session-compatibility, and external tool-surface fixes. It complements the
-general Windows gate in
+This is the release qualification plan for the Beta4.2 Collaboration,
+session-compatibility, deterministic tool-surface, transport, and third-party
+adapter fixes. It carries forward the already shipped Beta4.1 regression gates
+and complements the general Windows gate in
 [`real-client-e2e.md`](real-client-e2e.md); it is intentionally CLI-only.
 
 ## Scope
@@ -43,8 +44,8 @@ The `legacy-session-resume` case is the regression gate for #418. The
 limited to the exact old V1 shape; an extended or partially edited old call
 must still be rejected. `stable-tool-alias-replay` and
 `deferred-core-bounded` are the release regressions for #424 and #425. The
-`external-v2-lifecycle` adapter qualification is a mandatory Beta4.1 release
-gate, not a deferred Beta4.2/Beta5 qualification. Its result is specific to
+`external-v2-lifecycle` adapter qualification is a mandatory Beta4.2 release
+gate. Its result is specific to
 `ollama-cloud/glm-5.2`; this is support **via the CodexHub Gateway adapter**,
 not native provider V2 capability. A catalog entry, the CLI's initial
 namespace, or a successful text-only response is not capability evidence. The
@@ -59,15 +60,52 @@ task. Do not claim that opaque forwarding makes this combination work. The
 upstream delivery contract must either keep encrypted content on OpenAI →
 OpenAI, send provider-neutral plaintext user/message data (or re-encode after
 upstream decryption) for non-OpenAI targets, and fail closed for unsupported
-combinations. Until then, Beta4.1 evidence must label this gate
+combinations. Until then, Beta4.2 evidence must label this gate
 `blocked_upstream_provider_aware_delivery`, not a passed lifecycle.
 
-Issue #429 is also in the Beta4.1 generic protocol-classification scope:
+Issue #429 is also in the Beta4.2 generic protocol-classification scope:
 ordinary top-level functions whose names overlap Collaboration children must
 remain ordinary provider tools, while an attempted Collaboration namespace
 continues to fail closed when its frozen contract is incomplete or invalid.
 Full DSH managed-client support is tracked separately in #430 and is not part
 of this release.
+
+## Beta4.2 scope ledger
+
+Every implementation, test, and release-evidence change must map to one of
+these rows. A row is not releasable until both its automated checks and its
+required live/manual evidence are recorded.
+
+| Scope ID | Requirement | Candidate implementation | Required evidence | Status |
+| --- | --- | --- | --- | --- |
+| `B42-418` | Legacy worker/session resume hardening | `7c7a49b2`, `76fa21c2`, `ac32867f` | Historical Session continuation with unchanged legacy call shape | pending live evidence |
+| `B42-424` | Stable, collision-safe tool aliases and cache-prefix replay | `df926739` and follow-up compatibility commits | Identical caller/upstream hashes, aliases, and `prompt_cache_key`; no cache-hit-rate claim | pending live evidence |
+| `B42-425` | Bounded `deferred_core` surface | `df926739`, `b86a6c6` | 249-child/zero-child parity plus eager and Official controls | pending live evidence |
+| `B42-426` | Independent request-body write budget | `38ed1b69`, `f18527e0` | New/reused connection, `request_write`, read-timeout, and recovery tests | automated gate passed; live release evidence pending |
+| `B42-429` | Generic Collaboration classifier boundary | `ec034882` and routing/runtime regressions | Ordinary overlap accepted; malformed Collaboration rejected; no client special case | automated gate passed; live release evidence pending |
+| `B42-EXT-V2` | Third-party ordinary-tool V2 Gateway adapter | `ddd88b44`, `e3c1219b`, `0a3d7bb5` | Real `ollama-cloud/glm-5.2` lifecycle, stream/history, restart/readback, terminal/error replay | pending live qualification |
+| `B42-MODELS` | OpenAI-compatible `/v1/models` projection | `ec034882` | HTTP `data[]`; no internal `models`/`fetched_at` fields | local HTTP smoke passed; packaged smoke pending |
+| `B42-COPY` | Provider-qualified model copy | `ec034882` | Packaged UI clipboard reads `provider/model` for existing/new Provider | pending manual smoke |
+| `B42-419` | Luna V1/V2 save contract and restart persistence | `454d1a39` and `ec034882` | Desktop saves each selection with `modelId`, then reads it back after restart | pending manual smoke |
+| `B42-420` | Luna selector is exactly V1/V2 with dynamic `(Default)` marker | `454d1a39` | Desktop selector shows two choices and moves the marker with the catalog baseline | automated UI contract passed; pending manual smoke |
+| `B42-421` | Official Codex quota card uses the weekly limit label | `454d1a39` | Desktop shows one quota card labeled Weekly | automated UI contract passed; pending manual smoke |
+| `B42-UPSTREAM` | Cross-provider encrypted V2 boundary | upstream dependency | Record `blocked_upstream_provider_aware_delivery`; never record ciphertext | explicitly blocked |
+| `B42-EVIDENCE` | Fail-closed sanitized Beta4.2 runner evidence contract | `scripts/beta42_evidence.py`, `tests/test_beta42_evidence.py` | Exact candidate/CLI binding, complete case outcomes, deterministic alias replay, adapter-owned inverse mapping, and upstream blocked classification | automated validator gate pending |
+| `B42-RELEASE` | Beta4.2 versioned candidate and release assets | this candidate | Final main SHA, installer/portable assets, manifest/signature/SHA-256 and immutable tag | pending final release gate |
+
+The following are explicitly outside this candidate: #430 managed-client
+support, #427 Ultra evaluation, and #428 local-key rotation. They must not be
+added through incidental commits or release evidence.
+
+## Beta4.2 release notes (draft)
+
+Beta4.2 provides a CodexHub Gateway tool-surface adapter that lets ordinary
+third-party structured-tool models use the client-owned Collaboration V2
+surface. This does **not** mean that a third-party provider natively supports
+Collaboration V2. The OpenAI-parent → third-party-child encrypted handoff
+remains limited by upstream provider-aware delivery and is recorded as
+`blocked_upstream_provider_aware_delivery`; opaque forwarding is not claimed as
+a fix. Beta4.2 does not include the #430 DSH managed-client/UI/YAML support.
 
 ## Execution phases
 
@@ -157,7 +195,7 @@ of this release.
 ## Evidence contract
 
 The planned runner should emit one sanitized summary with schema
-`codexhub.beta41.cli-e2e.v1` and one record per matrix case. Each record may
+`codexhub.beta42.cli-e2e.v1` and one record per matrix case. Each record may
 contain:
 
 - candidate SHA, CLI version, protocol (`v1`/`v2`), selected model, and
@@ -177,11 +215,12 @@ failure, not an omitted field.
 
 ## Local and release checks
 
-The implementation phase should add deterministic tests for the runner's
-schema parser and sanitized evidence validator, then execute the real matrix
-only on the dedicated Windows host. The release checklist is:
+The checked-in `scripts/beta42_evidence.py` module is the fail-closed parser
+and sanitized evidence validator for the private runner; its deterministic
+tests must pass before the real matrix is executed on the dedicated Windows
+host. The release checklist is:
 
-- all supported Beta4.1 matrix gates pass with the exact CLI version and
+- all supported Beta4.2 matrix gates pass with the exact CLI version and
   candidate SHA, including the real `ollama-cloud/glm-5.2` adapter
   qualification;
 - the legacy Session continuation passes without changing its old call shape;
@@ -195,14 +234,14 @@ only on the dedicated Windows host. The release checklist is:
 - no secret-bearing or raw Session artifact is written to the repository;
 - the release evidence explicitly records the full cross-provider V2 gate as
   `blocked_upstream_provider_aware_delivery` until upstream delivery is
-  provider-aware; Beta4.1 must not describe it as a completed lifecycle.
+  provider-aware; Beta4.2 must not describe it as a completed lifecycle.
 
 ## Manual confirmation still required
 
 - Real Codex CLI lifecycle, model switching, historical Session resume, and
   process restart require the dedicated authenticated Windows environment and
   cannot be proven by the local unit/UI checks alone.
-- Desktop #419 still needs a manual UI check: select Luna V1 and V2, save each,
+- Desktop Beta4.1 carry-forward still needs a manual UI check: select Luna V1 and V2, save each,
   restart CodexHub, and confirm the selected value and `(Default)` marker are
   retained. The CLI plan does not replace this Desktop verification.
 - If the historical Session is unavailable in the isolated test fixture, stop
