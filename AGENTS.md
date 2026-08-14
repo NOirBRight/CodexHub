@@ -16,6 +16,23 @@ Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `
 
 Classify work as fast, standard, or strict and select local checks from `docs/agents/verification-policy.md`. GitHub Actions remains the final PR gate for `dev` and `main`; when unavailable, run the documented fallback commands in `docs/agents/ci.md`.
 
+### Python runtime
+
+CodexHub requires Python 3.13 or newer. The interactive Codex environment may
+put a separate Python 3.11 virtualenv first on `PATH`, so never invoke bare
+`python`, `python3`, `py`, or `pytest` for repository checks. Use the repository
+launcher instead:
+
+```powershell
+.\scripts\codexhub-python.cmd -m pytest -q
+.\scripts\codexhub-python.cmd path\to\script.py
+```
+
+The launcher validates one compatible interpreter and exports it to child
+processes. A 3.11 error is an invocation error: do not retry the same command
+with another bare Python name. Rust, packaged Gateway, and real-client E2E
+entrypoints resolve or inherit the same contract independently.
+
 ### User feedback
 
 Persistent state changes use the shared Toast lifecycle and disclose exact restart requirements. See `docs/agents/user-feedback.md`.
