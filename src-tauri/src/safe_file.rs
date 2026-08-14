@@ -752,6 +752,12 @@ mod tests {
         std::env::temp_dir().join(format!("codexhub-safe-file-{name}-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()))
     }
 
+    fn configured_test_python() -> Command {
+        let mut command = Command::new(crate::runtime_paths::find_test_python());
+        crate::runtime_paths::configure_python_command(&mut command);
+        command
+    }
+
 
     #[test]
     fn write_text_atomic_keeps_persistent_versioned_lock() {
@@ -803,7 +809,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let target = root.join("settings.json");
         let lock = root.join("settings.json.lock");
-        let mut child = Command::new(crate::runtime_paths::find_test_python())
+        let mut child = configured_test_python()
             .arg("-c")
             .arg("pass")
             .spawn()
@@ -1023,7 +1029,7 @@ mod tests {
     fn python_holder(target: &Path) -> PythonHolder {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
         let script = "import pathlib, sys; from atomic_io import file_lock_for; target = pathlib.Path(sys.argv[1]);\nwith file_lock_for(target):\n    print('ready', flush=True);\n    if sys.stdin.readline().strip() != 'release': raise SystemExit(2);\n    print('released', flush=True)";
-        let mut child = Command::new(crate::runtime_paths::find_test_python())
+        let mut child = configured_test_python()
             .env("PYTHONPATH", source)
             .arg("-c")
             .arg(script)
@@ -1103,7 +1109,7 @@ mod tests {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
         let script = "import pathlib, sys; from atomic_io import _set_test_lock_hook, atomic_write_text; target = pathlib.Path(sys.argv[1]); _set_test_lock_hook(lambda event: print(event, flush=True)); atomic_write_text(target, 'python'); print('entered', flush=True)";
         let lock = FileLock::acquire(&target).unwrap();
-        let mut child = Command::new(crate::runtime_paths::find_test_python())
+        let mut child = configured_test_python()
             .env("PYTHONPATH", source)
             .arg("-c")
             .arg(script)
@@ -1290,7 +1296,7 @@ mod tests {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
         let rounds = 5;
         let script = "import pathlib, sys, time; from atomic_io import file_lock_for; target = pathlib.Path(sys.argv[1]); log = pathlib.Path(sys.argv[2]);\nfor _ in range(5):\n    with file_lock_for(target):\n        with log.open('a', encoding='ascii') as stream:\n            stream.write('START-P\\n'); stream.flush(); time.sleep(0.05); stream.write('END-P\\n')\nprint('done', flush=True)";
-        let mut child = Command::new(crate::runtime_paths::find_test_python())
+        let mut child = configured_test_python()
             .env("PYTHONPATH", &source)
             .arg("-c")
             .arg(script)

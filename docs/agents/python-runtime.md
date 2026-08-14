@@ -20,7 +20,8 @@ Use the repository entrypoint from the repository root:
 The entrypoint uses `Resolve-CodexHubPython.ps1`, validates the selected
 interpreter before running anything, and exports the selected path through
 `CODEXHUB_PYTHON`, `CODEXHUB_PROXY_PYTHON`, and `CODEXHUB_E2E_PYTHON` for child
-processes. These are hard bindings; when `CODEXHUB_E2E_PYTHON` is present, it
+processes. It also replaces ambient `PYTHONPATH` with this checkout's
+`src-python` import root. These are hard bindings; when `CODEXHUB_E2E_PYTHON` is present, it
 takes precedence at nested resolver/Rust boundaries so an isolated E2E child
 cannot select another host interpreter. Gateway, packaging, and E2E PowerShell entrypoints use the same resolver in
 bundled-preferred mode; the development wrapper also accepts a checkout
@@ -35,9 +36,10 @@ That makes nested literal `python` calls use the same interpreter, while
 than the ambient 3.11 executable.
 Every Rust-to-Python launch and the Rust version probes also pass through
 `runtime_paths::configure_python_command`, which removes `PYTHONHOME` and the
-activated-environment selectors at the child boundary. This prevents a valid
-3.13 executable from being redirected to a Hermes/Conda/Pipenv prefix in
-Catalog, Config, History, Model discovery, or Gateway paths.
+activated-environment selectors, including ambient `PYTHONPATH`, at the child
+boundary. This prevents a valid 3.13 executable from being redirected to a
+Hermes/Conda/Pipenv prefix or importing host modules in Catalog, Config,
+History, Model discovery, Gateway, and cross-language lock-test paths.
 When the command is `-m pytest`, the resolver also verifies that pytest is
 installed in that exact interpreter; otherwise it fails before collection with
 the command needed to install it instead of silently switching to another
@@ -90,7 +92,10 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 
 The same command may be run with `pwsh.exe`; both must select the bundled
 3.13.x runtime. A build failure in this preflight is a runtime-boundary issue,
-not a reason to retry with the ambient `python` or `pytest` command.
+not a reason to retry with the ambient `python` or `pytest` command. The
+preparation script also removes host Python selectors before checking or
+extracting the embedded runtime, so an activated 3.11 shell cannot contaminate
+the package.
 
 The two source executables that are commonly launched directly,
 `src-python/codex_proxy.py` and `src-python/catalog_sync.py`, also fail before

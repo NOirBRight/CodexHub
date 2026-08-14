@@ -94,14 +94,14 @@ jobs:
       - name: Create isolated Python environment
         shell: pwsh
         run: |
-          .\scripts\codexhub-python.cmd -m venv .venv-ci
+          .\scripts\codexhub-python.cmd -m venv --clear .venv-ci
 
       - name: Install test dependencies
-        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
+        run: .\scripts\codexhub-python.cmd -m pip install --upgrade pip pytest
 
       - name: Run Python core partition
         run: |
-          .\.venv-ci\Scripts\python.exe -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
+          .\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
 
       - name: Upload Python core JUnit evidence
         if: always()
@@ -131,17 +131,17 @@ jobs:
       - name: Create isolated Python environment
         shell: pwsh
         run: |
-          .\scripts\codexhub-python.cmd -m venv .venv-ci
+          .\scripts\codexhub-python.cmd -m venv --clear .venv-ci
 
       - name: Install test dependencies
-        run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
+        run: .\scripts\codexhub-python.cmd -m pip install --upgrade pip pytest
 
       - name: Run or skip synthetic partition
         shell: pwsh
         run: |
-          .\.venv-ci\Scripts\python.exe tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
+          .\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py `
             --timeout-seconds 3600 `
-            -- .\.venv-ci\Scripts\python.exe -m pytest -q tests/test_real_client_e2e.py `
+            -- .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py `
               --junitxml=.pytest-results/junit-synthetic.xml --durations=0
 
       - name: Upload synthetic JUnit evidence

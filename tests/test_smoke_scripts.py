@@ -945,7 +945,10 @@ def test_ci_python_entrypoints_do_not_reparse_ambient_python():
     source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert ".\\scripts\\codexhub-python.cmd scripts/ci/ci_change_plan.py" in source
-    assert ".\\scripts\\codexhub-python.cmd -m venv .venv-ci" in source
+    assert ".\\scripts\\codexhub-python.cmd -m venv --clear .venv-ci" in source
+    assert ".\\scripts\\codexhub-python.cmd -m pip install --upgrade pip pytest" in source
+    assert ".\\scripts\\codexhub-python.cmd -m pytest -q" in source
+    assert ".\\venv-ci\\Scripts\\python.exe" not in source
 
 
 def test_fixture_launcher_validates_python_launcher_before_using_it():
@@ -957,6 +960,8 @@ def test_fixture_launcher_validates_python_launcher_before_using_it():
     assert "if defined CODEXHUB_E2E_PYTHON goto run_explicit" in source
     assert "if defined CODEXHUB_PYTHON goto run_repository" in source
     assert "requires an explicit CODEXHUB_E2E_PYTHON binding" in source
+    assert 'set "PYTHONHOME="' in source
+    assert 'set "PYTHONPATH="' in source
     assert 'py.exe -3.13 -c "import sys;' not in source
 
 

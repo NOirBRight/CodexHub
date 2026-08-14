@@ -23,6 +23,7 @@ pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
 pub(crate) fn configure_python_command(command: &mut Command) {
     for name in [
         "PYTHONHOME",
+        "PYTHONPATH",
         "PYTHONSTARTUP",
         "PYTHONUSERBASE",
         "VIRTUAL_ENV",
@@ -456,7 +457,7 @@ mod tests {
             .env("PIPENV_ACTIVE", "1")
             .arg("-c")
             .arg(
-                "import os, sys; names = ('PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER', 'PIPENV_ACTIVE'); print(sys.version_info[:2]); print([os.environ.get(name) for name in names])",
+            "import os, sys; names = ('PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONUSERBASE', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER', 'PIPENV_ACTIVE'); print(sys.version_info[:2]); print([os.environ.get(name) for name in names])",
             );
         configure_python_command(&mut command);
 
@@ -468,7 +469,7 @@ mod tests {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("(3, 13)") || stdout.contains("(3, 14)"));
-        assert!(stdout.contains("[None, None, None, None, None, None, None, None]"));
+        assert!(stdout.contains("[None, None, None, None, None, None, None, None, None]"));
     }
 
     #[test]

@@ -1,6 +1,17 @@
 @echo off
 setlocal
 
+rem Never let the fixture inherit a host Python prefix or module search path.
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONSTARTUP="
+set "PYTHONUSERBASE="
+set "VIRTUAL_ENV="
+set "CONDA_PREFIX="
+set "CONDA_DEFAULT_ENV="
+set "CONDA_PROMPT_MODIFIER="
+set "PIPENV_ACTIVE="
+
 if defined CODEXHUB_E2E_PYTHON goto run_explicit
 if defined CODEXHUB_PYTHON goto run_repository
 if defined CODEXHUB_PROXY_PYTHON goto run_proxy

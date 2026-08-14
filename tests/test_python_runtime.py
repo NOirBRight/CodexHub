@@ -114,6 +114,23 @@ def test_prepare_runtime_check_is_compatible_with_windows_powershell_51() -> Non
     assert "Python runtime check passed" in result.stdout
 
 
+def test_prepare_runtime_check_ignores_host_python_environment(tmp_path: Path) -> None:
+    """Packaged-runtime validation must not inherit a host Python prefix."""
+    result = _run_script(
+        PREPARE_RUNTIME,
+        "-CheckOnly",
+        env={
+            "PYTHONHOME": str(tmp_path / "hermes-3.11"),
+            "PYTHONPATH": str(tmp_path / "hermes-3.11" / "site-packages"),
+            "VIRTUAL_ENV": str(tmp_path / "hermes-3.11"),
+            "CONDA_PREFIX": str(tmp_path / "hermes-3.11" / "conda"),
+            "PIPENV_ACTIVE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Python runtime check passed" in result.stdout
+
+
 def test_repository_selector_resolves_under_host_runtime_selector_contamination(
     tmp_path: Path,
 ) -> None:
@@ -275,6 +292,27 @@ def test_cmd_launcher_exports_one_interpreter_to_all_children() -> None:
     assert Path(lines[-4]).resolve() == Path(lines[-3]).resolve()
     assert Path(lines[-4]).resolve() == Path(lines[-2]).resolve()
     assert Path(lines[-4]).resolve() == Path(lines[-1]).resolve()
+
+
+def test_cmd_launcher_replaces_ambient_pythonpath_with_repository_import_root(
+    tmp_path: Path,
+) -> None:
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(tmp_path / "hermes-3.11" / "site-packages")
+    result = subprocess.run(
+        [str(CMD_LAUNCHER), "-c", "import os; print(os.environ['PYTHONPATH'])"],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(result.stdout.strip().splitlines()[-1]).resolve() == (
+        ROOT / "src-python"
+    ).resolve()
 
 
 def test_pytest_command_rejects_a_compatible_interpreter_without_pytest(

@@ -14,6 +14,23 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# The embedded runtime is the packaged application's source of truth. Do not
+# let a developer shell's active 3.11/Conda/Pipenv environment redirect its
+# stdlib or inject host modules while we validate or prepare the bundle.
+foreach ($name in @(
+    'PYTHONHOME',
+    'PYTHONPATH',
+    'PYTHONSTARTUP',
+    'PYTHONUSERBASE',
+    'VIRTUAL_ENV',
+    'CONDA_PREFIX',
+    'CONDA_DEFAULT_ENV',
+    'CONDA_PROMPT_MODIFIER',
+    'PIPENV_ACTIVE'
+)) {
+    Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+}
+
 $repoRootPath = [System.IO.Path]::GetFullPath($RepoRoot)
 $tauriDir = Join-Path $repoRootPath "src-tauri"
 $resourcesDir = Join-Path $tauriDir "resources"

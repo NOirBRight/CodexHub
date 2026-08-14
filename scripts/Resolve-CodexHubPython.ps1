@@ -63,10 +63,11 @@ function Test-CodexHubPythonPytest {
 
 function Clear-CodexHubPythonRuntimeSelectors {
     # PYTHONHOME can redirect a valid selected executable to an incompatible
-    # stdlib. Clear it before any version probe, not only before the final
-    # child launch; otherwise the resolver can reject Python 3.13 itself.
+    # stdlib. PYTHONPATH can make the pytest/version probe import host modules.
+    # Clear both before any probe, not only before the final child launch.
     foreach ($name in @(
         'PYTHONHOME',
+        'PYTHONPATH',
         'PYTHONSTARTUP',
         'PYTHONUSERBASE',
         'VIRTUAL_ENV',
@@ -131,7 +132,9 @@ function Get-CodexHubPythonLauncherPath {
 function Set-CodexHubPythonEnvironment {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot
     )
 
     # A resolved parent must pass the exact same executable to every child.
@@ -140,12 +143,16 @@ function Set-CodexHubPythonEnvironment {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     # Do not let an activated Hermes/Conda/Pipenv environment change the
     # interpreter's stdlib or prefix after the concrete executable is chosen.
-    # PYTHONPATH is intentionally preserved: callers use it for the checked-in
-    # src-python import root, while runtime-selection variables are removed.
     Clear-CodexHubPythonRuntimeSelectors
     $env:CODEXHUB_PYTHON = $fullPath
     $env:CODEXHUB_PROXY_PYTHON = $fullPath
     $env:CODEXHUB_E2E_PYTHON = $fullPath
+    $sourcePython = Join-Path ([System.IO.Path]::GetFullPath($SourceRoot)) 'src-python'
+    if (Test-Path -LiteralPath $sourcePython -PathType Container) {
+        # Keep repository imports available without inheriting arbitrary host
+        # modules from Hermes/Conda/Pipenv PYTHONPATH entries.
+        $env:PYTHONPATH = $sourcePython
+    }
     # Some third-party helpers still spawn a literal `python` or `pytest`
     # instead of using the parent's executable. Put the selected interpreter
     # first on PATH so those nested processes cannot fall back to the Hermes
@@ -199,7 +206,7 @@ function Resolve-CodexHubPythonPath {
             [System.IO.Path]::GetFullPath($explicitText)
         }
         Assert-CodexHubPythonRequirements -Path $path -NeedsPytest:$RequirePytest
-        return (Set-CodexHubPythonEnvironment -Path $path)
+        return (Set-CodexHubPythonEnvironment -Path $path -SourceRoot $Root)
     }
 
     $candidatePaths = [System.Collections.Generic.List[string]]::new()
@@ -246,7 +253,7 @@ function Resolve-CodexHubPythonPath {
             continue
         }
         if (Test-CodexHubPythonCandidate -Path $candidate -NeedsPytest:$RequirePytest) {
-            return (Set-CodexHubPythonEnvironment -Path $candidate)
+            return (Set-CodexHubPythonEnvironment -Path $candidate -SourceRoot $Root)
         }
     }
 
