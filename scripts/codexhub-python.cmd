@@ -9,5 +9,6 @@ if %errorlevel% equ 0 (
 if not defined CODEXHUB_RESOLVED_PYTHON exit /b 127
 set "CODEXHUB_PYTHON=%CODEXHUB_RESOLVED_PYTHON%"
 set "CODEXHUB_PROXY_PYTHON=%CODEXHUB_RESOLVED_PYTHON%"
+for %%D in ("%CODEXHUB_RESOLVED_PYTHON%") do set "PATH=%%~dpD;%~dp0;%PATH%"
 "%CODEXHUB_RESOLVED_PYTHON%" %*
 exit /b %errorlevel%

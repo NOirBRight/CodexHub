@@ -4,11 +4,11 @@ CodexHub source requires **Python 3.13 or newer**. The source uses Python
 3.13 syntax, so a 3.11 interpreter fails during collection before any test
 can run.
 
-The recurring failure was an environment-resolution problem: the interactive
-Codex shell prepends the Hermes virtual environment, so bare `python` resolves
-to Hermes Python 3.11 even though the machine also has Python 3.13. Rust test
-fixtures that spawned `Command::new("python")` reproduced the same mismatch in
-nested processes.
+The recurring failure is an environment-resolution problem, not a Gateway
+protocol problem: the interactive Codex shell prepends the Hermes virtual
+environment, so bare `python` and `pytest` resolve to Hermes Python 3.11 even
+though the machine also has Python 3.13. Rust test fixtures that spawned
+`Command::new("python")` reproduced the same mismatch in nested processes.
 
 Use the repository entrypoint from the repository root:
 
@@ -26,7 +26,21 @@ virtualenv before host discovery. Rust applies the same 3.13 probe to
 configured, bundled, checkout, and host candidates. An explicit override is a
 hard choice: an incompatible `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON`
 fails closed and never falls through to another interpreter. A 3.11 ambient
-interpreter is never accepted as a fallback.
+interpreter is never accepted as a fallback. The wrapper also puts the chosen
+interpreter directory and the repository `scripts` directory first on `PATH`.
+That makes nested literal `python` calls use the same interpreter, while
+`scripts/pytest.cmd` forwards nested `pytest` calls to `python -m pytest` rather
+than the ambient 3.11 executable.
+
+If direct `python` and `pytest` commands are needed in an interactive
+PowerShell session, activate the contract once by dot-sourcing:
+
+```powershell
+. .\scripts\Enter-CodexHubPython.ps1
+```
+
+Running that script without the leading dot only changes its child process;
+PowerShell cannot let a child process rewrite its parent's environment.
 
 The isolated Windows real-client runner applies the selected interpreter's
 directory to child `PATH` and passes it to the fixture launcher through

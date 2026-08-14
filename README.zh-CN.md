@@ -232,10 +232,13 @@ cd ..
 ```
 
 源码要求 Python 3.13 或更高版本。不要在可能把其他虚拟环境置于首位的
-Shell 中直接使用 `python`；测试和脚本统一使用
-`scripts\codexhub-python.cmd`。它会解析并校验同一个解释器，并把路径传给
-子进程。也可以通过 `CODEXHUB_PYTHON` 或 `CODEXHUB_PROXY_PYTHON` 显式指定
-Python 3.13+ 可执行文件。
+Shell 中直接使用 `python` 或 `pytest`；测试和脚本统一使用
+`scripts\codexhub-python.cmd`。它会解析并校验同一个解释器、导出精确路径，
+并把该解释器及仓库的 `scripts` 目录置于子进程 `PATH` 首位，避免嵌套进程
+回退到 Python 3.11。`scripts\pytest.cmd` 是匹配的 pytest 转发入口。如需在
+当前 PowerShell 会话中直接使用这些命令，可一次性执行
+`. .\scripts\Enter-CodexHubPython.ps1`。也可以通过 `CODEXHUB_PYTHON` 或
+`CODEXHUB_PROXY_PYTHON` 显式指定 Python 3.13+ 可执行文件。
 
 ## 和其他方式的区别
 

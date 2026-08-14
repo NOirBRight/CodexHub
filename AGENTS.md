@@ -28,10 +28,13 @@ launcher instead:
 .\scripts\codexhub-python.cmd path\to\script.py
 ```
 
-The launcher validates one compatible interpreter and exports it to child
-processes. A 3.11 error is an invocation error: do not retry the same command
-with another bare Python name. Rust, packaged Gateway, and real-client E2E
-entrypoints resolve or inherit the same contract independently.
+The launcher validates one compatible interpreter, exports it to child
+processes, and places that interpreter plus the repository `scripts` directory
+first on the child `PATH`. A 3.11 error is an invocation error: do not retry
+the same command with another bare Python name. Rust, packaged Gateway, and
+real-client E2E entrypoints resolve or inherit the same contract independently.
+For an interactive PowerShell session, dot-source
+`.\scripts\Enter-CodexHubPython.ps1` once before using bare commands.
 
 ### User feedback
 

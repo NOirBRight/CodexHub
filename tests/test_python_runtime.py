@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SELECTOR = ROOT / "scripts" / "Resolve-CodexHubPython.ps1"
 LAUNCHER = ROOT / "scripts" / "codexhub-python.ps1"
 CMD_LAUNCHER = ROOT / "scripts" / "codexhub-python.cmd"
+ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
 
 
 def _powershell() -> str:
@@ -82,6 +84,81 @@ def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
     assert len(lines) >= 3
     assert Path(lines[-3]).resolve() == Path(lines[-2]).resolve()
     assert Path(lines[-3]).resolve() == Path(lines[-1]).resolve()
+
+
+def test_repository_launcher_puts_selected_interpreter_first_on_child_path() -> None:
+    result = _run_script(
+        LAUNCHER,
+        "-c",
+        "import os, shutil, sys; path=os.environ['PATH'].split(os.pathsep); print(sys.executable); print(shutil.which('python')); print(shutil.which('pytest')); print(path[0]); print(path[1])",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 5
+    assert Path(lines[-2]).resolve() == Path(lines[-4]).parent.resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-5]).resolve()
+    assert Path(lines[-3]).resolve().parent in {
+        Path(lines[-4]).resolve().parent,
+        (ROOT / "scripts").resolve(),
+    }
+    assert Path(lines[-1]).resolve() == (ROOT / "scripts").resolve()
+
+
+def test_cmd_launcher_puts_selected_interpreter_first_on_child_path() -> None:
+    result = subprocess.run(
+        [str(CMD_LAUNCHER), "-c", "import os, shutil, sys; path=os.environ['PATH'].split(os.pathsep); print(sys.executable); print(shutil.which('python')); print(shutil.which('pytest')); print(path[0]); print(path[1])"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 5
+    assert Path(lines[-2]).resolve() == Path(lines[-4]).parent.resolve()
+    assert Path(lines[-4]).resolve() == Path(lines[-5]).resolve()
+    assert Path(lines[-3]).resolve().parent in {
+        Path(lines[-4]).resolve().parent,
+        (ROOT / "scripts").resolve(),
+    }
+    assert Path(lines[-1]).resolve() == (ROOT / "scripts").resolve()
+
+
+def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:
+    selected_directory = Path(sys.executable).resolve().parent
+    managed_directories = {selected_directory, (ROOT / "scripts").resolve()}
+    child_env = os.environ.copy()
+    child_env.pop("CODEXHUB_PYTHON", None)
+    child_env.pop("CODEXHUB_PROXY_PYTHON", None)
+    child_env["PATH"] = os.pathsep.join(
+        entry
+        for entry in child_env["PATH"].split(os.pathsep)
+        if entry and Path(entry).resolve() not in managed_directories
+    )
+    command = (
+        f". '{ACTIVATION}'; "
+        'python -c "import shutil, sys; print(sys.version_info[:2]); print(sys.executable); print(shutil.which(\'pytest\'))"'
+    )
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert lines[-3] in {"(3, 13)", "(3, 14)"}
+    assert Path(lines[-2]).is_file()
+    assert Path(lines[-1]).resolve().parent in {
+        Path(lines[-2]).resolve().parent,
+        (ROOT / "scripts").resolve(),
+    }
 
 
 def test_repository_launcher_preserves_a_script_path_as_the_first_argument(

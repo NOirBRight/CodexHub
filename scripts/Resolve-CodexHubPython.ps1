@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$script:CodexHubPythonScriptDirectory = $PSScriptRoot
 
 function Test-CodexHubPython313 {
     param(
@@ -64,6 +65,27 @@ function Set-CodexHubPythonEnvironment {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $env:CODEXHUB_PYTHON = $fullPath
     $env:CODEXHUB_PROXY_PYTHON = $fullPath
+    # Some third-party helpers still spawn a literal `python` or `pytest`
+    # instead of using the parent's executable. Put the selected interpreter
+    # first on PATH so those nested processes cannot fall back to the Hermes
+    # Python 3.11 environment.
+    $pythonDirectory = Split-Path -Parent $fullPath
+    $pathSeparator = [string][System.IO.Path]::PathSeparator
+    $managedPathEntries = @($pythonDirectory, $script:CodexHubPythonScriptDirectory)
+    $existingPathEntries = if ([string]::IsNullOrWhiteSpace([string]$env:PATH)) {
+        @()
+    }
+    else {
+        @($env:PATH -split [regex]::Escape($pathSeparator))
+    }
+    $unmanagedPathEntries = @($existingPathEntries | Where-Object {
+        $entry = [string]$_
+        -not [string]::IsNullOrWhiteSpace($entry) -and
+            -not ($managedPathEntries | Where-Object {
+                $_ -and $entry.Equals([string]$_, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+    })
+    $env:PATH = (@($managedPathEntries) + $unmanagedPathEntries) -join $pathSeparator
     return $fullPath
 }
 

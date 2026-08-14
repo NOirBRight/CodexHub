@@ -233,11 +233,14 @@ cd ..
 ```
 
 CodexHub source code requires Python 3.13 or newer. Do not use the ambient
-`python` command from a shell that may prepend another virtual environment;
-use `scripts\codexhub-python.cmd` for tests and scripts. It resolves one
-interpreter, validates its version, and propagates that path to child
-processes. `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON` may explicitly point
-to a Python 3.13+ executable.
+`python` or `pytest` command from a shell that may prepend another virtual
+environment; use `scripts\codexhub-python.cmd` for tests and scripts. It
+resolves one interpreter, exports that exact executable, and puts it first on
+the child `PATH` so nested processes cannot fall back to Python 3.11.
+`scripts\pytest.cmd` is the matching pytest shim. For a PowerShell session
+where direct commands are desired, dot-source
+`.\scripts\Enter-CodexHubPython.ps1` once. `CODEXHUB_PYTHON` or
+`CODEXHUB_PROXY_PYTHON` may explicitly point to a Python 3.13+ executable.
 
 ## Comparison
 
