@@ -24,6 +24,19 @@ $zstandardWheelName = "zstandard-$ZstandardVersion-cp313-cp313-win_amd64.whl"
 $zstandardWheelPath = Join-Path $downloadDir $zstandardWheelName
 $runtimeManifestPath = Join-Path $runtimeDir "codexhub-python-runtime.json"
 
+function ConvertTo-PythonVersion([string]$Value) {
+    $version = $null
+    if (-not [System.Version]::TryParse($Value, [ref]$version)) {
+        throw "PythonVersion must be a numeric version such as 3.13.14: $Value"
+    }
+    return $version
+}
+
+$requestedPythonVersion = ConvertTo-PythonVersion $PythonVersion
+if ($requestedPythonVersion -lt [System.Version]::new(3, 13, 0)) {
+    throw "CodexHub requires a bundled Python runtime of 3.13 or newer: $PythonVersion"
+}
+
 function Assert-UnderPath([string]$Path, [string]$Root) {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -53,9 +66,42 @@ function Invoke-Download([string]$Url, [string]$Destination) {
     Invoke-WebRequest -Uri $Url -OutFile $Destination
 }
 
+function Get-PythonRuntimeVersion([string]$PythonPath) {
+    $versionOutput = @(& $PythonPath -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3]))' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -eq 0) {
+        return $null
+    }
+    $version = $null
+    if (-not [System.Version]::TryParse(([string]($versionOutput | Select-Object -Last 1)).Trim(), [ref]$version)) {
+        return $null
+    }
+    return $version
+}
+
 function Test-PythonRuntimeReady {
     $python = Join-Path $runtimeDir "python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        return $false
+    }
+
+    $actualVersion = Get-PythonRuntimeVersion $python
+    if ($null -eq $actualVersion -or
+        $actualVersion -lt [System.Version]::new(3, 13, 0) -or
+        $actualVersion -ne $requestedPythonVersion) {
+        return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $runtimeManifestPath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+        $manifestVersion = ConvertTo-PythonVersion ([string]$manifest.python_version)
+    }
+    catch {
+        return $false
+    }
+    if ($manifestVersion -ne $actualVersion) {
         return $false
     }
 
@@ -148,8 +194,16 @@ if ($LASTEXITCODE -ne 0) {
     throw "zstandard wheel extraction failed with exit code $LASTEXITCODE."
 }
 
+$actualPythonVersion = Get-PythonRuntimeVersion $python
+if ($null -eq $actualPythonVersion -or
+    $actualPythonVersion -lt [System.Version]::new(3, 13, 0) -or
+    $actualPythonVersion -ne $requestedPythonVersion) {
+    throw "Extracted Python runtime version is not the requested compatible version: expected $PythonVersion, got $actualPythonVersion"
+}
+
 $manifest = [ordered]@{
-    python_version = $PythonVersion
+    python_version = $actualPythonVersion.ToString()
+    requested_python_version = $PythonVersion
     source_url = $PythonZipUrl
     sha256 = $PythonZipSha256.ToLowerInvariant()
     zstandard_version = $ZstandardVersion

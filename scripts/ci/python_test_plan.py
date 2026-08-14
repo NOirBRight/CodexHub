@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 

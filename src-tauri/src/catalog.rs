@@ -25,7 +25,7 @@ pub fn generate_catalog() -> Result<Vec<Model>, String> {
 
 pub fn sync_catalog() -> Result<String, String> {
     let paths = CatalogPaths::runtime()?;
-    let python = config::find_python();
+    let python = config::find_python()?;
     let runner = ProcessCatalogSyncCommandRunner;
 
     sync_catalog_with_paths(&paths, &python, &runner)

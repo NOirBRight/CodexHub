@@ -592,7 +592,7 @@ function Refresh-ProxyCatalog {
     Write-Host 'Refreshing proxy model catalog...'
     Push-Location -LiteralPath $ProxyDir
     try {
-        Invoke-Checked -FilePath 'python' -Arguments @((Join-Path $ProxyDir 'catalog_sync.py'), '--sync') | Out-Null
+        Invoke-Checked -FilePath $Python -Arguments @((Join-Path $ProxyDir 'catalog_sync.py'), '--sync') | Out-Null
     }
     finally {
         Pop-Location
@@ -612,7 +612,7 @@ function Repair-UiStateFile {
     $backupDir = Join-Path $ScriptDir 'mode-backups'
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     $backupPath = Join-Path $backupDir ("global-state.$BackupLabel.$(Get-Date -Format 'yyyyMMddHHmmss').bak")
-    Invoke-Checked -FilePath 'python' -Arguments @(
+    Invoke-Checked -FilePath $Python -Arguments @(
         (Join-Path $ProxyDir 'global_state_repair.py'),
         'repair',
         '--state',
@@ -681,7 +681,7 @@ function Invoke-HistoryOverlay {
     $historyOverlay = Join-Path $ProxyDir 'history_overlay.py'
     if ($TargetProvider -eq 'custom') {
         $backupRoot = Join-Path $ScriptDir "history-openai-to-custom-$stamp"
-        Invoke-Checked -FilePath 'python' -Arguments @(
+        Invoke-Checked -FilePath $Python -Arguments @(
             $historyOverlay,
             'normalize-fast',
             '--codex-dir',
@@ -694,7 +694,7 @@ function Invoke-HistoryOverlay {
     }
     else {
         $backupRoot = Join-Path $ScriptDir "history-custom-to-openai-$stamp"
-        Invoke-Checked -FilePath 'python' -Arguments @(
+        Invoke-Checked -FilePath $Python -Arguments @(
             $historyOverlay,
             'normalize-fast',
             '--codex-dir',
@@ -709,7 +709,7 @@ function Invoke-HistoryOverlay {
 }
 
 function Invoke-HistoryStatus {
-    Invoke-Checked -FilePath 'python' -Arguments @(
+    Invoke-Checked -FilePath $Python -Arguments @(
         (Join-Path $ProxyDir 'history_consolidate.py'),
         'status',
         '--codex-dir',
@@ -743,7 +743,7 @@ function Invoke-ConsolidateOfficial {
     if ($DryRun) {
         $arguments += '--dry-run'
     }
-    Invoke-Checked -FilePath 'python' -Arguments $arguments
+    Invoke-Checked -FilePath $Python -Arguments $arguments
     if ($DryRun) {
         Write-Host "Dry-run only; no active history or saved workspace roots were written."
     }
@@ -776,7 +776,7 @@ function Invoke-SavedWorkspaceRootImport {
     if ($ApplyWorkspaceRoots) {
         $arguments += '--apply'
     }
-    Invoke-Checked -FilePath 'python' -Arguments $arguments
+    Invoke-Checked -FilePath $Python -Arguments $arguments
     if ($ApplyWorkspaceRoots) {
         Write-Host "Saved workspace roots imported after preview. Backup: $backupRoot"
     }
@@ -849,7 +849,7 @@ function Show-GlobalStateWarning {
     }
 
     try {
-        $summaryJson = & python -c "import json, pathlib, sys; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text(encoding='utf-8-sig')); print(json.dumps({'selected': data.get('selected-remote-host-id'), 'auto_connect_count': len(data.get('remote-connection-auto-connect-by-host-id') or {})}, ensure_ascii=True))" $statePath
+        $summaryJson = & $Python -c "import json, pathlib, sys; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text(encoding='utf-8-sig')); print(json.dumps({'selected': data.get('selected-remote-host-id'), 'auto_connect_count': len(data.get('remote-connection-auto-connect-by-host-id') or {})}, ensure_ascii=True))" $statePath
         $state = $summaryJson | ConvertFrom-Json
     }
     catch {
@@ -905,6 +905,8 @@ $ScriptDir = Split-Path -Parent $PSCommandPath
 $RepoRoot = Split-Path -Parent $ScriptDir
 $ProxyDir = Join-Path $RepoRoot 'src-python'
 $ConfigDir = Join-Path $RepoRoot 'config'
+. (Join-Path $ScriptDir 'Resolve-CodexHubPython.ps1')
+$Python = Resolve-CodexHubPythonPath -Root $RepoRoot -PreferBundled
 $CodexDir = Join-Path $env:USERPROFILE '.codex'
 $ModeStateRoot = Join-Path $ScriptDir 'mode-state'
 $CatalogPath = Join-Path $CodexDir 'model-catalogs\codexhub-model-catalog.json'

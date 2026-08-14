@@ -333,6 +333,7 @@ def _prepare_run(
         tmp_path / "validate-managed-client-contract-probe.py",
     )
     shutil.copyfile(FIXTURES / "write-catalog.py", tmp_path / "write-catalog.py")
+    shutil.copyfile(FIXTURES / "run-fixture-python.cmd", tmp_path / "run-fixture-python.cmd")
     portable_files = (
         "config/providers.toml",
         "src-python/codex_proxy.py",
@@ -441,6 +442,7 @@ def _run(
             "fake-debug-gateway.py",
             "fake-managed-client-config.py",
             "validate-managed-client-contract-probe.py",
+            "run-fixture-python.cmd",
         ):
             shutil.copyfile(tmp_path / support, candidate_root / support)
         for relative in (

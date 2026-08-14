@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 if /I "%~1"=="refresh-models" (
   set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
   if not exist "!catalog!" mkdir "!catalog!"
-  python.exe "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
+  call "%~dp0run-fixture-python.cmd" "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
   if errorlevel 1 exit /b 37
   exit /b 0
 )

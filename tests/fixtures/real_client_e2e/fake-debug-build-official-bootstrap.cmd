@@ -25,7 +25,7 @@ if exist "%~f0.no-listener" (
   ping.exe 127.0.0.1 -t >nul
   exit /b 36
 )
-python.exe "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%
+call "%~dp0run-fixture-python.cmd" "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%
 exit /b %errorlevel%
 
 :refresh
@@ -45,7 +45,7 @@ if exist "%~f0.bootstrap-slow" (
 )
 set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
 if not exist "%catalog%" mkdir "%catalog%"
-python.exe "%~dp0write-catalog.py" "%catalog%\codexhub-model-catalog.json"
+call "%~dp0run-fixture-python.cmd" "%~dp0write-catalog.py" "%catalog%\codexhub-model-catalog.json"
 if errorlevel 1 exit /b 37
 >"%budget%" echo candidate-managed-safe-budget
 exit /b 0

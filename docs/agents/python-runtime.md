@@ -1,0 +1,52 @@
+# Python runtime contract
+
+CodexHub source requires **Python 3.13 or newer**. The source uses Python
+3.13 syntax, so a 3.11 interpreter fails during collection before any test
+can run.
+
+The recurring failure was an environment-resolution problem: the interactive
+Codex shell prepends the Hermes virtual environment, so bare `python` resolves
+to Hermes Python 3.11 even though the machine also has Python 3.13. Rust test
+fixtures that spawned `Command::new("python")` reproduced the same mismatch in
+nested processes.
+
+Use the repository entrypoint from the repository root:
+
+```powershell
+.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py
+.\scripts\codexhub-python.cmd scripts/report_quality_gates.py
+```
+
+The entrypoint uses `Resolve-CodexHubPython.ps1`, validates the selected
+interpreter before running anything, and exports the selected path through
+`CODEXHUB_PYTHON` and `CODEXHUB_PROXY_PYTHON` for child processes. Gateway,
+packaging, and E2E PowerShell entrypoints use the same resolver in
+bundled-preferred mode; the development wrapper also accepts a checkout
+virtualenv before host discovery. Rust applies the same 3.13 probe to
+configured, bundled, checkout, and host candidates. An explicit override is a
+hard choice: an incompatible `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON`
+fails closed and never falls through to another interpreter. A 3.11 ambient
+interpreter is never accepted as a fallback.
+
+The isolated Windows real-client runner applies the selected interpreter's
+directory to child `PATH` and passes it to the fixture launcher through
+`CODEXHUB_E2E_PYTHON`. Fixture `.cmd` files therefore invoke an explicit
+3.13 interpreter rather than resolving a bare `python.exe` in a nested
+process.
+
+For an explicit override:
+
+```powershell
+$env:CODEXHUB_PYTHON = 'C:\path\to\Python313\python.exe'
+.\scripts\codexhub-python.cmd -m pytest -q
+```
+
+The resolver fails immediately if that override is not Python 3.13+, instead
+of allowing a later `SyntaxError` to obscure the cause. Packaged builds use
+the bundled runtime and do not depend on the user's PATH.
+
+The two source executables that are commonly launched directly,
+`src-python/codex_proxy.py` and `src-python/catalog_sync.py`, also fail before
+importing the 3.13-only provider module when an ambient 3.11 interpreter is
+used. This turns a manual mis-invocation into the same actionable contract
+error rather than another misleading syntax/import failure.

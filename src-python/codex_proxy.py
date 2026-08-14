@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 13):
+    raise RuntimeError(
+        "CodexHub requires Python 3.13 or newer. "
+        "Run .\\scripts\\codexhub-python.cmd src-python/codex_proxy.py ..."
+    )
+
 import argparse
 from copy import deepcopy
 from collections.abc import Iterable as IterableABC
@@ -25,7 +33,6 @@ from functools import partial
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import sys
 import threading
 import time
 import tomllib

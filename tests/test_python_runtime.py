@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SELECTOR = ROOT / "scripts" / "Resolve-CodexHubPython.ps1"
+LAUNCHER = ROOT / "scripts" / "codexhub-python.ps1"
+CMD_LAUNCHER = ROOT / "scripts" / "codexhub-python.cmd"
+
+
+def _powershell() -> str:
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    if executable is None:
+        pytest.skip("PowerShell is required for the repository Python launcher")
+    return executable
+
+
+def _run_script(script: Path, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    child_env = os.environ.copy()
+    if env:
+        child_env.update(env)
+    return subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-RepoRoot",
+            str(ROOT),
+            *arguments,
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+
+def test_repository_selector_returns_python_313_or_newer() -> None:
+    result = _run_script(SELECTOR, "-PrintPath")
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = result.stdout.strip().splitlines()[-1]
+    version = subprocess.check_output(
+        [path, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    assert (major, minor) >= (3, 13)
+
+
+def test_repository_launcher_can_import_python_313_syntax_source() -> None:
+    result = _run_script(
+        LAUNCHER,
+        "-c",
+        "from providers_config import _sort_by_order; import sys; print(sys.version_info[:2])",
+        env={"PYTHONPATH": str(ROOT / "src-python")},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout
+
+
+def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
+    result = _run_script(
+        LAUNCHER,
+        "-c",
+        "import os, sys; print(sys.executable); print(os.environ['CODEXHUB_PYTHON']); print(os.environ['CODEXHUB_PROXY_PYTHON'])",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 3
+    assert Path(lines[-3]).resolve() == Path(lines[-2]).resolve()
+    assert Path(lines[-3]).resolve() == Path(lines[-1]).resolve()
+
+
+def test_repository_launcher_preserves_a_script_path_as_the_first_argument(
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "argument-probe.py"
+    probe.write_text("import sys; print(sys.argv[1:])\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(LAUNCHER),
+            str(probe),
+            "alpha",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "['alpha']" in result.stdout
+
+
+def test_cmd_launcher_preserves_separator_and_script_arguments(tmp_path: Path) -> None:
+    probe = tmp_path / "argument-probe.py"
+    probe.write_text("import sys; print(sys.argv[1:])\n", encoding="utf-8")
+    result = subprocess.run(
+        [str(CMD_LAUNCHER), str(probe), "alpha", "--", "omega"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "['alpha', '--', 'omega']" in result.stdout
+
+
+def test_repository_selector_rejects_an_explicit_python_311_override() -> None:
+    ambient = shutil.which("python")
+    if ambient is None:
+        pytest.skip("ambient Python executable is unavailable")
+    version = subprocess.check_output(
+        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    if (major, minor) >= (3, 13):
+        pytest.skip("ambient Python is already compatible")
+
+    result = _run_script(SELECTOR, "-PrintPath", env={"CODEXHUB_PYTHON": ambient})
+    assert result.returncode != 0
+    assert "explicit interpreter is not compatible" in result.stdout + result.stderr
+
+
+def test_repository_selector_rejects_an_incompatible_proxy_override_without_fallback() -> None:
+    ambient = shutil.which("python")
+    if ambient is None:
+        pytest.skip("ambient Python executable is unavailable")
+    version = subprocess.check_output(
+        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    if (major, minor) >= (3, 13):
+        pytest.skip("ambient Python is already compatible")
+
+    result = _run_script(
+        SELECTOR,
+        "-PrintPath",
+        env={"CODEXHUB_PYTHON": "", "CODEXHUB_PROXY_PYTHON": ambient},
+    )
+    assert result.returncode != 0
+    assert "explicit interpreter is not compatible" in result.stdout + result.stderr
+
+
+def test_fixture_launcher_rejects_an_incompatible_proxy_override(tmp_path: Path) -> None:
+    cmd = shutil.which("cmd.exe")
+    if cmd is None:
+        pytest.skip("Windows cmd.exe is required for the fixture launcher")
+
+    incompatible = tmp_path / "python311.cmd"
+    incompatible.write_text("@echo off\nexit /b 1\n", encoding="ascii")
+    fixture = ROOT / "tests" / "fixtures" / "real_client_e2e" / "run-fixture-python.cmd"
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env.pop(name, None)
+    child_env["CODEXHUB_PROXY_PYTHON"] = str(incompatible)
+    result = subprocess.run(
+        [cmd, "/d", "/c", str(fixture), "-c", "pass"],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 126
+    assert "requires Python 3.13 or newer" in result.stderr
+
+
+def test_pytest_preflight_rejects_python_311_before_source_collection() -> None:
+    ambient = shutil.which("python")
+    if ambient is None:
+        pytest.skip("ambient Python executable is unavailable")
+    version = subprocess.check_output(
+        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    if (major, minor) >= (3, 13):
+        pytest.skip("ambient Python is already compatible")
+
+    result = subprocess.run(
+        [ambient, "-m", "pytest", "--collect-only", "-q", "tests/test_providers_config.py"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src-python")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub requires Python 3.13 or newer" in combined
+
+
+@pytest.mark.parametrize("entrypoint", ["codex_proxy.py", "catalog_sync.py"])
+def test_core_python_entrypoints_reject_python_311_before_importing_313_modules(
+    entrypoint: str,
+) -> None:
+    ambient = shutil.which("python")
+    if ambient is None:
+        pytest.skip("ambient Python executable is unavailable")
+    version = subprocess.check_output(
+        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        text=True,
+    ).strip()
+    major, minor = (int(part) for part in version.split(".", 1))
+    if (major, minor) >= (3, 13):
+        pytest.skip("ambient Python is already compatible")
+
+    result = subprocess.run(
+        [ambient, str(ROOT / "src-python" / entrypoint), "--help"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src-python")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub requires Python 3.13 or newer" in combined

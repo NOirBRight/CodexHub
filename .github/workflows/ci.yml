@@ -56,7 +56,7 @@ jobs:
           CI_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          $raw = & python scripts/ci/ci_change_plan.py --output-json
+          $raw = & .\scripts\codexhub-python.cmd scripts/ci/ci_change_plan.py --output-json
           $exitCode = $LASTEXITCODE
           if (-not $raw) {
             throw 'CI classifier produced no plan output.'
@@ -94,7 +94,7 @@ jobs:
       - name: Create isolated Python environment
         shell: pwsh
         run: |
-          python -m venv .venv-ci
+          .\scripts\codexhub-python.cmd -m venv .venv-ci
 
       - name: Install test dependencies
         run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest
@@ -131,7 +131,7 @@ jobs:
       - name: Create isolated Python environment
         shell: pwsh
         run: |
-          python -m venv .venv-ci
+          .\scripts\codexhub-python.cmd -m venv .venv-ci
 
       - name: Install test dependencies
         run: .\.venv-ci\Scripts\python.exe -m pip install --upgrade pip pytest

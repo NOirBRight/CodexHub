@@ -14,6 +14,11 @@ import sys
 from pathlib import Path
 from typing import List, Set
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 REAL_CLIENT_E2E = "tests/test_real_client_e2e.py"

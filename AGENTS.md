@@ -22,4 +22,4 @@ Persistent state changes use the shared Toast lifecycle and disclose exact resta
 
 ### Report-only quality gates
 
-Use `python scripts/report_quality_gates.py` for non-blocking dead-code and duplicate-name reports. See `docs/agents/report-only-quality-gates.md`.
+Use `.\scripts\codexhub-python.cmd scripts/report_quality_gates.py` for non-blocking dead-code and duplicate-name reports. See `docs/agents/report-only-quality-gates.md`.

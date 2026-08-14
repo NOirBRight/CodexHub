@@ -228,10 +228,14 @@ cd ..\src-tauri
 cargo test
 
 cd ..
-python -m pytest
+.\scripts\codexhub-python.cmd -m pytest
 ```
 
-源码运行 Gateway 时需要 Python 可用。可通过 `CODEXHUB_PYTHON` 或 `CODEXHUB_PROXY_PYTHON` 指定 Python 路径。
+源码要求 Python 3.13 或更高版本。不要在可能把其他虚拟环境置于首位的
+Shell 中直接使用 `python`；测试和脚本统一使用
+`scripts\codexhub-python.cmd`。它会解析并校验同一个解释器，并把路径传给
+子进程。也可以通过 `CODEXHUB_PYTHON` 或 `CODEXHUB_PROXY_PYTHON` 显式指定
+Python 3.13+ 可执行文件。
 
 ## 和其他方式的区别
 

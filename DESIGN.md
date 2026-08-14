@@ -148,7 +148,7 @@ Same stack as CC Switch. Native desktop binary, no web server.
 - Rust backend handles file I/O, process management, model API calls
 - Packaged as .msi (Windows), .dmg (macOS), .AppImage (Linux)
 
-### Proxy: Python 3.12+ (existing codebase)
+### Proxy: Python 3.13+ (existing codebase)
 
 - HTTP proxy server (codex_proxy.py)
 - Catalog sync (catalog_sync.py)
@@ -297,7 +297,7 @@ codexhub refresh-models     # CLI: refresh model catalog
 
 ### Embedded Python runtime
 
-Python 3.12+ runtime is bundled inside the Tauri binary as a sidecar (PyOxidizer or PyInstaller).
+Python 3.13+ runtime is bundled inside the Tauri binary as a sidecar (PyOxidizer or PyInstaller).
 Users do not need to install Python separately.
 
 ### Auto-start proxy on system login

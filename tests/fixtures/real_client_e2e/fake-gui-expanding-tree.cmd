@@ -10,6 +10,6 @@ if defined CODEXHUB_E2E_VERSION_PROBE (
 if defined CODEXHUB_E2E_GUI_CLIENT (
   if /I "%CODEXHUB_E2E_GUI_CLIENT%"=="desktop" if defined OPEN_PROJECT exit /b 0
   echo launched>"%CODEXHUB_E2E_GUI_LAUNCH_MARKER%"
-  python.exe "%~dp0fake-gui-expanding-tree.py" "%CODEXHUB_E2E_GUI_LAUNCH_MARKER%.orphan"
+  call "%~dp0run-fixture-python.cmd" "%~dp0fake-gui-expanding-tree.py" "%CODEXHUB_E2E_GUI_LAUNCH_MARKER%.orphan"
 )
 exit /b 0

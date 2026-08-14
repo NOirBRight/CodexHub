@@ -18,8 +18,8 @@ the historical gate failed on classifier failure, cancellation, or any
 selected job that did not pass. These jobs are not run by the current release
 process.
 
-- **Python core**: `python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0` when the classifier selects Python core.
-- **Synthetic real-client contract**: when selected, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The unified classifier uses the existing synthetic dependency set; `python scripts/ci/check_python_test_partitions.py` still proves the core and synthetic partitions are disjoint and complete.
+- **Python core**: `.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0` when the classifier selects Python core.
+- **Synthetic real-client contract**: when selected, it runs the synthetic module through `tests/fixtures/real_client_e2e/run-with-windows-watchdog.py` with an explicit 3600-second outer bound while retaining JUnit and per-test duration output. The unified classifier uses the existing synthetic dependency set; `.\scripts\codexhub-python.cmd scripts/ci/check_python_test_partitions.py` still proves the core and synthetic partitions are disjoint and complete.
 - Frontend build and UI contract: `npm ci`, `npm run build`, `npm run test:ui-contract` in `frontend/`
 - Rust tests (normal and debug flavors): `cargo test --locked -- --test-threads=1` in `src-tauri/`, plus a release-optimized flavor build
 - Rust clippy: `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`
@@ -101,10 +101,10 @@ The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` fi
 For `standard` and `strict` candidates, run the affected suites selected by the verification policy. Use the following complete matrix when the changed boundary spans the whole product or when a release gate explicitly requires it:
 
 ```powershell
-python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
-python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
-  python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0
-python scripts/ci/check_python_test_partitions.py
+.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0
+.\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
+  .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0
+.\scripts\codexhub-python.cmd scripts/ci/check_python_test_partitions.py
 
 Push-Location frontend
 npm ci
@@ -127,10 +127,10 @@ checker in one chained command. The synthetic partition must use the checked-in
 Windows watchdog:
 
 ```powershell
-python -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0 && `
-python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
-  python -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0 && `
-python scripts/ci/check_python_test_partitions.py
+.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-core.xml --durations=0 && `
+.\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
+  .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py --junitxml=.pytest-results/junit-synthetic.xml --durations=0 && `
+.\scripts\codexhub-python.cmd scripts/ci/check_python_test_partitions.py
 ```
 
 This executes the core suite, the watchdog-bounded synthetic suite, and proves
@@ -140,7 +140,7 @@ To verify only the planner/path logic, unified/legacy synthetic parity, and
 collection completeness without executing `tests/test_real_client_e2e.py`, use:
 
 ```powershell
-python -m pytest -q tests/test_ci_python_plan.py tests/test_ci_change_plan.py && python scripts/ci/check_python_test_partitions.py
+.\scripts\codexhub-python.cmd -m pytest -q tests/test_ci_python_plan.py tests/test_ci_change_plan.py && .\scripts\codexhub-python.cmd scripts/ci/check_python_test_partitions.py
 ```
 
 Do not commit generated frontend output, local Tauri resource placeholders, or `dist/` artifacts.

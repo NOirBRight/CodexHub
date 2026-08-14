@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 13):
+    raise RuntimeError(
+        "CodexHub requires Python 3.13 or newer. "
+        "Run .\\scripts\\codexhub-python.cmd src-python/catalog_sync.py ..."
+    )
+
 import argparse
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -11,7 +19,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen

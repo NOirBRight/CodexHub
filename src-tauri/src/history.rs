@@ -364,7 +364,7 @@ pub fn preflight_unified_history(
     };
     let clock = SystemHistoryClock;
     let budget = HistoryOperationBudget::new(&clock);
-    let python = config::find_python();
+    let python = config::find_python()?;
     let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     let result = preflight_unified_history_with_budget(
         PreflightRequest {
@@ -765,7 +765,7 @@ pub(crate) fn reconcile_after_confirmed_route_switch(
     let paths = ConfigPaths::runtime()?;
     let clock = SystemHistoryClock;
     let budget = HistoryOperationBudget::new(&clock);
-    let python = config::find_python();
+    let python = config::find_python()?;
     let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     preflight_unified_history_with_budget(
         PreflightRequest {

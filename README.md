@@ -229,10 +229,15 @@ cd ..\src-tauri
 cargo test
 
 cd ..
-python -m pytest
+.\scripts\codexhub-python.cmd -m pytest
 ```
 
-Running the Gateway from source requires Python. Use `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON` to point CodexHub at a specific Python executable.
+CodexHub source code requires Python 3.13 or newer. Do not use the ambient
+`python` command from a shell that may prepend another virtual environment;
+use `scripts\codexhub-python.cmd` for tests and scripts. It resolves one
+interpreter, validates its version, and propagates that path to child
+processes. `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON` may explicitly point
+to a Python 3.13+ executable.
 
 ## Comparison
 

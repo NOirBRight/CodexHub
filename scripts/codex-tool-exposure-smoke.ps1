@@ -172,7 +172,7 @@ function Add-ProcessArgument {
         [string]$Argument
     )
     [void]$Arguments.Add($Argument)
-    if ($null -ne $StartInfo.ArgumentList) {
+    if ($null -ne $StartInfo.GetType().GetProperty('ArgumentList')) {
         [void]$StartInfo.ArgumentList.Add($Argument)
     }
 }
@@ -279,7 +279,7 @@ function Invoke-CodexSmokeCase {
         ) -join ' '
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        if ($null -ne $psi.ArgumentList) {
+        if ($null -ne $psi.GetType().GetProperty('ArgumentList')) {
             foreach ($shimArg in @('/d', '/s', '/c')) {
                 [void]$psi.ArgumentList.Add($shimArg)
             }
@@ -289,7 +289,7 @@ function Invoke-CodexSmokeCase {
             $psi.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $commandLine)"
         }
     }
-    elseif ($null -eq $psi.ArgumentList) {
+    elseif ($null -eq $psi.GetType().GetProperty('ArgumentList')) {
         $psi.Arguments = ($processArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
     }
     $psi.RedirectStandardInput = $true

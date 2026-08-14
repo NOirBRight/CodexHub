@@ -950,7 +950,7 @@ where
     })?;
 
     remove_pid(paths)?;
-    let python = find_python(paths);
+    let python = find_python(paths)?;
     let mut command = command_builder(&python, &script, paths, &settings);
 
     let mut child = command.spawn().map_err(|error| {
@@ -2899,48 +2899,8 @@ fn remove_pid(paths: &ProxyPaths) -> Result<(), String> {
     }
 }
 
-fn find_python(paths: &ProxyPaths) -> PathBuf {
-    for candidate in python_candidates(paths) {
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    which::which("python")
-        .or_else(|_| which::which("python3"))
-        .unwrap_or_else(|_| PathBuf::from("python"))
-}
-
-fn python_candidates(paths: &ProxyPaths) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    candidates.extend(runtime_paths::python_env_candidates());
-
-    #[cfg(windows)]
-    {
-        candidates.push(
-            paths
-                .proxy_script_dir()
-                .join(".venv")
-                .join("Scripts")
-                .join("python.exe"),
-        );
-    }
-
-    #[cfg(not(windows))]
-    {
-        candidates.push(
-            paths
-                .proxy_script_dir()
-                .join(".venv")
-                .join("bin")
-                .join("python"),
-        );
-    }
-
-    candidates.extend(runtime_paths::bundled_python_candidates(&paths.repo_root));
-    candidates.extend(runtime_paths::current_exe_python_candidates());
-
-    candidates
+fn find_python(paths: &ProxyPaths) -> Result<PathBuf, String> {
+    runtime_paths::find_python(Some(&paths.repo_root))
 }
 
 #[cfg(windows)]
@@ -3694,7 +3654,7 @@ mod tests {
         );
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut command = Command::new("python");
+            let mut command = Command::new(crate::runtime_paths::find_test_python());
             command.args(["-c", &script]);
             super::configure_no_window(&mut command);
             let result = run_bounded_inspection_command(
@@ -4686,7 +4646,9 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(find_python(&paths));
+        let mut command = Command::new(
+            find_python(&paths).expect("repository Python interpreter"),
+        );
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4724,7 +4686,9 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(find_python(&paths));
+        let mut command = Command::new(
+            find_python(&paths).expect("repository Python interpreter"),
+        );
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4785,7 +4749,9 @@ time.sleep(10)
         let port = free_port();
         write_settings(&paths, port);
         write_fake_proxy_script(&paths, "import time\ntime.sleep(30)");
-        let mut command = Command::new(find_python(&paths));
+        let mut command = Command::new(
+            find_python(&paths).expect("repository Python interpreter"),
+        );
         command.args(["-c", "import time; time.sleep(30)"]);
         configure_start_stdio(&mut command);
         let mut child = command.spawn().expect("spawn cleanup child");
@@ -4958,7 +4924,9 @@ time.sleep(10)
     fn start_stdio_configuration_exposes_piped_child_handles() {
         let root = temp_root("start-command-stdio");
         let paths = test_paths(&root);
-        let mut command = Command::new(find_python(&paths));
+        let mut command = Command::new(
+            find_python(&paths).expect("repository Python interpreter"),
+        );
         command.args(["-c", "import sys; sys.exit(0)"]);
         configure_start_stdio(&mut command);
 

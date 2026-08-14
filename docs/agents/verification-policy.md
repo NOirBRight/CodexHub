@@ -24,7 +24,7 @@ Run targeted tests freely while implementing. At the candidate commit,
 
 | Changed boundary | Relevant local full suite |
 |---|---|
-| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | `python -m pytest -q --ignore=tests/test_real_client_e2e.py` plus `python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- python -m pytest -q tests/test_real_client_e2e.py` when the changed paths touch the real-client E2E contract surface |
+| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | `.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py` plus `.\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py` when the changed paths touch the real-client E2E contract surface |
 | Frontend source, UI contracts, frontend configuration, or frontend dependencies | `npm run build` and `npm run test:ui-contract` in `frontend/` |
 | Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/` |
 | Shared frontend/Tauri command or persisted-settings contract | Frontend and Rust suites |
@@ -48,7 +48,7 @@ variable, bound, success/failure cues, and sanitized artifact before running.
 One clean run does not create a new acceptance gate. Retry only for a new
 hypothesis or materially changed environment.
 
-`python scripts/report_quality_gates.py` is always report-only. Run it once when
+`.\scripts\codexhub-python.cmd scripts/report_quality_gates.py` is always report-only. Run it once when
 changed Python, TypeScript/TSX, or Rust source is in its scan scope; findings do
 not block PR, merge, or release under the current policy.
 
@@ -86,7 +86,7 @@ the source of the core/synthetic partition definitions used by local fallback
 and is tested by `tests/test_ci_python_plan.py`. Use the same stable pytest
 arguments locally when the corresponding boundary is selected. Collection
 completeness is verified by
-`python scripts/ci/check_python_test_partitions.py`.
+`.\scripts\codexhub-python.cmd scripts/ci/check_python_test_partitions.py`.
 
 Existing active work migrates incrementally: retain already completed full
 suites and formal reviews, do not restart a Worker, and verify only later

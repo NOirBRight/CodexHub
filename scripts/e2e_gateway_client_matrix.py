@@ -14,10 +14,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ in supported runs
-    tomllib = None
+if sys.version_info < (3, 13):
+    raise RuntimeError(
+        "CodexHub requires Python 3.13 or newer. "
+        "Run .\\scripts\\codexhub-python.cmd scripts/e2e_gateway_client_matrix.py ..."
+    )
+
+import tomllib
 
 
 DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:9099/v1"
@@ -80,8 +83,6 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def parse_runtime_providers_config(path: Path, *, proxy_base_url: str) -> list[ClientCase]:
-    if tomllib is None:
-        raise RuntimeError("Python 3.11+ tomllib is required")
     data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cases: list[ClientCase] = []
     base = proxy_base_url.rstrip("/")

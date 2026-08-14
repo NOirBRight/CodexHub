@@ -97,7 +97,7 @@ pub fn probe_upstream_format(
 ) -> Result<Value, String> {
     let api_key = resolve_gateway_api_key(base_url, api_key)?.unwrap_or_default();
     let paths = ModelPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     let script = paths.upstream_format_probe_script();
     if !script.exists() {
         return Err(format!(
@@ -251,7 +251,7 @@ fn model_test_payload(
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     let runner = ProcessCatalogSyncRunner;
 
     generate_catalog_with_runner(&paths, &python, &runner)
@@ -3137,7 +3137,7 @@ fn format_exit_code(code: Option<i32>) -> String {
     )
 }
 
-fn find_python() -> PathBuf {
+fn find_python() -> Result<PathBuf, String> {
     let resource_root = runtime_paths::resource_root().ok();
     runtime_paths::find_python(resource_root.as_deref())
 }
@@ -3428,7 +3428,9 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(super::find_python());
+        let mut command = std::process::Command::new(
+            super::find_python().expect("repository Python interpreter"),
+        );
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);
@@ -3498,7 +3500,9 @@ for line in sys.stdin:
                 .join(format!("{shape}-codex-home"))
                 .join("models_cache.json");
             fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-            let mut command = std::process::Command::new(super::find_python());
+            let mut command = std::process::Command::new(
+                super::find_python().expect("repository Python interpreter"),
+            );
             command
                 .arg(&script)
                 .env("MODEL_LIST_SHAPE", shape);
@@ -3690,7 +3694,9 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(super::find_python());
+        let mut command = std::process::Command::new(
+            super::find_python().expect("repository Python interpreter"),
+        );
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);

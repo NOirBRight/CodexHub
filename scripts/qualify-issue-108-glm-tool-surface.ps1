@@ -24,6 +24,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$LASTEXITCODE = 0
+
+$pythonResolverPath = Join-Path $PSScriptRoot 'Resolve-CodexHubPython.ps1'
+if (-not (Test-Path -LiteralPath $pythonResolverPath -PathType Leaf)) {
+    $pythonResolverPath = Join-Path $Workspace 'scripts\Resolve-CodexHubPython.ps1'
+}
+. $pythonResolverPath
 
 $TaskkillTimeoutMilliseconds = 1500
 $TrackedProcessStopTimeoutMilliseconds = 3000
@@ -58,35 +65,7 @@ function Invoke-Checked {
 }
 
 function Resolve-RepositoryPythonPath {
-    $pythonLauncher = Get-Command 'py.exe' -ErrorAction SilentlyContinue
-    if ($null -eq $pythonLauncher) {
-        $pythonLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $pythonLauncher -and -not [string]::IsNullOrWhiteSpace([string]$pythonLauncher.Source)) {
-        $pythonPathOutput = @(& $pythonLauncher.Source '-3.13' '-c' 'import sys; print(sys.executable)' 2>$null)
-        if ($LASTEXITCODE -eq 0) {
-            $pythonPath = ([string]($pythonPathOutput | Select-Object -Last 1)).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($pythonPath) -and (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-                return $pythonPath
-            }
-        }
-    }
-
-    # Keep environments that expose Python 3.13 directly supported while
-    # rejecting an ambient interpreter that cannot parse repository syntax.
-    $pythonCommand = Get-Command 'python.exe' -ErrorAction SilentlyContinue
-    if ($null -eq $pythonCommand) {
-        $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $pythonCommand -and -not [string]::IsNullOrWhiteSpace([string]$pythonCommand.Source)) {
-        $pythonPath = [string]$pythonCommand.Source
-        $versionOutput = @(& $pythonPath '-c' 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null)
-        if ($LASTEXITCODE -eq 0 -and ([string]($versionOutput | Select-Object -Last 1)).Trim() -eq '3.13') {
-            return $pythonPath
-        }
-    }
-
-    throw 'repository_python_3_13_not_found'
+    return Resolve-CodexHubPythonPath -Root $Workspace -PreferBundled
 }
 
 function Get-TrackedProcessIdentity {
@@ -251,9 +230,11 @@ function Start-TrackedProcess {
     # Never inherit the desktop task's ambient credentials or user profile.
     # Each caller provides a deliberately small child-environment allowlist.
     $startInfo.Environment.Clear()
-    if ($null -ne $startInfo.ArgumentList) {
+    $argumentListProperty = $startInfo.GetType().GetProperty('ArgumentList')
+    if ($null -ne $argumentListProperty) {
+        $argumentList = $argumentListProperty.GetValue($startInfo, $null)
         foreach ($argument in $Arguments) {
-            [void]$startInfo.ArgumentList.Add($argument)
+            [void]$argumentList.Add($argument)
         }
     }
     else {

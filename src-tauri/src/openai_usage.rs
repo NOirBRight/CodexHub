@@ -1954,7 +1954,7 @@ mod tests {
     fn app_server_child_guard_kills_probe_on_drop() {
         let root = temp_root("openai-usage-child-guard");
         let marker = root.join("survived");
-        let mut command = Command::new("python");
+        let mut command = Command::new(crate::runtime_paths::find_test_python());
         command
             .arg("-c")
             .arg("import pathlib, sys, time; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('alive')")

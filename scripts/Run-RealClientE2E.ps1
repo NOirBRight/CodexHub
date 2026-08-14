@@ -48,6 +48,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$script:ScriptDirectory = Split-Path -Parent $PSCommandPath
+$script:RepositoryRoot = Split-Path -Parent $script:ScriptDirectory
+. (Join-Path $script:ScriptDirectory 'Resolve-CodexHubPython.ps1')
+$script:RepositoryPython = Resolve-CodexHubPythonPath -Root $script:RepositoryRoot
+$script:RepositoryPythonDirectory = Split-Path -Parent $script:RepositoryPython
+
 try {
 Add-Type -TypeDefinition @'
 using System;
@@ -868,6 +874,13 @@ function New-IsolatedStartInfo {
             $startInfo.EnvironmentVariables[$name] = $value
         }
     }
+    $basePath = $startInfo.EnvironmentVariables['PATH']
+    $startInfo.EnvironmentVariables['PATH'] = if ([string]::IsNullOrWhiteSpace($basePath)) {
+        $script:RepositoryPythonDirectory
+    }
+    else {
+        $script:RepositoryPythonDirectory + ';' + $basePath
+    }
     $startInfo.EnvironmentVariables['HOME'] = $CaseRoot
     $startInfo.EnvironmentVariables['USERPROFILE'] = $CaseRoot
     $startInfo.EnvironmentVariables['APPDATA'] = (Join-Path $CaseRoot 'appdata\roaming')
@@ -879,6 +892,13 @@ function New-IsolatedStartInfo {
     foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
         $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
     }
+    # Every isolated child, including a .cmd materializer that launches a
+    # second Python process, must receive the exact interpreter selected by
+    # the runner.  PATH ordering alone is not a runtime contract: another
+    # virtualenv (notably Hermes 3.11) can still win in a nested process.
+    $startInfo.EnvironmentVariables['CODEXHUB_E2E_PYTHON'] = $script:RepositoryPython
+    $startInfo.EnvironmentVariables['CODEXHUB_PYTHON'] = $script:RepositoryPython
+    $startInfo.EnvironmentVariables['CODEXHUB_PROXY_PYTHON'] = $script:RepositoryPython
     return $startInfo
 }
 
@@ -3210,6 +3230,7 @@ try {
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
         OLLAMA_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
+        CODEXHUB_E2E_PYTHON = $script:RepositoryPython
     }
     Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
