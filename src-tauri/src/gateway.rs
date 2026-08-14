@@ -8703,10 +8703,44 @@ mod tests {
 
     #[test]
     fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
+        let root = unique_temp_dir("codexhub-official-fast-selection");
+        let catalog_dir = root.join("model-catalogs");
+        fs::create_dir_all(&catalog_dir).unwrap();
+        fs::write(
+            catalog_dir.join("codexhub-model-catalog.json"),
+            serde_json::to_vec_pretty(&json!({
+                "models": [{
+                    "slug": "gpt-5.5",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "degraded_last_known_official",
+                            "freshness": "stale",
+                            "model_context_window": 272000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258400,
+                            "model_auto_compact_token_limit": 244800
+                        }
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &root);
+        std::env::set_var("CODEXHUB_RUNTIME_HOME", &root);
+
         let settings = Settings::default();
         let providers = client_export_test_providers();
 
-        let text = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast").unwrap();
+        let result = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast");
+        restore_env("CODEX_HOME", previous_codex_home);
+        restore_env("CODEXHUB_RUNTIME_HOME", previous_runtime_home);
+        let text = result.unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let openai_models = value
             .pointer("/provider/codexhub-openai/models")
