@@ -83,6 +83,26 @@ def test_repository_selector_returns_python_313_or_newer() -> None:
     assert (major, minor) >= (3, 13)
 
 
+def test_repository_selector_honors_the_e2e_runtime_binding(tmp_path: Path) -> None:
+    selected = _write_python_without_pytest(tmp_path)
+    conflicting = tmp_path / "conflicting-python.cmd"
+    conflicting.write_text(
+        f'@echo off\r\n"{sys.executable}" %*\r\nexit /b %errorlevel%\r\n',
+        encoding="ascii",
+    )
+    result = _run_script(
+        SELECTOR,
+        "-PrintPath",
+        env={
+            "CODEXHUB_E2E_PYTHON": str(selected),
+            "CODEXHUB_PYTHON": str(conflicting),
+            "CODEXHUB_PROXY_PYTHON": "",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(result.stdout.strip().splitlines()[-1]).resolve() == selected.resolve()
+
+
 def test_repository_launcher_can_import_python_313_syntax_source() -> None:
     result = _run_script(
         LAUNCHER,

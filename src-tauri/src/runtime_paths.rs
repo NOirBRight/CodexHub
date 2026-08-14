@@ -258,7 +258,14 @@ pub(crate) fn find_test_python() -> PathBuf {
 
 pub(crate) fn python_env_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    for name in ["CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"] {
+    // E2E launchers bind this variable for every isolated child. Keep it
+    // ahead of the generic overrides so a nested Rust -> Python boundary
+    // cannot drift back to a different host interpreter.
+    for name in [
+        "CODEXHUB_E2E_PYTHON",
+        "CODEXHUB_PYTHON",
+        "CODEXHUB_PROXY_PYTHON",
+    ] {
         if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
             candidates.push(PathBuf::from(value));
         }

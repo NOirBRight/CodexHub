@@ -20,7 +20,9 @@ Use the repository entrypoint from the repository root:
 The entrypoint uses `Resolve-CodexHubPython.ps1`, validates the selected
 interpreter before running anything, and exports the selected path through
 `CODEXHUB_PYTHON`, `CODEXHUB_PROXY_PYTHON`, and `CODEXHUB_E2E_PYTHON` for child
-processes. Gateway, packaging, and E2E PowerShell entrypoints use the same resolver in
+processes. These are hard bindings; when `CODEXHUB_E2E_PYTHON` is present, it
+takes precedence at nested resolver/Rust boundaries so an isolated E2E child
+cannot select another host interpreter. Gateway, packaging, and E2E PowerShell entrypoints use the same resolver in
 bundled-preferred mode; the development wrapper also accepts a checkout
 virtualenv before host discovery. Rust applies the same 3.13 probe to
 configured, bundled, checkout, and host candidates. An explicit override is a

@@ -155,6 +155,10 @@ function Resolve-CodexHubPythonPath {
     )
 
     $explicitValues = @(
+        # E2E runners pass this value through isolated .cmd launchers. Treat
+        # it as the same hard binding as the normal repository overrides so
+        # a nested resolver cannot silently select a different host Python.
+        $env:CODEXHUB_E2E_PYTHON,
         $env:CODEXHUB_PYTHON,
         $env:CODEXHUB_PROXY_PYTHON
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }

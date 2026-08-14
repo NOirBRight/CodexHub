@@ -33,6 +33,9 @@ processes, and places that interpreter plus the repository `scripts` directory
 first on the child `PATH`. A 3.11 error is an invocation error: do not retry
 the same command with another bare Python name. Rust, packaged Gateway, and
 real-client E2E entrypoints resolve or inherit the same contract independently.
+Do not rely on a previous activation command: automated shell invocations may
+start a fresh process, so use the repository launcher in every command that
+needs Python.
 For an interactive PowerShell session, dot-source
 `.\scripts\Enter-CodexHubPython.ps1` once before using bare commands.
 
