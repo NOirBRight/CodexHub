@@ -20,7 +20,17 @@ def _summary(
     *,
     outcome: str = "not_run",
     cases: list[dict[str, object]] | None = None,
+    complete: bool = True,
 ) -> dict[str, object]:
+    supplied = {str(case["id"]): case for case in cases or []}
+    if complete:
+        supplied.update(
+            {
+                case_id: _case(case_id)
+                for case_id in evidence.CASE_IDS
+                if case_id not in supplied
+            }
+        )
     return {
         "schema": evidence.SCHEMA,
         "candidate_sha": "a" * 40,
@@ -28,7 +38,7 @@ def _summary(
         "outcome": outcome,
         "failure_classification": "none" if outcome == "passed" else "not_run",
         "upstream_v2_boundary": evidence.UPSTREAM_BLOCKED,
-        "cases": cases or [_case("v1-lifecycle")],
+        "cases": list(supplied.values()) or [_case("v1-lifecycle")],
     }
 
 
@@ -53,6 +63,7 @@ def test_validator_rejects_passing_summary_without_all_matrix_cases() -> None:
             _summary(
                 outcome="passed",
                 cases=[_case("v1-lifecycle", outcome="passed")],
+                complete=False,
             )
         )
 
@@ -83,7 +94,7 @@ def test_stable_alias_summary_requires_identical_replays_and_cache_key() -> None
             ],
         }
     )
-    assert evidence.validate_summary(_summary(cases=[case]))["case_count"] == 1
+    assert evidence.validate_summary(_summary(cases=[case]))["case_count"] == len(evidence.CASE_IDS)
 
     case["replays"][1]["upstream_body_sha256"] = "sha256:" + "3" * 64
     with pytest.raises(evidence.EvidenceValidationError, match="upstream_body_not_stable"):
@@ -117,8 +128,20 @@ def test_external_v2_summary_is_gateway_adapter_evidence_not_native_capability()
                 for name in evidence.EXTERNAL_V2_TOOL_NAMES
             ],
             "alias_replays": [
-                [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
-                [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
+                {
+                    "aliases": [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
+                    "alias_map": [
+                        {"tool": name, "alias": f"__codexhub_ns_{name}"}
+                        for name in evidence.EXTERNAL_V2_TOOL_NAMES
+                    ],
+                },
+                {
+                    "aliases": [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
+                    "alias_map": [
+                        {"tool": name, "alias": f"__codexhub_ns_{name}"}
+                        for name in evidence.EXTERNAL_V2_TOOL_NAMES
+                    ],
+                },
             ],
             "call_output_pairs": [
                 {
@@ -127,12 +150,20 @@ def test_external_v2_summary_is_gateway_adapter_evidence_not_native_capability()
                     "call_count": 1,
                     "output_count": 1,
                     "inverse_mapped": True,
+                    "call_id_sha256": "sha256:" + f"{index + 10:064x}",
+                    "output_id_sha256": "sha256:" + f"{index + 30:064x}",
+                    "output_call_id_sha256": "sha256:" + f"{index + 10:064x}",
+                    "gateway_correlation_sha256": "sha256:" + f"{index + 50:064x}",
                 }
-                for name in evidence.EXTERNAL_V2_LIFECYCLE
+                for index, name in enumerate(evidence.EXTERNAL_V2_LIFECYCLE)
             ],
             "target_id_sha256": "sha256:" + "4" * 64,
             "final_readback_target_id_sha256": "sha256:" + "4" * 64,
             "final_readback_terminal": True,
+            "final_readback_tool": "list_agents",
+            "final_readback_contains_target": True,
+            "final_readback_state": "terminal",
+            "final_readback_gateway_correlation_sha256": "sha256:" + "5" * 64,
         }
     )
     assert evidence.validate_summary(_summary(cases=[case]))["outcome"] == "not_run"
@@ -159,6 +190,55 @@ def test_external_v2_rejects_weak_adapter_evidence() -> None:
         }
     )
     with pytest.raises(evidence.EvidenceValidationError, match="adapter_evidence_missing"):
+        evidence.validate_summary(_summary(cases=[case]))
+
+
+def test_external_v2_requires_two_stable_alias_map_replays() -> None:
+    case = _case("external-v2-lifecycle", outcome="passed", model="glm-5.2")
+    case.update(
+        {
+            "provider": "ollama-cloud",
+            "upstream_endpoint": evidence.EXTERNAL_V2_ENDPOINT,
+            "native_namespace_count": 0,
+            "upstream_function_tool_count": 6,
+            "stream_history": True,
+            "restart_readback": True,
+            "terminal_replay": True,
+            "error_replay": True,
+            "support_claim": "gateway_adapter",
+            "lifecycle": list(evidence.EXTERNAL_V2_LIFECYCLE),
+            "adapter_evidence": {
+                "backend": "codexhub_gateway",
+                "upstream_surface": "ordinary_function_tools",
+                "client_surface": "collaboration_v2",
+                "inverse_mapping": "client_owned_v2",
+                "inverse_mapping_count": 8,
+            },
+            "aliases": [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
+            "alias_map": [
+                {"tool": name, "alias": f"__codexhub_ns_{name}"}
+                for name in evidence.EXTERNAL_V2_TOOL_NAMES
+            ],
+            "alias_replays": [
+                {
+                    "aliases": [f"__codexhub_ns_{name}" for name in evidence.EXTERNAL_V2_TOOL_NAMES],
+                    "alias_map": [
+                        {"tool": name, "alias": f"__codexhub_ns_{name}"}
+                        for name in evidence.EXTERNAL_V2_TOOL_NAMES
+                    ],
+                }
+            ],
+            "call_output_pairs": [],
+            "target_id_sha256": "sha256:" + "4" * 64,
+            "final_readback_target_id_sha256": "sha256:" + "4" * 64,
+            "final_readback_terminal": True,
+            "final_readback_tool": "list_agents",
+            "final_readback_contains_target": True,
+            "final_readback_state": "terminal",
+            "final_readback_gateway_correlation_sha256": "sha256:" + "5" * 64,
+        }
+    )
+    with pytest.raises(evidence.EvidenceValidationError, match="external_alias_replays_invalid"):
         evidence.validate_summary(_summary(cases=[case]))
 
 

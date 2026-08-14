@@ -147,7 +147,7 @@ def parse_summary(value: bytes | str | Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate_replay_hashes(case: Mapping[str, Any]) -> None:
     replays = case.get("replays")
-    _require(isinstance(replays, list) and 1 <= len(replays) <= 8, "replay_records_invalid")
+    _require(isinstance(replays, list) and 2 <= len(replays) <= 8, "replay_records_invalid")
     caller_hashes: list[str] = []
     upstream_hashes: list[str] = []
     aliases: list[list[str]] = []
@@ -160,6 +160,7 @@ def _validate_replay_hashes(case: Mapping[str, Any]) -> None:
         _require(
             isinstance(replay_aliases, list)
             and 0 < len(replay_aliases) <= 512
+            and len(set(replay_aliases)) == len(replay_aliases)
             and all(
                 isinstance(alias, str)
                 and 1 <= len(alias) <= MAX_STRING_LENGTH
@@ -231,11 +232,18 @@ def _validate_external_v2(case: Mapping[str, Any]) -> None:
         alias_by_tool[tool_name] = alias
     _require(set(alias_by_tool) == set(EXTERNAL_V2_TOOL_NAMES), "external_alias_map_incomplete")
     _require(set(alias_by_tool.values()) == set(aliases), "external_alias_map_incomplete")
+    _require(
+        [entry.get("tool") for entry in alias_map] == list(EXTERNAL_V2_TOOL_NAMES)
+        and [entry.get("alias") for entry in alias_map] == aliases,
+        "external_alias_map_order_invalid",
+    )
 
     alias_replays = case.get("alias_replays")
     _require(isinstance(alias_replays, list) and len(alias_replays) == 2, "external_alias_replays_invalid")
-    for replay_aliases in alias_replays:
-        _require(replay_aliases == aliases, "external_aliases_not_stable")
+    for replay in alias_replays:
+        _require(isinstance(replay, Mapping), "external_alias_replay_invalid")
+        _require(replay.get("aliases") == aliases, "external_aliases_not_stable")
+        _require(replay.get("alias_map") == alias_map, "external_alias_map_not_stable")
 
     pairs = case.get("call_output_pairs")
     _require(
@@ -248,11 +256,29 @@ def _validate_external_v2(case: Mapping[str, Any]) -> None:
         _require(pair.get("alias") == alias_by_tool.get(expected_tool), "call_output_alias_invalid")
         _require(pair.get("call_count") == 1 and pair.get("output_count") == 1, "call_output_cardinality_invalid")
         _require(pair.get("inverse_mapped") is True, "inverse_mapping_missing")
+        call_id = pair.get("call_id_sha256")
+        output_id = pair.get("output_id_sha256")
+        linked_call_id = pair.get("output_call_id_sha256")
+        correlation = pair.get("gateway_correlation_sha256")
+        _require(
+            all(_is_hash(value) for value in (call_id, output_id, linked_call_id, correlation)),
+            "call_output_identity_invalid",
+        )
+        _require(linked_call_id == call_id, "call_output_link_invalid")
+
+    call_ids = [pair.get("call_id_sha256") for pair in pairs]
+    output_ids = [pair.get("output_id_sha256") for pair in pairs]
+    _require(len(set(call_ids)) == len(call_ids), "call_ids_not_unique")
+    _require(len(set(output_ids)) == len(output_ids), "output_ids_not_unique")
 
     target_hash = case.get("target_id_sha256")
     final_target_hash = case.get("final_readback_target_id_sha256")
     _require(_is_hash(target_hash) and final_target_hash == target_hash, "final_readback_target_mismatch")
     _require(case.get("final_readback_terminal") is True, "final_readback_not_terminal")
+    _require(case.get("final_readback_tool") == "list_agents", "final_readback_tool_invalid")
+    _require(case.get("final_readback_contains_target") is True, "final_readback_target_missing")
+    _require(case.get("final_readback_state") == "terminal", "final_readback_state_invalid")
+    _require(_is_hash(case.get("final_readback_gateway_correlation_sha256")), "final_readback_correlation_invalid")
 
 
 def validate_summary(
@@ -314,8 +340,8 @@ def validate_summary(
         if case_id == "external-v2-lifecycle" and case["outcome"] == "passed":
             _validate_external_v2(case)
 
+    _require(seen == CASE_IDS, "case_coverage_incomplete")
     if outcome == "passed":
-        _require(seen == CASE_IDS, "case_coverage_incomplete")
         _require(all(case["outcome"] == "passed" for case in cases), "case_outcome_incomplete")
         _require(failure == "none", "passed_with_failure")
     return {
