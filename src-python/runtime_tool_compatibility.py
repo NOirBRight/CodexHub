@@ -1110,8 +1110,8 @@ def _item_identity(item: Mapping[str, Any]) -> str | None:
 def _is_legacy_message_identity(value: str) -> bool:
     """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
 
-    suffix = value.removeprefix("message_")
-    return bool(suffix) and suffix.isdigit()
+    prefix = "message_"
+    return value.startswith(prefix) and value[len(prefix) :].isdigit()
 
 
 def _hosted_kind_for_item_type(item_type: Any) -> str | None:

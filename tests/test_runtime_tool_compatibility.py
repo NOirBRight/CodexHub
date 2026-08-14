@@ -147,7 +147,8 @@ def test_history_allows_legacy_duplicate_ids_on_ordinary_messages() -> None:
     assert plan.encode_payload({"input": history})["input"] == history
 
 
-def test_history_rejects_duplicate_nonlegacy_message_ids() -> None:
+@pytest.mark.parametrize("message_id", ["shared_message", "123"])
+def test_history_rejects_duplicate_nonlegacy_message_ids(message_id: str) -> None:
     plan = build_tool_compatibility_plan(
         [{"type": "function", "name": "keep", "parameters": {"type": "object"}}],
         selected_protocol="responses_structured",
@@ -155,8 +156,8 @@ def test_history_rejects_duplicate_nonlegacy_message_ids() -> None:
         request_token="duplicate-message-id",
     )
     history = [
-        {"type": "message", "id": "shared_message", "role": "assistant", "content": "first"},
-        {"type": "message", "id": "shared_message", "role": "assistant", "content": "second"},
+        {"type": "message", "id": message_id, "role": "assistant", "content": "first"},
+        {"type": "message", "id": message_id, "role": "assistant", "content": "second"},
     ]
 
     with pytest.raises(ToolCompatibilityError) as raised:
