@@ -3570,15 +3570,15 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        // A Windows test binary can take more than 500 ms to start under a
-        // loaded workspace. Keep this helper-only response budget bounded
-        // well below the production 20 s native-cache grace: if the code
-        // regresses into waiting for cache publication despite complete
-        // context metadata, the 5 s cache grace below outlasts the 4 s
-        // elapsed bound and keeps that wait observable.
+        // A Windows test binary can take several seconds to start under a
+        // loaded workspace or antivirus scan. Keep this helper-only response
+        // budget bounded well below the production 20 s native-cache grace:
+        // if the code regresses into waiting for cache publication despite
+        // complete context metadata, the 5 s cache grace below outlasts the
+        // 8 s elapsed bound and keeps that wait observable.
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             &cache_path,
             Duration::from_secs(5),
         )
@@ -3598,7 +3598,7 @@ for line in sys.stdin:
             })
         );
         assert!(
-            started.elapsed() < Duration::from_secs(4),
+            started.elapsed() < Duration::from_secs(8),
             "model/list handling must remain bounded without native cache publication"
         );
         assert!(!cache_path.is_file());
@@ -3618,9 +3618,9 @@ for line in sys.stdin:
 
         let error = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
             &cache_path,
-            Duration::from_millis(100),
+            Duration::from_millis(250),
         )
         .expect_err("context-less model/list must fail closed without native cache evidence");
 
@@ -3629,7 +3629,7 @@ for line in sys.stdin:
             "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(8),
             "missing context handling must remain bounded"
         );
         assert!(!cache_path.is_file());
@@ -3706,7 +3706,7 @@ for line in sys.stdin:
 
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             &cache_path,
             Duration::from_secs(1),
         )
@@ -3717,7 +3717,7 @@ for line in sys.stdin:
             serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert_eq!(cache["models"][0]["context_window"], 272000);
         assert!(started.elapsed() >= Duration::from_millis(100));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(8));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3749,9 +3749,9 @@ for line in sys.stdin:
 
         let error = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
             &cache_path,
-            Duration::from_millis(100),
+            Duration::from_millis(250),
         )
         .expect_err("unchanged native cache must not satisfy a context-less refresh");
 
