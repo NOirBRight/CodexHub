@@ -120,6 +120,22 @@ function Set-CodexHubPythonEnvironment {
     # Keeping both names in sync also prevents the Gateway-specific override
     # from re-selecting a different interpreter in Rust or a fixture launcher.
     $fullPath = [System.IO.Path]::GetFullPath($Path)
+    # Do not let an activated Hermes/Conda/Pipenv environment change the
+    # interpreter's stdlib or prefix after the concrete executable is chosen.
+    # PYTHONPATH is intentionally preserved: callers use it for the checked-in
+    # src-python import root, while runtime-selection variables are removed.
+    foreach ($name in @(
+        'PYTHONHOME',
+        'PYTHONSTARTUP',
+        'PYTHONUSERBASE',
+        'VIRTUAL_ENV',
+        'CONDA_PREFIX',
+        'CONDA_DEFAULT_ENV',
+        'CONDA_PROMPT_MODIFIER',
+        'PIPENV_ACTIVE'
+    )) {
+        Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+    }
     $env:CODEXHUB_PYTHON = $fullPath
     $env:CODEXHUB_PROXY_PYTHON = $fullPath
     $env:CODEXHUB_E2E_PYTHON = $fullPath

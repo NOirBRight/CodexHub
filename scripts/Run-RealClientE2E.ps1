@@ -1085,7 +1085,8 @@ function Invoke-DesktopProjectOpen {
         [string]$Executable,
         [string]$CaseRoot,
         [string]$UserDataRoot,
-        [hashtable]$Environment
+        [hashtable]$Environment,
+        [string]$PythonPath = ''
     )
     $result = Invoke-IsolatedProcess `
         -Executable $Executable `
@@ -1098,7 +1099,8 @@ function Invoke-DesktopProjectOpen {
         -CaseRoot $CaseRoot `
         -Environment $Environment `
         -StandardInput '' `
-        -ProcessTimeoutSeconds 10
+        -ProcessTimeoutSeconds 10 `
+        -PythonPath $PythonPath
     if ($result.timed_out -or $result.exit_code -ne 0) {
         throw 'manual_desktop_project_open_failed'
     }
@@ -3398,6 +3400,16 @@ try {
             @($guiCaseRoot)
         }
         $guiExecutable = if ($guiClient -ceq 'desktop') { $desktopLaunchExecutable } else { $executables[$guiClient] }
+        # Test shims are command files and spawn fixture Python themselves;
+        # bind those to the repository runtime. Real native clients must use
+        # only the Python shipped beside their own artifact, so they receive
+        # no host override here.
+        $guiPythonPath = if ([System.IO.Path]::GetExtension($guiExecutable) -iin @('.cmd', '.bat', '.ps1')) {
+            $script:RepositoryPython
+        }
+        else {
+            ''
+        }
         $guiEnvironment = @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
@@ -3406,7 +3418,7 @@ try {
             CODEXHUB_E2E_MANUAL_EVIDENCE = $manualEvidencePath
             CODEXHUB_E2E_GUI_LAUNCH_MARKER = $guiLaunchMarker
         }
-        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment
+        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment -PythonPath $guiPythonPath
         [void]$trackedProcesses.Add($guiProcess)
         [void]$nativeGuiProcesses.Add($guiProcess)
         if ($guiClient -ceq 'desktop') {
@@ -3415,7 +3427,8 @@ try {
                 -Executable $guiExecutable `
                 -CaseRoot $guiCaseRoot `
                 -UserDataRoot $desktopUserDataRoot `
-                -Environment $guiEnvironment
+                -Environment $guiEnvironment `
+                -PythonPath $guiPythonPath
         }
     }
 

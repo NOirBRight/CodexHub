@@ -67,7 +67,10 @@ $env:CODEXHUB_PYTHON = 'C:\path\to\Python313\python.exe'
 
 The resolver fails immediately if that override is not Python 3.13+, instead
 of allowing a later `SyntaxError` to obscure the cause. Packaged builds use
-the bundled runtime and do not depend on the user's PATH.
+the bundled runtime and do not depend on the user's PATH. The launch boundary
+also removes `PYTHONHOME`, `PYTHONSTARTUP`, `VIRTUAL_ENV`, Conda, and Pipenv
+runtime selectors before spawning Python; a selected executable must not inherit
+a different environment prefix from the host shell.
 
 The two source executables that are commonly launched directly,
 `src-python/codex_proxy.py` and `src-python/catalog_sync.py`, also fail before

@@ -3,6 +3,16 @@ setlocal
 rem Do not inherit a parent's temporary resolver result into a nested launcher.
 set "CODEXHUB_RESOLVED_PYTHON="
 set "CODEXHUB_RESOLVER_OPTIONS="
+rem Prevent an activated 3.11/Conda/Pipenv environment from changing the
+rem selected interpreter after the resolver has validated its executable.
+set "PYTHONHOME="
+set "PYTHONSTARTUP="
+set "PYTHONUSERBASE="
+set "VIRTUAL_ENV="
+set "CONDA_PREFIX="
+set "CONDA_DEFAULT_ENV="
+set "CONDA_PROMPT_MODIFIER="
+set "PIPENV_ACTIVE="
 if /I "%~1"=="-m" if /I "%~2"=="pytest" set "CODEXHUB_RESOLVER_OPTIONS=-RequirePytest"
 where pwsh.exe >nul 2>&1
 if %errorlevel% equ 0 (

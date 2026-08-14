@@ -1941,6 +1941,17 @@ fn build_start_command_with_diagnostics(
         .arg("--port")
         .arg(settings.proxy_port.to_string())
         .current_dir(paths.proxy_script_dir())
+        // The executable has already been resolved and version-checked.
+        // Remove host environment selectors so Python cannot load a different
+        // stdlib/prefix from an activated 3.11/Conda/Pipenv environment.
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONSTARTUP")
+        .env_remove("PYTHONUSERBASE")
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("CONDA_PREFIX")
+        .env_remove("CONDA_DEFAULT_ENV")
+        .env_remove("CONDA_PROMPT_MODIFIER")
+        .env_remove("PIPENV_ACTIVE")
         .env("PYTHONPATH", paths.proxy_script_dir())
         .env("CODEX_HOME", paths.codex_dir.clone())
         .env("CODEXHUB_CODEX_TARGET_HOME", paths.codex_target_dir.clone())

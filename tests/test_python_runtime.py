@@ -128,6 +128,39 @@ def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
     assert Path(lines[-4]).resolve() == Path(lines[-1]).resolve()
 
 
+def test_repository_launcher_removes_host_runtime_selection_variables(
+    tmp_path: Path,
+) -> None:
+    child_env = os.environ.copy()
+    child_env.update(
+        {
+            "PYTHONHOME": str(tmp_path / "hermes-3.11"),
+            "PYTHONSTARTUP": str(tmp_path / "startup.py"),
+            "VIRTUAL_ENV": str(tmp_path / "hermes-3.11"),
+            "CONDA_PREFIX": str(tmp_path / "conda-3.11"),
+            "CONDA_DEFAULT_ENV": "hermes",
+            "PIPENV_ACTIVE": "1",
+        }
+    )
+    result = subprocess.run(
+        [
+            str(CMD_LAUNCHER),
+            "-c",
+            "import os, sys; print(sys.version_info[:2]); print([os.environ.get(name) for name in ('PYTHONHOME', 'PYTHONSTARTUP', 'VIRTUAL_ENV', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'PIPENV_ACTIVE')])",
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout
+    assert "[None, None, None, None, None, None]" in result.stdout
+
+
 def test_repository_launcher_puts_selected_interpreter_first_on_child_path() -> None:
     result = _run_script(
         LAUNCHER,
