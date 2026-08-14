@@ -245,13 +245,10 @@ def _has_collaboration_marker(tools: Any) -> bool:
     if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes, bytearray)):
         return False
     collaboration_names = {V1_NAMESPACE, V2_NAMESPACE}
-    child_names = set(V1_TOOLS) | set(V2_TOOLS)
     return any(
         isinstance(tool, Mapping)
-        and (
-            tool.get("name") in collaboration_names
-            or (tool.get("type") == "function" and tool.get("name") in child_names)
-        )
+        and tool.get("type") == "namespace"
+        and tool.get("name") in collaboration_names
         for tool in tools
     )
 
@@ -351,13 +348,16 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
     """Return the exact request version or ``None`` when no marker exists."""
 
     _require(isinstance(request, Mapping), "request_invalid")
+    tools = request.get("tools")
+    if not _has_collaboration_marker(tools):
+        # Ordinary provider requests may carry similarly named metadata and
+        # may omit tool_choice.  They are not Collaboration requests unless
+        # the exact frozen namespace declaration is present.
+        return None
     _require(
         not _has_unexpected_version_signal(request),
         "collaboration_version_signal_unexpected",
     )
-    tools = request.get("tools")
-    if not _has_collaboration_marker(tools):
-        return None
     _require(request.get("tool_choice") == "auto", "tool_choice_invalid")
     return classify_collaboration_tools(tools)  # type: ignore[arg-type]
 

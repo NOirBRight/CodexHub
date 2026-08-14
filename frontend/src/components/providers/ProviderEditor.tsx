@@ -21,7 +21,7 @@ import {
 import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
 import { isProviderDirty } from "../../lib/providerComparison";
-import { cx, displayModel, renumberModels } from "../../lib/format";
+import { cx, displayModel, renumberModels, slugify } from "../../lib/format";
 import { api, messageFromError } from "../../lib/tauri";
 import type { Model, Provider, ToolProtocol, UpstreamFormat, UpstreamFormatProbeResult } from "../../lib/types";
 import type { ProviderDraftState } from "../../hooks/useProviderNavigationGuard";
@@ -385,6 +385,7 @@ export function AddProviderPanel({
         discoverBusy={busy === "discover"}
         discoverError={discoverError}
         models={form.models}
+        providerId={form.id.trim() || slugify(form.name)}
         onAdd={addModel}
         onDiscover={onDiscover}
         onReorder={(models) => onFormChange({ ...form, models: renumberModels(models) })}

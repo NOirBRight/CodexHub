@@ -105,6 +105,9 @@ class _SlowWriteSocket:
         self.timeout = timeout
         self.timeouts.append(timeout)
 
+    def gettimeout(self) -> float | None:
+        return self.timeout
+
     def sendall(self, data: bytes) -> None:
         self.sent_bytes += len(data)
         if len(data) <= 1024:
@@ -239,6 +242,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertGreaterEqual(sock.sent_bytes, 2 * 2 * 1024 * 1024)
         self.assertIn(0.05, sock.timeouts)
         self.assertIn(0.2, sock.timeouts)
+        self.assertEqual(sock.timeout, 0.2)
 
     def test_official_pool_checkout_marks_new_then_reused_connection(self) -> None:
         clock = _VirtualClock()
@@ -324,7 +328,12 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         self.assertIs(raised.exception, manager.failure)
         self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
-        self.assertLess(sock.timeouts[-1], 0.17)
+        self.assertTrue(
+            any(
+                isinstance(timeout, (int, float)) and timeout < 0.17
+                for timeout in sock.timeouts
+            )
+        )
         self.assertTrue(recorder.flush(3))
         records = [
             json.loads(line)

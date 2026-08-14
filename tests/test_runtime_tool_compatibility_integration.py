@@ -55,6 +55,22 @@ def _collaboration_namespace(version: str) -> dict:
     }
 
 
+def _ordinary_overlapping_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": name,
+            "description": "Ordinary provider tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {"provider_field": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        }
+        for name in ("send_message", "interrupt_agent", "list_agents")
+    ]
+
+
 def _decoded_sse(line: bytes) -> dict:
     assert line.startswith(b"data:")
     return json.loads(line.split(b":", 1)[1].strip())
@@ -107,6 +123,74 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
     assert "must-not-be-logged" not in serialized
     assert "req-private" not in serialized
     assert "__codexhub_" not in serialized
+
+
+def test_dsh_shaped_overlapping_tools_without_tool_choice_reach_provider_route():
+    context: dict = {}
+    body = json.dumps(
+        {
+            "model": "ordinary-model",
+            "input": [{"type": "message", "role": "user", "content": "Use a tool."}],
+            "tools": _ordinary_overlapping_tools(),
+        }
+    ).encode("utf-8")
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            body,
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert context.get("collaboration_protocol") is None
+    assert [tool["name"] for tool in transformed["tools"]] == [
+        "send_message",
+        "interrupt_agent",
+        "list_agents",
+    ]
+    assert "tool_choice" not in transformed
+
+
+def test_ordinary_request_version_metadata_does_not_enter_collaboration_boundary():
+    context: dict = {}
+    body = json.dumps(
+        {
+            "model": "ordinary-model",
+            "input": [{"type": "message", "role": "user", "content": "Continue."}],
+            "metadata": {"multi_agent_version": "v2"},
+            "tools": _ordinary_overlapping_tools(),
+        }
+    ).encode("utf-8")
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            body,
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert context.get("collaboration_protocol") is None
+    assert transformed["metadata"] == {"multi_agent_version": "v2"}
+    assert "tool_choice" not in transformed
+
+
+def test_attempted_collaboration_namespace_without_tool_choice_still_fails_closed():
+    body = json.loads(_request([_collaboration_namespace(COLLABORATION_V2)]))
+    body.pop("tool_choice")
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode("utf-8"),
+            _external_responses_upstream(),
+            event_context={},
+            inject_codex_tools=False,
+        )
+
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_runtime_plan_aliases_are_deterministic_for_identical_external_request():

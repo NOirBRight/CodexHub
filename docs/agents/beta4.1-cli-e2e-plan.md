@@ -43,12 +43,31 @@ The `legacy-session-resume` case is the regression gate for #418. The
 limited to the exact old V1 shape; an extended or partially edited old call
 must still be rejected. `stable-tool-alias-replay` and
 `deferred-core-bounded` are the release regressions for #424 and #425. The
-`external-v2-lifecycle` is a mandatory Beta4.1 release gate, not a deferred
-Beta4.2/Beta5 qualification. Its result is specific to
+`external-v2-lifecycle` adapter qualification is a mandatory Beta4.1 release
+gate, not a deferred Beta4.2/Beta5 qualification. Its result is specific to
 `ollama-cloud/glm-5.2`; this is support **via the CodexHub Gateway adapter**,
-not native provider V2 capability. A catalog entry, the CLI's initial namespace,
-or a successful text-only response is not capability evidence. The private replay body may not be attached to an
-Issue or Release; publish only its stable hash and bounded structural counts.
+not native provider V2 capability. A catalog entry, the CLI's initial
+namespace, or a successful text-only response is not capability evidence. The
+private replay body may not be attached to an Issue or Release; publish only
+its stable hash and bounded structural counts.
+
+The full cross-provider V2 lifecycle is a separate, known blocked gate.
+OpenAI parent → non-OpenAI child handoff data can contain Official encrypted
+content that the Gateway cannot decrypt. Rewriting `agent_message`, moving
+fields, or removing an encrypted schema annotation cannot recover the original
+task. Do not claim that opaque forwarding makes this combination work. The
+upstream delivery contract must either keep encrypted content on OpenAI →
+OpenAI, send provider-neutral plaintext user/message data (or re-encode after
+upstream decryption) for non-OpenAI targets, and fail closed for unsupported
+combinations. Until then, Beta4.1 evidence must label this gate
+`blocked_upstream_provider_aware_delivery`, not a passed lifecycle.
+
+Issue #429 is also in the Beta4.1 generic protocol-classification scope:
+ordinary top-level functions whose names overlap Collaboration children must
+remain ordinary provider tools, while an attempted Collaboration namespace
+continues to fail closed when its frozen contract is incomplete or invalid.
+Full DSH managed-client support is tracked separately in #430 and is not part
+of this release.
 
 ## Execution phases
 
@@ -93,20 +112,22 @@ Issue or Release; publish only its stable hash and bounded structural counts.
    - Verify a later V1 selection with a new Session or explicit fork. Codex CLI
      `0.146.1` pins Collaboration V2 in existing Session state, so an in-place
      V2-to-V1 downgrade is not a product acceptance condition.
-   - Run `external-v2-lifecycle` against the real `ollama-cloud/glm-5.2`
-      route. Require the exact eight-call order
-      `spawn_agent`, `list_agents`, `send_message`, `followup_task`,
-      `wait_agent`, `interrupt_agent`, `wait_agent`, `list_agents`; pair each
-      call with its output and require the final readback to contain the same
-      target ID in a terminal state. Record stream/history continuity,
-      restart/readback, and both terminal and error replay outcomes. Any
-     Require the private upstream capture to show six unique deterministic
-     `__codexhub_ns_*` function aliases, zero native namespaces, paired adapted
-     call/output history, and Gateway-owned evidence of inverse mapping back to
-     the native V2 lifecycle observed by the CLI. The pre-Gateway capture alone
-     is not adapter evidence. Any missing phase, provider/model mismatch,
-     absent Gateway adapter evidence, or synthetic/legacy fixture use fails the
-     gate.
+   - Run the third-party-coordinator `external-v2-lifecycle` qualification
+     against the real `ollama-cloud/glm-5.2` route. Require the exact
+     eight-call order `spawn_agent`, `list_agents`, `send_message`,
+     `followup_task`, `wait_agent`, `interrupt_agent`, `wait_agent`,
+     `list_agents`; pair each call with its output and require the final
+     readback to contain the same target ID in a terminal state. Record
+     stream/history continuity, restart/readback, and both terminal and error
+     replay outcomes. Require the private upstream capture to show six unique
+     deterministic function aliases, zero native namespaces, paired adapted
+     call/output history, and Gateway-owned evidence of inverse mapping back
+     to the client-owned V2 lifecycle. The pre-Gateway capture alone is not
+     adapter evidence. Any missing phase, provider/model mismatch, absent
+     Gateway adapter evidence, or synthetic/legacy fixture use fails the
+     adapter gate. Do not convert a failed OpenAI-parent → third-party-child
+     handoff into a product failure or a false pass: record the separate
+     upstream-blocked result and keep the full cross-provider gate unpassed.
 
 5. **Historical recovery**
    - Start from the copied operator-supplied historical Session.
@@ -160,14 +181,21 @@ The implementation phase should add deterministic tests for the runner's
 schema parser and sanitized evidence validator, then execute the real matrix
 only on the dedicated Windows host. The release checklist is:
 
-- all listed Beta4.1 matrix gates pass with the exact CLI version and candidate
-  SHA, including the real `ollama-cloud/glm-5.2` external-v2 qualification;
+- all supported Beta4.1 matrix gates pass with the exact CLI version and
+  candidate SHA, including the real `ollama-cloud/glm-5.2` adapter
+  qualification;
 - the legacy Session continuation passes without changing its old call shape;
 - direct-schema hashes show no harness mutation;
 - repeated caller hashes and upstream hashes match for #424, and the 249-child
   #425 replay has the same final bounded-core count as the zero-child control;
+- the sanitized #429 ordinary-overlapping-tool request reaches the selected
+  provider without a Collaboration boundary rejection, while partial or
+  schema-invalid Collaboration namespaces still fail closed;
 - restart readback passes for both selected versions;
-- no secret-bearing or raw Session artifact is written to the repository.
+- no secret-bearing or raw Session artifact is written to the repository;
+- the release evidence explicitly records the full cross-provider V2 gate as
+  `blocked_upstream_provider_aware_delivery` until upstream delivery is
+  provider-aware; Beta4.1 must not describe it as a completed lifecycle.
 
 ## Manual confirmation still required
 
@@ -180,3 +208,6 @@ only on the dedicated Windows host. The release checklist is:
 - If the historical Session is unavailable in the isolated test fixture, stop
   with `legacy_session_fixture_unavailable`; do not fall back to a newly
   created Session and call #418 verified.
+- Do not record complete encrypted content in logs, comments, or evidence;
+  record only the bounded fact that an Official encrypted payload was present
+  and could not be decrypted for the non-OpenAI target.

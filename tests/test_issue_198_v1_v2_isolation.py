@@ -104,8 +104,11 @@ def test_collaboration_boundary_classifies_explicit_protocols_and_rejects_mixed_
 
     with pytest.raises(CollaborationBoundaryError, match="mixed_v1_v2"):
         classify_collaboration_payload({"input": [_v1_spawn_call(), _v2_spawn_call()]})
-    with pytest.raises(CollaborationBoundaryError, match="missing_namespace"):
-        classify_collaboration_payload({"input": [{"type": "function_call", "name": "spawn_agent"}]})
+    # A top-level provider function/call may reuse a Collaboration child name;
+    # only an exact Collaboration namespace is a protocol marker.
+    assert classify_collaboration_payload(
+        {"input": [{"type": "function_call", "name": "spawn_agent"}]}
+    ) is None
     with pytest.raises(CollaborationBoundaryError, match="mixed_v1_v2"):
         classify_collaboration_payload(
             {
@@ -117,10 +120,10 @@ def test_collaboration_boundary_classifies_explicit_protocols_and_rejects_mixed_
                 ]
             }
         )
-    with pytest.raises(CollaborationBoundaryError, match="collaboration_version_signal_unexpected"):
-        classify_collaboration_payload({"metadata": {"multi_agent_version": "v2"}})
-    with pytest.raises(CollaborationBoundaryError, match="collaboration_version_signal_unexpected"):
-        classify_collaboration_payload({"metadata": {"multi_agent_version": "v3"}})
+    # Version metadata alone is not a Collaboration marker; ordinary requests
+    # must reach the selected provider without a client-specific version gate.
+    assert classify_collaboration_payload({"metadata": {"multi_agent_version": "v2"}}) is None
+    assert classify_collaboration_payload({"metadata": {"multi_agent_version": "v3"}}) is None
     with pytest.raises(CollaborationBoundaryError, match="missing_namespace"):
         classify_collaboration_payload({"namespace": "collaboration", "type": "function_call"})
 
@@ -248,6 +251,28 @@ def test_collaboration_protocols_collects_mixed_history_protocols() -> None:
         COLLABORATION_V1,
         COLLABORATION_V2,
     })
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda declaration: declaration.update({"tools": []}), id="empty-tools"),
+        pytest.param(
+            lambda declaration: declaration["tools"].pop(),
+            id="missing-child",
+        ),
+        pytest.param(
+            lambda declaration: declaration["tools"][0].update({"strict": True}),
+            id="child-schema-mismatch",
+        ),
+    ],
+)
+def test_history_collaboration_namespace_requires_exact_contract(mutate) -> None:
+    declaration = _collaboration_namespace(COLLABORATION_V2)
+    mutate(declaration)
+
+    with pytest.raises(CollaborationBoundaryError):
+        collaboration_protocols({"input": [declaration]})
 
 
 def test_v2_disables_v1_guidance_and_semantic_repair() -> None:
@@ -750,7 +775,7 @@ def test_context_multi_agent_version_does_not_select_a_runtime_protocol() -> Non
     assert payload["input"]
 
 
-def test_request_multi_agent_version_is_rejected() -> None:
+def test_request_multi_agent_version_is_rejected_when_collaboration_namespace_is_present() -> None:
     context = {
         "repair_policy": REPAIR_CODEX_SUBAGENT,
         "request_id": "issue198-request-v2",
@@ -758,6 +783,8 @@ def test_request_multi_agent_version_is_rejected() -> None:
     body = {
         "model": "glm-5.2",
         "input": [{"type": "message", "role": "user", "content": "continue"}],
+        "tool_choice": "auto",
+        "tools": [_collaboration_namespace(COLLABORATION_V2)],
         "metadata": {"multi_agent_version": "v2"},
     }
 
@@ -855,22 +882,23 @@ def test_selected_v2_context_conflicting_with_v1_history_fails_closed() -> None:
     assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
-def test_conflicting_current_target_metadata_fails_closed() -> None:
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_request_body(
-            json.dumps(
-                {
-                    "model": "glm-5.2",
-                    "input": "continue",
-                    "metadata": {"multi_agent_version": "v1"},
-                    "features": {"multi_agent_version": "v2"},
-                }
-            ).encode(),
-            _upstream(),
-            event_context={},
-        )
+def test_conflicting_current_target_metadata_without_namespace_is_ordinary_request() -> None:
+    body = json.dumps(
+        {
+            "model": "glm-5.2",
+            "input": "continue",
+            "metadata": {"multi_agent_version": "v1"},
+            "features": {"multi_agent_version": "v2"},
+        }
+    ).encode()
 
-    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    transformed = codex_proxy.compatible_request_body(
+        body,
+        _upstream(),
+        event_context={},
+    )
+
+    assert json.loads(transformed)["input"] == "continue"
 
 
 def test_official_passthrough_does_not_interpret_collaboration_metadata() -> None:

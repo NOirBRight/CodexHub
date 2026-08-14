@@ -179,6 +179,7 @@ _OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
 _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE = "_codexhub_request_write_deadline"
 _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE = "_codexhub_request_write_active"
 _TRANSPORT_PHASE_ATTRIBUTE = "_codexhub_transport_phase"
+_OFFICIAL_SOCKET_TIMEOUT_UNSET = object()
 
 
 def _reset_official_attempt_state(timeout: float) -> None:
@@ -248,14 +249,23 @@ class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
 
     def send(self, data: Any) -> None:
         request_write_active = getattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, False)
+        sock = self.sock
+        previous_timeout: Any = _OFFICIAL_SOCKET_TIMEOUT_UNSET
+        if request_write_active and sock is not None:
+            gettimeout = getattr(sock, "gettimeout", None)
+            if callable(gettimeout):
+                try:
+                    previous_timeout = gettimeout()
+                except Exception:
+                    previous_timeout = _OFFICIAL_SOCKET_TIMEOUT_UNSET
         try:
             deadline = getattr(self, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE, None)
             if request_write_active and isinstance(deadline, (int, float)):
                 remaining_timeout = deadline - time.monotonic()
                 if remaining_timeout <= 0:
                     raise TimeoutError("Official request write budget exhausted")
-                if self.sock is not None:
-                    self.sock.settimeout(remaining_timeout)
+                if sock is not None:
+                    sock.settimeout(remaining_timeout)
             super().send(data)
         except TimeoutError as exc:
             if request_write_active:
@@ -264,6 +274,16 @@ class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
                 except Exception:
                     pass
             raise
+        finally:
+            if (
+                request_write_active
+                and sock is not None
+                and previous_timeout is not _OFFICIAL_SOCKET_TIMEOUT_UNSET
+            ):
+                try:
+                    sock.settimeout(previous_timeout)
+                except Exception:
+                    pass
 
 
 class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
@@ -2729,11 +2749,23 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
-            history_protocols = _collaboration_protocols(
+            history_boundary = (
                 {"input": payload.get("input", [])}
                 if isinstance(payload, Mapping)
                 else {"input": []}
             )
+            if isinstance(payload, Mapping):
+                for key in (
+                    "tools",
+                    "tool_choice",
+                    "multi_agent_version",
+                    "metadata",
+                    "features",
+                    "client_metadata",
+                ):
+                    if key in payload:
+                        history_boundary[key] = payload[key]
+            history_protocols = _collaboration_protocols(history_boundary)
             protocol = (
                 current_protocol
                 or context_protocol
@@ -16373,6 +16405,30 @@ def current_catalog_data() -> dict[str, Any]:
     )
 
 
+def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the internal catalog snapshot into the public OpenAI shape."""
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        models = []
+    data: list[dict[str, str]] = []
+    for model in models:
+        if not isinstance(model, Mapping):
+            continue
+        model_id = model.get("slug")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        metadata = model.get("codex_proxy_metadata")
+        owner = metadata.get("provider") if isinstance(metadata, Mapping) else None
+        data.append(
+            {
+                "id": model_id,
+                "object": "model",
+                "owned_by": owner if isinstance(owner, str) and owner.strip() else "codexhub",
+            }
+        )
+    return {"object": "list", "data": data}
+
+
 def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
     """Read the Rust publication fence that commits an Official budget.
 
@@ -19326,7 +19382,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/v1/models":
-            self._send_json(200, current_catalog_data())
+            self._send_json(200, openai_model_list(current_catalog_data()))
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):

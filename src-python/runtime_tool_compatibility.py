@@ -1107,6 +1107,13 @@ def _item_identity(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _is_legacy_message_identity(value: str) -> bool:
+    """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
+
+    suffix = value.removeprefix("message_")
+    return bool(suffix) and suffix.isdigit()
+
+
 def _hosted_kind_for_item_type(item_type: Any) -> str | None:
     if not isinstance(item_type, str) or not item_type.endswith("_call"):
         return None
@@ -1956,6 +1963,8 @@ class ToolCompatibilityPlan:
         item_type = item.get("type")
         name = item.get("name")
         namespace = item.get("namespace")
+        if item_type == "agent_message":
+            return self._encode_agent_message(item)
         if item_type in {"tool_search_call", "tool_search_output"}:
             native_entry = self._native_entry_for_item(item)
             if native_entry is not None:
@@ -2048,6 +2057,42 @@ class ToolCompatibilityPlan:
                 return item, True
             return item, False
         return item, False
+
+    def _encode_agent_message(self, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Adapt plaintext V2 handoff history for an ordinary provider.
+
+        ``agent_message`` is an Official collaboration item.  A third-party
+        Responses endpoint can consume the plaintext meaning as a normal user
+        message, but it cannot consume the native item or decrypt Official
+        encrypted content.  Never discard encrypted content or pretend that it
+        was decoded: rejecting the request is the only lossless boundary.
+        """
+
+        entry = self._collaboration_v2_entry()
+        if entry is None or entry.disposition != ADAPT:
+            return item, False
+
+        try:
+            validate_agent_message(item)
+        except CollaborationContractError as exc:
+            self._raise_collaboration_contract(exc, surface="history")
+
+        content = item["content"]
+        if any(part.get("type") == "encrypted_content" for part in content):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "encrypted_agent_message_unavailable",
+                surface="history",
+            )
+
+        return {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": part["text"]}
+                for part in content
+            ],
+        }, True
 
     @staticmethod
     def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
@@ -2646,7 +2691,9 @@ class ToolCompatibilityPlan:
                         # Permit only that message-to-message duplicate; dual
                         # IDs and collisions with every other history family
                         # remain fail-closed.
-                        legacy_message = item_type == "message"
+                        legacy_message = (
+                            item_type == "message" and _is_legacy_message_identity(item_id)
+                        )
                         prior_legacy_message = seen_history_item_ids.get(item_id)
                         if prior_legacy_message is not None and not (
                             prior_legacy_message and legacy_message

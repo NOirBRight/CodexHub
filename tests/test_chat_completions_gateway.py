@@ -3035,7 +3035,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
 

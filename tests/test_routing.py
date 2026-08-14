@@ -12,7 +12,7 @@ import time
 import unittest
 import weakref
 from dataclasses import asdict, dataclass, fields, replace
-from http.client import IncompleteRead
+from http.client import HTTPConnection, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -11791,6 +11791,83 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["thread_id"], "thread-control")
             self.assertEqual(fields["route_reason"], "official_control")
 
+    def test_models_route_projects_internal_catalog_to_openai_list_shape(self):
+        catalog = {
+            "fetched_at": "private-timestamp",
+            "client_version": "private-client",
+            "visibility_diagnostics": {"hidden": 1},
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "display_name": "5.5",
+                    "codex_proxy_metadata": {"provider": "openai"},
+                },
+                {
+                    "slug": "ollama-cloud/glm-5.2",
+                    "codex_proxy_metadata": {"provider": "ollama-cloud"},
+                },
+            ],
+        }
+        with patch("codex_proxy.current_catalog_data", return_value=catalog):
+            handler, fake = websocket_get_handler("/v1/models")
+            handler.headers = {"X-Codex-Client-Id": "codex-app"}
+            handler.close_connection = False
+            handler.do_GET()
+
+        self.assertEqual(fake.status, 200)
+        body = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(body["object"], "list")
+        self.assertEqual(
+            body["data"],
+            [
+                {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
+                {
+                    "id": "ollama-cloud/glm-5.2",
+                    "object": "model",
+                    "owned_by": "ollama-cloud",
+                },
+            ],
+        )
+        self.assertNotIn("models", body)
+        self.assertNotIn("fetched_at", body)
+        self.assertNotIn("visibility_diagnostics", body)
+
+    def test_models_route_http_smoke_does_not_leak_internal_catalog_metadata(self):
+        catalog = {
+            "fetched_at": "private-timestamp",
+            "client_version": "private-client",
+            "visibility_diagnostics": {"hidden": 1},
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "codex_proxy_metadata": {"provider": "openai"},
+                }
+            ],
+        }
+        server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch("codex_proxy.current_catalog_data", return_value=catalog):
+                connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                connection.request("GET", "/v1/models")
+                response = connection.getresponse()
+                raw_body = response.read()
+                connection.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+        self.assertEqual(response.status, 200)
+        body = json.loads(raw_body)
+        self.assertIsInstance(body.get("data"), list)
+        self.assertEqual(body["data"][0]["id"], "gpt-5.5")
+        self.assertEqual(body["data"][0]["owned_by"], "openai")
+        self.assertNotIn("models", body)
+        self.assertNotIn("fetched_at", body)
+        self.assertNotIn("visibility_diagnostics", body)
+
     def test_official_control_error_event_uses_official_request_kind(self):
         handler = CodexProxyHandler.__new__(CodexProxyHandler)
         handler.path = "/v1/responses/resp_control"
@@ -16888,15 +16965,15 @@ class RoutingTests(unittest.TestCase):
                     b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_tool","type":"function_call","status":"in_progress","call_id":"call_tool","name":"shell_command","arguments":""}}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"{\\"command\\":"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"\\"rg idle\\""}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.done","item_id":"fc_tool","output_index":0,"arguments":"{\\"command\\":\\"rg idle\\"}"}\n\n',
                 ),
                 (
@@ -16912,7 +16989,7 @@ class RoutingTests(unittest.TestCase):
             os.environ,
             {
                 "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "10",
-                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.2",
             },
             clear=False,
         ):
@@ -17297,15 +17374,15 @@ class RoutingTests(unittest.TestCase):
                     b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_patch","type":"custom_tool_call","status":"in_progress","call_id":"call_patch","name":"apply_patch","input":""}}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Begin Patch\\n"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Add File: e2e.py\\n"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_patch","output_index":0,"input":"*** Begin Patch\\n*** Add File: e2e.py\\n*** End Patch\\n"}\n\n',
                 ),
                 (
@@ -17321,7 +17398,7 @@ class RoutingTests(unittest.TestCase):
             os.environ,
             {
                 "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "10",
-                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.2",
             },
             clear=False,
         ):

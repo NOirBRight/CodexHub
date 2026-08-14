@@ -11,6 +11,8 @@ __pycache__/
 *.bak-*
 test-results/
 diagnostics/
+.e2e-private/
+.pytest-results/
 docs/superpowers/
 .superpowers/
 
