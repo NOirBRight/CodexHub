@@ -3314,6 +3314,31 @@ def test_external_watchdog_timeout_is_not_blocked_by_inherited_output_handles(tm
     assert not [pid for pid in process_ids if _pid_is_running(pid)]
 
 
+def test_external_watchdog_replays_utf8_output_under_a_legacy_console_encoding(tmp_path):
+    command = [
+        sys.executable,
+        str(FIXTURES / "run-with-windows-watchdog.py"),
+        "--timeout-seconds",
+        "5",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write('replacement �'.encode('utf-8'))",
+    ]
+    result = subprocess.run(
+        command,
+        env={**os.environ, "PYTHONIOENCODING": "gbk:strict"},
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "replacement" in result.stdout
+
+
 def test_operator_commands_have_explicit_outer_and_manual_deadlines():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
