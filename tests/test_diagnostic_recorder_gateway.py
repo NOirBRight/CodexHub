@@ -440,6 +440,52 @@ class DiagnosticRecorderGatewayTests(TestCase):
             "reused",
         )
 
+    def test_official_pooled_direct_read_timeout_preserves_read_phase(self) -> None:
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+        for method, expected_phase in (("read", "response_body"), ("readline", "stream_body")):
+            with self.subTest(method=method):
+                pooled = codex_proxy._OfficialPooledResponse(
+                    _PooledReadFailure(TimeoutError("simulated unannotated body timeout"), connection)
+                )
+
+                with self.assertRaises(TimeoutError) as raised:
+                    getattr(pooled, method)()
+
+                self.assertEqual(
+                    codex_proxy._explicit_transport_phase(raised.exception),
+                    expected_phase,
+                )
+                self.assertEqual(
+                    codex_proxy.transport_failure_phase(raised.exception),
+                    expected_phase,
+                )
+
+    def test_official_response_header_read_timeout_is_classified_as_response_headers(self) -> None:
+        class _ReadTimeoutManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                raise codex_proxy.urllib3.exceptions.ReadTimeoutError(
+                    None,
+                    "https://example.test/v1/responses",
+                    "simulated response header timeout",
+                )
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_ReadTimeoutManager()),
+            self.assertRaises(TimeoutError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._explicit_transport_phase(raised.exception),
+            "response_headers",
+        )
+        self.assertEqual(
+            codex_proxy.transport_failure_phase(raised.exception),
+            "response_headers",
+        )
+
     def test_official_urlopen_direct_stdlib_transport_error_preserves_attempt_disposition(self) -> None:
         class _DirectFailureManager:
             def request(self, *_args: object, **_kwargs: object) -> object:

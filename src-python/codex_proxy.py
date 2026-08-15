@@ -364,6 +364,7 @@ class _OfficialPooledResponse:
                 translated,
                 source=exc,
                 disposition=self.connection_disposition,
+                phase=_explicit_transport_phase(exc) or "response_body",
             )
             raise translated from exc
         if amount is None or data == b"":
@@ -379,6 +380,7 @@ class _OfficialPooledResponse:
                 translated,
                 source=exc,
                 disposition=self.connection_disposition,
+                phase=_explicit_transport_phase(exc) or "stream_body",
             )
             raise translated from exc
         if data == b"":
@@ -476,11 +478,17 @@ def _propagate_transport_metadata(
     *,
     source: BaseException | None = None,
     disposition: str | None = None,
+    phase: str | None = None,
 ) -> BaseException:
-    phase = _explicit_transport_phase(source)
-    if phase is not None:
+    resolved_phase = phase if phase in {
+        "request_write",
+        "response_headers",
+        "response_body",
+        "stream_body",
+    } else _explicit_transport_phase(source)
+    if resolved_phase is not None:
         try:
-            setattr(target, _TRANSPORT_PHASE_ATTRIBUTE, phase)
+            setattr(target, _TRANSPORT_PHASE_ATTRIBUTE, resolved_phase)
         except Exception:
             pass
     if disposition in {"new", "reused"}:
@@ -591,6 +599,12 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
             translated,
             source=exc,
             disposition=_official_attempt_connection_disposition(),
+            phase=_explicit_transport_phase(exc)
+            or (
+                "response_headers"
+                if isinstance(exc, urllib3.exceptions.ReadTimeoutError)
+                else None
+            ),
         )
         raise translated from exc
     finally:
