@@ -48,6 +48,17 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "tests/validate_issue_251_evidence.py",
 )
 
+DIRECT_FIXTURE_PYTHON_ENTRYPOINTS = (
+    "tests/fixtures/real_client_e2e/fake-debug-gateway.py",
+    "tests/fixtures/real_client_e2e/fake-gui-expanding-tree.py",
+    "tests/fixtures/real_client_e2e/fake-managed-client-config.py",
+    "tests/fixtures/real_client_e2e/fake-watchdog-child.py",
+    "tests/fixtures/real_client_e2e/validate-client-routing.py",
+    "tests/fixtures/real_client_e2e/validate-managed-client-contract-probe.py",
+    "tests/fixtures/real_client_e2e/validate-zcode-structures.py",
+    "tests/fixtures/real_client_e2e/write-catalog.py",
+)
+
 
 def _powershell() -> str:
     executable = shutil.which("pwsh") or shutil.which("powershell")
@@ -196,6 +207,15 @@ def test_every_direct_python_entrypoint_declares_the_runtime_preflight() -> None
         str(path.relative_to(ROOT))
         for path in entrypoints
         if "require_python_313" not in path.read_text(encoding="utf-8")
+    ]
+    assert missing == []
+
+
+def test_every_direct_fixture_python_entrypoint_declares_the_runtime_preflight() -> None:
+    missing = [
+        entrypoint
+        for entrypoint in DIRECT_FIXTURE_PYTHON_ENTRYPOINTS
+        if "require_python_313" not in (ROOT / entrypoint).read_text(encoding="utf-8")
     ]
     assert missing == []
 
@@ -620,6 +640,29 @@ def test_fixture_launcher_rejects_an_incompatible_proxy_override(tmp_path: Path)
     assert "requires Python 3.13 or newer" in result.stderr
 
 
+def test_fixture_launcher_requires_an_explicit_runtime_binding() -> None:
+    cmd = shutil.which("cmd.exe")
+    if cmd is None:
+        pytest.skip("Windows cmd.exe is required for the fixture launcher")
+
+    fixture = ROOT / "tests" / "fixtures" / "real_client_e2e" / "run-fixture-python.cmd"
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env.pop(name, None)
+    result = subprocess.run(
+        [cmd, "/d", "/c", str(fixture), "-c", "pass"],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 127
+    assert "requires an explicit CODEXHUB_E2E_PYTHON binding" in result.stderr
+
+
 def test_pytest_preflight_rejects_python_311_before_source_collection() -> None:
     ambient = _find_incompatible_python()
     if ambient is None:
@@ -673,6 +716,29 @@ def test_every_direct_python_entrypoint_rejects_ambient_python_311_before_work(
         [ambient, str(ROOT / entrypoint), "--help"],
         cwd=ROOT,
         env={**os.environ, "PYTHONPATH": str(ROOT / "src-python")},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub requires Python 3.13 or newer" in combined
+
+
+@pytest.mark.parametrize("entrypoint", DIRECT_FIXTURE_PYTHON_ENTRYPOINTS)
+def test_every_direct_fixture_entrypoint_rejects_ambient_python_311_before_work(
+    entrypoint: str,
+) -> None:
+    ambient = _find_incompatible_python()
+    if ambient is None:
+        pytest.skip("an incompatible Python executable is unavailable")
+
+    result = subprocess.run(
+        [ambient, str(ROOT / entrypoint), "--help"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": ""},
         capture_output=True,
         text=True,
         encoding="utf-8",

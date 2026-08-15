@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+from fixture_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json

@@ -37,6 +37,9 @@ Direct utilities under `src-python/`, `scripts/`, and the checked-in evidence
 validators under `tests/` also run the canonical preflight in
 `src-python/python_runtime_contract.py`; a direct ambient-3.11 launch must
 fail closed before importing or mutating production code.
+E2E fixture Python files use the same 3.13 floor and require the exact
+`CODEXHUB_E2E_PYTHON` binding; the fixture launcher never falls back to a
+copied runtime or ambient `PATH`.
 Do not rely on a previous activation command: automated shell invocations may
 start a fresh process, so use the repository launcher in every command that
 needs Python.

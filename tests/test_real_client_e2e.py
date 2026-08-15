@@ -332,6 +332,10 @@ def _prepare_run(
         FIXTURES / "validate-managed-client-contract-probe.py",
         tmp_path / "validate-managed-client-contract-probe.py",
     )
+    shutil.copyfile(
+        FIXTURES / "fixture_runtime_contract.py",
+        tmp_path / "fixture_runtime_contract.py",
+    )
     shutil.copyfile(FIXTURES / "write-catalog.py", tmp_path / "write-catalog.py")
     shutil.copyfile(FIXTURES / "run-fixture-python.cmd", tmp_path / "run-fixture-python.cmd")
     portable_files = (
@@ -442,6 +446,7 @@ def _run(
             "fake-debug-gateway.py",
             "fake-managed-client-config.py",
             "validate-managed-client-contract-probe.py",
+            "fixture_runtime_contract.py",
             "run-fixture-python.cmd",
         ):
             shutil.copyfile(tmp_path / support, candidate_root / support)

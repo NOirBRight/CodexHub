@@ -16,12 +16,10 @@ if defined CODEXHUB_E2E_PYTHON goto run_explicit
 if defined CODEXHUB_PYTHON goto run_repository
 if defined CODEXHUB_PROXY_PYTHON goto run_proxy
 
-rem Prefer the materialized candidate runtime only when the parent did not
-rem provide an explicit binding. Do not fall back to py.exe: that can select
-rem a different 3.13 installation (or Hermes Python 3.11 through PATH).
-if exist "%~dp0python\python.exe" goto run_bundled
-
-echo CodexHub E2E fixture requires an explicit CODEXHUB_E2E_PYTHON binding or a bundled Python 3.13 runtime. 1>&2
+rem A fixture has no independent runtime contract.  Never select a copied
+rem candidate runtime or ambient PATH here: the parent runner must bind the
+rem exact repository-selected interpreter explicitly.
+echo CodexHub E2E fixture requires an explicit CODEXHUB_E2E_PYTHON binding. 1>&2
 exit /b 127
 
 :run_explicit
@@ -35,9 +33,6 @@ goto validate_python
 :run_proxy
 set "FIXTURE_PYTHON=%CODEXHUB_PROXY_PYTHON%"
 goto validate_python
-
-:run_bundled
-set "FIXTURE_PYTHON=%~dp0python\python.exe"
 
 :validate_python
 call "%FIXTURE_PYTHON%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)" >nul 2>&1

@@ -63,10 +63,12 @@ Running that script without the leading dot only changes its child process;
 PowerShell cannot let a child process rewrite its parent's environment.
 
 The isolated Windows real-client runner passes an explicit Python path only
-to a child that is expected to spawn Python. Fixture `.cmd` files use the
-validated repository 3.13 interpreter; a native candidate or managed-client
-materializer must use `<artifact>\python\python.exe` from its own packaged
-directory. The runner probes that bundled executable and compares the
+to a child that is expected to spawn Python. Fixture `.cmd` files require the
+validated repository 3.13 interpreter through `CODEXHUB_E2E_PYTHON`; they do
+not fall back to a copied candidate runtime or ambient `PATH`. A native
+candidate or managed-client materializer must use
+`<artifact>\python\python.exe` from its own packaged directory. The runner
+probes that bundled executable and compares the
 listening Gateway process's actual `MainModule.FileName` with the expected
 path. Native clients and packaged desktop processes do not receive the host
 Python override, so a test shell's Hermes 3.11 environment cannot silently
@@ -105,12 +107,14 @@ extracting the embedded runtime, so an activated 3.11 shell cannot contaminate
 the package.
 
 Every directly executable Python entrypoint under `src-python/`, `scripts/`,
-and the checked-in evidence validators under `tests/` runs the same small
-preflight before importing production modules.
+the checked-in evidence validators under `tests/`, and the E2E fixture Python
+files runs a small preflight before importing production or fixture logic.
 The canonical preflight lives in `src-python/python_runtime_contract.py`; the
 scripts-side module is only a compatibility import for it. This includes
 catalog/config/history utilities and evidence tools, not just the Gateway.
 Therefore a direct ambient-3.11 invocation fails with the actionable contract
 error instead of partially running, mutating state, or reaching a later
 syntax/import failure. The checked-in entrypoint audit and runtime tests keep
-new direct scripts from reopening this boundary.
+new direct scripts from reopening this boundary. Fixture scripts additionally
+reject an invocation without the runner's exact interpreter binding, so a
+second Python 3.13 installation cannot silently replace the selected runtime.

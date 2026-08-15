@@ -956,7 +956,7 @@ def test_fixture_launcher_validates_python_launcher_before_using_it():
         encoding="utf-8"
     )
 
-    assert 'if exist "%~dp0python\\python.exe" goto run_bundled' in source
+    assert 'if exist "%~dp0python\\python.exe" goto run_bundled' not in source
     assert "if defined CODEXHUB_E2E_PYTHON goto run_explicit" in source
     assert "if defined CODEXHUB_PYTHON goto run_repository" in source
     assert "requires an explicit CODEXHUB_E2E_PYTHON binding" in source

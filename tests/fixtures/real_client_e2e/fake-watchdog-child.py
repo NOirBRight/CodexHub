@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+from fixture_runtime_contract import require_python_313
+
+require_python_313(__file__)
 
 
 def main() -> int:
