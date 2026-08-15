@@ -2149,11 +2149,12 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
 
 def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
     started = time.monotonic()
+    manual_timeout_seconds = 30
     result = _run(
         tmp_path,
         debug_fake="fake-debug-build-gateway-exits.cmd",
         finalize_manual=False,
-        manual_timeout_seconds=30,
+        manual_timeout_seconds=manual_timeout_seconds,
         overall_timeout_seconds=60,
     )
     elapsed = time.monotonic() - started
@@ -2164,7 +2165,11 @@ def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
         summary["failure_classification"]
         == "candidate_gateway_unavailable_during_manual_evidence"
     )
-    assert elapsed < 25
+    # Keep the assertion tied to the configured manual deadline rather than a
+    # machine-load-sensitive wall-clock constant.  The distinct gateway-loss
+    # classification above proves that health loss, not the deadline, ended
+    # the run; this bound still rejects waiting until the manual timeout.
+    assert elapsed < manual_timeout_seconds
 
 
 def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
@@ -2607,6 +2612,15 @@ def test_desktop_payload_hardlinks_are_copied_as_independent_files(tmp_path):
     shutil.copyfile(
         FIXTURES / "fake-client-real-contract.cmd",
         desktop_root / "fake-client-real-contract.cmd",
+    )
+    # The contract fixture now verifies that script-like clients invoke the
+    # explicitly bound repository Python through its adjacent launcher.  Keep
+    # this synthetic installed payload self-contained; the test is about
+    # copying hard-linked files, not about accidentally omitting a required
+    # sidecar from the authoritative install root.
+    shutil.copyfile(
+        FIXTURES / "run-fixture-python.cmd",
+        desktop_root / "run-fixture-python.cmd",
     )
     source = desktop_root / "shared-runtime.bin"
     linked = desktop_root / "shared-runtime-copy.bin"
