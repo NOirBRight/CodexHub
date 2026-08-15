@@ -465,7 +465,19 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
     if schema is None and value == "":
         parsed: Any = None
     else:
-        parsed = _json_object_or_value(value, "malformed_collaboration_result")
+        try:
+            parsed = _json_object_or_value(value, "malformed_collaboration_result")
+        except CollaborationContractError:
+            # Codex CLI serializes a failed V2 interrupt as the tool's plain
+            # error text rather than a JSON result object.  Preserve that
+            # replay value; JSON-shaped failures (including duplicate keys)
+            # still go through the strict result schema below.
+            if version == COLLABORATION_V2 and name == "interrupt_agent" and value.strip():
+                try:
+                    json.loads(value)
+                except (TypeError, ValueError):
+                    return
+            raise
     if (schema is None and parsed is not None) or (
         isinstance(schema, Mapping) and not _matches_schema(parsed, schema)
     ):

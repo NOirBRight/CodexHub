@@ -1004,6 +1004,46 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
 
 
+def test_collaboration_v2_interrupt_error_replay_accepts_plain_text_history():
+    context: dict = {}
+    tools = [_collaboration_namespace(COLLABORATION_V2)]
+    error_text = "agent with id /root/missing not found"
+    history = [
+        {
+            "type": "function_call",
+            "id": "item_interrupt",
+            "namespace": "collaboration",
+            "name": "interrupt_agent",
+            "call_id": "call_interrupt",
+            "arguments": '{"target":"/root/missing"}',
+        },
+        {
+            "type": "function_call_output",
+            "id": "item_interrupt_output",
+            "call_id": "call_interrupt",
+            "output": error_text,
+        },
+    ]
+
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "custom-model",
+                    "input": history,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                }
+            ).encode("utf-8"),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert payload["input"][1]["output"] == error_text
+
+
 def test_collaboration_v2_provider_wire_drops_encrypted_schema_extension():
     context: dict = {}
     payload = json.loads(
