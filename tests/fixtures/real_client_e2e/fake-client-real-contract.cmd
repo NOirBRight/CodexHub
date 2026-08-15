@@ -1,4 +1,9 @@
 @echo off
+rem This script-like fixture may spawn Python helpers.  The E2E runner must
+rem bind it to the repository-selected interpreter instead of ambient PATH.
+if not defined CODEXHUB_E2E_PYTHON exit /b 41
+call "%~dp0run-fixture-python.cmd" -c "import os,sys; from pathlib import Path; raise SystemExit(0 if sys.version_info >= (3,13) and Path(sys.executable).resolve() == Path(os.environ['CODEXHUB_E2E_PYTHON']).resolve() else 1)" >nul 2>&1
+if errorlevel 1 exit /b 42
 if defined CODEXHUB_E2E_VERSION_PROBE (
   echo %CODEXHUB_E2E_MINIMUM_VERSION%
   exit /b 0

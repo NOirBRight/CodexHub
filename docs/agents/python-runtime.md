@@ -1,8 +1,11 @@
 # Python runtime contract
 
-CodexHub source requires **Python 3.13 or newer**. The source uses Python
-3.13 syntax, so a 3.11 interpreter fails during collection before any test
-can run.
+CodexHub's runtime contract requires **Python 3.13 or newer**. The source
+contains PEP 695 type-parameter syntax (introduced in Python 3.12), so a
+3.11 interpreter fails during collection before any test can run. We still
+standardize on 3.13+ for development, packaged Gateway, and release tooling;
+3.13 is the product/runtime floor, not a claim that every syntax feature is
+unique to 3.13.
 
 The recurring failure is an environment-resolution problem, not a Gateway
 protocol problem: the interactive Codex shell prepends the Hermes virtual
@@ -101,8 +104,13 @@ preparation script also removes host Python selectors before checking or
 extracting the embedded runtime, so an activated 3.11 shell cannot contaminate
 the package.
 
-The two source executables that are commonly launched directly,
-`src-python/codex_proxy.py` and `src-python/catalog_sync.py`, also fail before
-importing the 3.13-only provider module when an ambient 3.11 interpreter is
-used. This turns a manual mis-invocation into the same actionable contract
-error rather than another misleading syntax/import failure.
+Every directly executable Python entrypoint under `src-python/`, `scripts/`,
+and the checked-in evidence validators under `tests/` runs the same small
+preflight before importing production modules.
+The canonical preflight lives in `src-python/python_runtime_contract.py`; the
+scripts-side module is only a compatibility import for it. This includes
+catalog/config/history utilities and evidence tools, not just the Gateway.
+Therefore a direct ambient-3.11 invocation fails with the actionable contract
+error instead of partially running, mutating state, or reaching a later
+syntax/import failure. The checked-in entrypoint audit and runtime tests keep
+new direct scripts from reopening this boundary.

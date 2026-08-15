@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import sys
 
-if sys.version_info < (3, 13):
-    raise RuntimeError(
-        "CodexHub requires Python 3.13 or newer. "
-        "Run .\\scripts\\codexhub-python.cmd src-python/codex_proxy.py ..."
-    )
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
 
 import argparse
 from copy import deepcopy

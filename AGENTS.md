@@ -33,6 +33,10 @@ processes, and places that interpreter plus the repository `scripts` directory
 first on the child `PATH`. A 3.11 error is an invocation error: do not retry
 the same command with another bare Python name. Rust, packaged Gateway, and
 real-client E2E entrypoints resolve or inherit the same contract independently.
+Direct utilities under `src-python/`, `scripts/`, and the checked-in evidence
+validators under `tests/` also run the canonical preflight in
+`src-python/python_runtime_contract.py`; a direct ambient-3.11 launch must
+fail closed before importing or mutating production code.
 Do not rely on a previous activation command: automated shell invocations may
 start a fresh process, so use the repository launcher in every command that
 needs Python.

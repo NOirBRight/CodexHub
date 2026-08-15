@@ -7,6 +7,10 @@ and invoking it without ``--enable-live-capture`` cannot open a listener.
 
 from __future__ import annotations
 
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 from dataclasses import dataclass
 import hashlib

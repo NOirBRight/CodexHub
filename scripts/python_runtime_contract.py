@@ -1,19 +1,22 @@
-"""Shared preflight for Python scripts that can be launched directly."""
+"""Compatibility import for the canonical source-runtime preflight."""
 
 from __future__ import annotations
 
-import sys
+import importlib.util
 from pathlib import Path
+import sys
 
 
-MINIMUM_PYTHON = (3, 13)
+_SOURCE_CONTRACT = Path(__file__).resolve().parents[1] / "src-python" / "python_runtime_contract.py"
+_SPEC = importlib.util.spec_from_file_location(
+    "_codexhub_python_runtime_contract",
+    _SOURCE_CONTRACT,
+)
+if _SPEC is None or _SPEC.loader is None:
+    raise ImportError(f"CodexHub Python runtime contract is missing: {_SOURCE_CONTRACT}")
+_MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
+_SPEC.loader.exec_module(_MODULE)
 
-
-def require_python_313(entrypoint: str | Path) -> None:
-    """Stop a direct script invocation before it imports 3.13-only modules."""
-
-    if sys.version_info[:2] < MINIMUM_PYTHON:
-        raise RuntimeError(
-            "CodexHub requires Python 3.13 or newer. "
-            f"Run .\\scripts\\codexhub-python.cmd {Path(entrypoint).as_posix()} ..."
-        )
+MINIMUM_PYTHON = _MODULE.MINIMUM_PYTHON
+require_python_313 = _MODULE.require_python_313

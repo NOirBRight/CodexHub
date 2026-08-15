@@ -2099,6 +2099,9 @@ def test_packaged_gateway_and_materializer_bind_to_their_embedded_python():
     assert "sys.version_info >= (3, 13)" in resolver
     assert "if ($extension -iin @('.cmd', '.bat', '.ps1'))" in resolver
     assert "[string]$PythonPath = ''" in shared_start_info
+    assert "$effectivePythonPath" in shared_start_info
+    assert "$script:RepositoryPython" in shared_start_info
+    assert "effectivePythonPath" in shared_start_info
     assert "CODEXHUB_E2E_PYTHON" in shared_start_info
     assert "$owner.MainModule.FileName" in gateway_probe
     assert "$ExpectedPythonPath" in gateway_probe

@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+try:
+    from scripts.python_runtime_contract import require_python_313
+except ModuleNotFoundError:
+    from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 import concurrent.futures
 import dataclasses
@@ -13,12 +20,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-
-if sys.version_info < (3, 13):
-    raise RuntimeError(
-        "CodexHub requires Python 3.13 or newer. "
-        "Run .\\scripts\\codexhub-python.cmd scripts/e2e_gateway_client_matrix.py ..."
-    )
 
 import tomllib
 

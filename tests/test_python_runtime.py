@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import subprocess
@@ -16,12 +17,116 @@ CMD_LAUNCHER = ROOT / "scripts" / "codexhub-python.cmd"
 ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
 PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
+DIRECT_PYTHON_ENTRYPOINTS = (
+    "src-python/bucket_sync.py",
+    "src-python/catalog_sync.py",
+    "src-python/codex_proxy.py",
+    "src-python/config_overlay.py",
+    "src-python/global_state_repair.py",
+    "src-python/history_consolidate.py",
+    "src-python/history_overlay.py",
+    "src-python/probe_upstream_format.py",
+    "scripts/analyze_transport_failures.py",
+    "scripts/audit_issue_62_runtime_artifacts.py",
+    "scripts/beta42_evidence.py",
+    "scripts/build_issue_392_collaboration_contract.py",
+    "scripts/build_issue_62_control_manifest.py",
+    "scripts/build_issue_62_runtime_inventory.py",
+    "scripts/build_issue_64_collaboration_inventory.py",
+    "scripts/capture_issue_392_collaboration_runtime.py",
+    "scripts/capture_issue_62_live_evidence.py",
+    "scripts/check_codex_task_creation_lifecycle.py",
+    "scripts/generate_wayfinder_final_audit.py",
+    "scripts/issue_278_fixture_mcp.py",
+    "scripts/replay_official_transport.py",
+    "scripts/report_quality_gates.py",
+    "scripts/run_claude_messages_spike_smoke.py",
+    "scripts/validate_issue_278_evidence.py",
+    "scripts/validate_issue_369_matrix.py",
+    "scripts/validate_issue_63_evidence.py",
+    "tests/validate_issue_108_evidence.py",
+    "tests/validate_issue_251_evidence.py",
+)
+
 
 def _powershell() -> str:
     executable = shutil.which("pwsh") or shutil.which("powershell")
     if executable is None:
         pytest.skip("PowerShell is required for the repository Python launcher")
     return executable
+
+
+def _find_incompatible_python() -> str | None:
+    """Find a real pre-3.13 interpreter even when the wrapper changed PATH."""
+
+    candidates: list[str] = []
+    if os.name == "nt":
+        where = shutil.which("where.exe")
+        if where:
+            result = subprocess.run(
+                [where, "python"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            candidates.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
+    else:
+        python = shutil.which("python")
+        if python:
+            candidates.append(python)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(Path(candidate).resolve()).casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result = subprocess.run(
+            [candidate, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        try:
+            major, minor = (int(part) for part in result.stdout.strip().split(".", 1))
+        except (ValueError, TypeError):
+            continue
+        if (major, minor) < (3, 13):
+            return candidate
+    return None
+
+
+def _direct_entrypoints() -> list[Path]:
+    entrypoints: list[Path] = []
+    for root in (ROOT / "src-python", ROOT / "scripts", ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            if "scripts" in path.parts and "tests" in path.parts:
+                continue
+            if "tests" in path.parts and "fixtures" in path.parts:
+                continue
+            if "tests" in path.parts and path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if any(
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__"
+                and any(
+                    isinstance(comparator, ast.Constant)
+                    and comparator.value == "__main__"
+                    for comparator in node.test.comparators
+                )
+                for node in ast.walk(tree)
+            ):
+                entrypoints.append(path)
+    return sorted(entrypoints)
 
 
 def _run_script(script: Path, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -82,6 +187,17 @@ def test_repository_selector_returns_python_313_or_newer() -> None:
     ).strip()
     major, minor = (int(part) for part in version.split(".", 1))
     assert (major, minor) >= (3, 13)
+
+
+def test_every_direct_python_entrypoint_declares_the_runtime_preflight() -> None:
+    entrypoints = _direct_entrypoints()
+    assert entrypoints
+    missing = [
+        str(path.relative_to(ROOT))
+        for path in entrypoints
+        if "require_python_313" not in path.read_text(encoding="utf-8")
+    ]
+    assert missing == []
 
 
 def test_prepare_runtime_check_is_compatible_with_windows_powershell_51() -> None:
@@ -443,38 +559,36 @@ def test_cmd_launcher_preserves_separator_and_script_arguments(tmp_path: Path) -
 
 
 def test_repository_selector_rejects_an_explicit_python_311_override() -> None:
-    ambient = shutil.which("python")
+    ambient = _find_incompatible_python()
     if ambient is None:
-        pytest.skip("ambient Python executable is unavailable")
-    version = subprocess.check_output(
-        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
-        text=True,
-    ).strip()
-    major, minor = (int(part) for part in version.split(".", 1))
-    if (major, minor) >= (3, 13):
-        pytest.skip("ambient Python is already compatible")
+        pytest.skip("an incompatible Python executable is unavailable")
 
-    result = _run_script(SELECTOR, "-PrintPath", env={"CODEXHUB_PYTHON": ambient})
+    result = _run_script(
+        SELECTOR,
+        "-PrintPath",
+        env={
+            "CODEXHUB_E2E_PYTHON": "",
+            "CODEXHUB_PYTHON": ambient,
+            "CODEXHUB_PROXY_PYTHON": "",
+        },
+    )
     assert result.returncode != 0
     assert "explicit interpreter is not compatible" in result.stdout + result.stderr
 
 
 def test_repository_selector_rejects_an_incompatible_proxy_override_without_fallback() -> None:
-    ambient = shutil.which("python")
+    ambient = _find_incompatible_python()
     if ambient is None:
-        pytest.skip("ambient Python executable is unavailable")
-    version = subprocess.check_output(
-        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
-        text=True,
-    ).strip()
-    major, minor = (int(part) for part in version.split(".", 1))
-    if (major, minor) >= (3, 13):
-        pytest.skip("ambient Python is already compatible")
+        pytest.skip("an incompatible Python executable is unavailable")
 
     result = _run_script(
         SELECTOR,
         "-PrintPath",
-        env={"CODEXHUB_PYTHON": "", "CODEXHUB_PROXY_PYTHON": ambient},
+        env={
+            "CODEXHUB_E2E_PYTHON": "",
+            "CODEXHUB_PYTHON": "",
+            "CODEXHUB_PROXY_PYTHON": ambient,
+        },
     )
     assert result.returncode != 0
     assert "explicit interpreter is not compatible" in result.stdout + result.stderr
@@ -507,16 +621,9 @@ def test_fixture_launcher_rejects_an_incompatible_proxy_override(tmp_path: Path)
 
 
 def test_pytest_preflight_rejects_python_311_before_source_collection() -> None:
-    ambient = shutil.which("python")
+    ambient = _find_incompatible_python()
     if ambient is None:
-        pytest.skip("ambient Python executable is unavailable")
-    version = subprocess.check_output(
-        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
-        text=True,
-    ).strip()
-    major, minor = (int(part) for part in version.split(".", 1))
-    if (major, minor) >= (3, 13):
-        pytest.skip("ambient Python is already compatible")
+        pytest.skip("an incompatible Python executable is unavailable")
 
     result = subprocess.run(
         [ambient, "-m", "pytest", "--collect-only", "-q", "tests/test_providers_config.py"],
@@ -535,16 +642,9 @@ def test_pytest_preflight_rejects_python_311_before_source_collection() -> None:
 def test_core_python_entrypoints_reject_python_311_before_importing_313_modules(
     entrypoint: str,
 ) -> None:
-    ambient = shutil.which("python")
+    ambient = _find_incompatible_python()
     if ambient is None:
-        pytest.skip("ambient Python executable is unavailable")
-    version = subprocess.check_output(
-        [ambient, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
-        text=True,
-    ).strip()
-    major, minor = (int(part) for part in version.split(".", 1))
-    if (major, minor) >= (3, 13):
-        pytest.skip("ambient Python is already compatible")
+        pytest.skip("an incompatible Python executable is unavailable")
 
     result = subprocess.run(
         [ambient, str(ROOT / "src-python" / entrypoint), "--help"],
@@ -552,6 +652,31 @@ def test_core_python_entrypoints_reject_python_311_before_importing_313_modules(
         env={**os.environ, "PYTHONPATH": str(ROOT / "src-python")},
         capture_output=True,
         text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CodexHub requires Python 3.13 or newer" in combined
+
+
+@pytest.mark.parametrize("entrypoint", DIRECT_PYTHON_ENTRYPOINTS)
+def test_every_direct_python_entrypoint_rejects_ambient_python_311_before_work(
+    entrypoint: str,
+) -> None:
+    """No direct utility may bypass the single runtime contract."""
+
+    ambient = _find_incompatible_python()
+    if ambient is None:
+        pytest.skip("an incompatible Python executable is unavailable")
+
+    result = subprocess.run(
+        [ambient, str(ROOT / entrypoint), "--help"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src-python")},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     assert result.returncode != 0

@@ -141,8 +141,9 @@ fn is_codexhub_resource_root(path: &Path) -> bool {
 
 /// Resolve the one Python interpreter that CodexHub is allowed to execute.
 ///
-/// The repository uses Python 3.13 syntax, so accepting the first executable
-/// named `python` is not safe.  Explicit environment overrides are a hard
+/// The repository uses newer Python syntax and the product runtime contract is
+/// Python 3.13+, so accepting the first executable named `python` is not safe.
+/// Explicit environment overrides are a hard
 /// choice rather than a hint: if one is present but incompatible, return an
 /// error instead of silently falling back to another interpreter.  This is
 /// what keeps a stale 3.11 virtualenv from being selected by one child
@@ -173,8 +174,8 @@ pub(crate) fn find_python(resource_root: Option<&Path>) -> Result<PathBuf, Strin
     ))
 }
 
-/// Return host interpreters that can parse the repository's Python 3.13
-/// syntax.  This is deliberately separate from the bundled-runtime search:
+/// Return host interpreters that satisfy the repository's Python 3.13+
+/// runtime contract. This is deliberately separate from the bundled-runtime search:
 /// source tests often use a temporary resource root that contains no runtime,
 /// and must not fall back to whichever `python` happens to be first on PATH.
 pub(crate) fn host_python_candidates() -> Vec<PathBuf> {

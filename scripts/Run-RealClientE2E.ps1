@@ -873,6 +873,20 @@ function New-IsolatedStartInfo {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $processArguments = [System.Collections.Generic.List[string]]::new()
     $extension = [System.IO.Path]::GetExtension($Executable)
+    # Script-like clients are allowed to spawn Python helpers.  They do not
+    # carry a packaged interpreter of their own, so bind them to the
+    # repository-resolved 3.13 runtime even when the caller omitted
+    # -PythonPath.  Native .exe clients remain isolated from the host Python
+    # and continue to use only their own artifact runtime.
+    $effectivePythonPath = if (
+        [string]::IsNullOrWhiteSpace($PythonPath) -and
+        $extension -iin @('.cmd', '.bat', '.ps1')
+    ) {
+        $script:RepositoryPython
+    }
+    else {
+        $PythonPath
+    }
     if ($extension -iin @('.cmd', '.bat')) {
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
         $commandLine = @(
@@ -913,8 +927,8 @@ function New-IsolatedStartInfo {
         }
     }
     $basePath = $startInfo.EnvironmentVariables['PATH']
-    $pythonDirectory = if (-not [string]::IsNullOrWhiteSpace($PythonPath)) {
-        Split-Path -Parent $PythonPath
+    $pythonDirectory = if (-not [string]::IsNullOrWhiteSpace($effectivePythonPath)) {
+        Split-Path -Parent $effectivePythonPath
     }
     else {
         ''
@@ -939,14 +953,14 @@ function New-IsolatedStartInfo {
     foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
         $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
     }
-    if (-not [string]::IsNullOrWhiteSpace($PythonPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($effectivePythonPath)) {
         # Every Python-spawning child must receive the exact interpreter
         # selected for that artifact.  PATH ordering alone is not a runtime
         # contract: another virtualenv (notably Hermes 3.11) can still win in
         # a nested process.
-        $startInfo.EnvironmentVariables['CODEXHUB_E2E_PYTHON'] = $PythonPath
-        $startInfo.EnvironmentVariables['CODEXHUB_PYTHON'] = $PythonPath
-        $startInfo.EnvironmentVariables['CODEXHUB_PROXY_PYTHON'] = $PythonPath
+        $startInfo.EnvironmentVariables['CODEXHUB_E2E_PYTHON'] = $effectivePythonPath
+        $startInfo.EnvironmentVariables['CODEXHUB_PYTHON'] = $effectivePythonPath
+        $startInfo.EnvironmentVariables['CODEXHUB_PROXY_PYTHON'] = $effectivePythonPath
     }
     return $startInfo
 }
