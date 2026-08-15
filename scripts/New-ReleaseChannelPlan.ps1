@@ -5,13 +5,20 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
     [string]$Commit = "HEAD",
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot = "",
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = Split-Path -Parent $scriptRoot
+}
+. (Join-Path $scriptRoot "ReleaseChannel.ps1")
 
 if (-not $DryRun) {
     throw "This tool is plan-only; -DryRun is required and no release will be published."

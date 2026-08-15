@@ -167,6 +167,31 @@ def _run_script(script: Path, *arguments: str, env: dict[str, str] | None = None
     )
 
 
+def _run_relative_powershell_script(
+    relative_script: str, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a repository script the same way a fresh Windows shell does."""
+
+    return subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            relative_script,
+            *arguments,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+
 def _write_python_without_pytest(tmp_path: Path) -> Path:
     wrapper = tmp_path / "python-without-pytest.cmd"
     wrapper.write_text(
@@ -198,6 +223,41 @@ def test_repository_selector_returns_python_313_or_newer() -> None:
     ).strip()
     major, minor = (int(part) for part in version.split(".", 1))
     assert (major, minor) >= (3, 13)
+
+
+def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> None:
+    """Windows PowerShell 5.1 must not lose script-root defaults on -File."""
+
+    selector = _run_relative_powershell_script(
+        r".\scripts\Resolve-CodexHubPython.ps1", "-PrintPath"
+    )
+    assert selector.returncode == 0, selector.stdout + selector.stderr
+    selected = Path(selector.stdout.strip().splitlines()[-1])
+    assert selected.is_file()
+    assert "Python313" in str(selected) or "python.exe" in selected.name.lower()
+
+    launcher = _run_relative_powershell_script(
+        r".\scripts\codexhub-python.ps1",
+        "-c",
+        "import sys; print(sys.version_info[:2])",
+    )
+    assert launcher.returncode == 0, launcher.stdout + launcher.stderr
+    assert "(3, 13)" in launcher.stdout or "(3, 14)" in launcher.stdout
+
+    portable_plan = _run_relative_powershell_script(
+        r".\scripts\build-windows-portable.ps1",
+        "-Flavor",
+        "normal",
+        "-DryRun",
+    )
+    assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
+    assert '"version":"0.1.8-beta.4.2"' in portable_plan.stdout
+
+    runtime_check = _run_relative_powershell_script(
+        r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"
+    )
+    assert runtime_check.returncode == 0, runtime_check.stdout + runtime_check.stderr
+    assert "Python runtime check passed" in runtime_check.stdout
 
 
 def test_every_direct_python_entrypoint_declares_the_runtime_preflight() -> None:

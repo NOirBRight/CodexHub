@@ -1,6 +1,6 @@
 param(
-    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
-    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot '..') 'output\cli-tool-exposure-smoke'),
+    [string]$Workspace = "",
+    [string]$OutputDir = "",
     [string]$OfficialDirectModel = 'gpt-5.5',
     [string]$OfficialProxyModel = 'gpt-5.5',
     [string]$ThirdPartyModel = 'ollama-cloud/glm-5.2',
@@ -13,6 +13,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Workspace)) {
+    $Workspace = (Resolve-Path (Join-Path $scriptRoot '..')).Path
+}
+if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = Join-Path (Join-Path $scriptRoot '..') 'output\cli-tool-exposure-smoke'
+}
 
 function Resolve-CodexCommand {
     param([string]$Override = '')

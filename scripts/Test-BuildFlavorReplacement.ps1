@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot = "",
     [string]$Version = "",
     [string]$NormalInstaller = "",
     [string]$DebugInstaller = "",
@@ -13,6 +13,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = Split-Path -Parent $scriptRoot
+}
 
 if ($RunInstall -and $DryRun) {
     throw "-RunInstall and -DryRun cannot be used together."
@@ -21,7 +28,7 @@ if ($LaunchAfterInstall -and -not $RunInstall) {
     throw "-LaunchAfterInstall requires -RunInstall."
 }
 
-. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
+. (Join-Path $scriptRoot "ReleaseChannel.ps1")
 
 $flavorManifestPath = Join-Path $RepoRoot "config\build-flavors.json"
 $tauriConfigPath = Join-Path $RepoRoot "src-tauri\tauri.conf.json"

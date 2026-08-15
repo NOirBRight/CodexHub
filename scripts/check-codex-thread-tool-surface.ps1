@@ -1,9 +1,9 @@
 param(
-    [string]$SourceContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codex-0.146-source-contract.json'),
-    [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
-    [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
-    [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
-    [string]$InventoryPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\runtime-wire-inventory.json'),
+    [string]$SourceContractPath = "",
+    [string]$TracePath = "",
+    [string]$WireFixturePath = "",
+    [string]$AuditPath = "",
+    [string]$InventoryPath = "",
     [ValidateSet('identity', 'mutation', 'deletion', 'loss', 'required-set-deletion', 'required-membership-mutation')]
     [string]$ReplayCase = 'identity',
     [ValidateSet('identity', 'mutation', 'deletion', 'loss')]
@@ -11,9 +11,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$repoRoot = Split-Path -Parent $scriptRoot
+if ([string]::IsNullOrWhiteSpace($SourceContractPath)) { $SourceContractPath = Join-Path $repoRoot 'docs\evidence\issue-62\codex-0.146-source-contract.json' }
+if ([string]::IsNullOrWhiteSpace($TracePath)) { $TracePath = Join-Path $repoRoot 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json' }
+if ([string]::IsNullOrWhiteSpace($WireFixturePath)) { $WireFixturePath = Join-Path $repoRoot 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json' }
+if ([string]::IsNullOrWhiteSpace($AuditPath)) { $AuditPath = Join-Path $repoRoot 'docs\evidence\issue-62\read-only-gate-audit.json' }
+if ([string]::IsNullOrWhiteSpace($InventoryPath)) { $InventoryPath = Join-Path $repoRoot 'docs\evidence\issue-62\runtime-wire-inventory.json' }
 
-. (Join-Path $PSScriptRoot 'Resolve-CodexHubPython.ps1')
-$Python = Resolve-CodexHubPythonPath -Root (Split-Path -Parent $PSScriptRoot) -PreferBundled
+. (Join-Path $scriptRoot 'Resolve-CodexHubPython.ps1')
+$Python = Resolve-CodexHubPythonPath -Root $repoRoot -PreferBundled
 
 foreach ($path in @($SourceContractPath, $TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
@@ -362,7 +372,7 @@ foreach ($expected in $expectedFamilySchemas) {
 # committed artifact.  The PowerShell checks below remain an independent
 # reconciliation, while this call catches stale generated fields/notes that
 # a hand-maintained mirror could otherwise miss.
-$inventoryGenerator = Join-Path $PSScriptRoot 'build_issue_62_runtime_inventory.py'
+$inventoryGenerator = Join-Path $scriptRoot 'build_issue_62_runtime_inventory.py'
 $python = $Python
 try {
     $generatorOutput = & $python $inventoryGenerator `

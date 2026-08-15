@@ -1,5 +1,5 @@
 param(
-    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$Workspace = "",
     [string]$OutputDir = '',
     [string]$CodexCommand = '',
     [int]$TimeoutSeconds = 240,
@@ -25,8 +25,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $LASTEXITCODE = 0
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Workspace)) {
+    $Workspace = (Resolve-Path (Join-Path $scriptRoot '..')).Path
+}
 
-$pythonResolverPath = Join-Path $PSScriptRoot 'Resolve-CodexHubPython.ps1'
+$pythonResolverPath = Join-Path $scriptRoot 'Resolve-CodexHubPython.ps1'
 if (-not (Test-Path -LiteralPath $pythonResolverPath -PathType Leaf)) {
     $pythonResolverPath = Join-Path $Workspace 'scripts\Resolve-CodexHubPython.ps1'
 }

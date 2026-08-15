@@ -3,12 +3,19 @@ param(
     [ValidateSet("normal", "debug")]
     [string]$Flavor = "normal",
     [string]$OutputRoot = "",
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot = "",
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = Split-Path -Parent $scriptRoot
+}
 
 $repoRoot = $RepoRoot
 $frontendDir = Join-Path $repoRoot "frontend"
@@ -23,10 +30,10 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repoRoot "output\portable"
 }
 
-$generatedTauriConfigPath = (& (Join-Path $PSScriptRoot "Build-TauriConfig.ps1") -Flavor $Flavor -RepoRoot $repoRoot).Trim()
+$generatedTauriConfigPath = (& (Join-Path $scriptRoot "Build-TauriConfig.ps1") -Flavor $Flavor -RepoRoot $repoRoot).Trim()
 $generatedTauriConfig = Get-Content -Raw -LiteralPath $generatedTauriConfigPath | ConvertFrom-Json
 $version = [string]$generatedTauriConfig.version
-. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")
+. (Join-Path $scriptRoot "ReleaseChannel.ps1")
 Assert-ReleaseVersion -Version $version
 $targetRoot = Get-FlavorTargetRoot -TauriDir $tauriDir -Flavor $Flavor
 
@@ -74,7 +81,7 @@ if ($DryRun) {
     return
 }
 
-& (Join-Path $PSScriptRoot "Prepare-PythonRuntime.ps1") -RepoRoot $repoRoot
+& (Join-Path $scriptRoot "Prepare-PythonRuntime.ps1") -RepoRoot $repoRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Python runtime preparation failed with exit code $LASTEXITCODE."
 }

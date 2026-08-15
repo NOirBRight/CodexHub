@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$RepoRoot = "",
     [switch]$PrintPath,
     [switch]$PreferBundled,
     [switch]$RequirePytest
@@ -8,7 +8,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$script:CodexHubPythonScriptDirectory = $PSScriptRoot
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = (Resolve-Path (Join-Path $scriptRoot '..')).Path
+}
+$script:CodexHubPythonScriptDirectory = $scriptRoot
 
 function Test-CodexHubPython313 {
     param(
