@@ -606,6 +606,54 @@ def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:
     }
 
 
+@pytest.mark.parametrize("shell_name", ["pwsh", "powershell.exe"])
+def test_interactive_activation_accepts_relative_dot_source(shell_name: str) -> None:
+    """The documented relative activation command must bind the caller shell."""
+
+    shell = shutil.which(shell_name)
+    if shell is None:
+        pytest.skip(f"{shell_name} is required for the activation check")
+
+    command = (
+        ". .\\scripts\\Enter-CodexHubPython.ps1; "
+        'python -c "import sys; print(sys.version_info[:2]); print(sys.executable)"'
+    )
+    managed_directories = {
+        Path(sys.executable).resolve().parent,
+        (ROOT / "scripts").resolve(),
+    }
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env.pop(name, None)
+    child_env["PATH"] = os.pathsep.join(
+        entry
+        for entry in child_env["PATH"].split(os.pathsep)
+        if entry and Path(entry).resolve() not in managed_directories
+    )
+    result = subprocess.run(
+        [
+            shell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert lines[-2] in {"(3, 13)", "(3, 14)"}
+    assert Path(lines[-1]).is_file()
+
+
 def test_interactive_activation_rejects_non_dot_sourced_invocation() -> None:
     """A child PowerShell cannot change the caller's PATH silently."""
 
