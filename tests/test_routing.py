@@ -15196,16 +15196,17 @@ class RoutingTests(unittest.TestCase):
         )
         handler = FakeHandler()
 
-        status = relay_upstream_response(
-            handler,
-            response,
-            "custom-endpoint",
-            relay_fixture=RELAY_GATEWAY,
-            upstream_format="chat_completions",
-            inbound_format="responses",
-            caller_stream=True,
-            event_context=context,
-        )
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = relay_upstream_response(
+                handler,
+                response,
+                "custom-endpoint",
+                relay_fixture=RELAY_GATEWAY,
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context=context,
+            )
 
         emitted = []
         for write in handler.wfile.writes:
@@ -15213,6 +15214,12 @@ class RoutingTests(unittest.TestCase):
                 if frame.startswith(b"data: {"):
                     emitted.append(json.loads(frame.decode("utf-8").removeprefix("data: ")))
         assert status == 200
+        adapter_responses = [
+            call_args.args[0]
+            for call_args in write_event.call_args_list
+            if call_args.args and call_args.args[0] == "runtime_tool_adapter_response"
+        ]
+        assert adapter_responses == ["runtime_tool_adapter_response"]
         assert not any(
             namespace_alias in json.dumps(event) or custom_alias in json.dumps(event)
             for event in emitted

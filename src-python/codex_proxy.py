@@ -24202,6 +24202,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 )
                         except RuntimeToolCompatibilityError as exc:
                             _raise_runtime_tool_compatibility_error(exc)
+                        _write_runtime_tool_adapter_response_evidence(
+                            runtime_tool_plan,
+                            events,
+                            decoded_events,
+                            event_context,
+                            surface="sse",
+                        )
                         events = decoded_events
                     _write_adapter_event(
                         event_context,
