@@ -12,7 +12,17 @@ Set-StrictMode -Version Latest
 $requiresPytest = @($PythonArguments).Count -ge 2 -and
     $PythonArguments[0] -eq '-m' -and
     $PythonArguments[1] -eq 'pytest'
-$python = Resolve-CodexHubPythonPath -Root $RepoRoot -RequirePytest:$requiresPytest
+# Prefer the prepared bundled runtime for repository scripts.  Environment and
+# bootstrap modules must stay on the local or host 3.13 runtime because the
+# embedded application runtime intentionally does not contain venv, pip, or
+# pytest.
+$bootstrapModule = @($PythonArguments).Count -ge 2 -and
+    $PythonArguments[0] -eq '-m' -and
+    $PythonArguments[1] -in @('pip', 'venv', 'ensurepip', 'pytest')
+$python = Resolve-CodexHubPythonPath `
+    -Root $RepoRoot `
+    -PreferBundled:(-not $bootstrapModule) `
+    -RequirePytest:$requiresPytest
 
 # Keep Python subprocesses on the same interpreter as the top-level command.
 # This is especially important for Rust/Python lifecycle fixtures.

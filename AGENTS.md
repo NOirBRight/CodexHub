@@ -30,9 +30,13 @@ launcher instead:
 
 The launcher validates one compatible interpreter, exports it to child
 processes, and places that interpreter plus the repository `scripts` directory
-first on the child `PATH`. A 3.11 error is an invocation error: do not retry
-the same command with another bare Python name. Rust, packaged Gateway, and
-real-client E2E entrypoints resolve or inherit the same contract independently.
+first on the child `PATH`. When the prepared application runtime exists,
+repository scripts use that bundled Python 3.13 runtime; pytest/venv/pip
+bootstrap commands use the local or host Python 3.13 runtime that has the
+development package installed. A 3.11 error is an invocation error: do not
+retry the same command with another bare Python name. Rust, packaged Gateway,
+and real-client E2E entrypoints resolve or inherit the same contract
+independently.
 Direct utilities under `src-python/`, `scripts/`, and the checked-in evidence
 validators under `tests/` also run the canonical preflight in
 `src-python/python_runtime_contract.py`; a direct ambient-3.11 launch must

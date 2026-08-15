@@ -235,7 +235,9 @@ cd ..
 Shell 中直接使用 `python` 或 `pytest`；测试和脚本统一使用
 `scripts\codexhub-python.cmd`。它会解析并校验同一个解释器、导出精确路径，
 并把该解释器及仓库的 `scripts` 目录置于子进程 `PATH` 首位，避免嵌套进程
-回退到 Python 3.11。`scripts\pytest.cmd` 是匹配的 pytest 转发入口。如需在
+回退到 Python 3.11。准备好的应用运行时存在时，普通脚本优先使用其中的
+Python；pytest/venv/pip 引导命令则使用已校验且安装了开发依赖的本地或主机
+Python 3.13 环境。`scripts\pytest.cmd` 是匹配的 pytest 转发入口。如需在
 当前 PowerShell 会话中直接使用这些命令，可一次性执行
 `. .\scripts\Enter-CodexHubPython.ps1`。也可以通过 `CODEXHUB_PYTHON` 或
 `CODEXHUB_PROXY_PYTHON` 显式指定 Python 3.13+ 可执行文件。测试命令还会

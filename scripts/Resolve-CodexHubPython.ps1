@@ -2,6 +2,7 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
     [switch]$PrintPath,
+    [switch]$PreferBundled,
     [switch]$RequirePytest
 )
 
@@ -267,7 +268,7 @@ function Resolve-CodexHubPythonPath {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $resolved = Resolve-CodexHubPythonPath -Root $RepoRoot -RequirePytest:$RequirePytest
+    $resolved = Resolve-CodexHubPythonPath -Root $RepoRoot -PreferBundled:$PreferBundled -RequirePytest:$RequirePytest
     if ($PrintPath) {
         Write-Output $resolved
     }

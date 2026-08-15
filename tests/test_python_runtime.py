@@ -321,6 +321,33 @@ def test_repository_launcher_can_import_python_313_syntax_source() -> None:
     assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout
 
 
+def test_repository_launcher_prefers_the_prepared_bundled_runtime_for_tools() -> None:
+    bundled = ROOT / "src-tauri" / "resources" / "python" / "python.exe"
+    if not bundled.is_file():
+        pytest.skip("the prepared bundled Python runtime is unavailable")
+
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env.pop(name, None)
+    result = subprocess.run(
+        [
+            str(CMD_LAUNCHER),
+            "-c",
+            "import sys; print(sys.executable)",
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    selected = Path(result.stdout.strip().splitlines()[-1]).resolve()
+    assert selected == bundled.resolve()
+
+
 def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
     result = _run_script(
         LAUNCHER,
