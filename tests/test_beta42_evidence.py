@@ -101,6 +101,51 @@ def test_stable_alias_summary_requires_identical_replays_and_cache_key() -> None
         evidence.validate_summary(_summary(cases=[case]))
 
 
+def _deferred_case() -> dict[str, object]:
+    case = _case("deferred-core-bounded", outcome="passed")
+    case.update(
+        {
+            "caller_namespace_child_count": 249,
+            "deferred_final_tool_count": 8,
+            "deferred_baseline_final_tool_count": 8,
+            "deferred_namespace_count": 0,
+            "eager_final_tool_count": 256,
+            "eager_baseline_final_tool_count": 7,
+            "eager_growth_exact": True,
+            "eager_namespace_count": 0,
+            "eager_namespace_expected_count": 249,
+            "eager_namespace_alias_count": 249,
+            "eager_namespace_coverage_count": 249,
+            "eager_namespace_coverage_exact": True,
+            "official_namespace_count": 1,
+            "official_alias_count": 0,
+            "official_tool_surface_equal": True,
+            "official_byte_identical": True,
+        }
+    )
+    return case
+
+
+def test_deferred_core_case_requires_bounded_eager_and_official_controls() -> None:
+    case = _deferred_case()
+    assert evidence.validate_summary(_summary(cases=[case]))["case_count"] == len(evidence.CASE_IDS)
+
+    invalid_cases = (
+        ("caller_namespace_child_count", 248, "deferred_caller_namespace_child_count_invalid"),
+        ("deferred_baseline_final_tool_count", 7, "deferred_surface_not_bounded"),
+        ("deferred_namespace_count", 1, "deferred_namespace_expanded"),
+        ("eager_final_tool_count", 255, "eager_growth_invalid"),
+        ("eager_namespace_coverage_count", 248, "eager_namespace_coverage_count_invalid"),
+        ("official_alias_count", 1, "official_alias_control_invalid"),
+        ("official_byte_identical", False, "official_passthrough_not_byte_identical"),
+    )
+    for field, value, error_code in invalid_cases:
+        invalid = _deferred_case()
+        invalid[field] = value
+        with pytest.raises(evidence.EvidenceValidationError, match=error_code):
+            evidence.validate_summary(_summary(cases=[invalid]))
+
+
 def test_external_v2_summary_is_gateway_adapter_evidence_not_native_capability() -> None:
     case = _case("external-v2-lifecycle", outcome="passed", model="glm-5.2")
     case.update(

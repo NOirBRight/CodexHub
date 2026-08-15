@@ -62,6 +62,7 @@ EXTERNAL_V2_LIFECYCLE = (
 EXTERNAL_V2_TOOL_NAMES = tuple(dict.fromkeys(EXTERNAL_V2_LIFECYCLE))
 EXTERNAL_V2_ENDPOINT = "https://ollama.com/v1"
 UPSTREAM_BLOCKED = "blocked_upstream_provider_aware_delivery"
+DEFERRED_NAMESPACE_CHILD_COUNT = 249
 
 # These names are forbidden anywhere in retained evidence. The runner may
 # keep them in its private working directory, but the release summary must not
@@ -183,6 +184,76 @@ def _validate_replay_hashes(case: Mapping[str, Any]) -> None:
     _require(len(set(upstream_hashes)) == 1, "upstream_body_not_stable")
     _require(len(set(tuple(alias_list) for alias_list in aliases)) == 1, "aliases_not_stable")
     _require(case.get("prompt_cache_key_preserved") is True, "prompt_cache_key_not_preserved")
+
+
+def _validate_deferred_core_bounded(case: Mapping[str, Any]) -> None:
+    """Require independent evidence for the deferred/eager/Official controls."""
+
+    caller_child_count = case.get("caller_namespace_child_count")
+    _require(
+        type(caller_child_count) is int
+        and caller_child_count == DEFERRED_NAMESPACE_CHILD_COUNT,
+        "deferred_caller_namespace_child_count_invalid",
+    )
+
+    deferred_final = case.get("deferred_final_tool_count")
+    deferred_baseline = case.get("deferred_baseline_final_tool_count")
+    _require(
+        type(deferred_final) is int
+        and deferred_final >= 0
+        and type(deferred_baseline) is int
+        and deferred_baseline >= 0,
+        "deferred_tool_count_invalid",
+    )
+    _require(deferred_final == deferred_baseline, "deferred_surface_not_bounded")
+    deferred_namespace_count = case.get("deferred_namespace_count")
+    _require(
+        type(deferred_namespace_count) is int and deferred_namespace_count == 0,
+        "deferred_namespace_expanded",
+    )
+
+    eager_final = case.get("eager_final_tool_count")
+    eager_baseline = case.get("eager_baseline_final_tool_count")
+    _require(
+        type(eager_final) is int
+        and eager_final >= 0
+        and type(eager_baseline) is int
+        and eager_baseline >= 0,
+        "eager_tool_count_invalid",
+    )
+    _require(
+        eager_final == eager_baseline + DEFERRED_NAMESPACE_CHILD_COUNT,
+        "eager_growth_invalid",
+    )
+    _require(case.get("eager_growth_exact") is True, "eager_growth_evidence_missing")
+    eager_namespace_count = case.get("eager_namespace_count")
+    _require(
+        type(eager_namespace_count) is int and eager_namespace_count == 0,
+        "eager_namespace_not_expanded",
+    )
+    for field in (
+        "eager_namespace_expected_count",
+        "eager_namespace_alias_count",
+        "eager_namespace_coverage_count",
+    ):
+        _require(
+            type(case.get(field)) is int and case.get(field) == DEFERRED_NAMESPACE_CHILD_COUNT,
+            f"{field}_invalid",
+        )
+    _require(case.get("eager_namespace_coverage_exact") is True, "eager_coverage_evidence_missing")
+
+    official_namespace_count = case.get("official_namespace_count")
+    official_alias_count = case.get("official_alias_count")
+    _require(
+        type(official_namespace_count) is int and official_namespace_count == 1,
+        "official_namespace_control_invalid",
+    )
+    _require(
+        type(official_alias_count) is int and official_alias_count == 0,
+        "official_alias_control_invalid",
+    )
+    _require(case.get("official_tool_surface_equal") is True, "official_surface_control_invalid")
+    _require(case.get("official_byte_identical") is True, "official_passthrough_not_byte_identical")
 
 
 def _validate_external_v2(case: Mapping[str, Any]) -> None:
@@ -344,6 +415,8 @@ def validate_summary(
                 _require(_is_hash(case[hash_key]), "case_hash_invalid")
         if case_id == "stable-tool-alias-replay" and case["outcome"] == "passed":
             _validate_replay_hashes(case)
+        if case_id == "deferred-core-bounded" and case["outcome"] == "passed":
+            _validate_deferred_core_bounded(case)
         if case_id == "external-v2-lifecycle" and case["outcome"] == "passed":
             _validate_external_v2(case)
 
@@ -387,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "CASE_IDS",
     "CLI_VERSION",
+    "DEFERRED_NAMESPACE_CHILD_COUNT",
     "EXTERNAL_V2_LIFECYCLE",
     "EXTERNAL_V2_ENDPOINT",
     "EXTERNAL_V2_TOOL_NAMES",
