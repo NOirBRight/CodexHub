@@ -8414,21 +8414,44 @@ def _is_legacy_native_worker_spawn_call(
     the historical namespace/name and argument shape may bypass the new
     sidecar contract.
     """
+    # The first native V1 Responses history used two equivalent wire shapes:
+    # the namespace/name form and the flattened ``multi_agent_v1__spawn_agent``
+    # form.  The CLI also omitted the generated item ``id`` when replaying old
+    # history.  Keep those variants explicit instead of treating every
+    # unbound spawn call as legacy.
     item_fields = set(item)
-    if item_fields not in (
-        LEGACY_NATIVE_WORKER_SPAWN_FIELDS,
-        LEGACY_NATIVE_WORKER_SPAWN_FIELDS | {LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
+    allowed_fields = {
+        "type",
+        "call_id",
+        "name",
+        "arguments",
+        "namespace",
+        "id",
+        LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
+    }
+    if not item_fields.issubset(allowed_fields):
+        return False
+    if item_fields - {"type", "call_id", "name", "arguments"} not in (
+        set(),
+        {"namespace"},
+        {"id"},
+        {"namespace", "id"},
+        {"id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
+        {"namespace", "id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
     ):
         return False
     if (
         item.get("type") != "function_call"
-        or not isinstance(item.get("id"), str)
-        or not item.get("id")
         or not isinstance(item.get("call_id"), str)
         or not item.get("call_id")
     ):
         return False
+    has_id = "id" in item
+    if has_id and (not isinstance(item.get("id"), str) or not item.get("id")):
+        return False
     if LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD in item:
+        if not has_id:
+            return False
         metadata = item.get(LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD)
         if (
             not isinstance(metadata, Mapping)
@@ -8437,7 +8460,12 @@ def _is_legacy_native_worker_spawn_call(
             or not metadata.get("turn_id")
         ):
             return False
-    if item.get("namespace") != "multi_agent_v1" or item.get("name") != "spawn_agent":
+    namespace = item.get("namespace")
+    name = item.get("name")
+    if not (
+        (namespace == "multi_agent_v1" and name == "spawn_agent")
+        or (namespace is None and name == "multi_agent_v1__spawn_agent")
+    ):
         return False
     if not isinstance(arguments, Mapping):
         return False
@@ -16129,6 +16157,10 @@ def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -
             renamed[f"{prefix}_prefix_bytes"] = value
         elif key == "prompt_cache_key_hash":
             renamed[f"{prefix}_prompt_cache_key_hash"] = value
+        elif key == "body_bytes":
+            renamed[f"{prefix}_body_bytes"] = value
+        elif key == "body_sha256":
+            renamed[f"{prefix}_body_sha256"] = value
     return renamed
 
 

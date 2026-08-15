@@ -1,5 +1,6 @@
 import copy
 import gc
+import hashlib
 import os
 import gzip
 import io
@@ -4476,6 +4477,10 @@ class RoutingTests(unittest.TestCase):
                 codex_home=codex_proxy.RUNTIME_CODEX_DIR,
             )["request_body_hmac"]
         )
+        first_body_observability = codex_proxy.proxy_telemetry.enrich_request_observability(
+            body=responses_request.data,
+            codex_home=codex_proxy.RUNTIME_CODEX_DIR,
+        )
         final_body_hmac = (
             codex_proxy.proxy_telemetry.enrich_request_observability(
                 body=chat_request.data,
@@ -4486,6 +4491,15 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(
             request_start["upstream_request_body_hmac"],
             first_body_hmac,
+        )
+        self.assertEqual(request_start["upstream_body_bytes"], len(responses_request.data))
+        self.assertEqual(
+            request_start["upstream_body_sha256"],
+            hashlib.sha256(responses_request.data).hexdigest(),
+        )
+        self.assertEqual(
+            request_start["upstream_body_sha256"],
+            first_body_observability["body_sha256"],
         )
         self.assertEqual(
             fallback["upstream_request_body_hmac"],
@@ -26251,6 +26265,51 @@ Execution constraints:
             )
 
         self.assertEqual(json.loads(normalized)["input"][1], spawn_output)
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="legacy_native_spawn",
+        )
+
+    def test_external_worker_binding_history_accepts_idless_flat_native_spawn(self):
+        """Replay the old CLI shape that omitted the generated item id."""
+
+        call_id = "legacy-native-flat-idless"
+        spawn_call = {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": "multi_agent_v1__spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+        }
+        spawn_output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"agent_id": "legacy-agent", "nickname": None}),
+        }
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized = compatible_request_body(
+                self._worker_replay_body([spawn_call, spawn_output]),
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-next-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        normalized_input = json.loads(normalized)["input"]
+        self.assertEqual(normalized_input[0]["name"], "multi_agent_v1__spawn_agent")
+        self.assertNotIn("namespace", normalized_input[0])
+        self.assertNotIn("id", normalized_input[0])
+        self.assertEqual(normalized_input[1], spawn_output)
         write_event.assert_any_call(
             "worker_effective_binding_validated",
             outcome="accepted",
