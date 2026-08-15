@@ -13,17 +13,11 @@ set "CONDA_PREFIX="
 set "CONDA_DEFAULT_ENV="
 set "CONDA_PROMPT_MODIFIER="
 set "PIPENV_ACTIVE="
-rem Prefer the prepared 3.13.14 runtime for repository scripts.  Environment
-rem/bootstrap modules must stay on the local or host 3.13 runtime because the
-rem embedded application runtime intentionally does not contain venv, pip, or
-rem pytest.
-set "CODEXHUB_RESOLVER_OPTIONS=-PreferBundled"
-if /I "%~1"=="-m" (
-  if /I "%~2"=="pytest" set "CODEXHUB_RESOLVER_OPTIONS=-RequirePytest"
-  if /I "%~2"=="pip" set "CODEXHUB_RESOLVER_OPTIONS="
-  if /I "%~2"=="venv" set "CODEXHUB_RESOLVER_OPTIONS="
-  if /I "%~2"=="ensurepip" set "CODEXHUB_RESOLVER_OPTIONS="
-)
+rem This is the source/development launcher, not the packaged-runtime
+rem launcher.  Prefer the checkout/host 3.13 environment so scripts that
+rem invoke pytest through sys.executable keep their development modules.
+rem Production and packaging entrypoints opt into -PreferBundled directly.
+if /I "%~1"=="-m" if /I "%~2"=="pytest" set "CODEXHUB_RESOLVER_OPTIONS=-RequirePytest"
 where pwsh.exe >nul 2>&1
 if %errorlevel% equ 0 (
   for /f "usebackq delims=" %%P in (`pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0Resolve-CodexHubPython.ps1" -RepoRoot "%~dp0.." -PrintPath %CODEXHUB_RESOLVER_OPTIONS%`) do set "CODEXHUB_RESOLVED_PYTHON=%%P"

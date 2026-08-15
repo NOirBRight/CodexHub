@@ -26,11 +26,12 @@ interpreter before running anything, and exports the selected path through
 processes. It also replaces ambient `PYTHONPATH` with this checkout's
 `src-python` import root. These are hard bindings; when `CODEXHUB_E2E_PYTHON` is present, it
 takes precedence at nested resolver/Rust boundaries so an isolated E2E child
-cannot select another host interpreter. Gateway, packaging, E2E PowerShell, and
-the repository script launcher use the same resolver in bundled-preferred mode;
-pytest/venv/pip bootstrap commands deliberately use the local or host 3.13
-environment because the embedded application runtime does not contain those
-development modules. Rust applies the same 3.13 probe to
+cannot select another host interpreter. Gateway, packaging, and E2E PowerShell
+entrypoints use the resolver in bundled-preferred mode. The repository source
+launcher deliberately uses the checkout or host 3.13 environment for every
+script, not the embedded runtime: a script can invoke pytest through
+`sys.executable`, while the embedded application runtime intentionally does
+not contain development modules. Rust applies the same 3.13 probe to
 configured, bundled, checkout, and host candidates. An explicit override is a
 hard choice: an incompatible `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON`
 fails closed and never falls through to another interpreter. A 3.11 ambient

@@ -290,6 +290,24 @@ def test_repository_selector_resolves_under_host_runtime_selector_contamination(
     assert (major, minor) >= (3, 13)
 
 
+def test_repository_selector_can_explicitly_select_the_bundled_runtime() -> None:
+    bundled = ROOT / "src-tauri" / "resources" / "python" / "python.exe"
+    if not bundled.is_file():
+        pytest.skip("the prepared bundled Python runtime is unavailable")
+
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env[name] = ""
+    result = _run_script(
+        SELECTOR,
+        "-PrintPath",
+        "-PreferBundled",
+        env=child_env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(result.stdout.strip().splitlines()[-1]).resolve() == bundled.resolve()
+
+
 def test_repository_selector_honors_the_e2e_runtime_binding(tmp_path: Path) -> None:
     selected = _write_python_without_pytest(tmp_path)
     conflicting = tmp_path / "conflicting-python.cmd"
@@ -321,10 +339,8 @@ def test_repository_launcher_can_import_python_313_syntax_source() -> None:
     assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout
 
 
-def test_repository_launcher_prefers_the_prepared_bundled_runtime_for_tools() -> None:
+def test_repository_launcher_uses_the_development_runtime_for_tools() -> None:
     bundled = ROOT / "src-tauri" / "resources" / "python" / "python.exe"
-    if not bundled.is_file():
-        pytest.skip("the prepared bundled Python runtime is unavailable")
 
     child_env = os.environ.copy()
     for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PYTHON", "CODEXHUB_PROXY_PYTHON"):
@@ -333,7 +349,7 @@ def test_repository_launcher_prefers_the_prepared_bundled_runtime_for_tools() ->
         [
             str(CMD_LAUNCHER),
             "-c",
-            "import sys; print(sys.executable)",
+            "import pytest, sys; print(sys.executable); print(pytest.__version__)",
         ],
         cwd=ROOT,
         env=child_env,
@@ -344,8 +360,37 @@ def test_repository_launcher_prefers_the_prepared_bundled_runtime_for_tools() ->
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    selected = Path(result.stdout.strip().splitlines()[-1]).resolve()
-    assert selected == bundled.resolve()
+    selected = Path(result.stdout.strip().splitlines()[-2]).resolve()
+    if bundled.is_file():
+        assert selected != bundled.resolve()
+
+
+def test_repository_launcher_keeps_sys_executable_pytest_children_on_development_runtime(
+    tmp_path: Path,
+) -> None:
+    """A script invoking ``sys.executable -m pytest`` must not get the embedded runtime."""
+
+    script = tmp_path / "pytest-child.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "result = subprocess.run([sys.executable, '-m', 'pytest', '--version'], "
+        "capture_output=True, text=True)\n"
+        "print(result.stdout or result.stderr, end='')\n"
+        "raise SystemExit(result.returncode)\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(CMD_LAUNCHER), str(script)],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pytest" in result.stdout
 
 
 def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
