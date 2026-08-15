@@ -606,6 +606,16 @@ def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:
     }
 
 
+def test_interactive_activation_rejects_non_dot_sourced_invocation() -> None:
+    """A child PowerShell cannot change the caller's PATH silently."""
+
+    result = _run_script(ACTIVATION)
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "dot-source" in combined
+    assert "scripts\\Enter-CodexHubPython.ps1" in combined
+
+
 def test_repository_launcher_preserves_a_script_path_as_the_first_argument(
     tmp_path: Path,
 ) -> None:

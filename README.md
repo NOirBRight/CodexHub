@@ -244,7 +244,7 @@ Production, packaging, and Gateway entrypoints opt into the embedded runtime
 explicitly, and it intentionally does not contain development modules.
 `scripts\pytest.cmd` is the matching pytest shim. For a PowerShell session
 where direct commands are desired, dot-source
-`.\scripts\Enter-CodexHubPython.ps1` once. `CODEXHUB_PYTHON` or
+`. .\scripts\Enter-CodexHubPython.ps1` once. `CODEXHUB_PYTHON` or
 `CODEXHUB_PROXY_PYTHON` may explicitly point to a Python 3.13+ executable.
 Test commands also verify that pytest is installed in that exact interpreter
 and fail with an install command instead of falling through to another 3.13

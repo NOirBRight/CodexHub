@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+if ($MyInvocation.InvocationName -ne '.') {
+    throw 'Enter-CodexHubPython.ps1 must be dot-sourced so it can update the caller shell: . .\scripts\Enter-CodexHubPython.ps1'
+}
+
 . (Join-Path $PSScriptRoot 'Resolve-CodexHubPython.ps1')
 $python = Resolve-CodexHubPythonPath -Root $RepoRoot
 
