@@ -495,8 +495,8 @@ def test_release_scripts_share_flavor_validation_helpers():
     manifest_script = (ROOT / "scripts" / "Test-ReleaseManifest.ps1").read_text(encoding="utf-8-sig")
     helpers = (ROOT / "scripts" / "ReleaseChannel.ps1").read_text(encoding="utf-8-sig")
 
-    for script in (plan_script, manifest_script):
-        assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in script
+    assert '. (Join-Path $scriptRoot "ReleaseChannel.ps1")' in plan_script
+    assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in manifest_script
     assert "Test-ReleaseVersionIsPrerelease" in plan_script
     assert "Assert-ReleaseVersion" in manifest_script
     assert "Get-ReleaseArtifactName" in helpers
