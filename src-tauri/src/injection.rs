@@ -307,7 +307,10 @@ pub(crate) fn inject(
         None => false,
     };
 
-    providers.insert(route_key, injected_entry(descriptor, request));
+    providers.insert(
+        route_key,
+        injected_entry(descriptor, &request.base_url, &request.models),
+    );
 
     // Never touch the activation key: read-back only, asserted here so a
     // future edit to this engine fails loudly instead of silently flipping
@@ -466,6 +469,208 @@ pub(crate) fn activation_state(
         .map(str::to_owned))
 }
 
+/// What readback expects the Injected Block to contain: the local Gateway
+/// base URL and the enabled-model projection from the last inject/republish.
+/// Deliberately carries NO credential value — readback validates the
+/// credential reference and key presence only, so no code path here can ever
+/// observe, compare, or report a secret (MaskedSecret discipline extended to
+/// readback evidence).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadbackExpectation {
+    pub base_url: String,
+    pub models: Vec<String>,
+}
+
+/// Readback verdict for one injected client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadbackStatus {
+    /// Injected Block present and fingerprint-identical to the expectation.
+    Clean,
+    /// Block absent or fingerprint-mismatched; `drift_details` explains
+    /// exactly which owned piece diverged and how to repair it.
+    Drift,
+}
+
+/// Truthful readback report (#433). Contains no credential values; safe to
+/// log, surface in the UI, and attach to evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadbackReport {
+    pub status: ReadbackStatus,
+    pub block_present: bool,
+    pub credential_key_present: bool,
+    pub expected_fingerprint: String,
+    pub actual_fingerprint: Option<String>,
+    /// The client's global default-model selection. INFORMATIONAL ONLY
+    /// (Q1): never an error condition, never part of the fingerprint.
+    pub activation: Option<String>,
+    /// Actionable, field-level drift explanations; empty when Clean.
+    pub drift_details: Vec<String>,
+}
+
+/// Fingerprint the Injected Block must have for `base_url` + `models`.
+/// Computed through the same canonical entry builder and hasher as inject,
+/// so expectation and actual can never disagree about canonicalization.
+pub(crate) fn expected_block_fingerprint(
+    descriptor: &InjectionDescriptor,
+    base_url: &str,
+    models: &[String],
+) -> String {
+    let entry = injected_entry(descriptor, base_url, models);
+    block_fingerprint_value(descriptor, Some(&entry), true)
+}
+
+/// Block-fingerprint readback for injected clients (#433): validates ONLY
+/// the Injected Block (presence + fingerprint) plus the single credential
+/// key's presence. Foreign providers, settings, and credential keys are
+/// never validated and never reported as drift; the activation key is read
+/// back as informational state, never as an error. Legacy takeover clients
+/// keep byte-compare readback in `gateway.rs` until their migration phase.
+pub(crate) fn verify_readback(
+    client_root: &Path,
+    descriptor: &InjectionDescriptor,
+    expectation: &ReadbackExpectation,
+) -> Result<ReadbackReport, String> {
+    require_yaml(descriptor)?;
+
+    let expected = expected_block_fingerprint(
+        descriptor,
+        &expectation.base_url,
+        &expectation.models,
+    );
+    let actual = block_fingerprint(client_root, descriptor)?;
+    let activation = activation_state(client_root, descriptor)?;
+
+    let config_path = descriptor.config_file.resolve(client_root);
+    let entry = if config_path.exists() {
+        let config = read_yaml_mapping(&config_path)?;
+        read_path(&config, &descriptor.injection_point()).cloned()
+    } else {
+        None
+    };
+    let credential_path = descriptor.credential.file.resolve(client_root);
+    let credential_key_present = if credential_path.exists() {
+        read_yaml_mapping(&credential_path)?
+            .get(Value::String(descriptor.credential.key.to_owned()))
+            .is_some()
+    } else {
+        false
+    };
+
+    let block_present = entry.is_some();
+    let clean = actual.as_deref() == Some(expected.as_str());
+    let drift_details = if clean {
+        Vec::new()
+    } else {
+        field_drift_details(
+            descriptor,
+            entry.as_ref(),
+            expectation,
+            credential_key_present,
+        )
+    };
+
+    Ok(ReadbackReport {
+        status: if clean {
+            ReadbackStatus::Clean
+        } else {
+            ReadbackStatus::Drift
+        },
+        block_present,
+        credential_key_present,
+        expected_fingerprint: expected,
+        actual_fingerprint: actual,
+        activation,
+        drift_details,
+    })
+}
+
+/// Field-level drift explanation. Only CodexHub-owned fields are compared,
+/// and the credential contributes its env-var NAME and key PRESENCE — never
+/// a value — so no detail string can contain a secret.
+fn field_drift_details(
+    descriptor: &InjectionDescriptor,
+    entry: Option<&Value>,
+    expectation: &ReadbackExpectation,
+    credential_key_present: bool,
+) -> Vec<String> {
+    let template = descriptor.entry_template;
+    let injection_point = descriptor.injection_point().join(".");
+    let mut details = Vec::new();
+
+    let Some(entry) = entry else {
+        details.push(format!(
+            "injected block absent: no '{}' provider entry at {injection_point}; reconnect the client to re-inject",
+            descriptor.route_key
+        ));
+        if !credential_key_present {
+            details.push(format!(
+                "credential key '{}' missing from {}; reconnect the client to rewrite it",
+                descriptor.credential.key, descriptor.credential.file.relative_path
+            ));
+        }
+        return details;
+    };
+
+    let compare_str = |label: &str, found: Option<&str>, expected: &str, details: &mut Vec<String>| {
+        let found = found.unwrap_or("");
+        if found != expected {
+            details.push(format!(
+                "provider entry '{}' {label}: found '{found}', expected '{expected}'; re-apply to restore",
+                descriptor.route_key
+            ));
+        }
+    };
+    compare_str(
+        "api",
+        entry.get("api").and_then(Value::as_str),
+        template.api,
+        &mut details,
+    );
+    compare_str(
+        template.base_url_key,
+        entry.get(template.base_url_key).and_then(Value::as_str),
+        &expectation.base_url,
+        &mut details,
+    );
+    compare_str(
+        template.credential_ref_key,
+        entry.get(template.credential_ref_key).and_then(Value::as_str),
+        descriptor.credential.env_var,
+        &mut details,
+    );
+
+    let mut found_models: Vec<&str> = entry
+        .get(template.models_key)
+        .and_then(Value::as_sequence)
+        .map(|sequence| {
+            sequence
+                .iter()
+                .filter_map(|model| model.get(template.model_id_key).and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    found_models.sort_unstable();
+    let mut expected_models: Vec<&str> = expectation.models.iter().map(String::as_str).collect();
+    expected_models.sort_unstable();
+    if found_models != expected_models {
+        details.push(format!(
+            "provider entry '{}' {}: found [{}], expected [{}]; re-apply to re-project the enabled model set",
+            descriptor.route_key,
+            template.models_key,
+            found_models.join(", "),
+            expected_models.join(", ")
+        ));
+    }
+
+    if !credential_key_present {
+        details.push(format!(
+            "credential key '{}' missing from {}; re-apply to rewrite it",
+            descriptor.credential.key, descriptor.credential.file.relative_path
+        ));
+    }
+    details
+}
+
 fn require_yaml(descriptor: &InjectionDescriptor) -> Result<(), String> {
     for file in [descriptor.config_file, descriptor.credential.file] {
         if file.format != ConfigFormat::Yaml {
@@ -479,8 +684,9 @@ fn require_yaml(descriptor: &InjectionDescriptor) -> Result<(), String> {
 }
 
 /// Canonical injected entry: api, base URL, credential env-var reference,
-/// and the full enabled-model projection.
-fn injected_entry(descriptor: &InjectionDescriptor, request: &InjectionRequest) -> Value {
+/// and the full enabled-model projection. Deliberately takes no credential
+/// value: the entry only ever references the bare env-var name.
+fn injected_entry(descriptor: &InjectionDescriptor, base_url: &str, models: &[String]) -> Value {
     let template = descriptor.entry_template;
     let mut entry = Mapping::new();
     entry.insert(
@@ -489,14 +695,13 @@ fn injected_entry(descriptor: &InjectionDescriptor, request: &InjectionRequest) 
     );
     entry.insert(
         Value::String(template.base_url_key.to_owned()),
-        Value::String(request.base_url.clone()),
+        Value::String(base_url.to_owned()),
     );
     entry.insert(
         Value::String(template.credential_ref_key.to_owned()),
         Value::String(descriptor.credential.env_var.to_owned()),
     );
-    let models = request
-        .models
+    let models = models
         .iter()
         .map(|id| {
             let mut model = Mapping::new();
@@ -1138,5 +1343,237 @@ mod tests {
             None,
             "injection must not activate"
         );
+    }
+
+    // --- block-fingerprint readback (#433) ---
+
+    fn expectation() -> ReadbackExpectation {
+        ReadbackExpectation {
+            base_url: "http://127.0.0.1:9109/v1".to_owned(),
+            models: vec!["gpt-5.5".to_owned(), "gpt-5.5-codex".to_owned()],
+        }
+    }
+
+    #[test]
+    fn readback_is_clean_right_after_inject() {
+        let root = dsh_root("codexhub-readback-clean");
+        let descriptor = dsh_descriptor();
+        let outcome = inject(&root, &descriptor, &request()).unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Clean);
+        assert!(report.block_present);
+        assert!(report.credential_key_present);
+        assert_eq!(report.actual_fingerprint.as_deref(), Some(outcome.fingerprint.as_str()));
+        assert_eq!(
+            report.expected_fingerprint,
+            expected_block_fingerprint(&descriptor, "http://127.0.0.1:9109/v1", &expectation().models)
+        );
+        assert_eq!(report.actual_fingerprint, Some(report.expected_fingerprint.clone()));
+        assert!(report.drift_details.is_empty(), "clean report must have no drift details");
+        assert_eq!(report.activation, None);
+    }
+
+    #[test]
+    fn readback_ignores_foreign_provider_and_credential_churn() {
+        let root = dsh_root("codexhub-readback-foreign");
+        let descriptor = dsh_descriptor();
+        fs::write(
+            root.join("settings.yaml"),
+            concat!(
+                "llm-pi-ai:\n",
+                "  providers:\n",
+                "    anthropic:\n",
+                "      api: anthropic-messages\n",
+                "      baseURL: https://api.anthropic.example\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".credentials.yaml"),
+            "OPENAI_API_KEY: sk-user-owned-123\n",
+        )
+        .unwrap();
+        inject(&root, &descriptor, &request()).unwrap();
+
+        // User rewrites their own providers and rotates their own keys.
+        fs::write(
+            root.join("settings.yaml"),
+            concat!(
+                "agent-default-model: openai/gpt-5\n",
+                "llm-pi-ai:\n",
+                "  providers:\n",
+                "    openai:\n",
+                "      api: openai-responses\n",
+                "      baseURL: https://api.openai.example/v1\n",
+                "    codexhub:\n",
+                "      api: openai-responses\n",
+                "      baseURL: http://127.0.0.1:9109/v1\n",
+                "      apiKeyEnv: CODEXHUB_API_KEY\n",
+                "      models:\n",
+                "        - id: gpt-5.5-codex\n",
+                "        - id: gpt-5.5\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".credentials.yaml"),
+            concat!(
+                "ANTHROPIC_API_KEY: sk-ant-user-owned\n",
+                "CODEXHUB_API_KEY: cx-test-key-0000-SECRET\n"
+            ),
+        )
+        .unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(
+            report.status,
+            ReadbackStatus::Clean,
+            "foreign churn must never read as drift: {:?}",
+            report.drift_details
+        );
+        // The user's own activation choice is surfaced informationally.
+        assert_eq!(report.activation, Some("openai/gpt-5".to_owned()));
+    }
+
+    #[test]
+    fn readback_reports_deleted_block_with_actionable_detail() {
+        let root = dsh_root("codexhub-readback-deleted");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        fs::write(root.join("settings.yaml"), "llm-pi-ai:\n  providers: {}\n").unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Drift);
+        assert!(!report.block_present);
+        assert!(report.credential_key_present, "credential survives; only the entry was deleted");
+        assert_eq!(report.actual_fingerprint, None);
+        let detail = report.drift_details.join("\n");
+        assert!(detail.contains("llm-pi-ai.providers.codexhub"), "detail must name the injection point: {detail}");
+        assert!(detail.contains("re-inject"), "detail must be actionable: {detail}");
+    }
+
+    #[test]
+    fn readback_reports_missing_config_file_as_absent_block() {
+        let root = dsh_root("codexhub-readback-nofile");
+        let descriptor = dsh_descriptor();
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Drift);
+        assert!(!report.block_present);
+        assert!(!report.credential_key_present);
+        assert!(report.drift_details.iter().any(|detail| detail.contains("credential key 'CODEXHUB_API_KEY' missing")));
+    }
+
+    #[test]
+    fn readback_reports_tampered_fields_individually() {
+        let root = dsh_root("codexhub-readback-tampered");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        fs::write(
+            root.join("settings.yaml"),
+            concat!(
+                "llm-pi-ai:\n",
+                "  providers:\n",
+                "    codexhub:\n",
+                "      api: openai-completions\n",
+                "      baseURL: http://127.0.0.1:9999/v1\n",
+                "      apiKeyEnv: TAMPERED_VAR\n",
+                "      models:\n",
+                "        - id: gpt-5.5\n"
+            ),
+        )
+        .unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Drift);
+        assert!(report.block_present);
+        assert_ne!(report.actual_fingerprint, Some(report.expected_fingerprint.clone()));
+        let detail = report.drift_details.join("\n");
+        assert!(detail.contains("api: found 'openai-completions', expected 'openai-responses'"), "{detail}");
+        assert!(detail.contains("baseURL: found 'http://127.0.0.1:9999/v1', expected 'http://127.0.0.1:9109/v1'"), "{detail}");
+        assert!(detail.contains("apiKeyEnv: found 'TAMPERED_VAR', expected 'CODEXHUB_API_KEY'"), "{detail}");
+        assert!(detail.contains("found [gpt-5.5], expected [gpt-5.5, gpt-5.5-codex]"), "{detail}");
+    }
+
+    #[test]
+    fn readback_reports_missing_credential_key_without_exposing_values() {
+        let root = dsh_root("codexhub-readback-credkey");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        // User deletes only our credential key, keeps their own.
+        fs::write(root.join(".credentials.yaml"), "OPENAI_API_KEY: sk-user-owned-123\n").unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Drift);
+        assert!(report.block_present);
+        assert!(!report.credential_key_present);
+        let detail = report.drift_details.join("\n");
+        assert!(detail.contains("credential key 'CODEXHUB_API_KEY' missing"), "{detail}");
+        assert!(!detail.contains("sk-user-owned-123"), "foreign credential value leaked: {detail}");
+    }
+
+    #[test]
+    fn readback_stays_clean_across_credential_rotation() {
+        let root = dsh_root("codexhub-readback-rotation");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        // Key rotation (#428) rewrites the value only; readback must not drift.
+        fs::write(
+            root.join(".credentials.yaml"),
+            "CODEXHUB_API_KEY: cx-test-key-9999-ROTATED\n",
+        )
+        .unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Clean);
+        assert!(report.credential_key_present);
+    }
+
+    #[test]
+    fn readback_never_treats_activation_as_error() {
+        let root = dsh_root("codexhub-readback-activation");
+        let descriptor = dsh_descriptor();
+        fs::write(
+            root.join("settings.yaml"),
+            "agent-default-model: anthropic/claude-opus\n",
+        )
+        .unwrap();
+        inject(&root, &descriptor, &request()).unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Clean);
+        assert_eq!(
+            report.activation,
+            Some("anthropic/claude-opus".to_owned()),
+            "activation is informational state, never an error condition"
+        );
+    }
+
+    #[test]
+    fn readback_report_never_contains_credential_values() {
+        let root = dsh_root("codexhub-readback-masking");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        // Tamper everything owned so every drift detail fires.
+        fs::write(root.join("settings.yaml"), "llm-pi-ai:\n  providers: {}\n").unwrap();
+        fs::remove_file(root.join(".credentials.yaml")).unwrap();
+
+        let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
+        assert_eq!(report.status, ReadbackStatus::Drift);
+        let evidence = format!("{report:?}") + &report.drift_details.join("\n");
+        assert!(
+            !evidence.contains("cx-test-key-0000-SECRET"),
+            "credential value must never appear in readback evidence: {evidence}"
+        );
+    }
+
+    #[test]
+    fn readback_fails_truthfully_on_unparseable_config() {
+        let root = dsh_root("codexhub-readback-broken");
+        let descriptor = dsh_descriptor();
+        fs::write(root.join("settings.yaml"), "llm-pi-ai: [unclosed\n").unwrap();
+
+        let error = verify_readback(&root, &descriptor, &expectation()).unwrap_err();
+        assert!(error.contains("failed to parse"), "unexpected error: {error}");
     }
 }
