@@ -12311,18 +12311,26 @@ def compatible_request_body(
         # private context here prevents those calls from silently forwarding a
         # raw Collaboration namespace (or re-expanding deferred children) just
         # because telemetry storage was unavailable.
-        runtime_plan_context = (
-            event_context if isinstance(event_context, dict) else {}
-        )
-        if _prepare_runtime_tool_compatibility(
-            payload,
-            upstream,
-            tool_protocol,
-            runtime_plan_context,
-            native_responses_tool_codec=native_responses_tool_codec_override,
-        ):
-            changed = True
-        runtime_tool_plan = _runtime_tool_compatibility_plan(runtime_plan_context)
+        # A real relay always supplies a mutable context.  The one context-free
+        # path that still needs planning is the client-owned Collaboration V2
+        # adapter: direct callers may omit telemetry, but the namespace must
+        # still be converted before it can reach a third-party provider.  Keep
+        # ordinary context-free compatibility calls on their legacy shaping
+        # path; they have no response ledger to decode and changing them would
+        # turn a helper call into a different protocol boundary.
+        if isinstance(event_context, dict) or collaboration_v2:
+            runtime_plan_context = (
+                event_context if isinstance(event_context, dict) else {}
+            )
+            if _prepare_runtime_tool_compatibility(
+                payload,
+                upstream,
+                tool_protocol,
+                runtime_plan_context,
+                native_responses_tool_codec=native_responses_tool_codec_override,
+            ):
+                changed = True
+            runtime_tool_plan = _runtime_tool_compatibility_plan(runtime_plan_context)
     if raw_provider_probe:
         pass
     elif collaboration_v2:
