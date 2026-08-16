@@ -12303,16 +12303,26 @@ def compatible_request_body(
                     ),
                     "deferred_tool_count": deferred_tool_count,
                 }
-        if isinstance(event_context, dict):
-            if _prepare_runtime_tool_compatibility(
-                payload,
-                upstream,
-                tool_protocol,
-                event_context,
-                native_responses_tool_codec=native_responses_tool_codec_override,
-            ):
-                changed = True
-            runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+        # Runtime planning is required for the wire transformation even when
+        # this helper is used without a mutable telemetry context.  The
+        # production handler supplies a dict so the plan/stream ledger can be
+        # reused for response decoding, but direct callers and a few request
+        # boundaries legitimately pass None or an immutable Mapping.  Using a
+        # private context here prevents those calls from silently forwarding a
+        # raw Collaboration namespace (or re-expanding deferred children) just
+        # because telemetry storage was unavailable.
+        runtime_plan_context = (
+            event_context if isinstance(event_context, dict) else {}
+        )
+        if _prepare_runtime_tool_compatibility(
+            payload,
+            upstream,
+            tool_protocol,
+            runtime_plan_context,
+            native_responses_tool_codec=native_responses_tool_codec_override,
+        ):
+            changed = True
+        runtime_tool_plan = _runtime_tool_compatibility_plan(runtime_plan_context)
     if raw_provider_probe:
         pass
     elif collaboration_v2:

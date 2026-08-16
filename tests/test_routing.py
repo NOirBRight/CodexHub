@@ -22339,13 +22339,12 @@ Execution constraints:
             json.dumps(without_context_zero["tools"], sort_keys=True),
         )
         self.assertEqual(
-            sum(
-                len(tool.get("tools", []))
-                for tool in without_context_249["tools"]
-                if tool.get("type") == "namespace"
-            ),
-            len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+            json.dumps(without_context_249["tools"], sort_keys=True),
+            json.dumps(with_context_249["tools"], sort_keys=True),
         )
+        self.assertEqual(len(without_context_249["tools"]), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+        self.assertTrue(all(tool["type"] == "function" for tool in without_context_249["tools"]))
+        self.assertFalse(any("child_" in json.dumps(tool) for tool in without_context_249["tools"]))
 
     def test_deferred_tool_surface_retains_bounded_caller_tool_search_without_changing_eager(self):
         shell_command = {
