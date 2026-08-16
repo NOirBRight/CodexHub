@@ -24,6 +24,7 @@
 //! first caller so nothing existing changes behavior.
 #![allow(dead_code)]
 
+use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -868,6 +869,53 @@ fn backup_file(path: &Path) -> Result<Option<PathBuf>, String> {
         )
     })?;
     Ok(Some(backup_path))
+}
+
+/// Headless DSH lifecycle result for the backend command contract.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DshLifecycleReport {
+    pub client_id: String,
+    pub connected: bool,
+    pub config_path: PathBuf,
+    pub credential_path: PathBuf,
+    pub activation: Option<String>,
+    pub fingerprint: Option<String>,
+    pub drift_details: Vec<String>,
+    pub restart_required: String,
+}
+
+fn dsh_report(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+    let descriptor = dsh_descriptor();
+    let readback = verify_readback(root, &descriptor, expectation)?;
+    Ok(DshLifecycleReport {
+        client_id: descriptor.client_id.to_owned(),
+        connected: matches!(readback.status, ReadbackStatus::Clean),
+        config_path: descriptor.config_file.resolve(root),
+        credential_path: descriptor.credential.file.resolve(root),
+        activation: readback.activation,
+        fingerprint: readback.actual_fingerprint,
+        drift_details: readback.drift_details,
+        restart_required: "none".to_owned(),
+    })
+}
+
+pub(crate) fn dsh_connect(root: &Path, base_url: String, api_key: MaskedSecret, models: Vec<String>) -> Result<DshLifecycleReport, String> {
+    let descriptor = dsh_descriptor();
+    let expectation = ReadbackExpectation { base_url: base_url.clone(), models: models.clone() };
+    inject(root, &descriptor, &InjectionRequest { base_url, api_key, models })?;
+    dsh_report(root, &expectation)
+}
+
+pub(crate) fn dsh_disconnect(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+    let descriptor = dsh_descriptor();
+    detach(root, &descriptor)?;
+    let mut report = dsh_report(root, expectation)?;
+    report.connected = false;
+    Ok(report)
+}
+
+pub(crate) fn dsh_readback(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+    dsh_report(root, expectation)
 }
 
 #[cfg(test)]

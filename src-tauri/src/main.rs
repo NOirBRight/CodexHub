@@ -581,6 +581,26 @@ fn apply_gateway_client_config(
 }
 
 #[tauri::command]
+fn dsh_client_info() -> gateway::DshClientInfo {
+    gateway::detect_dsh_client()
+}
+
+#[tauri::command]
+fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
+    gateway::dsh_client_connect()
+}
+
+#[tauri::command]
+fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
+    gateway::dsh_client_disconnect()
+}
+
+#[tauri::command]
+fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
+    gateway::dsh_client_readback()
+}
+
+#[tauri::command]
 fn restore_gateway_client_config(
     client_id: String,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
@@ -1144,6 +1164,10 @@ fn run_gui() {
             gateway_usage_events,
             gateway_copy_client_config,
             list_gateway_clients,
+            dsh_client_info,
+            dsh_client_connect,
+            dsh_client_disconnect,
+            dsh_client_readback,
             preview_gateway_client_config,
             apply_gateway_client_config,
             restore_gateway_client_config,
