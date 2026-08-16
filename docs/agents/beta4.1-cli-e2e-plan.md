@@ -50,7 +50,9 @@ gate. Its result is specific to
 not native provider V2 capability. A catalog entry, the CLI's initial
 namespace, or a successful text-only response is not capability evidence. The
 private replay body may not be attached to an Issue or Release; publish only
-its stable hash and bounded structural counts.
+its stable hash and bounded structural counts. The ordinary tool-surface
+qualification for #424/#425 is independently releasable evidence; it must not
+be confused with the blocked child-delivery lifecycle below.
 
 The full cross-provider V2 lifecycle is a separate, known blocked gate.
 OpenAI parent → non-OpenAI child handoff data can contain Official encrypted
@@ -78,21 +80,21 @@ required live/manual evidence are recorded.
 
 | Scope ID | Requirement | Candidate implementation | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| `B42-418` | Legacy worker/session resume hardening | `7c7a49b2`, `76fa21c2`, `ac32867f` | Historical Session continuation with unchanged legacy call shape | pending live evidence |
-| `B42-424` | Stable, collision-safe tool aliases and cache-prefix replay | `df926739` and follow-up compatibility commits | Identical caller/upstream hashes, aliases, and `prompt_cache_key`; no cache-hit-rate claim | pending live evidence |
-| `B42-425` | Bounded `deferred_core` surface | `df926739`, `b86a6c6` | 249-child/zero-child parity plus eager and Official controls | pending live evidence |
+| `B42-418` | Legacy worker/session resume hardening | `7c7a49b2`, `76fa21c2`, `ac32867f` | Historical Session continuation with unchanged legacy call shape | authenticated live gate passed on candidate `125db563` |
+| `B42-424` | Stable, collision-safe tool aliases and cache-prefix replay | `df926739` and follow-up compatibility commits | Identical caller/upstream hashes, aliases, and `prompt_cache_key`; no cache-hit-rate claim | live evidence passed in sanitized candidate `125db563` tools-only run |
+| `B42-425` | Bounded `deferred_core` surface | `df926739`, `b86a6c6` | 249-child/zero-child parity plus eager and Official controls | live evidence passed in sanitized candidate `125db563` tools-only run |
 | `B42-426` | Independent request-body write budget | `38ed1b69`, `f18527e0`, `d4964a3` | New/reused connection, `request_write`, `response_headers`/`response_body`/`stream_body` read-timeout classification, and recovery tests | automated core gate passed on `e8360417`; read-phase regression and affected routing checks passed on `d4964a32`; live release evidence pending |
 | `B42-429` | Generic Collaboration classifier boundary | `ec034882` and routing/runtime regressions | Ordinary overlap accepted; malformed Collaboration rejected; no client special case | automated gate passed; live release evidence pending |
-| `B42-EXT-V2` | Third-party ordinary-tool V2 Gateway adapter | `ddd88b44`, `e3c1219b`, `0a3d7bb5` | Real `ollama-cloud/glm-5.2` lifecycle, stream/history, restart/readback, terminal/error replay | pending live qualification |
-| `B42-MODELS` | OpenAI-compatible `/v1/models` projection and stable app-server model-list test boundary | `ec034882`, `e7c804a7` | HTTP `data[]`; no internal `models`/`fetched_at` fields; full serial Rust suite remains green under Windows process-start jitter | local HTTP smoke passed; packaged smoke pending |
-| `B42-COPY` | Provider-qualified model copy | `ec034882` | Packaged UI clipboard reads `provider/model` for existing/new Provider | pending manual smoke |
-| `B42-419` | Luna V1/V2 save contract and restart persistence | `454d1a39` and `ec034882` | Desktop saves each selection with `modelId`, then reads it back after restart | pending manual smoke |
-| `B42-420` | Luna selector is exactly V1/V2 with dynamic `(Default)` marker | `454d1a39` | Desktop selector shows two choices and moves the marker with the catalog baseline | automated UI contract passed; pending manual smoke |
-| `B42-421` | Official Codex quota card uses the weekly limit label | `454d1a39` | Desktop shows one quota card labeled Weekly | automated UI contract passed; pending manual smoke |
+| `B42-EXT-V2` | Third-party ordinary-tool V2 Gateway adapter | `ddd88b44`, `e3c1219b`, `0a3d7bb5` | Real `ollama-cloud/glm-5.2` lifecycle, stream/history, restart/readback, terminal/error replay | real route reached ordinary function-tool adapter and inverse mapping; complete cross-provider lifecycle blocked by `encrypted_agent_message_unavailable` / `blocked_upstream_provider_aware_delivery` |
+| `B42-MODELS` | OpenAI-compatible `/v1/models` projection and stable app-server model-list test boundary | `ec034882`, `e7c804a7` | HTTP `data[]`; no internal `models`/`fetched_at` fields; full serial Rust suite remains green under Windows process-start jitter | current candidate packaged HTTP smoke passed; Desktop packaged smoke pending |
+| `B42-COPY` | Provider-qualified model copy | `ec034882` | Packaged UI clipboard reads `provider/model` for existing/new Provider | disposable packaged-like UI smoke passed; final asset smoke pending |
+| `B42-419` | Luna V1/V2 save contract and restart persistence | `454d1a39` and `ec034882` | Desktop saves each selection with `modelId`, then reads it back after restart | disposable packaged-like UI smoke passed; final asset smoke pending |
+| `B42-420` | Luna selector is exactly V1/V2 with dynamic `(Default)` marker | `454d1a39` | Desktop selector shows two choices and moves the marker with the catalog baseline | automated UI and disposable packaged-like smoke passed; final asset smoke pending |
+| `B42-421` | Official Codex quota card uses the weekly limit label | `454d1a39` | Desktop shows one quota card labeled Weekly | automated UI and disposable packaged-like smoke passed; final asset smoke pending |
 | `B42-UPSTREAM` | Cross-provider encrypted V2 boundary | upstream dependency | Record `blocked_upstream_provider_aware_delivery`; never record ciphertext | explicitly blocked |
-| `B42-EVIDENCE` | Fail-closed sanitized Beta4.2 runner evidence contract | `scripts/beta42_evidence.py`, `tests/test_beta42_evidence.py` | Exact candidate/CLI binding, complete case outcomes, deterministic alias replay, adapter-owned inverse mapping, and upstream blocked classification | automated validator gate pending |
-| `B42-PYTHON` | Repository-wide Python 3.13+ runtime selection; no ambient 3.11 fallback | `ae48a1eb`, `2e55d8d7`, `84fada6f`, `ff37f209`, `799d51ab`, `dd277ba7`, `03b5ea92`, `10a28af5`, `cf18d947`, `e1c285e6`, `66aa535b`, `1726c340`, `b49f795`, `41d70125`, `e9f2528`, plus the fixture-boundary follow-up: canonical resolver/contract, scripts compatibility import, direct `src-python/`/`scripts/`/evidence-validator entrypoints, fixture preflight and exact binding, Rust runtime resolver, E2E child-process launchers, separate source-vs-embedded runtime boundary, fresh-shell-safe PowerShell entrypoints, and fail-closed interactive activation | Launcher/version/preflight tests, nested bare-command PATH binding, Rust lifecycle fixtures, isolated E2E child-process checks, direct ambient-3.11 fail-closed checks for production and fixtures, explicit bundled-runtime selection, a script-level `sys.executable -m pytest` regression, relative PowerShell entrypoint/build checks, and rejection of non-dot-sourced activation | targeted runtime boundary gate passed on `e9f2528` (69 Python runtime tests); full candidate gate and live release evidence pending |
-| `B42-RELEASE` | Beta4.2 versioned candidate and release assets | this candidate | Final main SHA, installer/portable assets, manifest/signature/SHA-256 and immutable tag | pending final release gate |
+| `B42-EVIDENCE` | Fail-closed sanitized Beta4.2 runner evidence contract | `scripts/beta42_evidence.py`, `tests/test_beta42_evidence.py` | Exact candidate/CLI binding, complete case outcomes, deterministic alias replay, adapter-owned inverse mapping, and upstream blocked classification | automated validator gate passed; live evidence is split into passed tool-surface and blocked external-lifecycle records |
+| `B42-PYTHON` | Repository-wide Python 3.13+ runtime selection; no ambient 3.11 fallback | `ae48a1eb`, `2e55d8d7`, `84fada6f`, `ff37f209`, `799d51ab`, `dd277ba7`, `03b5ea92`, `10a28af5`, `cf18d947`, `e1c285e6`, `66aa535b`, `1726c340`, `b49f795`, `41d70125`, `e9f2528`, plus the fixture-boundary follow-up: canonical resolver/contract, scripts compatibility import, direct `src-python/`/`scripts/`/evidence-validator entrypoints, fixture preflight and exact binding, Rust runtime resolver, E2E child-process launchers, separate source-vs-embedded runtime boundary, fresh-shell-safe PowerShell entrypoints, and fail-closed interactive activation | Launcher/version/preflight tests, nested bare-command PATH binding, Rust lifecycle fixtures, isolated E2E child-process checks, direct ambient-3.11 fail-closed checks for production and fixtures, explicit bundled-runtime selection, a script-level `sys.executable -m pytest` regression, relative PowerShell entrypoint/build checks, and rejection of non-dot-sourced activation | final candidate runtime gate passed: 85 tests; embedded candidate and runner stayed on Python 3.13 |
+| `B42-RELEASE` | Beta4.2 versioned candidate and release assets | candidate `125db563` build | Final main SHA, installer/portable assets, manifest/signature/SHA-256 and immutable tag | normal/debug portable and installer assets built and manifest-validated; final main/tag pending |
 
 The following are explicitly outside this candidate: #430 managed-client
 support, #427 Ultra evaluation, and #428 local-key rotation. They must not be
@@ -167,6 +169,11 @@ a fix. Beta4.2 does not include the #430 DSH managed-client/UI/YAML support.
      adapter gate. Do not convert a failed OpenAI-parent → third-party-child
      handoff into a product failure or a false pass: record the separate
      upstream-blocked result and keep the full cross-provider gate unpassed.
+     On candidate `125db563`, the real route reached the adapter and produced
+     ordinary function-tool traffic, but the restart/error phase observed only
+     the bounded `encrypted_agent_message_unavailable` classification; this is
+     recorded as `blocked_upstream_provider_aware_delivery`, not as a passed
+     lifecycle.
 
 5. **Historical recovery**
    - Start from the copied operator-supplied historical Session.
