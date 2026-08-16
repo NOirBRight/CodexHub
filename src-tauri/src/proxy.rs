@@ -2198,7 +2198,7 @@ where
                 };
                 if let Ok(mut buffer) = buffer.lock() {
                     buffer.append(&chunk[..count]);
-                }
+                };
             }
             Err(_) => break,
         }
@@ -3432,7 +3432,7 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         .collect::<Vec<_>>();
     let process_start_id = fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
-        .and_then(|stat| process_start_ticks(&stat))
+        .and_then(|stat| process_start_ticks(&stat).map(str::to_string))
         .map(|ticks| format!("proc-start-ticks:{ticks}"));
     let mut info = ProcessInfo::from_args(args);
     info.process_start_id = process_start_id;
