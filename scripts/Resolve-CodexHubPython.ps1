@@ -28,9 +28,24 @@ function Test-CodexHubPython313 {
     }
 
     # Avoid nested quotes in this probe: Windows PowerShell 5.1 applies its
-    # native-command quoting rules before launching Python.
-    $versionOutput = @(& $Path '-c' 'import sys; print(sys.version_info[0] * 100 + sys.version_info[1])' 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -eq 0) {
+    # native-command quoting rules before launching Python.  A PATH entry may
+    # also be a wrapper that PowerShell cannot execute under redirected output;
+    # treat that candidate as unavailable and continue to the next one.
+    $versionOutput = @()
+    $status = 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $versionOutput = @(& $Path '-c' 'import sys; print(sys.version_info[0] * 100 + sys.version_info[1])' 2>$null)
+        $status = $LASTEXITCODE
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($status -ne 0 -or $versionOutput.Count -eq 0) {
         return $false
     }
 
@@ -121,16 +136,24 @@ function Assert-CodexHubPythonRequirements {
 
 function Get-CodexHubPythonLauncherPath {
     foreach ($commandName in @('py.exe', 'py')) {
-        $launcher = Get-Command $commandName -ErrorAction SilentlyContinue
-        if ($null -eq $launcher -or [string]::IsNullOrWhiteSpace([string]$launcher.Source)) {
-            continue
-        }
-
-        $pathOutput = @(& $launcher.Source '-3.13' '-c' 'import sys; print(sys.executable)' 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $pathOutput.Count -gt 0) {
-            $path = ([string]($pathOutput | Select-Object -Last 1)).Trim()
-            if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Test-CodexHubPython313 -Path $path)) {
-                return $path
+        $launchers = @(Get-Command $commandName -All -ErrorAction SilentlyContinue)
+        foreach ($launcher in $launchers) {
+            if ($null -eq $launcher -or [string]::IsNullOrWhiteSpace([string]$launcher.Source)) {
+                continue
+            }
+            try {
+                $pathOutput = @(& $launcher.Source '-3.13' '-c' 'import sys; print(sys.executable)' 2>$null)
+                if ($LASTEXITCODE -eq 0 -and $pathOutput.Count -gt 0) {
+                    $path = ([string]($pathOutput | Select-Object -Last 1)).Trim()
+                    if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Test-CodexHubPython313 -Path $path)) {
+                        return $path
+                    }
+                }
+            }
+            catch {
+                # A stale Windows Store/py launcher must not prevent the
+                # resolver from trying the remaining PATH candidates.
+                continue
             }
         }
     }
@@ -230,10 +253,21 @@ function Resolve-CodexHubPythonPath {
     if (-not [string]::IsNullOrWhiteSpace($launcherPath)) {
         $hostCandidates.Add($launcherPath)
     }
-    foreach ($commandName in @('python3.13.exe', 'python3.13', 'python.exe', 'python')) {
-        $command = Get-Command $commandName -ErrorAction SilentlyContinue
-        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
-            $hostCandidates.Add([string]$command.Source)
+    # Prefer the conventional ``python.exe`` resolution before the versioned
+    # shim.  Activation promises that bare ``python`` and ``pytest`` resolve
+    # through the selected directory; a versioned-only shim can otherwise
+    # leave an older ``python.exe`` earlier in the remaining PATH.
+    foreach ($commandName in @('python.exe', 'python', 'python3.13.exe', 'python3.13')) {
+        # A fresh shell may have an embedded 3.13 runtime or another valid
+        # interpreter ahead of the development Python on PATH.  Enumerate all
+        # command resolutions so -RequirePytest can skip a 3.13 interpreter
+        # that lacks the repository test dependencies instead of stopping at
+        # the first command with the right major/minor version.
+        $commands = @(Get-Command $commandName -All -ErrorAction SilentlyContinue)
+        foreach ($command in $commands) {
+            if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+                $hostCandidates.Add([string]$command.Source)
+            }
         }
     }
 

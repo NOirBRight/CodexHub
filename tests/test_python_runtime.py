@@ -275,6 +275,42 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
     assert "Python runtime check passed" in runtime_check.stdout
 
 
+def test_fresh_shell_pytest_selector_skips_a_3_13_runtime_without_pytest() -> None:
+    """Fresh PATH order must not strand test commands on the bundled runtime."""
+
+    bundled = ROOT / "src-tauri" / "resources" / "python" / "python.exe"
+    if not bundled.is_file():
+        pytest.skip("the prepared bundled Python runtime is unavailable")
+
+    host_directory = Path(sys.executable).resolve().parent
+    path_entries = [bundled.parent, host_directory]
+    path_entries.extend(
+        Path(entry)
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() not in {entry.resolve() for entry in path_entries}
+    )
+    child_env = {
+        "PATH": os.pathsep.join(str(entry) for entry in path_entries),
+        "CODEXHUB_E2E_PYTHON": "",
+        "CODEXHUB_PYTHON": "",
+        "CODEXHUB_PROXY_PYTHON": "",
+    }
+    result = _run_script(SELECTOR, "-PrintPath", "-RequirePytest", env=child_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    selected = Path(result.stdout.strip().splitlines()[-1]).resolve()
+    assert selected != bundled.resolve()
+    probe = subprocess.run(
+        [str(selected), "-c", "import pytest; print('pytest-ready')"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert "pytest-ready" in probe.stdout
+
+
 def test_every_direct_python_entrypoint_declares_the_runtime_preflight() -> None:
     entrypoints = _direct_entrypoints()
     assert entrypoints
@@ -426,8 +462,9 @@ def test_repository_launcher_uses_the_development_runtime_for_tools() -> None:
     result = subprocess.run(
         [
             str(CMD_LAUNCHER),
-            "-c",
-            "import pytest, sys; print(sys.executable); print(pytest.__version__)",
+            "-m",
+            "pytest",
+            "--version",
         ],
         cwd=ROOT,
         env=child_env,
@@ -438,9 +475,9 @@ def test_repository_launcher_uses_the_development_runtime_for_tools() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    selected = Path(result.stdout.strip().splitlines()[-2]).resolve()
+    assert "pytest" in result.stdout.lower()
     if bundled.is_file():
-        assert selected != bundled.resolve()
+        assert str(bundled.resolve()) not in result.stdout
 
 
 def test_repository_launcher_keeps_sys_executable_pytest_children_on_development_runtime(
@@ -537,9 +574,14 @@ def test_repository_launcher_puts_selected_interpreter_first_on_child_path() -> 
 
 
 def test_cmd_launcher_puts_selected_interpreter_first_on_child_path() -> None:
+    child_env = os.environ.copy()
+    for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PROXY_PYTHON"):
+        child_env.pop(name, None)
+    child_env["CODEXHUB_PYTHON"] = sys.executable
     result = subprocess.run(
         [str(CMD_LAUNCHER), "-c", "import os, shutil, sys; path=os.environ['PATH'].split(os.pathsep); print(sys.executable); print(shutil.which('python')); print(shutil.which('pytest')); print(path[0]); print(path[1])"],
         cwd=ROOT,
+        env=child_env,
         capture_output=True,
         text=True,
         encoding="utf-8",
