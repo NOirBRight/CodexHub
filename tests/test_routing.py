@@ -22134,6 +22134,50 @@ Execution constraints:
         self.assertEqual(legacy, body)
         self.assertEqual(eager, body)
 
+    def test_v2_adapter_hoists_additional_tools_before_alias_planning(self):
+        """V2's Lite carrier must reach the ordinary function-tool adapter."""
+
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        context: dict[str, Any] = {}
+        transformed = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                    "tool_surface_strategy": "eager",
+                    "tool_protocol_capabilities": {
+                        "function_lifecycle": True,
+                        "accepts_namespace_adapter": True,
+                    },
+                },
+                event_context=context,
+                inject_codex_tools=False,
+            )
+        )
+
+        tools = transformed["tools"]
+        self.assertEqual(len(tools), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+        self.assertTrue(all(tool["type"] == "function" for tool in tools))
+        self.assertTrue(all(tool["name"].startswith("__codexhub_ns_") for tool in tools))
+        self.assertFalse(any(item.get("type") == "additional_tools" for item in transformed["input"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in tools))
+        self.assertIsNotNone(context.get("_runtime_tool_compatibility_plan"))
+
     def test_external_tool_surface_ab_harness_defers_large_mcp_namespace(self):
         shell_command = {
             "type": "function",
@@ -22225,6 +22269,83 @@ Execution constraints:
         self.assertIn("tool_search", deferred_names)
         for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
             self.assertIn(f"multi_agent_v1__{tool_name}", deferred_names)
+
+    def test_deferred_core_prunes_namespace_before_runtime_planning(self):
+        """A runtime plan must not re-expand children removed by deferred_core."""
+
+        def mcp_namespace(child_count: int) -> dict[str, Any]:
+            return {
+                "type": "namespace",
+                "name": "mcp__beta42_namespace_249",
+                "description": "bounded namespace fixture",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": f"child_{index:03d}",
+                        "description": "bounded child",
+                        "strict": False,
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                    for index in range(child_count)
+                ],
+            }
+
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+            "tool_protocol_capabilities": {
+                "function_lifecycle": True,
+                "accepts_namespace_adapter": True,
+            },
+        }
+
+        def request(child_count: int, context: dict[str, Any] | None) -> dict[str, Any]:
+            body = json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": "Use the bounded collaboration surface.",
+                    "tools": [
+                        mcp_namespace(child_count),
+                        _model_switch_tool_surface(COLLABORATION_V2),
+                    ],
+                    "tool_choice": "auto",
+                    "stream": False,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return json.loads(
+                compatible_request_body(body, upstream, event_context=context)
+            )
+
+        with_context_249 = request(249, {"request_id": "req-249"})
+        with_context_zero = request(0, {"request_id": "req-zero"})
+        for transformed in (with_context_249, with_context_zero):
+            tools = transformed["tools"]
+            self.assertEqual(len(tools), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+            self.assertTrue(all(tool["type"] == "function" for tool in tools))
+            self.assertTrue(all(tool["name"].startswith("__codexhub_ns_") for tool in tools))
+            self.assertFalse(any("child_" in json.dumps(tool) for tool in tools))
+        self.assertEqual(
+            [tool["name"] for tool in with_context_249["tools"]],
+            [tool["name"] for tool in with_context_zero["tools"]],
+        )
+
+        without_context_249 = request(249, None)
+        without_context_zero = request(0, None)
+        self.assertEqual(
+            json.dumps(without_context_249["tools"], sort_keys=True),
+            json.dumps(without_context_zero["tools"], sort_keys=True),
+        )
+        self.assertEqual(
+            sum(
+                len(tool.get("tools", []))
+                for tool in without_context_249["tools"]
+                if tool.get("type") == "namespace"
+            ),
+            len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+        )
 
     def test_deferred_tool_surface_retains_bounded_caller_tool_search_without_changing_eager(self):
         shell_command = {

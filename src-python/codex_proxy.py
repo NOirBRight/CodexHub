@@ -12244,9 +12244,20 @@ def compatible_request_body(
     runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
     pending_tool_surface_event: dict[str, Any] | None = None
     tool_surface_source_tools: list[Any] | None = None
-    if isinstance(event_context, dict) and not raw_provider_probe:
-        if _hoist_additional_tools_input_items(payload):
-            changed = True
+    if not raw_provider_probe:
+        # The selected tool-surface policy is a wire-shaping concern, not a
+        # telemetry concern.  Apply it before runtime planning even when a
+        # direct helper caller does not provide a mutable event context.  If
+        # this remains behind the ``dict`` check, a runtime plan can see the
+        # original namespace and re-expand every child into aliases (#425).
+        if tool_surface_strategy == "deferred_core" or collaboration_v2:
+            # ``additional_tools`` is an internal carrier.  Only deferred
+            # external routes, or the client-owned V2 adapter, need it
+            # promoted so namespace pruning/runtime planning can inspect the
+            # declarations.  Ordinary eager routes must preserve this legacy
+            # carrier byte-for-byte (#425).
+            if _hoist_additional_tools_input_items(payload):
+                changed = True
         if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
             tools = payload["tools"]
             tool_surface_source_tools = list(tools)
@@ -12292,15 +12303,16 @@ def compatible_request_body(
                     ),
                     "deferred_tool_count": deferred_tool_count,
                 }
-        if _prepare_runtime_tool_compatibility(
-            payload,
-            upstream,
-            tool_protocol,
-            event_context,
-            native_responses_tool_codec=native_responses_tool_codec_override,
-        ):
-            changed = True
-        runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+        if isinstance(event_context, dict):
+            if _prepare_runtime_tool_compatibility(
+                payload,
+                upstream,
+                tool_protocol,
+                event_context,
+                native_responses_tool_codec=native_responses_tool_codec_override,
+            ):
+                changed = True
+            runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
     if raw_provider_probe:
         pass
     elif collaboration_v2:
