@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 from copy import deepcopy
 from collections.abc import Iterable as IterableABC
@@ -25,11 +31,10 @@ from functools import partial
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import sys
 import threading
 import time
 import tomllib
-from typing import Any, Callable, Mapping, NoReturn
+from typing import Any, Callable, Iterable, Mapping, NoReturn
 import uuid
 import zlib
 from urllib.error import HTTPError, URLError
@@ -81,6 +86,7 @@ from protocol_translation import (
     responses_tools_to_chat_tools,
 )
 from runtime_tool_compatibility import (
+    HostedCapabilityFacts as RuntimeHostedCapabilityFacts,
     ProtocolCapabilities as RuntimeProtocolCapabilities,
     ToolCompatibilityError as RuntimeToolCompatibilityError,
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
@@ -91,6 +97,7 @@ from codex_semantic_adapter import (
     BINDING_ACCEPTED as _BINDING_ACCEPTED,
     COLLABORATION_V1 as _COLLABORATION_V1,
     COLLABORATION_V2 as _COLLABORATION_V2,
+    COLLABORATION_V2_NAMESPACE as _COLLABORATION_V2_NAMESPACE,
     CollaborationBoundaryError as _CollaborationBoundaryError,
     classify_collaboration_payload as _classify_collaboration_payload,
     collaboration_protocols as _collaboration_protocols,
@@ -174,12 +181,17 @@ OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
 OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
 _OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
+_OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE = "_codexhub_request_write_deadline"
+_OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE = "_codexhub_request_write_active"
+_TRANSPORT_PHASE_ATTRIBUTE = "_codexhub_transport_phase"
+_OFFICIAL_SOCKET_TIMEOUT_UNSET = object()
 
 
-def _reset_official_attempt_connection_disposition() -> None:
-    """Clear the per-thread lease label before a new Official pool request."""
+def _reset_official_attempt_state(timeout: float) -> None:
+    """Initialize request-scoped state before a new Official pool request."""
 
     _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = "unobserved"
+    _OFFICIAL_ATTEMPT_CONNECTION_STATE.request_write_deadline = time.monotonic() + timeout
 
 
 def _set_official_attempt_connection_disposition(disposition: str) -> None:
@@ -192,11 +204,17 @@ def _official_attempt_connection_disposition() -> str:
     return disposition if disposition in {"new", "reused"} else "unobserved"
 
 
-def _clear_official_attempt_connection_disposition() -> None:
-    try:
-        del _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition
-    except AttributeError:
-        pass
+def _official_attempt_request_write_deadline() -> float | None:
+    deadline = getattr(_OFFICIAL_ATTEMPT_CONNECTION_STATE, "request_write_deadline", None)
+    return deadline if isinstance(deadline, (int, float)) else None
+
+
+def _clear_official_attempt_state() -> None:
+    for attribute in ("disposition", "request_write_deadline"):
+        try:
+            delattr(_OFFICIAL_ATTEMPT_CONNECTION_STATE, attribute)
+        except AttributeError:
+            pass
 
 
 def _official_socket_options() -> list[tuple[int, int, int]]:
@@ -230,9 +248,71 @@ class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
         if self.sock is not None:
             _configure_official_windows_keepalive(self.sock)
 
+    def endheaders(self, message_body: Any = None, *, encode_chunked: bool = False) -> None:
+        setattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, True)
+        super().endheaders(message_body=message_body, encode_chunked=encode_chunked)
+
+    def send(self, data: Any) -> None:
+        request_write_active = getattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, False)
+        sock = self.sock
+        previous_timeout: Any = _OFFICIAL_SOCKET_TIMEOUT_UNSET
+        if request_write_active and sock is not None:
+            gettimeout = getattr(sock, "gettimeout", None)
+            if callable(gettimeout):
+                try:
+                    previous_timeout = gettimeout()
+                except Exception:
+                    previous_timeout = _OFFICIAL_SOCKET_TIMEOUT_UNSET
+        try:
+            deadline = getattr(self, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE, None)
+            if request_write_active and isinstance(deadline, (int, float)):
+                remaining_timeout = deadline - time.monotonic()
+                if remaining_timeout <= 0:
+                    raise TimeoutError("Official request write budget exhausted")
+                if sock is not None:
+                    sock.settimeout(remaining_timeout)
+            super().send(data)
+        except TimeoutError as exc:
+            if request_write_active:
+                try:
+                    setattr(exc, _TRANSPORT_PHASE_ATTRIBUTE, "request_write")
+                except Exception:
+                    pass
+            raise
+        finally:
+            if (
+                request_write_active
+                and sock is not None
+                and previous_timeout is not _OFFICIAL_SOCKET_TIMEOUT_UNSET
+            ):
+                try:
+                    sock.settimeout(previous_timeout)
+                except Exception:
+                    pass
+
 
 class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
     ConnectionCls = _OfficialHTTPSConnection
+
+    def _make_request(self, conn: Any, *args: Any, **kwargs: Any) -> Any:
+        request_write_deadline = _official_attempt_request_write_deadline()
+        if request_write_deadline is None:
+            timeout = kwargs.get("timeout")
+            request_write_timeout = getattr(timeout, "read_timeout", timeout)
+            if isinstance(request_write_timeout, (int, float)) and request_write_timeout > 0:
+                request_write_deadline = time.monotonic() + request_write_timeout
+        try:
+            setattr(conn, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE, request_write_deadline)
+            return super()._make_request(conn, *args, **kwargs)
+        finally:
+            try:
+                delattr(conn, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE)
+            except AttributeError:
+                pass
+            try:
+                delattr(conn, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE)
+            except AttributeError:
+                pass
 
     def _get_conn(self, timeout: float | None = None) -> Any:
         connection = super()._get_conn(timeout)
@@ -278,8 +358,14 @@ class _OfficialPooledResponse:
     def read(self, amount: int | None = None) -> bytes:
         try:
             data = self._response.read(amount)
-        except urllib3.exceptions.HTTPError as exc:
+        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
             translated = _stdlib_transport_error(exc)
+            _propagate_transport_metadata(
+                translated,
+                source=exc,
+                disposition=self.connection_disposition,
+                phase=_explicit_transport_phase(exc) or "response_body",
+            )
             raise translated from exc
         if amount is None or data == b"":
             self._exhausted = True
@@ -288,8 +374,14 @@ class _OfficialPooledResponse:
     def readline(self, limit: int = -1) -> bytes:
         try:
             data = self._response.readline(limit)
-        except urllib3.exceptions.HTTPError as exc:
+        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
             translated = _stdlib_transport_error(exc)
+            _propagate_transport_metadata(
+                translated,
+                source=exc,
+                disposition=self.connection_disposition,
+                phase=_explicit_transport_phase(exc) or "stream_body",
+            )
             raise translated from exc
         if data == b"":
             self._exhausted = True
@@ -346,6 +438,65 @@ def _connection_disposition(connection: Any) -> str:
     except Exception:
         return "unobserved"
     return disposition if disposition in {"new", "reused"} else "unobserved"
+
+
+def _explicit_transport_phase(exc: BaseException | None) -> str | None:
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    supported = {
+        "request_write",
+        "response_headers",
+        "response_body",
+        "stream_body",
+    }
+    while pending:
+        candidate = pending.pop(0)
+        if not isinstance(candidate, BaseException) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        try:
+            phase = getattr(candidate, _TRANSPORT_PHASE_ATTRIBUTE, None)
+        except Exception:
+            phase = None
+        if phase in supported:
+            return phase
+        pending.extend(
+            value
+            for value in (
+                getattr(candidate, "reason", None),
+                candidate.__cause__,
+                candidate.__context__,
+                *candidate.args,
+            )
+            if isinstance(value, BaseException)
+        )
+    return None
+
+
+def _propagate_transport_metadata(
+    target: BaseException,
+    *,
+    source: BaseException | None = None,
+    disposition: str | None = None,
+    phase: str | None = None,
+) -> BaseException:
+    resolved_phase = phase if phase in {
+        "request_write",
+        "response_headers",
+        "response_body",
+        "stream_body",
+    } else _explicit_transport_phase(source)
+    if resolved_phase is not None:
+        try:
+            setattr(target, _TRANSPORT_PHASE_ATTRIBUTE, resolved_phase)
+        except Exception:
+            pass
+    if disposition in {"new", "reused"}:
+        try:
+            setattr(target, "_codexhub_diagnostic_connection_disposition", disposition)
+        except Exception:
+            pass
+    return target
 
 
 def _official_proxy_url(url: str) -> str | None:
@@ -426,10 +577,10 @@ def _stdlib_transport_error(exc: BaseException) -> BaseException:
 
 
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
-    manager = _official_pool_manager(request.full_url)
-    headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
-    _reset_official_attempt_connection_disposition()
+    _reset_official_attempt_state(timeout)
     try:
+        manager = _official_pool_manager(request.full_url)
+        headers = {key: value for key, value in request.header_items() if key.lower() != "connection"}
         response = manager.request(
             request.get_method(),
             request.full_url,
@@ -442,27 +593,37 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
             timeout=urllib3.Timeout(connect=min(timeout, OFFICIAL_CONNECT_TIMEOUT_SECONDS), read=timeout),
             pool_timeout=timeout,
         )
-    except urllib3.exceptions.HTTPError as exc:
+    except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
         translated = _stdlib_transport_error(exc)
-        disposition = _official_attempt_connection_disposition()
-        if disposition != "unobserved":
-            try:
-                setattr(translated, "_codexhub_diagnostic_connection_disposition", disposition)
-            except Exception:
-                pass
+        _propagate_transport_metadata(
+            translated,
+            source=exc,
+            disposition=_official_attempt_connection_disposition(),
+            phase=_explicit_transport_phase(exc)
+            or (
+                "response_headers"
+                if isinstance(exc, urllib3.exceptions.ReadTimeoutError)
+                else None
+            ),
+        )
         raise translated from exc
     finally:
-        _clear_official_attempt_connection_disposition()
+        _clear_official_attempt_state()
 
     pooled_response = _OfficialPooledResponse(response)
     if response.status >= 400:
-        raise HTTPError(
+        error = HTTPError(
             request.full_url,
             response.status,
             str(response.reason or "upstream error"),
             response.headers,
             pooled_response,
         )
+        _propagate_transport_metadata(
+            error,
+            disposition=pooled_response.connection_disposition,
+        )
+        raise error
     return pooled_response
 
 
@@ -578,6 +739,15 @@ WORKER_REQUESTED_BINDING_FIELDS = {
     "reasoning",
     "signature",
 }
+LEGACY_NATIVE_WORKER_SPAWN_FIELDS = {
+    "type",
+    "id",
+    "call_id",
+    "namespace",
+    "name",
+    "arguments",
+}
+LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {
         "type": "namespace",
@@ -2598,11 +2768,23 @@ def _resolve_collaboration_boundary(
                 _COLLABORATION_V1,
                 _COLLABORATION_V2,
             } else None
-            history_protocols = _collaboration_protocols(
+            history_boundary = (
                 {"input": payload.get("input", [])}
                 if isinstance(payload, Mapping)
                 else {"input": []}
             )
+            if isinstance(payload, Mapping):
+                for key in (
+                    "tools",
+                    "tool_choice",
+                    "multi_agent_version",
+                    "metadata",
+                    "features",
+                    "client_metadata",
+                ):
+                    if key in payload:
+                        history_boundary[key] = payload[key]
+            history_protocols = _collaboration_protocols(history_boundary)
             protocol = (
                 current_protocol
                 or context_protocol
@@ -4837,6 +5019,17 @@ def _request_kind_from_headers_and_payload(
     payload: Mapping[str, Any] | None,
     inbound_format: str,
 ) -> str:
+    turn_metadata = _get_header(headers, "x-codex-turn-metadata")
+    if isinstance(turn_metadata, str):
+        try:
+            parsed_turn_metadata = json.loads(turn_metadata)
+        except json.JSONDecodeError:
+            parsed_turn_metadata = None
+        if (
+            isinstance(parsed_turn_metadata, Mapping)
+            and parsed_turn_metadata.get("request_kind") == "compaction"
+        ):
+            return RETRY_REQUEST_COMPACT
     for header_name in ("x-request-kind", "x-query-source"):
         header_value = _get_header(headers, header_name)
         if isinstance(header_value, str) and header_value.strip().lower() == RETRY_REQUEST_COMPACT:
@@ -6157,6 +6350,79 @@ def _is_raw_namespace_schema(value: Any) -> bool:
     return isinstance(value, Mapping) and value.get("type") == "namespace"
 
 
+def _valid_namespace_function_names(value: Any) -> tuple[str, tuple[str, ...]] | None:
+    if not _is_raw_namespace_schema(value):
+        return None
+    namespace_name = _tool_schema_name(value)
+    namespace_tools = value.get("tools")
+    if not isinstance(namespace_name, str) or not namespace_name or not isinstance(namespace_tools, list):
+        return None
+    child_names: list[str] = []
+    for tool in namespace_tools:
+        tool_name = _tool_schema_name(tool)
+        if (
+            not isinstance(tool, Mapping)
+            or tool.get("type") != "function"
+            or not isinstance(tool_name, str)
+            or not tool_name
+        ):
+            return None
+        child_names.append(tool_name)
+    if not child_names or len(set(child_names)) != len(child_names):
+        return None
+    return namespace_name, tuple(child_names)
+
+
+def _deferred_namespace_surface_counts(
+    source_tools: list[Any],
+    final_tools: list[Any],
+) -> tuple[int, int]:
+    final_function_names = {
+        name
+        for tool in final_tools
+        if isinstance(tool, Mapping) and tool.get("type") == "function"
+        for name in (_tool_schema_name(tool),)
+        if name is not None
+    }
+    final_qualified_functions = {
+        (tool.get("namespace"), name)
+        for tool in final_tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("namespace"), str)
+        for name in (_tool_schema_name(tool),)
+        if name is not None
+    }
+    final_namespace_children: dict[str, set[str]] = {}
+    for tool in final_tools:
+        details = _valid_namespace_function_names(tool)
+        if details is None:
+            continue
+        namespace_name, child_names = details
+        final_namespace_children.setdefault(namespace_name, set()).update(child_names)
+
+    namespace_count = 0
+    child_count = 0
+    for namespace in source_tools:
+        details = _valid_namespace_function_names(namespace)
+        if details is None:
+            continue
+        namespace_name, child_names = details
+        surviving_namespace_children = final_namespace_children.get(namespace_name, set())
+        if not set(child_names).issubset(surviving_namespace_children):
+            namespace_count += 1
+        for child_name in child_names:
+            if (
+                child_name in surviving_namespace_children
+                or (namespace_name, child_name) in final_qualified_functions
+                or f"{namespace_name}__{child_name}" in final_function_names
+                or f"{namespace_name}.{child_name}" in final_function_names
+            ):
+                continue
+            child_count += 1
+    return namespace_count, child_count
+
+
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for namespace in tools:
@@ -6347,6 +6613,43 @@ def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError
     ) from error
 
 
+def _runtime_tool_alias_token(
+    declarations: list[Any],
+    *,
+    selected_protocol: str,
+    protocol_capabilities: RuntimeProtocolCapabilities,
+    provider_hosted_capabilities: Any,
+) -> str:
+    capability_set = {
+        "function_lifecycle": protocol_capabilities.function_lifecycle,
+        "namespace_lifecycle": protocol_capabilities.namespace_lifecycle,
+        "custom_lifecycle": protocol_capabilities.custom_lifecycle,
+        "tool_search_lifecycle": protocol_capabilities.tool_search_lifecycle,
+        "hosted_lifecycles": sorted(protocol_capabilities.hosted_lifecycles),
+        "unknown_lifecycles": sorted(protocol_capabilities.unknown_lifecycles),
+        "accepts_namespace_adapter": protocol_capabilities.accepts_namespace_adapter,
+        "accepts_custom_adapter": protocol_capabilities.accepts_custom_adapter,
+        "accepts_tool_search_adapter": protocol_capabilities.accepts_tool_search_adapter,
+        "max_tool_name_length": protocol_capabilities.max_tool_name_length,
+        "provider_hosted_kinds": sorted(
+            RuntimeHostedCapabilityFacts.from_value(
+                provider_hosted_capabilities
+            ).supported_kinds
+        ),
+    }
+    canonical = json.dumps(
+        {
+            "capability_set": capability_set,
+            "declarations": declarations,
+            "selected_protocol": selected_protocol,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _prepare_runtime_tool_compatibility(
     payload: dict[str, Any],
     upstream: Mapping[str, Any],
@@ -6400,13 +6703,20 @@ def _prepare_runtime_tool_compatibility(
         )
     ]
     try:
+        provider_hosted_capabilities = upstream.get("hosted_tool_capabilities")
+        protocol_capabilities = _runtime_tool_protocol_capabilities(tool_protocol, upstream)
         plan = build_tool_compatibility_plan(
             planned_declarations,
             selected_protocol=tool_protocol,
-            provider_hosted_capabilities=upstream.get("hosted_tool_capabilities"),
+            provider_hosted_capabilities=provider_hosted_capabilities,
             tool_choice=payload.get("tool_choice"),
-            protocol_capabilities=_runtime_tool_protocol_capabilities(tool_protocol, upstream),
-            request_token=uuid.uuid4().hex,
+            protocol_capabilities=protocol_capabilities,
+            request_token=_runtime_tool_alias_token(
+                planned_declarations,
+                selected_protocol=tool_protocol,
+                protocol_capabilities=protocol_capabilities,
+                provider_hosted_capabilities=provider_hosted_capabilities,
+            ),
         )
     except RuntimeToolCompatibilityError as exc:
         write_proxy_event(
@@ -6492,6 +6802,177 @@ def _runtime_tool_compatibility_stream_for_attempt(
         stream = plan.new_stream()
         event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream
     return plan, stream
+
+
+def _runtime_tool_adapter_alias_hash(aliases: Iterable[str]) -> str:
+    """Hash the ordered generated alias surface without logging tool names."""
+
+    encoded = json.dumps(
+        list(aliases),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_tool_adapter_request_snapshot(
+    plan: RuntimeToolCompatibilityPlan,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return bounded evidence for the body sent to the selected upstream.
+
+    This is intentionally computed after ``encode_payload``.  The capture
+    proxy used by the private E2E runner sits before this boundary and can
+    therefore only prove the CLI's native collaboration surface; these
+    fields are the Gateway's own proof of the final provider wire shape.
+    """
+
+    tools = payload.get("tools")
+    tool_values = tools if isinstance(tools, list) else []
+    aliases = [
+        tool.get("name")
+        for tool in tool_values
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("name"), str)
+        and plan.registry.record_for_alias(tool.get("name")) is not None
+    ]
+    namespace_count = sum(
+        1
+        for tool in tool_values
+        if isinstance(tool, Mapping) and tool.get("type") == "namespace"
+    )
+    namespace_child_count = sum(
+        len(tool.get("tools"))
+        for tool in tool_values
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and isinstance(tool.get("tools"), list)
+    )
+    history_call_ids: set[str] = set()
+    history_output_ids: set[str] = set()
+    alias_call_ids: set[str] = set()
+    history_call_count = 0
+    history_output_count = 0
+    input_items = payload.get("input")
+    for item in input_items if isinstance(input_items, list) else ():
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if item_type == "function_call" and plan.registry.record_for_alias(item.get("name")) is not None:
+            history_call_count += 1
+            if isinstance(call_id, str) and call_id:
+                history_call_ids.add(call_id)
+                alias_call_ids.add(call_id)
+        elif item_type == "function_call_output":
+            record = plan.registry.record_for_call(call_id)
+            if record is not None or (isinstance(call_id, str) and call_id in alias_call_ids):
+                history_output_count += 1
+                if isinstance(call_id, str) and call_id:
+                    history_output_ids.add(call_id)
+    return {
+        "adapted_alias_count": len(aliases),
+        "adapted_alias_unique_count": len(set(aliases)),
+        "adapted_alias_hash": _runtime_tool_adapter_alias_hash(aliases),
+        "upstream_function_tool_count": sum(
+            1
+            for tool in tool_values
+            if isinstance(tool, Mapping) and tool.get("type") == "function"
+        ),
+        "upstream_namespace_count": namespace_count,
+        "upstream_namespace_child_count": namespace_child_count,
+        "adapted_history_call_count": history_call_count,
+        "adapted_history_output_count": history_output_count,
+        "adapted_history_pair_count": len(history_call_ids & history_output_ids),
+    }
+
+
+def _runtime_tool_adapter_item_snapshot(
+    plan: RuntimeToolCompatibilityPlan,
+    value: Any,
+) -> dict[str, Any]:
+    """Count alias-owned response items without retaining their contents."""
+
+    items = value if isinstance(value, list) else [value]
+    call_count = 0
+    output_count = 0
+    alias_call_ids: set[str] = set()
+    aliases: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        candidates = [item]
+        nested = item.get("item")
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+        for candidate in candidates:
+            if candidate.get("type") == "function_call":
+                name = candidate.get("name")
+                if plan.registry.record_for_alias(name) is not None:
+                    call_count += 1
+                    call_id = candidate.get("call_id")
+                    if isinstance(call_id, str) and call_id:
+                        alias_call_ids.add(call_id)
+                    if isinstance(name, str):
+                        aliases.append(name)
+            elif candidate.get("type") == "function_call_output":
+                call_id = candidate.get("call_id")
+                if (
+                    plan.registry.record_for_call(call_id) is not None
+                    or (isinstance(call_id, str) and call_id in alias_call_ids)
+                ):
+                    output_count += 1
+    return {
+        "wire_alias_call_count": call_count,
+        "wire_alias_output_count": output_count,
+        "wire_alias_hash": _runtime_tool_adapter_alias_hash(aliases),
+    }
+
+
+def _write_runtime_tool_adapter_request_evidence(
+    plan: RuntimeToolCompatibilityPlan,
+    payload: Mapping[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> None:
+    snapshot = _runtime_tool_adapter_request_snapshot(plan, payload)
+    if not plan.has_adaptations and not (
+        snapshot["adapted_history_call_count"]
+        or snapshot["adapted_history_output_count"]
+    ):
+        return
+    _write_adapter_event(
+        event_context,
+        "runtime_tool_adapter_request",
+        surface="request",
+        outcome="adapted",
+        **snapshot,
+    )
+
+
+def _write_runtime_tool_adapter_response_evidence(
+    plan: RuntimeToolCompatibilityPlan,
+    wire_value: Any,
+    decoded_value: Any,
+    event_context: Mapping[str, Any] | None,
+    *,
+    surface: str,
+) -> None:
+    snapshot = _runtime_tool_adapter_item_snapshot(plan, wire_value)
+    wire_count = snapshot["wire_alias_call_count"] + snapshot["wire_alias_output_count"]
+    if not wire_count or wire_value == decoded_value:
+        return
+    _write_adapter_event(
+        event_context,
+        "runtime_tool_adapter_response",
+        surface=surface,
+        outcome="inverse_mapped",
+        adapted_alias_hash=_runtime_tool_adapter_alias_hash(plan.aliases),
+        reverse_mapping_count=wire_count,
+        reverse_mapped_call_count=snapshot["wire_alias_call_count"],
+        reverse_mapped_output_count=snapshot["wire_alias_output_count"],
+        **snapshot,
+    )
 
 
 def _runtime_required_tool_diagnostics(
@@ -6967,7 +7448,9 @@ def _inject_explicit_codex_tools(
     strip_namespace_tools: bool = True,
     strip_all_namespace_tools: bool = False,
     include_flattened_namespace_tools: bool = True,
+    deferred_core_surface: bool = False,
     tool_surface_counts: dict[str, int] | None = None,
+    tool_surface_source_tools: list[Any] | None = None,
     open_agent_ids: list[str] | None = None,
     wait_agent_ids: list[str] | None = None,
     close_agent_ids: list[str] | None = None,
@@ -6990,13 +7473,16 @@ def _inject_explicit_codex_tools(
         return False
 
     changed = False
+    surface_source_tools = list(tool_surface_source_tools if tool_surface_source_tools is not None else tools)
     caller_non_namespace_tools = tuple(
         tool
-        for tool in tools
+        for tool in surface_source_tools
         if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
     )
-    namespace_declaration_count = sum(1 for tool in tools if _is_flattened_namespace_schema(tool))
-    flattened_namespace_tools = _flatten_namespace_function_tools(tools)
+    namespace_declaration_count = sum(
+        1 for tool in surface_source_tools if _is_flattened_namespace_schema(tool)
+    )
+    flattened_namespace_tools = _flatten_namespace_function_tools(surface_source_tools)
     if strip_namespace_tools:
         # Eager preserves the #105 compatibility surface: only declarations the
         # existing flattener understands are removed. deferred_core is the
@@ -7148,6 +7634,11 @@ def _inject_explicit_codex_tools(
             eager_tool_count += 1
         changed = True
     if tool_surface_counts is not None:
+        if deferred_core_surface:
+            namespace_declaration_count, deferred_tool_count = _deferred_namespace_surface_counts(
+                surface_source_tools,
+                tools,
+            )
         surviving_tool_ids = {id(tool) for tool in tools}
         tool_surface_counts.update(
             {
@@ -7160,6 +7651,41 @@ def _inject_explicit_codex_tools(
             }
         )
     return changed
+
+
+def _restore_deferred_core_node_repl_namespace(
+    payload: dict[str, Any],
+    source_tools: list[Any] | None,
+) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not isinstance(source_tools, list):
+        return False
+    if any(_is_node_repl_tool_schema(tool) for tool in tools):
+        return False
+    namespaces = [
+        tool
+        for tool in source_tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and tool.get("name") == NODE_REPL_NAMESPACE
+    ]
+    if len(namespaces) != 1:
+        return False
+    source_namespace = namespaces[0]
+    children = source_namespace.get("tools")
+    if not isinstance(children, list):
+        return False
+    js_children = [
+        child
+        for child in children
+        if isinstance(child, Mapping)
+        and child.get("type") == "function"
+        and child.get("name") == "js"
+    ]
+    if len(js_children) != 1:
+        return False
+    tools.append({**source_namespace, "tools": [js_children[0]]})
+    return True
 
 
 def _filter_tools_for_subagent_coordinator(
@@ -7888,7 +8414,58 @@ def _is_legacy_native_worker_spawn_call(
     the historical namespace/name and argument shape may bypass the new
     sidecar contract.
     """
-    if item.get("namespace") != "multi_agent_v1" or item.get("name") != "spawn_agent":
+    # The first native V1 Responses history used two equivalent wire shapes:
+    # the namespace/name form and the flattened ``multi_agent_v1__spawn_agent``
+    # form.  The CLI also omitted the generated item ``id`` when replaying old
+    # history.  Keep those variants explicit instead of treating every
+    # unbound spawn call as legacy.
+    item_fields = set(item)
+    allowed_fields = {
+        "type",
+        "call_id",
+        "name",
+        "arguments",
+        "namespace",
+        "id",
+        LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
+    }
+    if not item_fields.issubset(allowed_fields):
+        return False
+    if item_fields - {"type", "call_id", "name", "arguments"} not in (
+        set(),
+        {"namespace"},
+        {"id"},
+        {"namespace", "id"},
+        {"id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
+        {"namespace", "id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
+    ):
+        return False
+    if (
+        item.get("type") != "function_call"
+        or not isinstance(item.get("call_id"), str)
+        or not item.get("call_id")
+    ):
+        return False
+    has_id = "id" in item
+    if has_id and (not isinstance(item.get("id"), str) or not item.get("id")):
+        return False
+    if LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD in item:
+        if not has_id:
+            return False
+        metadata = item.get(LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD)
+        if (
+            not isinstance(metadata, Mapping)
+            or set(metadata) != {"turn_id"}
+            or not isinstance(metadata.get("turn_id"), str)
+            or not metadata.get("turn_id")
+        ):
+            return False
+    namespace = item.get("namespace")
+    name = item.get("name")
+    if not (
+        (namespace == "multi_agent_v1" and name == "spawn_agent")
+        or (namespace is None and name == "multi_agent_v1__spawn_agent")
+    ):
         return False
     if not isinstance(arguments, Mapping):
         return False
@@ -8141,9 +8718,11 @@ def _attach_worker_requested_binding_sidecars(
     # normalizer intentionally accepts a valid JSON prefix for other repair
     # paths, but that would let malformed streamed arguments inherit a worker
     # binding after the strict stream state has already been cleared.
-    arguments = _semantic_strict_json_object(rewritten.get("arguments"))
+    raw_arguments = rewritten.get("arguments")
+    arguments = _semantic_strict_json_object(raw_arguments)
     context = event_context or {}
     pending_agent_type = None
+    pending_arguments = None
     stream_item_tracked = False
     stream_selector_invalid = False
     stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
@@ -8154,6 +8733,7 @@ def _attach_worker_requested_binding_sidecars(
         if isinstance(record, Mapping):
             stream_item_tracked = True
             pending_agent_type = record.get("agent_type")
+            pending_arguments = _semantic_strict_json_object(record.get("arguments"))
             stream_selector_invalid = bool(record.get("selector_invalid"))
     if arguments is None:
         # Responses streams may publish the function-call item before its
@@ -8164,12 +8744,14 @@ def _attach_worker_requested_binding_sidecars(
         # worker call.  A normal body call has no lifecycle status and keeps the
         # old fail-closed behavior.
         if not (
-            rewritten.get("arguments") in (None, "")
+            raw_arguments in (None, "")
             and bool(context.get("_worker_binding_required"))
             and rewritten.get("status") in {"in_progress", "completed"}
             and pending_agent_type == "worker"
+            and pending_arguments is not None
         ):
             return (rewritten if changed else value), changed
+        arguments = pending_arguments
     elif arguments.get("agent_type") != "worker":
         return (rewritten if changed else value), changed
     elif stream_item_tracked and (
@@ -8191,8 +8773,20 @@ def _attach_worker_requested_binding_sidecars(
             classification="missing_requested_binding_sidecar",
         )
     sidecar = _worker_requested_binding_sidecar(requested, call_id)
-    if rewritten.get(WORKER_REQUESTED_BINDING_FIELD) != sidecar:
-        rewritten[WORKER_REQUESTED_BINDING_FIELD] = sidecar
+    persisted_arguments = dict(arguments)
+    # Keep one inert native field as the post-Beta4 marker so removing only the
+    # private carrier cannot turn a new call into the exact legacy shape. A
+    # null optional model is parsed by Codex CLI as no override, so the worker
+    # still inherits the external parent model and reasoning effort.
+    persisted_arguments["model"] = None
+    persisted_arguments.pop("reasoning_effort", None)
+    persisted_arguments[WORKER_REQUESTED_BINDING_FIELD] = sidecar
+    encoded_arguments = _dump_arguments_like(raw_arguments, persisted_arguments)
+    if raw_arguments != encoded_arguments:
+        rewritten["arguments"] = encoded_arguments
+        changed = True
+    if WORKER_REQUESTED_BINDING_FIELD in rewritten:
+        rewritten.pop(WORKER_REQUESTED_BINDING_FIELD, None)
         changed = True
     return (rewritten if changed else value), changed
 
@@ -8221,11 +8815,12 @@ def _apply_external_worker_response_contract(
 
 def _validate_worker_binding_history(
     payload: Mapping[str, Any],
-) -> None:
+) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
-        return
+        return False
 
+    changed = False
     worker_calls: dict[str, Mapping[str, Any] | None] = {}
     legacy_worker_calls: set[str] = set()
     validated_call_ids: set[str] = set()
@@ -8234,7 +8829,9 @@ def _validate_worker_binding_history(
             continue
         call_id = item.get("call_id")
         if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
-            arguments = _json_object_from_arguments(item.get("arguments"))
+            raw_arguments = item.get("arguments")
+            arguments = _json_object_from_arguments(raw_arguments)
+            strict_arguments = _semantic_strict_json_object(raw_arguments)
             agent_type = arguments.get("agent_type") if arguments is not None else None
             if agent_type in {"general", "default"}:
                 continue
@@ -8250,10 +8847,15 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification="duplicate_worker_call_identity",
                 )
-            legacy_arguments = _semantic_strict_json_object(item.get("arguments"))
+            nested_sidecar_present = (
+                isinstance(arguments, Mapping)
+                and WORKER_REQUESTED_BINDING_FIELD in arguments
+            )
+            top_level_sidecar_present = WORKER_REQUESTED_BINDING_FIELD in item
             if (
-                WORKER_REQUESTED_BINDING_FIELD not in item
-                and _is_legacy_native_worker_spawn_call(item, legacy_arguments)
+                not nested_sidecar_present
+                and not top_level_sidecar_present
+                and _is_legacy_native_worker_spawn_call(item, strict_arguments)
             ):
                 legacy_worker_calls.add(call_id)
                 worker_calls[call_id] = None
@@ -8266,8 +8868,30 @@ def _validate_worker_binding_history(
                     classification=selector_validation.classification,
                     surface="history",
                 )
+            if nested_sidecar_present and strict_arguments is None:
+                _raise_worker_contract_error(
+                    event="worker_requested_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="unknown_requested_binding_sidecar",
+                )
+            nested_sidecar = (
+                strict_arguments.get(WORKER_REQUESTED_BINDING_FIELD)
+                if nested_sidecar_present and strict_arguments is not None
+                else None
+            )
+            top_level_sidecar = item.get(WORKER_REQUESTED_BINDING_FIELD)
+            if (
+                nested_sidecar_present
+                and top_level_sidecar_present
+                and nested_sidecar != top_level_sidecar
+            ):
+                _raise_worker_contract_error(
+                    event="worker_requested_binding_validated",
+                    error_code=WORKER_BINDING_ERROR_CODE,
+                    classification="conflicting_requested_binding_sidecar",
+                )
             requested, sidecar_failure = _verified_worker_requested_binding(
-                item.get(WORKER_REQUESTED_BINDING_FIELD),
+                nested_sidecar if nested_sidecar_present else top_level_sidecar,
                 call_id,
             )
             if requested is None:
@@ -8276,8 +8900,59 @@ def _validate_worker_binding_history(
                     error_code=WORKER_BINDING_ERROR_CODE,
                     classification=sidecar_failure or "unknown_requested_binding_sidecar",
                 )
+            if strict_arguments is not None:
+                if nested_sidecar_present and (
+                    "model" not in strict_arguments
+                    or strict_arguments.get("model") is not None
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_model",
+                    )
+                if nested_sidecar_present and "reasoning_effort" in strict_arguments:
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_reasoning",
+                    )
+                if (
+                    not nested_sidecar_present
+                    and "model" in strict_arguments
+                    and strict_arguments.get("model") != requested["model"]
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_model",
+                    )
+                if (
+                    not nested_sidecar_present
+                    and "reasoning_effort" in strict_arguments
+                    and strict_arguments.get("reasoning_effort") != requested["reasoning"]
+                ):
+                    _raise_worker_contract_error(
+                        event="worker_requested_binding_validated",
+                        error_code=WORKER_BINDING_ERROR_CODE,
+                        classification="contradictory_requested_reasoning",
+                    )
             if isinstance(item, dict):
-                item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                if WORKER_REQUESTED_BINDING_FIELD in item:
+                    item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                    changed = True
+                if nested_sidecar_present and strict_arguments is not None:
+                    forwarded_arguments = dict(strict_arguments)
+                    forwarded_arguments.pop(WORKER_REQUESTED_BINDING_FIELD, None)
+                    # The null model is a persistence marker added after the
+                    # provider produced the call. Do not replay persistence
+                    # metadata as provider-authored tool arguments.
+                    forwarded_arguments.pop("model", None)
+                    forwarded_arguments.pop("reasoning_effort", None)
+                    item["arguments"] = _dump_arguments_like(
+                        raw_arguments,
+                        forwarded_arguments,
+                    )
+                    changed = True
             worker_calls[call_id] = requested
             continue
         if (
@@ -8343,6 +9018,7 @@ def _validate_worker_binding_history(
             error_code=WORKER_BINDING_ERROR_CODE,
             classification="missing_readback",
         )
+    return changed
 
 
 def _normalize_third_party_tool_call(
@@ -11521,7 +12197,8 @@ def compatible_request_body(
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
     if not raw_provider_probe and not collaboration_v2:
-        _validate_worker_binding_history(payload)
+        if _validate_worker_binding_history(payload):
+            changed = True
     bounded_tool_search_terminal_calls = (
         {}
         if raw_provider_probe
@@ -11565,18 +12242,95 @@ def compatible_request_body(
             )
         changed = True
     runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
-    if isinstance(event_context, dict) and not raw_provider_probe:
-        if _hoist_additional_tools_input_items(payload):
-            changed = True
-        if _prepare_runtime_tool_compatibility(
-            payload,
-            upstream,
-            tool_protocol,
-            event_context,
-            native_responses_tool_codec=native_responses_tool_codec_override,
-        ):
-            changed = True
-        runtime_tool_plan = _runtime_tool_compatibility_plan(event_context)
+    pending_tool_surface_event: dict[str, Any] | None = None
+    tool_surface_source_tools: list[Any] | None = None
+    if not raw_provider_probe:
+        # The selected tool-surface policy is a wire-shaping concern, not a
+        # telemetry concern.  Apply it before runtime planning even when a
+        # direct helper caller does not provide a mutable event context.  If
+        # this remains behind the ``dict`` check, a runtime plan can see the
+        # original namespace and re-expand every child into aliases (#425).
+        if tool_surface_strategy == "deferred_core" or collaboration_v2:
+            # ``additional_tools`` is an internal carrier.  Only deferred
+            # external routes, or the client-owned V2 adapter, need it
+            # promoted so namespace pruning/runtime planning can inspect the
+            # declarations.  Ordinary eager routes must preserve this legacy
+            # carrier byte-for-byte (#425).
+            if _hoist_additional_tools_input_items(payload):
+                changed = True
+        if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
+            tools = payload["tools"]
+            tool_surface_source_tools = list(tools)
+            deferred_namespace_tools = [
+                tool
+                for tool in tools
+                if _is_raw_namespace_schema(tool)
+                and not (
+                    collaboration_v2
+                    and isinstance(tool, Mapping)
+                    and tool.get("name") == _COLLABORATION_V2_NAMESPACE
+                )
+            ]
+            retained_tools = [
+                tool
+                for tool in tools
+                if not (
+                    _is_raw_namespace_schema(tool)
+                    and not (
+                        collaboration_v2
+                        and isinstance(tool, Mapping)
+                        and tool.get("name") == _COLLABORATION_V2_NAMESPACE
+                    )
+                )
+            ]
+            if len(retained_tools) != len(tools):
+                tools[:] = retained_tools
+                changed = True
+            if collaboration_v2:
+                namespace_declaration_count, deferred_tool_count = (
+                    _deferred_namespace_surface_counts(deferred_namespace_tools, retained_tools)
+                )
+                retained_tool_ids = {id(tool) for tool in retained_tools}
+                pending_tool_surface_event = {
+                    "tool_surface_strategy": tool_surface_strategy,
+                    "namespace_declaration_count": namespace_declaration_count,
+                    "eager_tool_count": 0,
+                    "retained_core_count": sum(
+                        1
+                        for tool in tool_surface_source_tools
+                        if not _is_raw_namespace_schema(tool)
+                        and id(tool) in retained_tool_ids
+                    ),
+                    "deferred_tool_count": deferred_tool_count,
+                }
+        # Runtime planning is required for the wire transformation even when
+        # this helper is used without a mutable telemetry context.  The
+        # production handler supplies a dict so the plan/stream ledger can be
+        # reused for response decoding, but direct callers and a few request
+        # boundaries legitimately pass None or an immutable Mapping.  Using a
+        # private context here prevents those calls from silently forwarding a
+        # raw Collaboration namespace (or re-expanding deferred children) just
+        # because telemetry storage was unavailable.
+        # A real relay always supplies a mutable context.  The one context-free
+        # path that still needs planning is the client-owned Collaboration V2
+        # adapter: direct callers may omit telemetry, but the namespace must
+        # still be converted before it can reach a third-party provider.  Keep
+        # ordinary context-free compatibility calls on their legacy shaping
+        # path; they have no response ledger to decode and changing them would
+        # turn a helper call into a different protocol boundary.
+        if isinstance(event_context, dict) or collaboration_v2:
+            runtime_plan_context = (
+                event_context if isinstance(event_context, dict) else {}
+            )
+            if _prepare_runtime_tool_compatibility(
+                payload,
+                upstream,
+                tool_protocol,
+                runtime_plan_context,
+                native_responses_tool_codec=native_responses_tool_codec_override,
+            ):
+                changed = True
+            runtime_tool_plan = _runtime_tool_compatibility_plan(runtime_plan_context)
     if raw_provider_probe:
         pass
     elif collaboration_v2:
@@ -12025,6 +12779,22 @@ def compatible_request_body(
                 and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
+            if (
+                tool_surface_strategy == "deferred_core"
+                and include_node_repl_for_subagent_workflow
+                and _restore_deferred_core_node_repl_namespace(
+                    payload,
+                    tool_surface_source_tools,
+                )
+            ):
+                changed = True
+                if runtime_tool_plan is not None:
+                    runtime_tool_plan = runtime_tool_plan.with_final_declarations(
+                        payload["tools"],
+                        tool_choice=payload.get("tool_choice"),
+                    )
+                    if isinstance(event_context, dict):
+                        event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = runtime_tool_plan
             if subagent_worker_context and _filter_tools_for_subagent_worker(
                 payload,
                 compatibility_plan=runtime_tool_plan,
@@ -12089,7 +12859,9 @@ def compatible_request_body(
                 include_flattened_namespace_tools=(
                     runtime_tool_plan is None and tool_surface_strategy == "eager"
                 ),
+                deferred_core_surface=tool_surface_strategy == "deferred_core",
                 tool_surface_counts=tool_surface_counts,
+                tool_surface_source_tools=tool_surface_source_tools,
                 open_agent_ids=open_agent_ids,
                 wait_agent_ids=wait_agent_ids,
                 close_agent_ids=close_agent_ids,
@@ -12101,11 +12873,20 @@ def compatible_request_body(
             )
             if _restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
-            write_proxy_event(
-                "external_tool_surface_prepared",
-                tool_surface_strategy=tool_surface_strategy,
-                **tool_surface_counts,
-            )
+            if tool_surface_counts:
+                if runtime_tool_plan is not None and tool_surface_strategy == "eager":
+                    tool_surface_counts["eager_tool_count"] = sum(
+                        len(entry.aliases)
+                        for entry in runtime_tool_plan.entries
+                        if entry.family == "namespace"
+                        and entry.disposition == "adapt"
+                        and _is_flattened_namespace_schema(entry.declaration)
+                    )
+                    tool_surface_counts["deferred_tool_count"] = 0
+                pending_tool_surface_event = {
+                    "tool_surface_strategy": tool_surface_strategy,
+                    **tool_surface_counts,
+                }
             if explicit_tools_injected:
                 added_tool_names = sorted(_function_tool_names(payload.get("tools")) - tool_names_before)
                 _write_adapter_event(
@@ -12185,6 +12966,19 @@ def compatible_request_body(
         runtime_tool_plan,
     ):
         changed = True
+    if runtime_tool_plan is not None:
+        _write_runtime_tool_adapter_request_evidence(
+            runtime_tool_plan,
+            payload,
+            event_context,
+        )
+    if pending_tool_surface_event is not None:
+        final_tools = payload.get("tools")
+        write_proxy_event(
+            "external_tool_surface_prepared",
+            **pending_tool_surface_event,
+            final_tool_count=len(final_tools) if isinstance(final_tools, list) else 0,
+        )
     model_id = payload.get("model")
     max_output_tokens, context_window_fallback = (
         _catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
@@ -12956,10 +13750,18 @@ def compatible_response_body(
     changed = False
     runtime_tool_plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
     if runtime_tool_plan is not None:
+        wire_output = payload.get("output")
         try:
             decoded_payload = runtime_tool_plan.decode_payload(payload)
         except RuntimeToolCompatibilityError as exc:
             _raise_runtime_tool_compatibility_error(exc)
+        _write_runtime_tool_adapter_response_evidence(
+            runtime_tool_plan,
+            wire_output if wire_output is not None else payload,
+            decoded_payload.get("output") if isinstance(decoded_payload, Mapping) else decoded_payload,
+            event_context,
+            surface="body",
+        )
         if decoded_payload != payload:
             payload = decoded_payload
             changed = True
@@ -13058,10 +13860,18 @@ def compatible_sse_line(
         event_context
     )
     if runtime_tool_plan is not None and stream_state is not None:
+        wire_event = payload
         try:
             decoded_events = stream_state.decode_events_for_event(payload)
         except RuntimeToolCompatibilityError as exc:
             _raise_runtime_tool_compatibility_error(exc)
+        _write_runtime_tool_adapter_response_evidence(
+            runtime_tool_plan,
+            wire_event,
+            decoded_events,
+            event_context,
+            surface="sse",
+        )
         if not decoded_events:
             return b""
         if len(decoded_events) > 1:
@@ -13171,6 +13981,9 @@ def transport_failure_phase(exc: BaseException | None) -> str | None:
     """Best-effort phase label for failures before an upstream response is relayed."""
     if exc is None:
         return None
+    explicit_phase = _explicit_transport_phase(exc)
+    if explicit_phase is not None:
+        return explicit_phase
     reason = getattr(exc, "reason", None)
     if isinstance(exc, URLError) and isinstance(reason, BaseException):
         nested = transport_failure_phase(reason)
@@ -13214,6 +14027,9 @@ def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
     """
     if exc is None:
         return None
+    explicit_phase = _explicit_transport_phase(exc)
+    if explicit_phase is not None:
+        return explicit_phase
     if isinstance(exc, (UpstreamStreamIncompleteError, UpstreamStreamErrorEvent)):
         return "stream_body"
     if isinstance(exc, HTTPError):
@@ -14517,7 +15333,20 @@ def _route_supports_transparent_metering(
     wire_format_adapter: str,
     request_context: Mapping[str, str],
     provider_hint: str | None,
+    collaboration_protocol: str | None = None,
+    raw_provider_probe: bool = False,
 ) -> bool:
+    # Collaboration V2 is a Gateway-owned compatibility surface for
+    # provider-scoped third-party routes.  It must not be sent through the
+    # transparent client-runtime path, otherwise the provider sees the native
+    # namespace and no runtime tool adapter can translate calls back.
+    if (
+        not raw_provider_probe
+        and collaboration_protocol == _COLLABORATION_V2
+        and upstream_name != "official"
+        and provider_hint is not None
+    ):
+        return False
     if _is_codex_app_context(request_context):
         return False
     explicit_client = _has_explicit_third_party_client_identity(request_context)
@@ -14661,6 +15490,7 @@ def route_plan_for_request(
     *,
     inbound_format: str,
     provider_hint: str | None = None,
+    collaboration_protocol: str | None = None,
     model_requested: str | None = None,
     canonical_route_model: str | None = None,
     request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
@@ -14759,6 +15589,8 @@ def route_plan_for_request(
         wire_format_adapter=wire_adapter,
         request_context=request_context,
         provider_hint=provider_hint,
+        collaboration_protocol=collaboration_protocol,
+        raw_provider_probe=raw_provider_probe,
     )
     if codex_app_external:
         behavior_profile = BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
@@ -15355,6 +16187,10 @@ def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -
             renamed[f"{prefix}_prefix_bytes"] = value
         elif key == "prompt_cache_key_hash":
             renamed[f"{prefix}_prompt_cache_key_hash"] = value
+        elif key == "body_bytes":
+            renamed[f"{prefix}_body_bytes"] = value
+        elif key == "body_sha256":
+            renamed[f"{prefix}_body_sha256"] = value
     return renamed
 
 
@@ -15648,6 +16484,30 @@ def current_catalog_data() -> dict[str, Any]:
             require_published_snapshot=True,
         )
     )
+
+
+def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the internal catalog snapshot into the public OpenAI shape."""
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        models = []
+    data: list[dict[str, str]] = []
+    for model in models:
+        if not isinstance(model, Mapping):
+            continue
+        model_id = model.get("slug")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        metadata = model.get("codex_proxy_metadata")
+        owner = metadata.get("provider") if isinstance(metadata, Mapping) else None
+        data.append(
+            {
+                "id": model_id,
+                "object": "model",
+                "owned_by": owner if isinstance(owner, str) and owner.strip() else "codexhub",
+            }
+        )
+    return {"object": "list", "data": data}
 
 
 def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
@@ -18603,7 +19463,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/v1/models":
-            self._send_json(200, current_catalog_data())
+            self._send_json(200, openai_model_list(current_catalog_data()))
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):
@@ -19026,11 +19886,21 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )
+            collaboration_protocol = (
+                _resolve_collaboration_boundary(
+                    inbound_payload,
+                    proxy_request_context,
+                    surface="request",
+                )
+                if provider_hint is not None and upstream_name != "official"
+                else None
+            )
             route_plan = route_plan_for_request(
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
                 provider_hint=provider_hint,
+                collaboration_protocol=collaboration_protocol,
                 model_requested=model_requested,
                 canonical_route_model=model,
                 request_kind=request_kind,
@@ -23362,6 +24232,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 )
                         except RuntimeToolCompatibilityError as exc:
                             _raise_runtime_tool_compatibility_error(exc)
+                        _write_runtime_tool_adapter_response_evidence(
+                            runtime_tool_plan,
+                            events,
+                            decoded_events,
+                            event_context,
+                            surface="sse",
+                        )
                         events = decoded_events
                     _write_adapter_event(
                         event_context,

@@ -1,6 +1,7 @@
 import os
 import stat
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -499,7 +500,7 @@ def test_real_unlink_recreate_cannot_overlap_guarded_contender(tmp_path: Path) -
     target = tmp_path / "shared.json"
     lock = target.with_name("shared.json.lock")
     source = str(Path(__file__).resolve().parents[1] / "src-python")
-    python = os.environ.get("PYTHON", "python")
+    python = sys.executable
     holder_script = "import pathlib, sys; from atomic_io import file_lock_for; target = pathlib.Path(sys.argv[1]);\nwith file_lock_for(target):\n    print('held', flush=True);\n    if sys.stdin.readline().strip() != 'release': raise SystemExit(2);\n    print('released', flush=True)"
     contender_script = "import pathlib, sys; from atomic_io import _set_test_lock_hook, atomic_write_text; target = pathlib.Path(sys.argv[1]); state = {'phase': 0};\ndef hook(event):\n    if event == 'attempt' and state['phase'] == 0:\n        print('attempt', flush=True); state['phase'] = 1\n    elif event == 'blocked' and state['phase'] == 1:\n        print('blocked', flush=True); state['phase'] = 2;\n        if sys.stdin.readline().strip() != 'replacement-verified': raise SystemExit(3)\n        print('replacement-verified', flush=True)\n    elif event == 'acquired':\n        print('acquired', flush=True)\n_set_test_lock_hook(hook); atomic_write_text(target, 'contender'); print('entered', flush=True)"
     holder = subprocess.Popen([python, "-c", holder_script, str(target)], env={**os.environ, "PYTHONPATH": source}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 if /I "%~1"=="refresh-models" (
   set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
   if not exist "!catalog!" mkdir "!catalog!"
-  python.exe "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
+  call "%~dp0run-fixture-python.cmd" "%~dp0write-catalog.py" "!catalog!\codexhub-model-catalog.json"
   if errorlevel 1 exit /b 37
   exit /b 0
 )
@@ -26,4 +26,4 @@ if defined OPENAI_API_KEY exit /b 38
 if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\settings.json" exit /b 26
 if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\config\providers.toml" exit /b 27
 if not exist "%CODEXHUB_CODEX_TARGET_HOME%\auth.json" exit /b 28
-python.exe "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%
+call "%~dp0run-fixture-python.cmd" "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%

@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+from fixture_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -10,6 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
 parser.add_argument("--bad-health", action="store_true")
 parser.add_argument("--exit-after-seconds", type=float)
+parser.add_argument("--keep-process-after-shutdown", action="store_true")
 args = parser.parse_args()
 settings = json.loads(
     (Path(os.environ["CODEXHUB_RUNTIME_HOME"]) / "proxy" / "settings.json").read_text()
@@ -45,3 +52,7 @@ if args.exit_after_seconds is not None:
     timer.daemon = True
     timer.start()
 server.serve_forever()
+if args.keep_process_after_shutdown:
+    # Keep the candidate process alive after the listener disappears so the
+    # runner classifies this as manual-evidence health loss, not startup exit.
+    threading.Event().wait()

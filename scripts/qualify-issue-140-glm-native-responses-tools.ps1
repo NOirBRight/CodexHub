@@ -1,5 +1,5 @@
 param(
-    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$Workspace = "",
     [string]$OutputDir = '',
     [string]$CodexCommand = '',
     [int]$TimeoutSeconds = 240,
@@ -8,6 +8,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Workspace)) {
+    $Workspace = (Resolve-Path (Join-Path $scriptRoot '..')).Path
+}
 $Workspace = (Resolve-Path -LiteralPath $Workspace).Path
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path ([System.IO.Path]::GetTempPath()) (
@@ -17,7 +24,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-$qualificationScript = Join-Path $PSScriptRoot 'qualify-issue-108-glm-tool-surface.ps1'
+$qualificationScript = Join-Path $scriptRoot 'qualify-issue-108-glm-tool-surface.ps1'
 $powerShellPath = (Get-Process -Id $PID).Path
 $runs = [System.Collections.Generic.List[object]]::new()
 

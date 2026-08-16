@@ -314,7 +314,7 @@ def test_ci_yaml_synthetic_run_uses_watchdog_with_3600s_bound():
     )
     timeout_idx = normalized.find("--timeout-seconds 3600")
     separator_idx = normalized.find("-- ")
-    pytest_idx = normalized.find("python.exe -m pytest")
+    pytest_idx = normalized.find(".\\scripts\\codexhub-python.cmd -m pytest")
     assert -1 < watchdog_idx < timeout_idx < separator_idx < pytest_idx, normalized
 
 

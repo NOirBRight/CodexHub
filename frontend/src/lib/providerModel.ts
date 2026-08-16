@@ -1,5 +1,14 @@
 import type { Model } from "./types";
 
+export function providerQualifiedModelId(providerId: string, modelId: string) {
+  const cleanProviderId = providerId.trim();
+  const cleanModelId = modelId.trim();
+  if (!cleanProviderId || !cleanModelId || cleanModelId.startsWith(`${cleanProviderId}/`)) {
+    return cleanModelId;
+  }
+  return `${cleanProviderId}/${cleanModelId}`;
+}
+
 export function normalizeModel(model: Model): Model {
   const levels = model.supported_reasoning_levels ?? [];
   return {

@@ -44,13 +44,13 @@ struct CodexConfigContextGuardStatus {
 
 pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, String> {
     let paths = ConfigPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     get_codex_context_guard_status_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
 pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus, String> {
     let paths = ConfigPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
 }
 
@@ -59,7 +59,7 @@ pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus,
 /// unowned and cross-channel Codex configuration.
 pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
     let paths = ConfigPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     republish_managed_codex_context_budget_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
@@ -69,7 +69,7 @@ pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
 /// backup belongs to the other channel or the active model is third-party.
 pub(crate) fn migrate_legacy_context_guard() -> Result<bool, String> {
     let paths = ConfigPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     migrate_legacy_context_guard_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
@@ -79,7 +79,7 @@ pub fn switch_mode_with_takeover(
     force_takeover: bool,
 ) -> Result<AppStatus, String> {
     let paths = ConfigPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     let runner = ProcessCommandRunner;
 
     let mut status =
@@ -276,7 +276,7 @@ pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
-        let mut command = Command::new(program);
+        let mut command = runtime_paths::configured_python_command(program);
         command.args(args);
         configure_no_window(&mut command);
         let output = command
@@ -1256,7 +1256,7 @@ fn quote_command_part(part: OsString) -> String {
     }
 }
 
-pub(crate) fn find_python() -> PathBuf {
+pub(crate) fn find_python() -> Result<PathBuf, String> {
     let resource_root = runtime_paths::resource_root().ok();
     runtime_paths::find_python(resource_root.as_deref())
 }
@@ -2324,7 +2324,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         .unwrap();
         save_settings_with_paths(Settings::default(), &stable_paths).unwrap();
         save_settings_with_paths(Settings::default(), &beta_paths).unwrap();
-        let python = super::find_python();
+        let python = super::find_python().expect("repository Python interpreter");
         let runner = ProcessCommandRunner;
 
         switch_mode_with_paths_takeover_as_owner(
@@ -2422,7 +2422,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
                 &paths,
             )
             .unwrap();
-            let python = super::find_python();
+            let python = super::find_python().expect("repository Python interpreter");
             let runner = ProcessCommandRunner;
 
             let rejected = switch_mode_with_paths_takeover_as_owner(
@@ -2497,7 +2497,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         )
         .unwrap();
         save_settings_with_paths(Settings::default(), &paths).unwrap();
-        let python = super::find_python();
+        let python = super::find_python().expect("repository Python interpreter");
         let runner = ProcessCommandRunner;
 
         switch_mode_with_paths_takeover_as_owner(
@@ -2539,7 +2539,7 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
         fs::create_dir_all(&target).unwrap();
         save_settings_with_paths(Settings::default(), &paths).unwrap();
-        let python = super::find_python();
+        let python = super::find_python().expect("repository Python interpreter");
         let runner = ProcessCommandRunner;
 
         switch_mode_with_paths_takeover_as_owner(

@@ -382,13 +382,13 @@ captures through inherited pipes, returns `124` on timeout, and emits only a
 bounded phase/process-count message. For the Issue module use:
 
 ```powershell
-python tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
-  python -m pytest -q tests/test_real_client_e2e.py
+.\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- `
+  .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py
 ```
 
 For a required full Python run, use the same command with an explicitly
 recorded bound appropriate to that suite, for example `--timeout-seconds 5400
--- python -m pytest -q`. Targeted unattended invocations use the same wrapper
+-- .\scripts\codexhub-python.cmd -m pytest -q`. Targeted unattended invocations use the same wrapper
 with a smaller stated bound. Do not invoke unattended E2E pytest without this
 outer watchdog.
 

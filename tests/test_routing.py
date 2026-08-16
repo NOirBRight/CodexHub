@@ -1,5 +1,6 @@
 import copy
 import gc
+import hashlib
 import os
 import gzip
 import io
@@ -12,7 +13,7 @@ import time
 import unittest
 import weakref
 from dataclasses import asdict, dataclass, fields, replace
-from http.client import IncompleteRead
+from http.client import HTTPConnection, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -965,6 +966,230 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.retry_policy, codex_proxy.RETRY_CONSERVATIVE_PRE_OUTPUT)
         self.assertEqual(decision.usage_policy, codex_proxy.USAGE_ASYNC_TAP)
         self.assertEqual(decision.repair_policy, codex_proxy.REPAIR_NONE)
+
+    def test_route_plan_provider_scoped_v2_uses_gateway_compatibility_adapter(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
+        )
+        self.assertFalse(decision.transparent_metered)
+        self.assertEqual(
+            decision.codex_compatibility_policy,
+            codex_proxy.CodexCompatibilityPolicy.CURRENT_COMPATIBILITY,
+        )
+        self.assertEqual(
+            decision.collaboration_backend,
+            codex_proxy.CollaborationBackend.GATEWAY_COMPATIBILITY,
+        )
+        self.assertEqual(decision.retry_policy, codex_proxy.RETRY_GATEWAY_FULL)
+        self.assertEqual(decision.usage_policy, codex_proxy.USAGE_SYNC_CAPTURE)
+        self.assertEqual(
+            decision.tool_exposure.effective_mode,
+            codex_proxy.ToolExposureMode.CURRENT_COMPATIBILITY,
+        )
+
+    def test_route_plan_provider_scoped_v1_keeps_transparent_metering(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V1,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
+    def test_route_plan_standard_external_v2_keeps_existing_transparent_behavior(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
+    def test_route_plan_provider_scoped_raw_v2_probe_keeps_passthrough(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "upstream_model": "glm-5.2",
+            },
+            {"client_id": "zcode"},
+            inbound_format="responses",
+            provider_hint="ollama-cloud",
+            model_requested="ollama-cloud/glm-5.2",
+            collaboration_protocol=COLLABORATION_V2,
+            raw_provider_probe=True,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
+        )
+        self.assertTrue(decision.transparent_metered)
+
+    def test_route_plan_official_codex_app_v2_remains_passthrough(self):
+        decision = codex_proxy.route_plan_for_request(
+            {
+                "name": "official",
+                "upstream_format": "responses",
+                "upstream_model": "gpt-5.5",
+            },
+            {"client_id": "codex-app"},
+            inbound_format="responses",
+            model_requested="openai/gpt-5.5",
+            collaboration_protocol=COLLABORATION_V2,
+        )
+
+        self.assertEqual(
+            decision.behavior_profile,
+            codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        )
+        self.assertFalse(decision.transparent_metered)
+        self.assertEqual(
+            decision.collaboration_backend,
+            codex_proxy.CollaborationBackend.CODEX_RUNTIME,
+        )
+
+    def test_provider_scoped_v2_handler_adapts_namespace_before_upstream(self):
+        body = json.dumps(
+            {
+                "model": "ollama-cloud/glm-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Use the collaboration tools.",
+                    }
+                ],
+                "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                "tool_choice": "auto",
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/ollama-cloud/responses",
+            body,
+            headers={"X-Codex-Client-Id": "zcode"},
+        )
+        upstream = {
+            "name": "ollama_cloud",
+            "provider_id": "ollama-cloud",
+            "upstream_model": "glm-5.2",
+            "upstream_format": "responses",
+            "base_url": "https://ollama.example.test/v1",
+            "auth": "ollama_api_key",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+        }
+
+        with (
+            patch("codex_proxy.choose_upstream", return_value=upstream),
+            patch(
+                "codex_proxy._open_upstream_response",
+                return_value=FakeContextResponse(b'{"id":"resp-v2","output":[]}'),
+            ) as open_upstream,
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+                provider_hint="ollama-cloud",
+            )
+
+        self.assertEqual(fake.status, 200)
+        forwarded = json.loads(open_upstream.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(
+            [tool["type"] for tool in forwarded["tools"]],
+            ["function"] * len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+        )
+        self.assertTrue(
+            all(tool["name"].startswith("__codexhub_ns_") for tool in forwarded["tools"])
+        )
+        self.assertNotIn("namespace", json.dumps(forwarded["tools"]))
+        request_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "runtime_tool_adapter_request"
+        ]
+        self.assertEqual(len(request_events), 1)
+        self.assertEqual(request_events[0]["upstream_namespace_count"], 0)
+        self.assertEqual(
+            request_events[0]["adapted_alias_count"],
+            len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+        )
+
+    def test_provider_scoped_mixed_collaboration_boundary_rejects_before_upstream(self):
+        body = json.dumps(
+            {
+                "model": "ollama-cloud/glm-5.2",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "tools": [
+                    _model_switch_tool_surface(COLLABORATION_V1),
+                    _model_switch_tool_surface(COLLABORATION_V2),
+                ],
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        handler, fake = post_handler(
+            "/v1/providers/ollama-cloud/responses",
+            body,
+            headers={"X-Codex-Client-Id": "zcode"},
+        )
+
+        with patch(
+            "codex_proxy._open_upstream_response",
+        ) as open_upstream:
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+                provider_hint="ollama-cloud",
+            )
+
+        self.assertEqual(fake.status, 400)
+        open_upstream.assert_not_called()
+        boundary_errors = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args
+            and call.args[0] == "request_error"
+            and call.kwargs.get("error") == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+        ]
+        self.assertEqual(len(boundary_errors), 1)
 
     def test_route_plan_third_party_app_official_responses_is_transparent_metered(self):
         upstream = {"name": "official", "upstream_format": "responses"}
@@ -4252,6 +4477,10 @@ class RoutingTests(unittest.TestCase):
                 codex_home=codex_proxy.RUNTIME_CODEX_DIR,
             )["request_body_hmac"]
         )
+        first_body_observability = codex_proxy.proxy_telemetry.enrich_request_observability(
+            body=responses_request.data,
+            codex_home=codex_proxy.RUNTIME_CODEX_DIR,
+        )
         final_body_hmac = (
             codex_proxy.proxy_telemetry.enrich_request_observability(
                 body=chat_request.data,
@@ -4262,6 +4491,15 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(
             request_start["upstream_request_body_hmac"],
             first_body_hmac,
+        )
+        self.assertEqual(request_start["upstream_body_bytes"], len(responses_request.data))
+        self.assertEqual(
+            request_start["upstream_body_sha256"],
+            hashlib.sha256(responses_request.data).hexdigest(),
+        )
+        self.assertEqual(
+            request_start["upstream_body_sha256"],
+            first_body_observability["body_sha256"],
         )
         self.assertEqual(
             fallback["upstream_request_body_hmac"],
@@ -11567,6 +11805,83 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(fields["thread_id"], "thread-control")
             self.assertEqual(fields["route_reason"], "official_control")
 
+    def test_models_route_projects_internal_catalog_to_openai_list_shape(self):
+        catalog = {
+            "fetched_at": "private-timestamp",
+            "client_version": "private-client",
+            "visibility_diagnostics": {"hidden": 1},
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "display_name": "5.5",
+                    "codex_proxy_metadata": {"provider": "openai"},
+                },
+                {
+                    "slug": "ollama-cloud/glm-5.2",
+                    "codex_proxy_metadata": {"provider": "ollama-cloud"},
+                },
+            ],
+        }
+        with patch("codex_proxy.current_catalog_data", return_value=catalog):
+            handler, fake = websocket_get_handler("/v1/models")
+            handler.headers = {"X-Codex-Client-Id": "codex-app"}
+            handler.close_connection = False
+            handler.do_GET()
+
+        self.assertEqual(fake.status, 200)
+        body = json.loads(b"".join(fake.wfile.writes))
+        self.assertEqual(body["object"], "list")
+        self.assertEqual(
+            body["data"],
+            [
+                {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
+                {
+                    "id": "ollama-cloud/glm-5.2",
+                    "object": "model",
+                    "owned_by": "ollama-cloud",
+                },
+            ],
+        )
+        self.assertNotIn("models", body)
+        self.assertNotIn("fetched_at", body)
+        self.assertNotIn("visibility_diagnostics", body)
+
+    def test_models_route_http_smoke_does_not_leak_internal_catalog_metadata(self):
+        catalog = {
+            "fetched_at": "private-timestamp",
+            "client_version": "private-client",
+            "visibility_diagnostics": {"hidden": 1},
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "codex_proxy_metadata": {"provider": "openai"},
+                }
+            ],
+        }
+        server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch("codex_proxy.current_catalog_data", return_value=catalog):
+                connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                connection.request("GET", "/v1/models")
+                response = connection.getresponse()
+                raw_body = response.read()
+                connection.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+        self.assertEqual(response.status, 200)
+        body = json.loads(raw_body)
+        self.assertIsInstance(body.get("data"), list)
+        self.assertEqual(body["data"][0]["id"], "gpt-5.5")
+        self.assertEqual(body["data"][0]["owned_by"], "openai")
+        self.assertNotIn("models", body)
+        self.assertNotIn("fetched_at", body)
+        self.assertNotIn("visibility_diagnostics", body)
+
     def test_official_control_error_event_uses_official_request_kind(self):
         handler = CodexProxyHandler.__new__(CodexProxyHandler)
         handler.path = "/v1/responses/resp_control"
@@ -14881,16 +15196,17 @@ class RoutingTests(unittest.TestCase):
         )
         handler = FakeHandler()
 
-        status = relay_upstream_response(
-            handler,
-            response,
-            "custom-endpoint",
-            relay_fixture=RELAY_GATEWAY,
-            upstream_format="chat_completions",
-            inbound_format="responses",
-            caller_stream=True,
-            event_context=context,
-        )
+        with patch("codex_proxy.write_proxy_event") as write_event:
+            status = relay_upstream_response(
+                handler,
+                response,
+                "custom-endpoint",
+                relay_fixture=RELAY_GATEWAY,
+                upstream_format="chat_completions",
+                inbound_format="responses",
+                caller_stream=True,
+                event_context=context,
+            )
 
         emitted = []
         for write in handler.wfile.writes:
@@ -14898,6 +15214,12 @@ class RoutingTests(unittest.TestCase):
                 if frame.startswith(b"data: {"):
                     emitted.append(json.loads(frame.decode("utf-8").removeprefix("data: ")))
         assert status == 200
+        adapter_responses = [
+            call_args.args[0]
+            for call_args in write_event.call_args_list
+            if call_args.args and call_args.args[0] == "runtime_tool_adapter_response"
+        ]
+        assert adapter_responses == ["runtime_tool_adapter_response"]
         assert not any(
             namespace_alias in json.dumps(event) or custom_alias in json.dumps(event)
             for event in emitted
@@ -16664,15 +16986,15 @@ class RoutingTests(unittest.TestCase):
                     b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_tool","type":"function_call","status":"in_progress","call_id":"call_tool","name":"shell_command","arguments":""}}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"{\\"command\\":"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.delta","item_id":"fc_tool","output_index":0,"delta":"\\"rg idle\\""}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.function_call_arguments.done","item_id":"fc_tool","output_index":0,"arguments":"{\\"command\\":\\"rg idle\\"}"}\n\n',
                 ),
                 (
@@ -16688,7 +17010,7 @@ class RoutingTests(unittest.TestCase):
             os.environ,
             {
                 "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "10",
-                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.2",
             },
             clear=False,
         ):
@@ -17073,15 +17395,15 @@ class RoutingTests(unittest.TestCase):
                     b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_patch","type":"custom_tool_call","status":"in_progress","call_id":"call_patch","name":"apply_patch","input":""}}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Begin Patch\\n"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_patch","output_index":0,"delta":"*** Add File: e2e.py\\n"}\n\n',
                 ),
                 (
-                    0.03,
+                    0.12,
                     b'data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_patch","output_index":0,"input":"*** Begin Patch\\n*** Add File: e2e.py\\n*** End Patch\\n"}\n\n',
                 ),
                 (
@@ -17097,7 +17419,7 @@ class RoutingTests(unittest.TestCase):
             os.environ,
             {
                 "CODEX_PROXY_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS": "10",
-                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.05",
+                "CODEX_PROXY_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS": "0.2",
             },
             clear=False,
         ):
@@ -20716,7 +21038,7 @@ Required sequence:
         )
         self.assertTrue(event_context["subagent_spawn_allowed"])
 
-    def test_chat_tools_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
+    def test_workflow_failed_node_repl_plan_read_still_blocks_spawn(self):
         workflow_prompt = """
 Use the real subagent-driven-development skill.
 
@@ -20741,36 +21063,76 @@ Execution constraints:
                     {
                         "type": "namespace",
                         "name": "mcp__node_repl",
-                        "tools": [{"type": "function", "name": "js", "parameters": {"type": "object"}}],
+                        "tools": [
+                            {"type": "function", "name": "js", "parameters": {"type": "object"}},
+                            {
+                                "type": "function",
+                                "name": "unrelated",
+                                "parameters": {"type": "object"},
+                            },
+                        ],
                     },
                     {"type": "function", "name": "multi_agent_v1__spawn_agent", "parameters": {"type": "object"}},
                 ],
             }
         ).encode("utf-8")
-        event_context = {"request_id": "req", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
-
-        transformed = compatible_request_body(
-            body,
-            {
+        upstreams = {
+            "chat-eager": {
                 "name": "ollama_cloud",
                 "upstream_format": "chat_completions",
                 "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "eager",
             },
-            event_context=event_context,
-        )
-        payload = json.loads(transformed)
-        tools_by_name = {tool["name"]: tool for tool in payload["tools"] if tool.get("type") == "function"}
-        transcript = json.dumps(payload, ensure_ascii=False)
+            "chat-deferred": {
+                "name": "ollama_cloud",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "deferred_core",
+            },
+            "responses-deferred": {
+                "name": "ollama_cloud",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "deferred_core",
+            },
+        }
 
-        self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
-        node_repl_aliases = [name for name in tools_by_name if name.startswith("__codexhub_ns_")]
-        self.assertEqual(len(node_repl_aliases), 1)
-        self.assertFalse(event_context["subagent_spawn_allowed"])
-        self.assertIn("status: workflow_plan_read_required", transcript)
-        self.assertEqual(
-            payload["tool_choice"],
-            {"type": "function", "name": node_repl_aliases[0]},
-        )
+        for case, upstream in upstreams.items():
+            with self.subTest(case=case):
+                event_context = {
+                    "request_id": "req",
+                    "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+                }
+                transformed = compatible_request_body(
+                    body,
+                    upstream,
+                    event_context=event_context,
+                )
+                payload = json.loads(transformed)
+                tools_by_name = {
+                    tool["name"]: tool
+                    for tool in payload["tools"]
+                    if tool.get("type") == "function"
+                }
+                transcript = json.dumps(payload, ensure_ascii=False)
+
+                self.assertNotIn("multi_agent_v1__spawn_agent", tools_by_name)
+                node_repl_aliases = [
+                    name for name in tools_by_name if name.startswith("__codexhub_ns_")
+                ]
+                self.assertEqual(len(node_repl_aliases), 2 if case == "chat-eager" else 1)
+                self.assertFalse(event_context["subagent_spawn_allowed"])
+                self.assertIn("status: workflow_plan_read_required", transcript)
+                self.assertEqual(payload["tool_choice"]["type"], "function")
+                self.assertIn(payload["tool_choice"]["name"], node_repl_aliases)
+                if case != "chat-eager":
+                    surface_event = next(
+                        call.kwargs
+                        for call in reversed(self.write_proxy_event.call_args_list)
+                        if call.args and call.args[0] == "external_tool_surface_prepared"
+                    )
+                    self.assertEqual(surface_event["namespace_declaration_count"], 1)
+                    self.assertEqual(surface_event["deferred_tool_count"], 1)
 
     def test_chat_tools_workflow_after_plan_read_hides_node_repl_and_other_mcp_tools(self):
         workflow_prompt = """
@@ -21772,6 +22134,50 @@ Execution constraints:
         self.assertEqual(legacy, body)
         self.assertEqual(eager, body)
 
+    def test_v2_adapter_hoists_additional_tools_before_alias_planning(self):
+        """V2's Lite carrier must reach the ordinary function-tool adapter."""
+
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        context: dict[str, Any] = {}
+        transformed = json.loads(
+            compatible_request_body(
+                body,
+                {
+                    "name": "ollama_cloud",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                    "tool_surface_strategy": "eager",
+                    "tool_protocol_capabilities": {
+                        "function_lifecycle": True,
+                        "accepts_namespace_adapter": True,
+                    },
+                },
+                event_context=context,
+                inject_codex_tools=False,
+            )
+        )
+
+        tools = transformed["tools"]
+        self.assertEqual(len(tools), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+        self.assertTrue(all(tool["type"] == "function" for tool in tools))
+        self.assertTrue(all(tool["name"].startswith("__codexhub_ns_") for tool in tools))
+        self.assertFalse(any(item.get("type") == "additional_tools" for item in transformed["input"]))
+        self.assertFalse(any(tool.get("type") == "namespace" for tool in tools))
+        self.assertIsNotNone(context.get("_runtime_tool_compatibility_plan"))
+
     def test_external_tool_surface_ab_harness_defers_large_mcp_namespace(self):
         shell_command = {
             "type": "function",
@@ -21863,6 +22269,82 @@ Execution constraints:
         self.assertIn("tool_search", deferred_names)
         for tool_name in codex_proxy.MULTI_AGENT_TOOL_NAMES:
             self.assertIn(f"multi_agent_v1__{tool_name}", deferred_names)
+
+    def test_deferred_core_prunes_namespace_before_runtime_planning(self):
+        """A runtime plan must not re-expand children removed by deferred_core."""
+
+        def mcp_namespace(child_count: int) -> dict[str, Any]:
+            return {
+                "type": "namespace",
+                "name": "mcp__beta42_namespace_249",
+                "description": "bounded namespace fixture",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": f"child_{index:03d}",
+                        "description": "bounded child",
+                        "strict": False,
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                    for index in range(child_count)
+                ],
+            }
+
+        upstream = {
+            "name": "ollama_cloud",
+            "upstream_format": "responses",
+            "tool_protocol": "responses_structured",
+            "tool_surface_strategy": "deferred_core",
+            "tool_protocol_capabilities": {
+                "function_lifecycle": True,
+                "accepts_namespace_adapter": True,
+            },
+        }
+
+        def request(child_count: int, context: dict[str, Any] | None) -> dict[str, Any]:
+            body = json.dumps(
+                {
+                    "model": "glm-5.2",
+                    "input": "Use the bounded collaboration surface.",
+                    "tools": [
+                        mcp_namespace(child_count),
+                        _model_switch_tool_surface(COLLABORATION_V2),
+                    ],
+                    "tool_choice": "auto",
+                    "stream": False,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return json.loads(
+                compatible_request_body(body, upstream, event_context=context)
+            )
+
+        with_context_249 = request(249, {"request_id": "req-249"})
+        with_context_zero = request(0, {"request_id": "req-zero"})
+        for transformed in (with_context_249, with_context_zero):
+            tools = transformed["tools"]
+            self.assertEqual(len(tools), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+            self.assertTrue(all(tool["type"] == "function" for tool in tools))
+            self.assertTrue(all(tool["name"].startswith("__codexhub_ns_") for tool in tools))
+            self.assertFalse(any("child_" in json.dumps(tool) for tool in tools))
+        self.assertEqual(
+            [tool["name"] for tool in with_context_249["tools"]],
+            [tool["name"] for tool in with_context_zero["tools"]],
+        )
+
+        without_context_249 = request(249, None)
+        without_context_zero = request(0, None)
+        self.assertEqual(
+            json.dumps(without_context_249["tools"], sort_keys=True),
+            json.dumps(without_context_zero["tools"], sort_keys=True),
+        )
+        self.assertEqual(
+            json.dumps(without_context_249["tools"], sort_keys=True),
+            json.dumps(with_context_249["tools"], sort_keys=True),
+        )
+        self.assertEqual(len(without_context_249["tools"]), len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]))
+        self.assertTrue(all(tool["type"] == "function" for tool in without_context_249["tools"]))
+        self.assertFalse(any("child_" in json.dumps(tool) for tool in without_context_249["tools"]))
 
     def test_deferred_tool_surface_retains_bounded_caller_tool_search_without_changing_eager(self):
         shell_command = {
@@ -23011,6 +23493,16 @@ Execution constraints:
             {
                 "name": "ollama_cloud",
                 "tool_protocol": "chat_tools",
+                "tool_surface_strategy": "eager",
+                "tool_protocol_capabilities": {"namespace_lifecycle": True},
+            },
+            event_context={"request_id": "<sanitized-request-id>"},
+        )
+        compatible_request_body(
+            body,
+            {
+                "name": "ollama_cloud",
+                "tool_protocol": "chat_tools",
                 "tool_surface_strategy": "deferred_core",
             },
             event_context={"request_id": "<sanitized-request-id>"},
@@ -23032,9 +23524,48 @@ Execution constraints:
                 },
                 {
                     "counts": [
-                        {"family": "namespace", "disposition": "adapt", "count": 2},
+                        {"family": "namespace", "disposition": "native", "count": 2},
                         {"family": "plain_function", "disposition": "native", "count": 1},
                     ]
+                },
+                {
+                    "counts": [
+                        {"family": "plain_function", "disposition": "native", "count": 1},
+                    ]
+                },
+            ],
+        )
+        surface_events = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "external_tool_surface_prepared"
+        ]
+        self.assertEqual(
+            surface_events,
+            [
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 2,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                    "final_tool_count": 10,
+                },
+                {
+                    "tool_surface_strategy": "eager",
+                    "namespace_declaration_count": 1,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 0,
+                    "final_tool_count": 9,
+                },
+                {
+                    "tool_surface_strategy": "deferred_core",
+                    "namespace_declaration_count": 2,
+                    "eager_tool_count": 0,
+                    "retained_core_count": 2,
+                    "deferred_tool_count": 3,
+                    "final_tool_count": 8,
                 },
             ],
         )
@@ -24721,9 +25252,11 @@ Execution constraints:
             event_context=event_context,
         )
         call_item = json.loads(normalized)["output"][0]
-        self.assertIn("_codexhub_worker_requested_binding", call_item)
-        self.assertNotIn("model", json.loads(call_item["arguments"]))
-        self.assertNotIn("reasoning", json.loads(call_item["arguments"]))
+        call_arguments = json.loads(call_item["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", call_item)
+        self.assertIn("_codexhub_worker_requested_binding", call_arguments)
+        self.assertIsNone(call_arguments["model"])
+        self.assertNotIn("reasoning_effort", call_arguments)
 
         replay = compatible_request_body(
             self._worker_replay_body(
@@ -24737,10 +25270,14 @@ Execution constraints:
             },
             event_context={"inbound_format": "responses"},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("reasoning_effort", json.loads(replay_call["arguments"]))
+        self.assertNotIn("model", json.loads(replay_call["arguments"]))
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
     def _chat_spawn_sse_response(
@@ -24856,10 +25393,12 @@ Execution constraints:
         completed = next(event for event in normalized_events if event.get("type") == "response.completed")
         call_item = done["item"]
         self.assertEqual(status, 200)
-        self.assertIn("_codexhub_worker_requested_binding", call_item)
+        done_arguments = json.loads(call_item["arguments"])
+        completed_arguments = json.loads(completed["response"]["output"][0]["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", call_item)
         self.assertEqual(
-            completed["response"]["output"][0]["_codexhub_worker_requested_binding"],
-            call_item["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
         )
 
         replay = compatible_request_body(
@@ -24874,10 +25413,13 @@ Execution constraints:
             },
             event_context={"inbound_format": "responses"},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("reasoning_effort", json.loads(replay_call["arguments"]))
         codex_proxy._responses_request_to_chat_completion_body(replay)
 
     def test_responses_caller_chat_upstream_sse_relay_rejects_missing_selector_before_call(self):
@@ -25119,10 +25661,12 @@ Execution constraints:
         ]
 
         self.assertEqual(len(accepted), 1)
-        self.assertEqual(json.loads(done_call["arguments"])["agent_type"], "worker")
+        done_arguments = json.loads(done_call["arguments"])
+        completed_arguments = json.loads(completed_call["arguments"])
+        self.assertEqual(done_arguments["agent_type"], "worker")
         self.assertEqual(
-            completed_call["_codexhub_worker_requested_binding"],
-            done_call["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
         )
 
     def test_native_responses_sse_streaming_worker_sidecar_survives_empty_item_arguments(self):
@@ -25218,22 +25762,24 @@ Execution constraints:
             if payload.get("type") == "response.completed"
         )
 
-        self.assertIn("_codexhub_worker_requested_binding", done_call)
-        self.assertIn("_codexhub_worker_requested_binding", completed_call)
+        done_arguments = json.loads(done_call["arguments"])
+        completed_arguments = json.loads(completed_call["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", done_call)
+        self.assertNotIn("_codexhub_worker_requested_binding", completed_call)
         self.assertEqual(
-            done_call["_codexhub_worker_requested_binding"],
-            completed_call["_codexhub_worker_requested_binding"],
+            done_arguments["_codexhub_worker_requested_binding"],
+            completed_arguments["_codexhub_worker_requested_binding"],
         )
+        self.assertIsNone(done_arguments["model"])
+        self.assertNotIn("reasoning_effort", done_arguments)
 
-        reconstructed_history_call = json.loads(json.dumps(completed_call))
-        reconstructed_history_call["arguments"] = worker_arguments
         replay = compatible_request_body(
             json.dumps(
                 {
                     "model": "glm-5.2",
                     "reasoning": {"effort": "high"},
                     "input": [
-                        reconstructed_history_call,
+                        completed_call,
                         self._worker_effective_output(
                             "call_glm_stream",
                             model="glm-5.2",
@@ -25251,10 +25797,13 @@ Execution constraints:
             },
             event_context={},
         )
+        replay_call = json.loads(replay)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replay_call)
         self.assertNotIn(
             "_codexhub_worker_requested_binding",
-            json.loads(replay)["input"][0],
+            json.loads(replay_call["arguments"]),
         )
+        self.assertNotIn("model", json.loads(replay_call["arguments"]))
 
     def test_native_responses_sse_streaming_general_spawn_keeps_worker_sidecar_absent(self):
         event_context = {
@@ -25727,6 +26276,7 @@ Execution constraints:
             "type": "function_call",
             "id": "fc_legacy_native_worker",
             "call_id": call_id,
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_legacy_native_worker"},
             "namespace": "multi_agent_v1",
             "name": "spawn_agent",
             "arguments": json.dumps(
@@ -25848,6 +26398,51 @@ Execution constraints:
             classification="legacy_native_spawn",
         )
 
+    def test_external_worker_binding_history_accepts_idless_flat_native_spawn(self):
+        """Replay the old CLI shape that omitted the generated item id."""
+
+        call_id = "legacy-native-flat-idless"
+        spawn_call = {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": "multi_agent_v1__spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+        }
+        spawn_output = {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"agent_id": "legacy-agent", "nickname": None}),
+        }
+
+        with patch.object(codex_proxy, "write_proxy_event") as write_event:
+            normalized = compatible_request_body(
+                self._worker_replay_body([spawn_call, spawn_output]),
+                {
+                    "name": "synthetic-provider",
+                    "upstream_model": "synthetic-next-model",
+                    "upstream_format": "responses",
+                    "tool_protocol": "responses_structured",
+                },
+                event_context={},
+            )
+
+        normalized_input = json.loads(normalized)["input"]
+        self.assertEqual(normalized_input[0]["name"], "multi_agent_v1__spawn_agent")
+        self.assertNotIn("namespace", normalized_input[0])
+        self.assertNotIn("id", normalized_input[0])
+        self.assertEqual(normalized_input[1], spawn_output)
+        write_event.assert_any_call(
+            "worker_effective_binding_validated",
+            outcome="accepted",
+            classification="legacy_native_spawn",
+        )
+
     def test_external_worker_binding_history_does_not_legacy_accept_extended_spawn(self):
         call_id = "legacy-extended-worker-call"
         spawn_call = {
@@ -25877,6 +26472,71 @@ Execution constraints:
             "missing_requested_binding_sidecar",
             event="worker_requested_binding_validated",
         )
+
+    def test_external_worker_binding_history_does_not_legacy_accept_extended_top_level_spawn(self):
+        call_id = "legacy-extended-top-level-worker-call"
+        spawn_call = {
+            "type": "function_call",
+            "id": "fc_legacy_extended_top_level_worker",
+            "call_id": call_id,
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": json.dumps(
+                {
+                    "agent_type": "worker",
+                    "fork_context": False,
+                    "message": "legacy worker task",
+                }
+            ),
+            "model": "synthetic-model",
+        }
+        self._assert_worker_history_rejected(
+            [
+                spawn_call,
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+                },
+            ],
+            "missing_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_history_does_not_legacy_accept_invalid_native_metadata(self):
+        for metadata in (
+            {"turn_id": ""},
+            {"turn_id": "turn_legacy_worker", "model": "synthetic-model"},
+        ):
+            with self.subTest(metadata=metadata):
+                call_id = "legacy-invalid-native-metadata"
+                spawn_call = {
+                    "type": "function_call",
+                    "id": "fc_legacy_invalid_native_metadata",
+                    "call_id": call_id,
+                    "internal_chat_message_metadata_passthrough": metadata,
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {
+                            "agent_type": "worker",
+                            "fork_context": False,
+                            "message": "legacy worker task",
+                        }
+                    ),
+                }
+                self._assert_worker_history_rejected(
+                    [
+                        spawn_call,
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps({"agent_id": "legacy-agent", "nickname": "worker"}),
+                        },
+                    ],
+                    "missing_requested_binding_sidecar",
+                    event="worker_requested_binding_validated",
+                )
 
     def _normalized_worker_spawn_call(self, *, model, reasoning, call_id="synthetic-bound-call"):
         event_context = {}
@@ -26014,10 +26674,14 @@ Execution constraints:
             reasoning="high",
             call_id="worker-call-b",
         )
-        first["_codexhub_worker_requested_binding"], second["_codexhub_worker_requested_binding"] = (
-            second["_codexhub_worker_requested_binding"],
-            first["_codexhub_worker_requested_binding"],
+        first_arguments = json.loads(first["arguments"])
+        second_arguments = json.loads(second["arguments"])
+        first_arguments["_codexhub_worker_requested_binding"], second_arguments["_codexhub_worker_requested_binding"] = (
+            second_arguments["_codexhub_worker_requested_binding"],
+            first_arguments["_codexhub_worker_requested_binding"],
         )
+        first["arguments"] = json.dumps(first_arguments)
+        second["arguments"] = json.dumps(second_arguments)
         self._assert_worker_history_rejected(
             [
                 first,
@@ -26035,7 +26699,9 @@ Execution constraints:
             reasoning="high",
             call_id="tampered-worker-call",
         )
-        spawn_call["_codexhub_worker_requested_binding"]["reasoning"] = "low"
+        arguments = json.loads(spawn_call["arguments"])
+        arguments["_codexhub_worker_requested_binding"]["reasoning"] = "low"
+        spawn_call["arguments"] = json.dumps(arguments)
         self._assert_worker_history_rejected(
             [spawn_call, self._worker_effective_output("tampered-worker-call")],
             "unknown_requested_binding_sidecar",
@@ -26058,19 +26724,128 @@ Execution constraints:
             event="worker_requested_binding_validated",
         )
 
+    def test_external_worker_binding_accepts_legacy_top_level_sidecar(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="legacy-top-level-sidecar",
+        )
+        arguments = json.loads(spawn_call["arguments"])
+        spawn_call["_codexhub_worker_requested_binding"] = arguments.pop(
+            "_codexhub_worker_requested_binding"
+        )
+        arguments.pop("model")
+        spawn_call["arguments"] = json.dumps(arguments)
+
+        normalized = compatible_request_body(
+            self._worker_replay_body(
+                [
+                    spawn_call,
+                    self._worker_effective_output("legacy-top-level-sidecar"),
+                ]
+            ),
+            {
+                "name": "synthetic-provider",
+                "upstream_model": "synthetic-next-model",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+            },
+            event_context={},
+        )
+
+        replayed_call = json.loads(normalized)["input"][0]
+        self.assertNotIn("_codexhub_worker_requested_binding", replayed_call)
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replayed_call["arguments"]),
+        )
+        self.assertNotIn("reasoning_effort", json.loads(replayed_call["arguments"]))
+
+    def test_external_worker_binding_rejects_conflicting_nested_and_top_level_sidecars(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+            call_id="conflicting-sidecars",
+        )
+        arguments = json.loads(spawn_call["arguments"])
+        top_level = json.loads(json.dumps(arguments["_codexhub_worker_requested_binding"]))
+        top_level["reasoning"] = "low"
+        spawn_call["_codexhub_worker_requested_binding"] = top_level
+
+        self._assert_worker_history_rejected(
+            [spawn_call, self._worker_effective_output("conflicting-sidecars")],
+            "conflicting_requested_binding_sidecar",
+            event="worker_requested_binding_validated",
+        )
+
+    def test_external_worker_binding_rejects_missing_or_tampered_nested_carrier_fields(self):
+        cases = (
+            (
+                "missing_carrier",
+                lambda call, arguments: arguments.pop("_codexhub_worker_requested_binding"),
+                "missing_requested_binding_sidecar",
+            ),
+            (
+                "model",
+                lambda call, arguments: arguments.__setitem__("model", "synthetic-other-model"),
+                "contradictory_requested_model",
+            ),
+            (
+                "reasoning",
+                lambda call, arguments: arguments.__setitem__("reasoning_effort", "low"),
+                "contradictory_requested_reasoning",
+            ),
+            (
+                "missing_model_marker",
+                lambda call, arguments: arguments.pop("model"),
+                "contradictory_requested_model",
+            ),
+            (
+                "signature",
+                lambda call, arguments: arguments["_codexhub_worker_requested_binding"].__setitem__(
+                    "signature", "invalid"
+                ),
+                "unknown_requested_binding_sidecar",
+            ),
+            (
+                "call_identity",
+                lambda call, arguments: call.__setitem__("call_id", "tampered-call-identity"),
+                "unknown_requested_binding_sidecar",
+            ),
+        )
+        for field, mutate, classification in cases:
+            with self.subTest(field=field):
+                original_call_id = f"nested-tamper-{field}"
+                spawn_call = self._normalized_worker_spawn_call(
+                    model="synthetic-original-model",
+                    reasoning="high",
+                    call_id=original_call_id,
+                )
+                arguments = json.loads(spawn_call["arguments"])
+                mutate(spawn_call, arguments)
+                spawn_call["arguments"] = json.dumps(arguments)
+                output_call_id = spawn_call["call_id"]
+                self._assert_worker_history_rejected(
+                    [spawn_call, self._worker_effective_output(output_call_id)],
+                    classification,
+                    event="worker_requested_binding_validated",
+                )
+
     def test_external_worker_binding_uses_original_call_sidecar_when_next_turn_changes(self):
         spawn_call = self._normalized_worker_spawn_call(
             model="synthetic-original-model",
             reasoning="high",
         )
-        sidecar = spawn_call["_codexhub_worker_requested_binding"]
+        spawn_arguments = json.loads(spawn_call["arguments"])
+        sidecar = spawn_arguments["_codexhub_worker_requested_binding"]
         self.assertEqual(
             set(sidecar),
             {"contract_version", "agent_type", "model", "reasoning", "signature"},
         )
-        self.assertEqual(json.loads(spawn_call["arguments"])["agent_type"], "worker")
-        self.assertNotIn("model", json.loads(spawn_call["arguments"]))
-        self.assertNotIn("reasoning", json.loads(spawn_call["arguments"]))
+        self.assertNotIn("_codexhub_worker_requested_binding", spawn_call)
+        self.assertEqual(spawn_arguments["agent_type"], "worker")
+        self.assertIsNone(spawn_arguments["model"])
+        self.assertNotIn("reasoning_effort", spawn_arguments)
 
         replay = json.dumps(
             {
@@ -26111,6 +26886,30 @@ Execution constraints:
         )
         replayed_call = json.loads(normalized_replay)["input"][0]
         self.assertNotIn("_codexhub_worker_requested_binding", replayed_call)
+        self.assertNotIn(
+            "_codexhub_worker_requested_binding",
+            json.loads(replayed_call["arguments"]),
+        )
+        self.assertNotIn("model", json.loads(replayed_call["arguments"]))
+
+    def test_worker_history_validation_reports_persistence_metadata_removal(self):
+        spawn_call = self._normalized_worker_spawn_call(
+            model="synthetic-original-model",
+            reasoning="high",
+        )
+        payload = {
+            "input": [
+                spawn_call,
+                self._worker_effective_output("synthetic-bound-call"),
+            ]
+        }
+
+        changed = codex_proxy._validate_worker_binding_history(payload)
+
+        self.assertIs(changed, True)
+        replayed_arguments = json.loads(payload["input"][0]["arguments"])
+        self.assertNotIn("_codexhub_worker_requested_binding", replayed_arguments)
+        self.assertNotIn("model", replayed_arguments)
 
     def test_external_worker_binding_rejects_next_turn_values_that_only_match_effective_readback(self):
         spawn_call = self._normalized_worker_spawn_call(

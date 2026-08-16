@@ -1,5 +1,6 @@
 use crate::app_flavor::RoutingOwner;
 use crate::config::{self, CommandRunner, ConfigPaths};
+use crate::runtime_paths;
 use crate::safe_file;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -78,7 +79,7 @@ impl DeadlineCommandRunner {
         args: &[String],
         deadline: Instant,
     ) -> Result<config::CommandOutcome, String> {
-        let mut command = Command::new(program);
+        let mut command = runtime_paths::configured_python_command(program);
         command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_history_helper_no_window(&mut command);
         let mut child = command
@@ -364,7 +365,7 @@ pub fn preflight_unified_history(
     };
     let clock = SystemHistoryClock;
     let budget = HistoryOperationBudget::new(&clock);
-    let python = config::find_python();
+    let python = config::find_python()?;
     let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     let result = preflight_unified_history_with_budget(
         PreflightRequest {
@@ -765,7 +766,7 @@ pub(crate) fn reconcile_after_confirmed_route_switch(
     let paths = ConfigPaths::runtime()?;
     let clock = SystemHistoryClock;
     let budget = HistoryOperationBudget::new(&clock);
-    let python = config::find_python();
+    let python = config::find_python()?;
     let runner = HistoryDeadlineRunner::with_deadline(budget.deadline);
     preflight_unified_history_with_budget(
         PreflightRequest {

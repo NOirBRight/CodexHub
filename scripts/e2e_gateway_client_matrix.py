@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+try:
+    from scripts.python_runtime_contract import require_python_313
+except ModuleNotFoundError:
+    from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 import concurrent.futures
 import dataclasses
@@ -14,10 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ in supported runs
-    tomllib = None
+import tomllib
 
 
 DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:9099/v1"
@@ -80,8 +84,6 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def parse_runtime_providers_config(path: Path, *, proxy_base_url: str) -> list[ClientCase]:
-    if tomllib is None:
-        raise RuntimeError("Python 3.11+ tomllib is required")
     data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cases: list[ClientCase] = []
     base = proxy_base_url.rstrip("/")

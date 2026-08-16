@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -11,7 +17,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import sys
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen

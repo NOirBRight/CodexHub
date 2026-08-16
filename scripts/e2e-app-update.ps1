@@ -274,6 +274,12 @@ function Start-AppForE2E([string]$Endpoint) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = (Resolve-Path -LiteralPath $AppExe).Path
     $info.UseShellExecute = $false
+    # A packaged app must resolve its embedded Python, not inherit the host
+    # test shell's Python binding (which may point at Hermes 3.11 or a
+    # different 3.13 installation).
+    foreach ($name in @('CODEXHUB_E2E_PYTHON', 'CODEXHUB_PYTHON', 'CODEXHUB_PROXY_PYTHON')) {
+        [void]$info.Environment.Remove($name)
+    }
     $info.Environment["CODEXHUB_UPDATE_E2E_ENDPOINT"] = $Endpoint
     if ($DownloadOnly) {
         $info.Environment["CODEXHUB_UPDATE_E2E_SKIP_INSTALL"] = "1"

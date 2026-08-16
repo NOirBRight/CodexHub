@@ -192,8 +192,8 @@ def test_issue_108_python_children_use_repository_python_313():
     )
 
     assert "function Resolve-RepositoryPythonPath" in source
-    assert "'-3.13'" in source
-    assert "sys.version_info" in source
+    assert "Resolve-CodexHubPythonPath" in source
+    assert "Resolve-CodexHubPython.ps1" in source
     assert source.count("Resolve-RepositoryPythonPath") >= 6
     assert "$pythonCommand = (Get-Command 'python'" not in source
     assert "$PythonCommand = (Get-Command 'python'" not in source
@@ -935,6 +935,34 @@ def test_embedded_python_runtime_bundles_zstandard_for_app_request_bodies():
     assert "zstandard-$ZstandardVersion-cp313-cp313-win_amd64.whl" in source
     assert "& $python -m zipfile -e $zstandardWheelPath $runtimeDir" in source
     assert "import http.server, pathlib, sqlite3, tomllib, urllib.request, zstandard" in source
+    assert "function Get-PythonRuntimeVersion" in source
+    assert "$actualPythonVersion = Get-PythonRuntimeVersion $python" in source
+    assert "requested_python_version = $PythonVersion" in source
+    assert "manifestVersion -ne $actualVersion" in source
+
+
+def test_ci_python_entrypoints_do_not_reparse_ambient_python():
+    source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert ".\\scripts\\codexhub-python.cmd scripts/ci/ci_change_plan.py" in source
+    assert ".\\scripts\\codexhub-python.cmd -m venv --clear .venv-ci" in source
+    assert ".\\scripts\\codexhub-python.cmd -m pip install --upgrade pip pytest" in source
+    assert ".\\scripts\\codexhub-python.cmd -m pytest -q" in source
+    assert ".\\venv-ci\\Scripts\\python.exe" not in source
+
+
+def test_fixture_launcher_validates_python_launcher_before_using_it():
+    source = (ROOT / "tests" / "fixtures" / "real_client_e2e" / "run-fixture-python.cmd").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'if exist "%~dp0python\\python.exe" goto run_bundled' not in source
+    assert "if defined CODEXHUB_E2E_PYTHON goto run_explicit" in source
+    assert "if defined CODEXHUB_PYTHON goto run_repository" in source
+    assert "requires an explicit CODEXHUB_E2E_PYTHON binding" in source
+    assert 'set "PYTHONHOME="' in source
+    assert 'set "PYTHONPATH="' in source
+    assert 'py.exe -3.13 -c "import sys;' not in source
 
 
 def test_codex_app_transport_e2e_uses_app_server_and_requires_completed_turns():

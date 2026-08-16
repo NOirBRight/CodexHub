@@ -151,7 +151,7 @@ def reduce_protocol_events(events: Iterable[ProtocolEvent]) -> ProtocolState:
             if agent is None:
                 state.violations.append(ProtocolViolation(f"{event.kind}_unknown_agent", agent_id=agent_id or None))
                 continue
-            if agent.closed:
+            if agent.closed and event.kind == "send_input":
                 state.violations.append(ProtocolViolation(f"{event.kind}_closed_agent", agent_id=agent_id))
                 continue
             agent.waited = False
@@ -264,7 +264,7 @@ def _event_from_result_text(
     if tool_name == "resume_agent":
         return ProtocolEvent.resume(
             call_id=call_id,
-            target=_string(arguments.get("target")),
+            target=_string(arguments.get("id") or arguments.get("target")),
             message=_string(arguments.get("message")),
         )
     return None
@@ -301,7 +301,7 @@ def _event_from_call_output(
     if name == "resume_agent":
         return ProtocolEvent.resume(
             call_id=call_id,
-            target=_string(arguments.get("target")),
+            target=_string(arguments.get("id") or arguments.get("target")),
             message=_string(arguments.get("message")),
         )
     return None

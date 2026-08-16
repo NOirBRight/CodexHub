@@ -20,7 +20,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.1.8-beta.4.1"
+    expected = "0.1.8-beta.4.2"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -495,8 +495,8 @@ def test_release_scripts_share_flavor_validation_helpers():
     manifest_script = (ROOT / "scripts" / "Test-ReleaseManifest.ps1").read_text(encoding="utf-8-sig")
     helpers = (ROOT / "scripts" / "ReleaseChannel.ps1").read_text(encoding="utf-8-sig")
 
-    for script in (plan_script, manifest_script):
-        assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in script
+    assert '. (Join-Path $scriptRoot "ReleaseChannel.ps1")' in plan_script
+    assert '. (Join-Path $PSScriptRoot "ReleaseChannel.ps1")' in manifest_script
     assert "Test-ReleaseVersionIsPrerelease" in plan_script
     assert "Assert-ReleaseVersion" in manifest_script
     assert "Get-ReleaseArtifactName" in helpers

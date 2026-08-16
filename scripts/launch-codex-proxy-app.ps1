@@ -115,6 +115,8 @@ $ScriptDir = Split-Path -Parent $PSCommandPath
 $RepoRoot = Split-Path -Parent $ScriptDir
 $ProxyDir = Join-Path $RepoRoot 'src-python'
 $ConfigDir = Join-Path $RepoRoot 'config'
+. (Join-Path $ScriptDir 'Resolve-CodexHubPython.ps1')
+$Python = Resolve-CodexHubPythonPath -Root $RepoRoot -PreferBundled
 $ProxyHost = '127.0.0.1'
 $ProxyPort = '9099'
 $ProxyBaseUrl = "http://${ProxyHost}:$ProxyPort"
@@ -357,7 +359,7 @@ function Test-OldCustomProxyOverlay {
 function Repair-CustomHistory {
     Write-Host 'Repairing ledger-confirmed custom-bucket history into the openai bucket...'
     Invoke-Timed -Label 'Custom history repair' -ScriptBlock {
-        Invoke-Checked -FilePath 'python' -Arguments @(
+        Invoke-Checked -FilePath $Python -Arguments @(
             $HistoryOverlay,
             'repair-history',
             '--codex-dir',
@@ -374,7 +376,7 @@ function Repair-CustomHistory {
 
 function Repair-UiState {
     Invoke-Timed -Label 'Global UI state repair' -ScriptBlock {
-        Invoke-Checked -FilePath 'python' -Arguments @(
+        Invoke-Checked -FilePath $Python -Arguments @(
             $GlobalStateRepair,
             'repair',
             '--state',
@@ -405,7 +407,7 @@ try {
     if ($RefreshCatalog -or -not (Test-Path -LiteralPath $CatalogPath)) {
         Write-Host 'Catalog refresh...'
         Invoke-Timed -Label 'Catalog refresh' -ScriptBlock {
-            Invoke-Checked -FilePath 'python' -Arguments @($CatalogSync, '--sync') | Out-Null
+            Invoke-Checked -FilePath $Python -Arguments @($CatalogSync, '--sync') | Out-Null
         }
     }
     else {
@@ -456,7 +458,7 @@ $ConfigOverlayApplied = $false
 Write-Host 'Launching Codex App...'
 try {
     Invoke-Timed -Label 'Config overlay apply' -ScriptBlock {
-        Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'apply', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--catalog', $CatalogPath, '--base-url', $ProxyBaseUrl, '--context-guard-state', $ContextGuardStatePath)
+        Invoke-Checked -FilePath $Python -Arguments @($ConfigOverlay, 'apply', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--catalog', $CatalogPath, '--base-url', $ProxyBaseUrl, '--context-guard-state', $ContextGuardStatePath)
     }
     $ConfigOverlayApplied = $true
 
@@ -479,7 +481,7 @@ finally {
         Write-Host 'Restoring original Codex config...'
         try {
             Invoke-Timed -Label 'Config overlay restore' -ScriptBlock {
-                Invoke-Checked -FilePath 'python' -Arguments @($ConfigOverlay, 'restore', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--context-guard-state', $ContextGuardStatePath)
+                Invoke-Checked -FilePath $Python -Arguments @($ConfigOverlay, 'restore', '--config', $ConfigPath, '--backup', $ConfigBackupPath, '--context-guard-state', $ContextGuardStatePath)
             }
         }
         catch {

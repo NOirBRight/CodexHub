@@ -1,9 +1,9 @@
 param(
-    [string]$SourceContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codex-0.146-source-contract.json'),
-    [string]$TracePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json'),
-    [string]$WireFixturePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json'),
-    [string]$AuditPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\read-only-gate-audit.json'),
-    [string]$InventoryPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\evidence\issue-62\runtime-wire-inventory.json'),
+    [string]$SourceContractPath = "",
+    [string]$TracePath = "",
+    [string]$WireFixturePath = "",
+    [string]$AuditPath = "",
+    [string]$InventoryPath = "",
     [ValidateSet('identity', 'mutation', 'deletion', 'loss', 'required-set-deletion', 'required-membership-mutation')]
     [string]$ReplayCase = 'identity',
     [ValidateSet('identity', 'mutation', 'deletion', 'loss')]
@@ -11,6 +11,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$repoRoot = Split-Path -Parent $scriptRoot
+if ([string]::IsNullOrWhiteSpace($SourceContractPath)) { $SourceContractPath = Join-Path $repoRoot 'docs\evidence\issue-62\codex-0.146-source-contract.json' }
+if ([string]::IsNullOrWhiteSpace($TracePath)) { $TracePath = Join-Path $repoRoot 'docs\evidence\issue-62\current-codexhub-thread-tool-surface.json' }
+if ([string]::IsNullOrWhiteSpace($WireFixturePath)) { $WireFixturePath = Join-Path $repoRoot 'docs\evidence\issue-62\codexhub-runtime-wire-fixture.json' }
+if ([string]::IsNullOrWhiteSpace($AuditPath)) { $AuditPath = Join-Path $repoRoot 'docs\evidence\issue-62\read-only-gate-audit.json' }
+if ([string]::IsNullOrWhiteSpace($InventoryPath)) { $InventoryPath = Join-Path $repoRoot 'docs\evidence\issue-62\runtime-wire-inventory.json' }
+
+. (Join-Path $scriptRoot 'Resolve-CodexHubPython.ps1')
+$Python = Resolve-CodexHubPythonPath -Root $repoRoot -PreferBundled
 
 foreach ($path in @($SourceContractPath, $TracePath, $WireFixturePath, $AuditPath, $InventoryPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
@@ -359,25 +372,21 @@ foreach ($expected in $expectedFamilySchemas) {
 # committed artifact.  The PowerShell checks below remain an independent
 # reconciliation, while this call catches stale generated fields/notes that
 # a hand-maintained mirror could otherwise miss.
-$inventoryGenerator = Join-Path $PSScriptRoot 'build_issue_62_runtime_inventory.py'
-$python = Get-Command python -ErrorAction SilentlyContinue
-if ($null -eq $python) {
-    Add-Mismatch 'generated inventory drift check requires the python interpreter'
-} else {
-    try {
-        $generatorOutput = & $python.Source $inventoryGenerator `
+$inventoryGenerator = Join-Path $scriptRoot 'build_issue_62_runtime_inventory.py'
+$python = $Python
+try {
+    $generatorOutput = & $python $inventoryGenerator `
             --source-contract $SourceContractPath `
             --trace $TracePath `
             --wire-fixture $WireFixturePath `
             --audit $AuditPath `
             --out $InventoryPath `
             --check-drift 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Add-Mismatch "generated inventory drift check failed: $($generatorOutput -join ' ')"
-        }
-    } catch {
-        Add-Mismatch "generated inventory drift check failed: $($_.Exception.Message)"
+    if ($LASTEXITCODE -ne 0) {
+        Add-Mismatch "generated inventory drift check failed: $($generatorOutput -join ' ')"
     }
+} catch {
+    Add-Mismatch "generated inventory drift check failed: $($_.Exception.Message)"
 }
 
 function Get-Sha256Hex {
@@ -424,15 +433,17 @@ function Get-UnknownTaggedSourceCount {
 
     if ($null -eq $Value) { return 0 }
     $count = 0
-    if ($Value.PSObject.Properties.Name -contains 'tag' -and $Value.tag -eq 'unknown') {
+    $properties = @($Value.PSObject.Properties)
+    $tagProperty = $properties | Where-Object { $_.Name -eq 'tag' } | Select-Object -First 1
+    if ($null -ne $tagProperty -and $tagProperty.Value -eq 'unknown') {
         $count++
     }
     if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
         foreach ($child in $Value) {
             $count += Get-UnknownTaggedSourceCount -Value $child
         }
-    } elseif ($Value.PSObject.Properties.Count -gt 0) {
-        foreach ($property in $Value.PSObject.Properties) {
+    } elseif ($properties.Count -gt 0) {
+        foreach ($property in $properties) {
             $count += Get-UnknownTaggedSourceCount -Value $property.Value
         }
     }
@@ -445,7 +456,10 @@ function Get-WireIdentityReplayStatus {
         [string]$WireFixtureSha256
     )
 
-    $replay = $Audit.wire_identity_replay
+    $replayProperty = if ($null -ne $Audit) {
+        $Audit.PSObject.Properties['wire_identity_replay']
+    }
+    $replay = if ($null -ne $replayProperty) { $replayProperty.Value } else { $null }
     if ($null -eq $replay) { return 'not_captured' }
     $status = if ($replay.PSObject.Properties.Name -contains 'status') {
         [string]$replay.status
@@ -477,7 +491,10 @@ function Get-SseIdentityStatus {
         [string]$WireFixtureSha256
     )
 
-    $evidence = $Audit.sse_identity
+    $evidenceProperty = if ($null -ne $Audit) {
+        $Audit.PSObject.Properties['sse_identity']
+    }
+    $evidence = if ($null -ne $evidenceProperty) { $evidenceProperty.Value } else { $null }
     if ($null -eq $evidence) { return 'not_captured' }
     $status = if ($evidence.PSObject.Properties.Name -contains 'status') {
         [string]$evidence.status
@@ -731,8 +748,20 @@ foreach ($link in $callLinks) {
     }
 }
 
-$streamUnknown = @($wire.response.streaming.events | Where-Object { $_.tag -eq 'unknown' })
-$nonStreamingUnknown = @($wire.response.non_streaming.response_items | Where-Object { $_.tag -eq 'unknown' })
+$streamUnknown = @(
+    $wire.response.streaming.events |
+        Where-Object {
+            $tag = $_.PSObject.Properties['tag']
+            $null -ne $tag -and $tag.Value -eq 'unknown'
+        }
+)
+$nonStreamingUnknown = @(
+    $wire.response.non_streaming.response_items |
+        Where-Object {
+            $tag = $_.PSObject.Properties['tag']
+            $null -ne $tag -and $tag.Value -eq 'unknown'
+        }
+)
 $responseUnknownSource = [PSCustomObject]@{
     streaming = $wire.response.streaming
     non_streaming = $wire.response.non_streaming
@@ -1015,9 +1044,9 @@ if (
     $sourceContract.provenance.cli_binary_sha256 -ne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb' -or
     $sourceContract.provenance.candidate_revision -ne 'accab8ff6eb4d6ebd93cda84585fb5f6cb89da82' -or
     -not $sourceContractSchemaValid -or
-    $sourceContract.runtime_wire_surface.declaration_families.Count -ne 6 -or
-    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observed -ne $false }).Count -ne 0 -or
-    ($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observation -notin @('not_observed_source_contract_only', 'not_observed_selected_provider_control_required', 'opaque_sentinel_only') }).Count -ne 0 -or
+    @($sourceContract.runtime_wire_surface.declaration_families).Count -ne 6 -or
+    @($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observed -ne $false }).Count -ne 0 -or
+    @($sourceContract.runtime_wire_surface.declaration_families | Where-Object { $_.observation -notin @('not_observed_source_contract_only', 'not_observed_selected_provider_control_required', 'opaque_sentinel_only') }).Count -ne 0 -or
     $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.captured -ne $false -or
     $sourceContract.runtime_wire_surface.request_shape.non_streaming_control.status -ne 'unqualified' -or
     [string]::IsNullOrWhiteSpace([string]$trace.source.capture_id) -or
@@ -1239,7 +1268,10 @@ $expectedEvidenceGates = [ordered]@{
     full_response_fingerprint = $trace.gateway_observability.full_response_body_fingerprint
     sse_identity = Get-SseIdentityStatus -Audit $audit -WireFixtureSha256 $wireFixtureSha256
     terminal_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -eq 'response.completed' }).Count -gt 0) { 'met' } else { 'not_captured' }
-    error_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object { $_.event -match 'error' -or $_.tag -eq 'error' }).Count -gt 0) { 'met' } else { 'not_captured' }
+    error_events = if ($audit.gate_classification.full_pre_post_request_response -in @('complete','met') -and @($wire.response.streaming.events | Where-Object {
+            $_.event -match 'error' -or
+            ($null -ne $_.PSObject.Properties['tag'] -and $_.PSObject.Properties['tag'].Value -eq 'error')
+        }).Count -gt 0) { 'met' } else { 'not_captured' }
     non_streaming = $audit.gate_classification.non_streaming
     non_streaming_fixture = if ($wire.response.non_streaming.captured -eq $true -and $wire.response.non_streaming.fixture_kind -ne 'contract_sentinel' -and $wire.response.non_streaming.request_stream -eq $false -and @($wire.response.non_streaming.response_items).Count -gt 0) { 'met' } else { 'not_captured' }
     identity_replay = $audit.gate_classification.zero_unclassified_identity

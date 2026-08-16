@@ -10,19 +10,14 @@ $ScriptDir = Split-Path -Parent $PSCommandPath
 $RepoRoot = Split-Path -Parent $ScriptDir
 $ProxyDir = Join-Path $RepoRoot 'src-python'
 $ProxyScript = Join-Path $ProxyDir 'codex_proxy.py'
+. (Join-Path $ScriptDir 'Resolve-CodexHubPython.ps1')
+if (-not [string]::IsNullOrWhiteSpace($Python)) {
+    $env:CODEXHUB_PYTHON = $Python
+}
+$Python = Resolve-CodexHubPythonPath -Root $RepoRoot -PreferBundled
 $HealthUrl = "http://127.0.0.1:$ProxyPort/health"
 $LogDir = Join-Path $RepoRoot '.runtime-logs'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-
-if (-not $Python) {
-    $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
-    if (Test-Path -LiteralPath $candidate) {
-        $Python = $candidate
-    }
-    else {
-        $Python = 'python'
-    }
-}
 
 if (-not $env:CODEX_HOME) {
     $env:CODEX_HOME = Join-Path $env:USERPROFILE '.codex'

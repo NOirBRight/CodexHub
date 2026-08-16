@@ -1857,7 +1857,7 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
     providerEditorSource.match(/function EndpointFormatSelect[\s\S]*?function EndpointAvailableChip/)?.[0] ?? "";
   const modelIdentity = modelSectionSource.match(/function ModelIdentity[\s\S]*?function ModelEditorOverlay/)?.[0] ?? "";
   const modelTestStateIcon = modelSectionSource.match(/function ModelTestStateIcon[\s\S]*$/)?.[0] ?? "";
-  const modelSection = modelSectionSource.match(/export function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
+  const modelSection = modelSectionSource.match(/export function ModelSection[\s\S]*?function ModelIdentity/)?.[0] ?? "";
   const headerRow = controlsSource.match(/export function HeaderRow[\s\S]*?export function Field/)?.[0] ?? "";
 
   assert.match(providerDetail, /className="grid gap-2 border-b border-line p-4"/);
@@ -2820,7 +2820,7 @@ test("providers toast uses the shared dismissible page toast", async () => {
 test("model copy uses provider-qualified identifiers", async () => {
   const providersSource = await readProviderContractSource();
 
-  assert.match(providersSource, /function providerQualifiedModelId\(providerId: string, modelId: string\)/);
+  assert.match(providersSource, /export function providerQualifiedModelId\(providerId: string, modelId: string\)/);
   assert.match(providersSource, /navigator\.clipboard\.writeText\(copyValue\)/);
   assert.match(providersSource, /title=\{copied \? t\("common\.copied"\) : t\("providers\.copyModelIdTitle", \{ id: copyValue \}\)\}/);
   assert.match(providersSource, /aria-label=\{copied \? t\("providers\.copiedModelId", \{ id: copyValue \}\) : t\("providers\.copyModelId", \{ id: copyValue \}\)\}/);

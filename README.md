@@ -229,10 +229,26 @@ cd ..\src-tauri
 cargo test
 
 cd ..
-python -m pytest
+.\scripts\codexhub-python.cmd -m pytest
 ```
 
-Running the Gateway from source requires Python. Use `CODEXHUB_PYTHON` or `CODEXHUB_PROXY_PYTHON` to point CodexHub at a specific Python executable.
+CodexHub source code requires Python 3.13 or newer. Do not use the ambient
+`python` or `pytest` command from a shell that may prepend another virtual
+environment; use `scripts\codexhub-python.cmd` for tests and scripts. It
+resolves one interpreter, exports that exact executable, and puts it first on
+the child `PATH` so nested processes cannot fall back to Python 3.11. When the
+prepared application runtime is present, the source launcher still uses the
+validated checkout or host Python 3.13 environment for all repository scripts;
+this is required because a script may invoke `pytest` through `sys.executable`.
+Production, packaging, and Gateway entrypoints opt into the embedded runtime
+explicitly, and it intentionally does not contain development modules.
+`scripts\pytest.cmd` is the matching pytest shim. For a PowerShell session
+where direct commands are desired, dot-source
+`. .\scripts\Enter-CodexHubPython.ps1` once. `CODEXHUB_PYTHON` or
+`CODEXHUB_PROXY_PYTHON` may explicitly point to a Python 3.13+ executable.
+Test commands also verify that pytest is installed in that exact interpreter
+and fail with an install command instead of falling through to another 3.13
+environment.
 
 ## Comparison
 

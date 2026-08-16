@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 import json
 import re

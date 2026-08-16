@@ -18,6 +18,11 @@ import re
 import sys
 from typing import Any, Callable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src-python"))
+from python_runtime_contract import require_python_313  # noqa: E402
+
+require_python_313(__file__)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = ROOT / "tests" / "fixtures" / "issue_251_code_mode_evidence.json"

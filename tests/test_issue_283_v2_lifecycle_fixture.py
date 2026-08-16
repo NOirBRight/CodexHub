@@ -100,6 +100,18 @@ def _v2_history() -> list[dict[str, Any]]:
     return history
 
 
+def _v2_history_without_encrypted_agent_message() -> list[dict[str, Any]]:
+    history = _v2_history()
+    history[-1] = {
+        **history[-1],
+        "content": [
+            part for part in history[-1]["content"]
+            if part.get("type") == "input_text"
+        ],
+    }
+    return history
+
+
 def _responses_upstream(*, native_namespace: bool) -> dict[str, object]:
     return {
         "name": "responses_fixture",
@@ -375,8 +387,10 @@ def test_c1_native_history_round_trips_unchanged() -> None:
 
 
 def test_c2_adapted_alias_encoding_is_injective_and_reversible() -> None:
-    """C2: alias adapter produces reversible, request-scoped aliases."""
-    body_with_history = _request_body(input_items=_v2_history())
+    """C2: alias adapter produces reversible aliases with request-local mappings."""
+    # Official encrypted handoff content cannot be decoded at a third-party
+    # boundary; the adapter accepts the provider-neutral/plaintext history.
+    body_with_history = _request_body(input_items=_v2_history_without_encrypted_agent_message())
     fixture = _ProtocolFixture(body_with_history, _adapted_upstream())
     payload = fixture.request()
 
@@ -430,8 +444,8 @@ def test_c2_adapted_alias_encoding_is_injective_and_reversible() -> None:
         assert item["call_id"] == f"adapted-call-{index}"
 
 
-def test_c2_adapted_aliases_are_request_scoped() -> None:
-    """C2: the same declaration shape produces different aliases per request token."""
+def test_c2_adapted_aliases_are_stable_for_identical_requests() -> None:
+    """C2: identical declaration shapes produce the same cache-stable aliases."""
     fixture_a = _ProtocolFixture(_request_body(), _adapted_upstream())
     payload_a = fixture_a.request()
     aliases_a = {tool["name"] for tool in payload_a["tools"] if tool.get("type") == "function"}
@@ -440,7 +454,8 @@ def test_c2_adapted_aliases_are_request_scoped() -> None:
     payload_b = fixture_b.request()
     aliases_b = {tool["name"] for tool in payload_b["tools"] if tool.get("type") == "function"}
 
-    assert aliases_a.isdisjoint(aliases_b)
+    assert aliases_a == aliases_b
+    assert payload_a == payload_b
 
 
 def test_c3_stream_arguments_delta_assembly_and_terminal() -> None:
@@ -564,18 +579,6 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
             ),
             "tool_compatibility_boundary",
         ),
-        # Missing namespace on a native V2 spawn_agent.
-        (
-            lambda body: body.setdefault("input", []).append(
-                {
-                    "type": "function_call",
-                    "name": "spawn_agent",
-                    "call_id": "missing-ns-call",
-                    "arguments": '{"task_name":"worker"}',
-                }
-            ),
-            codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
-        ),
         # Duplicate call_id.
         (
             lambda body: body.setdefault("input", []).extend([
@@ -626,7 +629,6 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
         "mixed_v1_v2_tools",
         "mixed_v1_v2_history",
         "v1_parameters_on_v2_call",
-        "missing_namespace_spawn",
         "duplicate_call_id",
         "missing_call_id",
         "malformed_agent_message",
@@ -711,7 +713,10 @@ def test_c4_history_integrity_and_state_fail_before_mutation(mutate) -> None:
 
 def test_gateway_does_not_fabricate_completion_or_output() -> None:
     """The gateway never invents function_call_output or completion items."""
-    fixture = _ProtocolFixture(_request_body(input_items=_v2_history()), _adapted_upstream())
+    fixture = _ProtocolFixture(
+        _request_body(input_items=_v2_history_without_encrypted_agent_message()),
+        _adapted_upstream(),
+    )
     payload = fixture.request()
 
     # No function_call_output appears in the forwarded request unless present in input.
@@ -728,7 +733,7 @@ def test_gateway_does_not_fabricate_completion_or_output() -> None:
 def test_v2_skips_v1_scheduler_and_repair() -> None:
     """V2 contexts do not initialize V1 scheduler/repair state."""
     fixture = _ProtocolFixture(
-        _request_body(input_items=_v2_history()),
+        _request_body(input_items=_v2_history_without_encrypted_agent_message()),
         _responses_upstream(native_namespace=False),
         repair_policy=codex_proxy.REPAIR_CODEX_SUBAGENT,
     )

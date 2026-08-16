@@ -426,11 +426,16 @@ fn run_codex_managed_client_config(
             Ok(serde_json::to_value(&preview).map_err(|error| error.to_string())?)
         }
         "apply" => {
-            let python = request
-                .python_path
-                .as_deref()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(config::find_python);
+            let python = if let Some(path) = request.python_path.as_deref() {
+                crate::runtime_paths::compatible_python_path(path).ok_or_else(|| {
+                    format!(
+                        "configured Python interpreter is missing or incompatible (requires Python 3.13+): {}",
+                        path.display()
+                    )
+                })?
+            } else {
+                config::find_python()?
+            };
             let runner = config::ProcessCommandRunner;
             let status = config::apply_codex_config_isolated(
                 &paths,

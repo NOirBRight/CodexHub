@@ -17,7 +17,7 @@ if /I "%~1"=="refresh-models" goto refresh
 if not "%~1"=="" exit /b 30
 >>"%invocations%" echo start
 if not exist "%budget%" exit /b 31
-python.exe "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%
+call "%~dp0run-fixture-python.cmd" "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%
 exit /b %errorlevel%
 
 :refresh

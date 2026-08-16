@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import tempfile
 from unittest import TestCase
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import codex_proxy
@@ -76,12 +77,454 @@ class _PoolConnection:
         self.closed = True
 
 
+class _VirtualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _SlowWriteSocket:
+    def __init__(
+        self,
+        *,
+        clock: _VirtualClock | None = None,
+        write_duration: float = 0.0,
+    ) -> None:
+        self.timeout: float | None = None
+        self.timeouts: list[float | None] = []
+        self.sent_bytes = 0
+        self.clock = clock
+        self.write_duration = write_duration
+
+    def settimeout(self, timeout: float | None) -> None:
+        self.timeout = timeout
+        self.timeouts.append(timeout)
+
+    def gettimeout(self) -> float | None:
+        return self.timeout
+
+    def sendall(self, data: bytes) -> None:
+        self.sent_bytes += len(data)
+        if len(data) <= 1024:
+            return
+        if self.timeout is not None and self.timeout < self.write_duration:
+            if self.clock is not None:
+                self.clock.advance(max(0.0, self.timeout))
+            raise TimeoutError("simulated slow request write")
+        if self.clock is not None:
+            self.clock.advance(self.write_duration)
+
+    def makefile(self, _mode: str) -> io.BytesIO:
+        return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+
+    def close(self) -> None:
+        return None
+
+
+class _ReadTimeoutFile:
+    def readline(self, _limit: int = -1) -> bytes:
+        raise TimeoutError("simulated response read timeout")
+
+    def close(self) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+
+class _ReadTimeoutSocket(_SlowWriteSocket):
+    def makefile(self, _mode: str) -> _ReadTimeoutFile:
+        return _ReadTimeoutFile()
+
+
+class _PooledReadFailure:
+    status = 200
+    reason = "OK"
+    headers: dict[str, str] = {}
+
+    def __init__(self, error: BaseException, connection: object) -> None:
+        self.connection = connection
+        self._error = error
+
+    def read(self, _amount: int | None = None) -> bytes:
+        raise self._error
+
+    def readline(self, _limit: int = -1) -> bytes:
+        raise self._error
+
+
+class _ErrorResponse:
+    status = 503
+    reason = "Service Unavailable"
+    headers: dict[str, str] = {}
+
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+
+    def close(self) -> None:
+        return None
+
+    def release_conn(self) -> None:
+        return None
+
+
+class _VirtualOfficialConnection(codex_proxy._OfficialHTTPSConnection):
+    def __init__(
+        self,
+        sock: _SlowWriteSocket,
+        clock: _VirtualClock,
+        *,
+        connect_duration: float,
+    ) -> None:
+        super().__init__("example.test", timeout=0.05)
+        self._fixture_sock = sock
+        self._clock = clock
+        self._connect_duration = connect_duration
+        self.connect_calls = 0
+
+    def connect(self) -> None:
+        self.connect_calls += 1
+        connect_timeout = self.timeout if isinstance(self.timeout, (int, float)) else None
+        if connect_timeout is not None and self._connect_duration > connect_timeout:
+            self._clock.advance(connect_timeout)
+            raise codex_proxy.urllib3.exceptions.ConnectTimeoutError(self, "simulated slow connect")
+        self._clock.advance(self._connect_duration)
+        self.sock = self._fixture_sock
+        self.is_verified = True
+        self.proxy_is_verified = True
+
+
 class _ExplodingRecorder:
     def observe_proxy_event(self, event: str, fields: object) -> None:
         raise RuntimeError("recorder unavailable")
 
 
 class DiagnosticRecorderGatewayTests(TestCase):
+    def _official_request_pool_fixture(self, sock: _SlowWriteSocket) -> tuple[object, object]:
+        connection = codex_proxy._OfficialHTTPSConnection("example.test", timeout=0.05)
+        connection.sock = sock
+        connection.is_verified = True
+        connection.proxy_is_verified = True
+        pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
+        return pool, connection
+
+    def test_official_pool_uses_request_budget_for_new_and_reused_connections(self) -> None:
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.1)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.04)
+        pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
+
+        with patch("codex_proxy.time.monotonic", side_effect=clock.monotonic):
+            for _ in range(2):
+                response = pool._make_request(
+                    connection,
+                    "POST",
+                    "/v1/responses",
+                    body=b"x" * (2 * 1024 * 1024),
+                    headers={"Content-Length": str(2 * 1024 * 1024)},
+                    retries=None,
+                    timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
+                    chunked=False,
+                    response_conn=None,
+                    preload_content=False,
+                    decode_content=False,
+                )
+
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"")
+
+        self.assertEqual(connection.connect_calls, 1)
+        self.assertGreaterEqual(sock.sent_bytes, 2 * 2 * 1024 * 1024)
+        self.assertIn(0.05, sock.timeouts)
+        self.assertIn(0.2, sock.timeouts)
+        self.assertEqual(sock.timeout, 0.2)
+
+    def test_official_pool_checkout_marks_new_then_reused_connection(self) -> None:
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.01)
+        pool = codex_proxy._OfficialHTTPSConnectionPool(
+            "example.test", maxsize=1, block=True
+        )
+        pool.pool.get_nowait()
+        pool.pool.put_nowait(connection)
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            patch("urllib3.connectionpool.is_connection_dropped", return_value=False),
+        ):
+            first = pool._get_conn()
+            self.assertIs(first, connection)
+            self.assertEqual(
+                first._codexhub_diagnostic_connection_disposition, "new"
+            )
+            first.connect()
+            pool._put_conn(first)
+            clock.advance(0.01)
+            second = pool._get_conn()
+            self.assertIs(second, connection)
+            self.assertEqual(
+                second._codexhub_diagnostic_connection_disposition, "reused"
+            )
+
+        second.close()
+
+    def test_official_write_budget_deducts_pool_wait_and_reports_request_write(self) -> None:
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        recorder = diagnostic_recorder.DiagnosticRecorder(Path(tmpdir))
+        self.addCleanup(recorder.shutdown, 1)
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.17)
+        pool, connection = self._official_request_pool_fixture(sock)
+
+        class _DelayedManager:
+            failure: TimeoutError | None = None
+
+            def request(self, method: str, _url: str, **kwargs: object) -> object:
+                clock.advance(0.05)
+                try:
+                    return pool._make_request(
+                        connection,
+                        method,
+                        "/v1/responses",
+                        body=kwargs["body"],
+                        headers=kwargs["headers"],
+                        retries=None,
+                        timeout=kwargs["timeout"],
+                        chunked=False,
+                        response_conn=None,
+                        preload_content=False,
+                        decode_content=False,
+                    )
+                except TimeoutError as exc:
+                    self.failure = exc
+                    raise codex_proxy.urllib3.exceptions.MaxRetryError(pool, _url, exc) from exc
+
+        manager = _DelayedManager()
+        request = Request(
+            "https://example.test/v1/responses",
+            data=b"x" * (2 * 1024 * 1024),
+            method="POST",
+        )
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            patch("codex_proxy._official_pool_manager", return_value=manager),
+            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            self.assertRaises(TimeoutError) as raised,
+        ):
+            codex_proxy._open_upstream_response(
+                request,
+                upstream_name="official",
+                upstream_format="responses",
+                timeout=0.2,
+                event_context={"request_id": "request-write-fixture", "model": "openai/gpt-5.6"},
+                max_attempts=1,
+            )
+
+        self.assertIs(raised.exception, manager.failure)
+        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
+        self.assertTrue(
+            any(
+                isinstance(timeout, (int, float)) and timeout < 0.17
+                for timeout in sock.timeouts
+            )
+        )
+        self.assertTrue(recorder.flush(3))
+        records = [
+            json.loads(line)
+            for path in (Path(tmpdir) / "diagnostics" / "rolling").glob("*.jsonl")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        phase_records = [record for record in records if record["kind"] == "upstream_request_write"]
+        self.assertEqual(len(phase_records), 1)
+        self.assertEqual(phase_records[0]["failure_phase"], "request_write")
+
+    def test_official_slow_connect_still_uses_connect_cap(self) -> None:
+        clock = _VirtualClock()
+        sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
+        connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.06)
+        pool = codex_proxy._OfficialHTTPSConnectionPool("example.test")
+
+        with (
+            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            self.assertRaises(codex_proxy.urllib3.exceptions.ConnectTimeoutError) as raised,
+        ):
+            pool._make_request(
+                connection,
+                "POST",
+                "/v1/responses",
+                body=b"x" * 2048,
+                headers={"Content-Length": "2048"},
+                retries=None,
+                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
+                chunked=False,
+                response_conn=None,
+                preload_content=False,
+                decode_content=False,
+            )
+
+        self.assertEqual(connection.connect_calls, 1)
+        self.assertEqual(clock.now, 0.05)
+        self.assertIsNone(codex_proxy._explicit_transport_phase(raised.exception))
+
+    def test_official_read_timeout_keeps_read_socket_budget_and_no_write_phase(self) -> None:
+        sock = _ReadTimeoutSocket()
+        pool, connection = self._official_request_pool_fixture(sock)
+
+        with self.assertRaises(codex_proxy.urllib3.exceptions.ReadTimeoutError) as raised:
+            pool._make_request(
+                connection,
+                "POST",
+                "/v1/responses",
+                body=b"x",
+                headers={"Content-Length": "1"},
+                retries=None,
+                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.75),
+                chunked=False,
+                response_conn=None,
+                preload_content=False,
+                decode_content=False,
+            )
+
+        self.assertIn(0.75, sock.timeouts)
+        self.assertIsNone(codex_proxy._explicit_transport_phase(raised.exception))
+
+    def test_official_pooled_read_translation_preserves_phase_and_disposition(self) -> None:
+        inner = TimeoutError("simulated response body timeout")
+        wrapped = codex_proxy.urllib3.exceptions.ProtocolError("response body failed", inner)
+        setattr(wrapped, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        for method in ("read", "readline"):
+            with self.subTest(method=method):
+                pooled = codex_proxy._OfficialPooledResponse(
+                    _PooledReadFailure(wrapped, connection)
+                )
+                with self.assertRaises(TimeoutError) as raised:
+                    getattr(pooled, method)()
+
+                self.assertEqual(
+                    codex_proxy._explicit_transport_phase(raised.exception),
+                    "stream_body",
+                )
+                self.assertEqual(
+                    codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+                    "reused",
+                )
+
+    def test_official_pooled_direct_read_transport_error_preserves_metadata(self) -> None:
+        direct = TimeoutError("simulated direct response body timeout")
+        setattr(direct, codex_proxy._TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        pooled = codex_proxy._OfficialPooledResponse(
+            _PooledReadFailure(direct, connection)
+        )
+        with self.assertRaises(TimeoutError) as raised:
+            pooled.read()
+
+        self.assertEqual(
+            codex_proxy._explicit_transport_phase(raised.exception),
+            "stream_body",
+        )
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "reused",
+        )
+
+    def test_official_pooled_direct_read_timeout_preserves_read_phase(self) -> None:
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+        for method, expected_phase in (("read", "response_body"), ("readline", "stream_body")):
+            with self.subTest(method=method):
+                pooled = codex_proxy._OfficialPooledResponse(
+                    _PooledReadFailure(TimeoutError("simulated unannotated body timeout"), connection)
+                )
+
+                with self.assertRaises(TimeoutError) as raised:
+                    getattr(pooled, method)()
+
+                self.assertEqual(
+                    codex_proxy._explicit_transport_phase(raised.exception),
+                    expected_phase,
+                )
+                self.assertEqual(
+                    codex_proxy.transport_failure_phase(raised.exception),
+                    expected_phase,
+                )
+
+    def test_official_response_header_read_timeout_is_classified_as_response_headers(self) -> None:
+        class _ReadTimeoutManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                raise codex_proxy.urllib3.exceptions.ReadTimeoutError(
+                    None,
+                    "https://example.test/v1/responses",
+                    "simulated response header timeout",
+                )
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_ReadTimeoutManager()),
+            self.assertRaises(TimeoutError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._explicit_transport_phase(raised.exception),
+            "response_headers",
+        )
+        self.assertEqual(
+            codex_proxy.transport_failure_phase(raised.exception),
+            "response_headers",
+        )
+
+    def test_official_urlopen_direct_stdlib_transport_error_preserves_attempt_disposition(self) -> None:
+        class _DirectFailureManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                codex_proxy._set_official_attempt_connection_disposition("new")
+                raise TimeoutError("simulated direct request write timeout")
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_DirectFailureManager()),
+            self.assertRaises(TimeoutError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "new",
+        )
+
+    def test_official_http_error_preserves_pooled_connection_disposition(self) -> None:
+        connection = _PoolConnection()
+        connection._codexhub_diagnostic_connection_disposition = "reused"
+
+        class _ErrorManager:
+            def request(self, *_args: object, **_kwargs: object) -> object:
+                codex_proxy._set_official_attempt_connection_disposition("reused")
+                return _ErrorResponse(connection)
+
+        request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
+        with (
+            patch("codex_proxy._official_pool_manager", return_value=_ErrorManager()),
+            self.assertRaises(HTTPError) as raised,
+        ):
+            codex_proxy._official_urlopen(request, timeout=1)
+
+        self.assertEqual(
+            codex_proxy._diagnostic_error_connection_disposition(raised.exception),
+            "reused",
+        )
+
     def test_official_pool_exposes_new_and_reused_connection_dispositions(self) -> None:
         pool = object.__new__(codex_proxy._OfficialHTTPSConnectionPool)
         pool.proxy = None

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+try:
+    from scripts.python_runtime_contract import require_python_313
+except ModuleNotFoundError:
+    from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import argparse
 import json
 import os

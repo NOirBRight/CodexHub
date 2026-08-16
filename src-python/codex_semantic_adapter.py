@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from collaboration_runtime_contract import (
     CollaborationContractError,
     classify_collaboration_request,
+    classify_collaboration_tools,
 )
 
 MULTI_AGENT_TOOL_NAMES = {
@@ -65,7 +66,11 @@ def _collaboration_alias_protocol(name: Any) -> str | None:
     return None
 
 
-def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: str | None) -> str | None:
+def _classify_collaboration_item(
+    value: Mapping[str, Any],
+    inherited_namespace: str | None,
+    request_protocol: str | None,
+) -> str | None:
     namespace = value.get("namespace")
     name = value.get("name")
     tool_name = value.get("tool_name")
@@ -79,6 +84,18 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
         COLLABORATION_V1_NAMESPACE,
         COLLABORATION_V2_NAMESPACE,
     }
+    if declaration:
+        try:
+            declared_protocol = classify_collaboration_tools([value])
+        except CollaborationContractError as exc:
+            raise CollaborationBoundaryError(exc.classification) from exc
+        expected_protocol = (
+            COLLABORATION_V1
+            if name == COLLABORATION_V1_NAMESPACE
+            else COLLABORATION_V2
+        )
+        if declared_protocol != expected_protocol:
+            raise CollaborationBoundaryError("mixed_v1_v2")
     if namespace is None and declaration:
         namespace = name
         name = None
@@ -89,8 +106,22 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
         alias_protocol = _collaboration_alias_protocol(name)
         if alias_protocol is not None:
             return alias_protocol
-        if name in (COLLABORATION_V1_TOOL_NAMES | COLLABORATION_V2_TOOL_NAMES):
+        if (
+            request_protocol is not None
+            and item_type == "function_call"
+            and name in (COLLABORATION_V1_TOOL_NAMES | COLLABORATION_V2_TOOL_NAMES)
+        ):
+            # Once a request has declared the exact Collaboration namespace,
+            # an unqualified history call is an ambiguous protocol boundary.
+            # Keep ordinary top-level calls valid when no exact namespace was
+            # declared, but do not silently accept a namespace-stripped call
+            # inside an otherwise native Collaboration request.
             raise CollaborationBoundaryError("missing_namespace")
+        # Ordinary top-level function declarations and calls may reuse names
+        # that happen to overlap Collaboration children.  Only an exact
+        # Collaboration namespace (or a generated Collaboration alias) is a
+        # protocol marker; reserving shared names would reject unrelated
+        # OpenAI-compatible clients before their selected provider is called.
         return None
 
     if namespace == COLLABORATION_V1_NAMESPACE:
@@ -121,8 +152,13 @@ def _classify_collaboration_item(value: Mapping[str, Any], inherited_namespace: 
             raise CollaborationBoundaryError("mixed_v1_v2")
         raise CollaborationBoundaryError("unknown_v2_tool")
 
-    if name in (COLLABORATION_V1_TOOL_NAMES | COLLABORATION_V2_TOOL_NAMES) or _collaboration_alias_protocol(name):
-        raise CollaborationBoundaryError("unknown_namespace")
+    # A provider-owned namespace may legally reuse a Collaboration child
+    # name.  It is not a Collaboration request unless the namespace itself is
+    # the exact frozen Collaboration namespace (or the wire name is one of our
+    # generated aliases).  Do not reject ordinary provider namespaces merely
+    # because one child happens to be called ``send_message`` or ``spawn_agent``.
+    if _collaboration_alias_protocol(name):
+        return _collaboration_alias_protocol(name)
     return None
 
 
@@ -142,6 +178,7 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
 
     protocols: set[str] = set()
     exact_request_root: Mapping[str, Any] | None = None
+    exact_protocol: str | None = None
     if isinstance(value, Mapping):
         try:
             exact_protocol = classify_collaboration_request(value)
@@ -151,9 +188,16 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
             protocols.add(exact_protocol)
             exact_request_root = value
 
-    def visit(item: Any, inherited_namespace: str | None = None) -> None:
+    def visit(
+        item: Any,
+        inherited_namespace: str | None = None,
+    ) -> None:
         if isinstance(item, Mapping):
-            protocol = _classify_collaboration_item(item, inherited_namespace)
+            protocol = _classify_collaboration_item(
+                item,
+                inherited_namespace,
+                exact_protocol,
+            )
             if protocol is not None:
                 protocols.add(protocol)
                 arguments = item.get("arguments")
@@ -172,6 +216,14 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
                 child_namespace = item["name"]
             for key, child in item.items():
                 if item is exact_request_root and key == "tools":
+                    continue
+                # A tool-search result is a discovery payload, not the
+                # request's Collaboration declaration.  Its returned
+                # ``multi_agent_v1`` namespace is the Gateway's internal
+                # discovery surface and intentionally does not use the
+                # frozen Collaboration schema.  Do not reinterpret that
+                # nested result as a client protocol marker.
+                if key == "tools" and item.get("type") == "tool_search_output":
                     continue
                 if key == "tools" and child_namespace is not None:
                     visit(child, child_namespace)

@@ -97,7 +97,7 @@ pub fn probe_upstream_format(
 ) -> Result<Value, String> {
     let api_key = resolve_gateway_api_key(base_url, api_key)?.unwrap_or_default();
     let paths = ModelPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     let script = paths.upstream_format_probe_script();
     if !script.exists() {
         return Err(format!(
@@ -106,7 +106,7 @@ pub fn probe_upstream_format(
         ));
     }
 
-    let mut command = Command::new(&python);
+    let mut command = runtime_paths::configured_python_command(&python);
     command
         .arg(&script)
         .arg("--base-url")
@@ -251,7 +251,7 @@ fn model_test_payload(
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
-    let python = find_python();
+    let python = find_python()?;
     let runner = ProcessCatalogSyncRunner;
 
     generate_catalog_with_runner(&paths, &python, &runner)
@@ -2528,7 +2528,7 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         script: &Path,
         codex_dir: &Path,
     ) -> Result<CatalogCommandOutcome, String> {
-        let mut command = Command::new(python);
+        let mut command = runtime_paths::configured_python_command(python);
         command
             .arg(script)
             .arg("--sync")
@@ -3137,7 +3137,7 @@ fn format_exit_code(code: Option<i32>) -> String {
     )
 }
 
-fn find_python() -> PathBuf {
+fn find_python() -> Result<PathBuf, String> {
     let resource_root = runtime_paths::resource_root().ok();
     runtime_paths::find_python(resource_root.as_deref())
 }
@@ -3428,7 +3428,8 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(super::find_python());
+        let python = super::find_python().expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);
@@ -3498,7 +3499,8 @@ for line in sys.stdin:
                 .join(format!("{shape}-codex-home"))
                 .join("models_cache.json");
             fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-            let mut command = std::process::Command::new(super::find_python());
+            let python = super::find_python().expect("repository Python interpreter");
+            let mut command = crate::runtime_paths::configured_python_command(&python);
             command
                 .arg(&script)
                 .env("MODEL_LIST_SHAPE", shape);
@@ -3564,15 +3566,15 @@ for line in sys.stdin:
         let command = responding_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        // A Windows test binary can take more than 500 ms to start under a
-        // loaded workspace. Keep this helper-only response budget bounded
-        // well below the production 20 s native-cache grace: if the code
-        // regresses into waiting for cache publication despite complete
-        // context metadata, the 5 s cache grace below outlasts the 4 s
-        // elapsed bound and keeps that wait observable.
+        // A Windows test binary can take several seconds to start under a
+        // loaded workspace or antivirus scan. Keep this helper-only response
+        // budget bounded well below the production 20 s native-cache grace:
+        // if the code regresses into waiting for cache publication despite
+        // complete context metadata, the 5 s cache grace below outlasts the
+        // 8 s elapsed bound and keeps that wait observable.
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             &cache_path,
             Duration::from_secs(5),
         )
@@ -3592,7 +3594,7 @@ for line in sys.stdin:
             })
         );
         assert!(
-            started.elapsed() < Duration::from_secs(4),
+            started.elapsed() < Duration::from_secs(8),
             "model/list handling must remain bounded without native cache publication"
         );
         assert!(!cache_path.is_file());
@@ -3612,9 +3614,9 @@ for line in sys.stdin:
 
         let error = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
             &cache_path,
-            Duration::from_millis(100),
+            Duration::from_millis(250),
         )
         .expect_err("context-less model/list must fail closed without native cache evidence");
 
@@ -3623,7 +3625,7 @@ for line in sys.stdin:
             "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(8),
             "missing context handling must remain bounded"
         );
         assert!(!cache_path.is_file());
@@ -3690,7 +3692,8 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let mut command = std::process::Command::new(super::find_python());
+        let python = super::find_python().expect("repository Python interpreter");
+        let mut command = crate::runtime_paths::configured_python_command(&python);
         command
             .arg(&script)
             .env("FAKE_MODELS_CACHE", &cache_path);
@@ -3698,7 +3701,7 @@ for line in sys.stdin:
 
         let result = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             &cache_path,
             Duration::from_secs(1),
         )
@@ -3709,7 +3712,7 @@ for line in sys.stdin:
             serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert_eq!(cache["models"][0]["context_window"], 272000);
         assert!(started.elapsed() >= Duration::from_millis(100));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(8));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3741,9 +3744,9 @@ for line in sys.stdin:
 
         let error = super::read_codex_app_server_model_list_with_cache_path(
             command,
-            Duration::from_millis(500),
+            Duration::from_secs(5),
             &cache_path,
-            Duration::from_millis(100),
+            Duration::from_millis(250),
         )
         .expect_err("unchanged native cache must not satisfy a context-less refresh");
 

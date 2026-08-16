@@ -48,6 +48,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$script:ScriptDirectory = Split-Path -Parent $PSCommandPath
+$script:RepositoryRoot = Split-Path -Parent $script:ScriptDirectory
+. (Join-Path $script:ScriptDirectory 'Resolve-CodexHubPython.ps1')
+$script:RepositoryPython = Resolve-CodexHubPythonPath -Root $script:RepositoryRoot
+$script:RepositoryPythonDirectory = Split-Path -Parent $script:RepositoryPython
+
 try {
 Add-Type -TypeDefinition @'
 using System;
@@ -245,6 +251,43 @@ function Resolve-CommandPath {
         throw "preflight_${Name}_executable_missing"
     }
     return [string]$command.Source
+}
+
+function Resolve-E2EPythonPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailureClassification
+    )
+
+    # Fixture command files intentionally use the repository host runtime:
+    # they are test shims, not packaged applications.  A native candidate or
+    # materializer must instead use the runtime shipped beside that binary;
+    # injecting the runner's PATH here was the source of the 3.11/3.13 drift.
+    $extension = [System.IO.Path]::GetExtension($Executable)
+    if ($extension -iin @('.cmd', '.bat', '.ps1')) {
+        return $script:RepositoryPython
+    }
+
+    $bundled = Join-Path (Split-Path -Parent $Executable) 'python\python.exe'
+    if (-not (Test-Path -LiteralPath $bundled -PathType Leaf)) {
+        throw $FailureClassification
+    }
+    $resolved = (Resolve-Path -LiteralPath $bundled -ErrorAction Stop).Path
+    $probeSucceeded = $false
+    try {
+        & $resolved '-c' 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)' 1>$null 2>$null
+        $probeSucceeded = $LASTEXITCODE -eq 0
+    }
+    catch {
+        $probeSucceeded = $false
+    }
+    if (-not $probeSucceeded) {
+        throw $FailureClassification
+    }
+    return $resolved
 }
 
 function Get-Sha256 {
@@ -824,11 +867,26 @@ function New-IsolatedStartInfo {
         [string]$Executable,
         [string[]]$Arguments,
         [string]$CaseRoot,
-        [hashtable]$ExtraEnvironment
+        [hashtable]$ExtraEnvironment,
+        [string]$PythonPath = ''
     )
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $processArguments = [System.Collections.Generic.List[string]]::new()
     $extension = [System.IO.Path]::GetExtension($Executable)
+    # Script-like clients are allowed to spawn Python helpers.  They do not
+    # carry a packaged interpreter of their own, so bind them to the
+    # repository-resolved 3.13 runtime even when the caller omitted
+    # -PythonPath.  Native .exe clients remain isolated from the host Python
+    # and continue to use only their own artifact runtime.
+    $effectivePythonPath = if (
+        [string]::IsNullOrWhiteSpace($PythonPath) -and
+        $extension -iin @('.cmd', '.bat', '.ps1')
+    ) {
+        $script:RepositoryPython
+    }
+    else {
+        $PythonPath
+    }
     if ($extension -iin @('.cmd', '.bat')) {
         $startInfo.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
         $commandLine = @(
@@ -868,6 +926,22 @@ function New-IsolatedStartInfo {
             $startInfo.EnvironmentVariables[$name] = $value
         }
     }
+    $basePath = $startInfo.EnvironmentVariables['PATH']
+    $pythonDirectory = if (-not [string]::IsNullOrWhiteSpace($effectivePythonPath)) {
+        Split-Path -Parent $effectivePythonPath
+    }
+    else {
+        ''
+    }
+    $startInfo.EnvironmentVariables['PATH'] = if ([string]::IsNullOrWhiteSpace($pythonDirectory)) {
+        $basePath
+    }
+    elseif ([string]::IsNullOrWhiteSpace($basePath)) {
+        $pythonDirectory
+    }
+    else {
+        $pythonDirectory + ';' + $basePath
+    }
     $startInfo.EnvironmentVariables['HOME'] = $CaseRoot
     $startInfo.EnvironmentVariables['USERPROFILE'] = $CaseRoot
     $startInfo.EnvironmentVariables['APPDATA'] = (Join-Path $CaseRoot 'appdata\roaming')
@@ -878,6 +952,15 @@ function New-IsolatedStartInfo {
     $startInfo.EnvironmentVariables['TMP'] = (Join-Path $CaseRoot 'temp')
     foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
         $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+    }
+    if (-not [string]::IsNullOrWhiteSpace($effectivePythonPath)) {
+        # Every Python-spawning child must receive the exact interpreter
+        # selected for that artifact.  PATH ordering alone is not a runtime
+        # contract: another virtualenv (notably Hermes 3.11) can still win in
+        # a nested process.
+        $startInfo.EnvironmentVariables['CODEXHUB_E2E_PYTHON'] = $effectivePythonPath
+        $startInfo.EnvironmentVariables['CODEXHUB_PYTHON'] = $effectivePythonPath
+        $startInfo.EnvironmentVariables['CODEXHUB_PROXY_PYTHON'] = $effectivePythonPath
     }
     return $startInfo
 }
@@ -890,12 +973,13 @@ function Invoke-IsolatedProcess {
         [hashtable]$Environment,
         [string]$StandardInput,
         [int]$ProcessTimeoutSeconds,
-        [int]$MaximumCapturedCharacters = $script:MaximumCapturedCharacters
+        [int]$MaximumCapturedCharacters = $script:MaximumCapturedCharacters,
+        [string]$PythonPath = ''
     )
     foreach ($relative in @('.codex', '.config', 'appdata\roaming', 'appdata\local', 'temp')) {
         [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
     }
-    $startInfo = New-IsolatedStartInfo -Executable $Executable -Arguments $Arguments -CaseRoot $CaseRoot -ExtraEnvironment $Environment
+    $startInfo = New-IsolatedStartInfo -Executable $Executable -Arguments $Arguments -CaseRoot $CaseRoot -ExtraEnvironment $Environment -PythonPath $PythonPath
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $startedAt = [System.Diagnostics.Stopwatch]::StartNew()
@@ -962,12 +1046,13 @@ function Start-IsolatedProcess {
         [string]$Executable,
         [string[]]$Arguments,
         [string]$CaseRoot,
-        [hashtable]$Environment
+        [hashtable]$Environment,
+        [string]$PythonPath = ''
     )
     foreach ($relative in @('.codex', '.config', 'appdata\roaming', 'appdata\local', 'temp')) {
         [void](New-Item -ItemType Directory -Force -Path (Join-Path $CaseRoot $relative))
     }
-    $startInfo = New-IsolatedStartInfo -Executable $Executable -Arguments $Arguments -CaseRoot $CaseRoot -ExtraEnvironment $Environment
+    $startInfo = New-IsolatedStartInfo -Executable $Executable -Arguments $Arguments -CaseRoot $CaseRoot -ExtraEnvironment $Environment -PythonPath $PythonPath
     $startInfo.RedirectStandardInput = $false
     $startInfo.RedirectStandardOutput = $false
     $startInfo.RedirectStandardError = $false
@@ -1014,7 +1099,8 @@ function Invoke-DesktopProjectOpen {
         [string]$Executable,
         [string]$CaseRoot,
         [string]$UserDataRoot,
-        [hashtable]$Environment
+        [hashtable]$Environment,
+        [string]$PythonPath = ''
     )
     $result = Invoke-IsolatedProcess `
         -Executable $Executable `
@@ -1027,7 +1113,8 @@ function Invoke-DesktopProjectOpen {
         -CaseRoot $CaseRoot `
         -Environment $Environment `
         -StandardInput '' `
-        -ProcessTimeoutSeconds 10
+        -ProcessTimeoutSeconds 10 `
+        -PythonPath $PythonPath
     if ($result.timed_out -or $result.exit_code -ne 0) {
         throw 'manual_desktop_project_open_failed'
     }
@@ -1121,7 +1208,11 @@ function Test-GatewayHealth {
 }
 
 function Test-GatewayPythonProcess {
-    param([int]$Port)
+    param(
+        [int]$Port,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPythonPath
+    )
     $netstat = $null
     try {
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -1151,9 +1242,18 @@ function Test-GatewayPythonProcess {
             }
             $owner = [System.Diagnostics.Process]::GetProcessById([int]$match.Groups[1].Value)
             try {
-                if ($owner.ProcessName -match '^pythonw?$') {
-                    return $true
+                if ($owner.ProcessName -notmatch '^pythonw?$') {
+                    continue
                 }
+                $actualPath = ''
+                try {
+                    $actualPath = [System.IO.Path]::GetFullPath([string]$owner.MainModule.FileName)
+                }
+                catch {
+                    return $false
+                }
+                $expectedPath = [System.IO.Path]::GetFullPath($ExpectedPythonPath)
+                return $actualPath.Equals($expectedPath, [System.StringComparison]::OrdinalIgnoreCase)
             }
             finally {
                 $owner.Dispose()
@@ -1232,13 +1332,13 @@ function Wait-CandidateGatewayReady {
         $listenerSeen = $listenerSeen -or (Test-LoopbackListener -Port ([int]$script:GatewayConfig.listen_port))
         if ($listenerSeen) {
             if (-not $pythonChildSeen) {
-                $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
+                $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port) -ExpectedPythonPath $script:CandidatePythonPath
             }
             $healthReady = Test-GatewayHealth -Port ([int]$script:GatewayConfig.listen_port)
         }
         if ($healthReady) {
             $diagnosticsReady = Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf
-            if ($diagnosticsReady) {
+            if ($diagnosticsReady -and $pythonChildSeen) {
                 $stopwatch.Stop()
                 return
             }
@@ -1247,7 +1347,7 @@ function Wait-CandidateGatewayReady {
     }
     $stopwatch.Stop()
     if (-not $pythonChildSeen -and $pythonProbeReserveMilliseconds -gt 0 -and $stopwatch.ElapsedMilliseconds -lt $deadlineMilliseconds) {
-        $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port)
+        $pythonChildSeen = Test-GatewayPythonProcess -Port ([int]$script:GatewayConfig.listen_port) -ExpectedPythonPath $script:CandidatePythonPath
     }
     $failure = if ($listenerSeen -and -not $healthReady) {
         'candidate_gateway_startup_failed_lifecycle'
@@ -1271,7 +1371,9 @@ function Invoke-CandidateOfficialBootstrap {
         [string]$Executable,
         [string]$CandidateRoot,
         [hashtable]$Environment,
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath
     )
     $budgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $bootstrapStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1283,7 +1385,7 @@ function Invoke-CandidateOfficialBootstrap {
             throw 'candidate_gateway_bootstrap_timeout'
         }
         $processTimeoutSeconds = [Math]::Max(1, [Math]::Floor($remainingMilliseconds / 1000))
-        $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('refresh-models') -CaseRoot $CandidateRoot -Environment $Environment -StandardInput '' -ProcessTimeoutSeconds $processTimeoutSeconds
+        $result = Invoke-IsolatedProcess -Executable $Executable -Arguments @('refresh-models') -CaseRoot $CandidateRoot -Environment $Environment -StandardInput '' -ProcessTimeoutSeconds $processTimeoutSeconds -PythonPath $PythonPath
         if ($result.timed_out) {
             $bootstrapStopwatch.Stop()
             Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_timeout' -DurationMilliseconds ([Math]::Min($budgetMilliseconds, [int]$bootstrapStopwatch.ElapsedMilliseconds)) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
@@ -2334,7 +2436,7 @@ function Invoke-ManagedClientConfigVerb {
     }
     $result = Invoke-IsolatedProcess -Executable $script:ManagedClientConfigBuild -Arguments $arguments -CaseRoot $ProcessRoot -Environment @{
         CODEXHUB_E2E_MATERIALIZER_LOG = $script:ManagedClientConfigLogPath
-    } -StandardInput '' -ProcessTimeoutSeconds 30
+    } -StandardInput '' -ProcessTimeoutSeconds 30 -PythonPath $script:MaterializerPythonPath
     if ($result.timed_out) {
         throw 'client_configuration_materializer_timeout'
     }
@@ -3032,6 +3134,8 @@ if (-not (Test-DebugPortableBuildResources -Executable $DebugBuild)) {
 if (-not (Test-DebugPortableBuildResources -Executable $ManagedClientConfigBuild)) {
     throw 'preflight_materializer_build_not_portable'
 }
+$script:CandidatePythonPath = Resolve-E2EPythonPath -Executable $DebugBuild -FailureClassification 'preflight_debug_build_python_invalid'
+$script:MaterializerPythonPath = Resolve-E2EPythonPath -Executable $ManagedClientConfigBuild -FailureClassification 'preflight_materializer_python_invalid'
 foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
 }
@@ -3214,7 +3318,7 @@ try {
     Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds)
+    [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
     $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
     $candidateCatalogDeadlineMilliseconds = [Math]::Min(
         $candidateStartupBudgetMilliseconds,
@@ -3272,7 +3376,7 @@ try {
         Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_startup_timeout' -DurationMilliseconds $candidateStartupBudgetMilliseconds -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)
         throw 'candidate_gateway_startup_timeout'
     }
-    $candidateProcess = Start-IsolatedProcess -Executable $DebugBuild -Arguments @() -CaseRoot $candidateRoot -Environment $candidateEnvironment
+    $candidateProcess = Start-IsolatedProcess -Executable $DebugBuild -Arguments @() -CaseRoot $candidateRoot -Environment $candidateEnvironment -PythonPath $script:CandidatePythonPath
     [void]$trackedProcesses.Add($candidateProcess)
     $elapsedBeforeWaitMilliseconds = [int]$candidateStartupStopwatch.ElapsedMilliseconds
     $remainingStartupMilliseconds = $candidateStartupBudgetMilliseconds - $elapsedBeforeWaitMilliseconds
@@ -3310,6 +3414,16 @@ try {
             @($guiCaseRoot)
         }
         $guiExecutable = if ($guiClient -ceq 'desktop') { $desktopLaunchExecutable } else { $executables[$guiClient] }
+        # Test shims are command files and spawn fixture Python themselves;
+        # bind those to the repository runtime. Real native clients must use
+        # only the Python shipped beside their own artifact, so they receive
+        # no host override here.
+        $guiPythonPath = if ([System.IO.Path]::GetExtension($guiExecutable) -iin @('.cmd', '.bat', '.ps1')) {
+            $script:RepositoryPython
+        }
+        else {
+            ''
+        }
         $guiEnvironment = @{
             CODEXHUB_E2E_GUI_CLIENT = $guiClient
             CODEXHUB_E2E_CASES = $guiCase.case_id
@@ -3318,7 +3432,7 @@ try {
             CODEXHUB_E2E_MANUAL_EVIDENCE = $manualEvidencePath
             CODEXHUB_E2E_GUI_LAUNCH_MARKER = $guiLaunchMarker
         }
-        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment
+        $guiProcess = Start-IsolatedProcess -Executable $guiExecutable -Arguments $guiArguments -CaseRoot $guiCaseRoot -Environment $guiEnvironment -PythonPath $guiPythonPath
         [void]$trackedProcesses.Add($guiProcess)
         [void]$nativeGuiProcesses.Add($guiProcess)
         if ($guiClient -ceq 'desktop') {
@@ -3327,7 +3441,8 @@ try {
                 -Executable $guiExecutable `
                 -CaseRoot $guiCaseRoot `
                 -UserDataRoot $desktopUserDataRoot `
-                -Environment $guiEnvironment
+                -Environment $guiEnvironment `
+                -PythonPath $guiPythonPath
         }
     }
 

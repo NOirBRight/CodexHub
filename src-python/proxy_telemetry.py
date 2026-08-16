@@ -168,6 +168,12 @@ def enrich_request_observability(
 ) -> dict[str, Any]:
     prefix = body[:REQUEST_PREFIX_BYTES]
     fields: dict[str, Any] = {
+        # These are non-secret wire identities used by the private E2E gate to
+        # compare the exact body passed to the upstream Request object.  Keep
+        # the existing HMAC fields for correlation/privacy-sensitive telemetry;
+        # the plain digest does not retain or expose request contents.
+        "body_bytes": len(body),
+        "body_sha256": hashlib.sha256(body).hexdigest(),
         "request_prefix_hmac": telemetry_hmac(codex_home, b"prefix", prefix),
         "prefix_bytes": len(prefix),
     }

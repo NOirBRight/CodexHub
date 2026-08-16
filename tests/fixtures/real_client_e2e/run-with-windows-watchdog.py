@@ -8,6 +8,21 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
+# PowerShell 5.1 and cmd.exe can expose the parent console's legacy code page
+# to a child even when the captured command output is UTF-8.  The watchdog
+# replays bounded child output after the process tree is complete; make that
+# replay independent of the host code page so a harmless replacement character
+# cannot turn a completed test into a UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8", errors="replace")
+
 
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9

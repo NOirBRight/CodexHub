@@ -140,6 +140,30 @@ def _v2_history() -> list[dict[str, object]]:
     return history
 
 
+def _v2_plaintext_agent_message() -> dict[str, object]:
+    item = _v2_history()[-1]
+    return {
+        **item,
+        "content": [part for part in item["content"] if part["type"] == "input_text"],
+    }
+
+
+def _v2_history_without_encrypted_agent_message() -> list[dict[str, object]]:
+    history = _v2_history()
+    history[-1] = _v2_plaintext_agent_message()
+    return history
+
+
+def _v2_provider_neutral_history() -> list[dict[str, object]]:
+    history = _v2_history_without_encrypted_agent_message()
+    history[-1] = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "done"}],
+    }
+    return history
+
+
 def _v2_plan(*, native: bool = False):
     capabilities = ProtocolCapabilities.responses_structured(
         namespace_lifecycle=native,
@@ -193,6 +217,138 @@ def test_exact_runtime_namespaces_classify_and_descriptions_are_dynamic() -> Non
         for child in body["tools"][0]["tools"]:
             child["description"] = "also dynamic"
         assert classify_collaboration_payload(body) == version
+
+
+@pytest.mark.parametrize("name", sorted({
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+}))
+def test_overlapping_top_level_function_names_are_not_collaboration_markers(name: str) -> None:
+    body = {
+        "model": "ordinary-model",
+        "tools": [
+            {
+                "type": "function",
+                "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"provider_field": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+
+    assert classify_collaboration_payload(body) is None
+
+
+def test_ordinary_responses_request_may_omit_tool_choice() -> None:
+    body = {
+        "model": "ordinary-model",
+        "tools": [
+            {
+                "type": "function",
+                "name": "send_message",
+                "parameters": {"type": "object"},
+            }
+        ],
+    }
+
+    assert classify_collaboration_payload(body) is None
+
+
+@pytest.mark.parametrize("name", sorted({
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+}))
+def test_exact_collaboration_namespace_rejects_unqualified_history_call(name: str) -> None:
+    body = _request(COLLABORATION_V2)
+    body["input"] = [{
+        "type": "function_call",
+        "name": name,
+        "call_id": "unqualified-call",
+        "arguments": "{}",
+    }]
+
+    with pytest.raises(CollaborationBoundaryError) as caught:
+        classify_collaboration_payload(body)
+
+    assert caught.value.classification == "missing_namespace"
+
+
+def test_gateway_rejects_unqualified_history_after_exact_namespace_selection() -> None:
+    body = _request(COLLABORATION_V2)
+    body["input"] = [{
+        "type": "function_call",
+        "name": "spawn_agent",
+        "call_id": "unqualified-call",
+        "arguments": "{}",
+    }]
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _responses_upstream(native_namespace=False),
+            event_context={},
+            inject_codex_tools=False,
+        )
+
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_provider_namespace_with_overlapping_child_name_is_not_collaboration() -> None:
+    body = {
+        "model": "ordinary-model",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "provider_owned",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "send_message",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            }
+        ],
+        "input": [
+            {
+                "type": "function_call",
+                "namespace": "provider_owned",
+                "name": "send_message",
+                "call_id": "provider-call",
+                "arguments": "{}",
+            }
+        ],
+    }
+
+    assert classify_collaboration_payload(body) is None
+
+
+def test_v1_default_role_spawn_schema_without_agent_type_classifies_exactly() -> None:
+    body = _request(COLLABORATION_V1)
+    spawn = next(
+        child
+        for child in body["tools"][0]["tools"]
+        if child["name"] == "spawn_agent"
+    )
+    del spawn["parameters"]["properties"]["agent_type"]
+
+    assert classify_collaboration_payload(body) == COLLABORATION_V1
+
+    del spawn["parameters"]["properties"]["model"]
+    with pytest.raises(CollaborationBoundaryError) as caught:
+        classify_collaboration_payload(body)
+    assert caught.value.classification == "namespace_child_parameter_schema_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -249,9 +405,9 @@ def test_exact_runtime_namespace_request_fails_closed(
 
 def test_direct_duplicate_and_mixed_runtime_markers_fail_closed() -> None:
     direct = copy.deepcopy(_declaration(COLLABORATION_V2)["tools"])
-    with pytest.raises(CollaborationBoundaryError) as caught:
-        classify_collaboration_payload({"tool_choice": "auto", "tools": direct})
-    assert caught.value.classification == "collaboration_marker_missing"
+    # Shared top-level function names are ordinary provider declarations
+    # unless the exact Collaboration namespace is present.
+    assert classify_collaboration_payload({"tool_choice": "auto", "tools": direct}) is None
 
     duplicate = _request(COLLABORATION_V2)
     duplicate["tools"].append(copy.deepcopy(duplicate["tools"][0]))
@@ -368,6 +524,25 @@ def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior()
     )
 
 
+def test_v2_provider_adapter_removes_official_encryption_schema_annotations() -> None:
+    body = _request(COLLABORATION_V2)
+    context: dict[str, object] = {}
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode(),
+            _responses_upstream(native_namespace=False),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert transformed["tools"]
+    assert all(tool["type"] == "function" for tool in transformed["tools"])
+    assert all("namespace" not in tool for tool in transformed["tools"])
+    assert "encrypted" not in json.dumps(transformed["tools"], sort_keys=True)
+
+
 def test_v2_chat_surface_fails_before_sampling_instead_of_downgrading() -> None:
     body = _request(COLLABORATION_V2)
     upstream = {
@@ -408,16 +583,18 @@ def test_v2_all_six_calls_results_and_agent_message_round_trip(native: bool) -> 
     original = {
         "tool_choice": "auto",
         "tools": [_declaration(COLLABORATION_V2)],
-        "input": _v2_history(),
+        "input": _v2_history() if native else _v2_history_without_encrypted_agent_message(),
     }
 
     encoded = plan.encode_payload(original)
     decoded = plan.decode_payload({"input": encoded["input"]})
 
-    assert decoded["input"] == original["input"]
-    assert [item["id"] for item in decoded["input"]] == [
-        item["id"] for item in original["input"]
-    ]
+    expected_history = original["input"] if native else _v2_provider_neutral_history()
+    assert decoded["input"] == expected_history
+    if native:
+        assert [item["id"] for item in decoded["input"]] == [
+            item["id"] for item in original["input"]
+        ]
     if native:
         assert encoded == original
     else:
@@ -432,14 +609,67 @@ def test_v2_adapted_history_and_restart_replay_use_the_same_inverse() -> None:
     payload = {
         "tool_choice": "auto",
         "tools": [_declaration(COLLABORATION_V2)],
-        "input": _v2_history(),
+        "input": _v2_history_without_encrypted_agent_message(),
     }
 
     first = plan.encode_payload(payload)
     restart = plan.new_attempt().encode_payload(payload)
 
     assert restart == first
-    assert plan.decode_payload({"input": first["input"]})["input"] == payload["input"]
+    assert plan.decode_payload({"input": first["input"]})["input"] == _v2_provider_neutral_history()
+
+
+def test_v2_external_plaintext_agent_message_becomes_provider_neutral_message() -> None:
+    plan = _v2_plan()
+    item = _v2_plaintext_agent_message()
+
+    encoded = plan.encode_payload(
+        {
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": [item],
+        }
+    )
+
+    assert encoded["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "done"}],
+        }
+    ]
+
+
+def test_v2_external_encrypted_agent_message_fails_closed_without_forwarding_content() -> None:
+    plan = _v2_plan()
+    item = {
+        **_v2_history()[-1],
+        "content": [{"type": "encrypted_content", "encrypted_content": "opaque-test-only"}],
+    }
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        plan.encode_payload(
+            {
+                "tools": [_declaration(COLLABORATION_V2)],
+                "input": [item],
+            }
+        )
+
+    assert caught.value.classification == "encrypted_agent_message_unavailable"
+    assert "opaque-test-only" not in str(caught.value)
+
+
+def test_v2_native_agent_message_keeps_official_encrypted_history_opaque() -> None:
+    plan = _v2_plan(native=True)
+    item = _v2_history()[-1]
+
+    encoded = plan.encode_payload(
+        {
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": [item],
+        }
+    )
+
+    assert encoded["input"] == [item]
 
 
 @pytest.mark.parametrize(
@@ -511,7 +741,7 @@ def test_v2_void_result_empty_string_is_normalized_to_null() -> None:
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
 def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
-    history = _v2_history()
+    history = _v2_history() if native else _v2_history_without_encrypted_agent_message()
     # followup_task result is at index 1, send_message result at index 7.
     history[1]["output"] = ""
     history[7]["output"] = ""
@@ -526,7 +756,15 @@ def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
     encoded = plan.encode_payload(payload)
     decoded = plan.decode_payload({"input": encoded["input"]})
 
-    assert decoded["input"] == history
+    expected = history
+    if not native:
+        expected = [*history]
+        expected[-1] = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "done"}],
+        }
+    assert decoded["input"] == expected
 
 
 def test_v2_send_message_non_empty_result_still_fails_closed() -> None:

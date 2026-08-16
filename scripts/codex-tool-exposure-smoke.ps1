@@ -1,6 +1,6 @@
 param(
-    [string]$Workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
-    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot '..') 'output\cli-tool-exposure-smoke'),
+    [string]$Workspace = "",
+    [string]$OutputDir = "",
     [string]$OfficialDirectModel = 'gpt-5.5',
     [string]$OfficialProxyModel = 'gpt-5.5',
     [string]$ThirdPartyModel = 'ollama-cloud/glm-5.2',
@@ -13,6 +13,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Workspace)) {
+    $Workspace = (Resolve-Path (Join-Path $scriptRoot '..')).Path
+}
+if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = Join-Path (Join-Path $scriptRoot '..') 'output\cli-tool-exposure-smoke'
+}
 
 function Resolve-CodexCommand {
     param([string]$Override = '')
@@ -172,7 +182,7 @@ function Add-ProcessArgument {
         [string]$Argument
     )
     [void]$Arguments.Add($Argument)
-    if ($null -ne $StartInfo.ArgumentList) {
+    if ($null -ne $StartInfo.GetType().GetProperty('ArgumentList')) {
         [void]$StartInfo.ArgumentList.Add($Argument)
     }
 }
@@ -279,7 +289,7 @@ function Invoke-CodexSmokeCase {
         ) -join ' '
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-        if ($null -ne $psi.ArgumentList) {
+        if ($null -ne $psi.GetType().GetProperty('ArgumentList')) {
             foreach ($shimArg in @('/d', '/s', '/c')) {
                 [void]$psi.ArgumentList.Add($shimArg)
             }
@@ -289,7 +299,7 @@ function Invoke-CodexSmokeCase {
             $psi.Arguments = "/d /s /c $(ConvertTo-ProcessArgument $commandLine)"
         }
     }
-    elseif ($null -eq $psi.ArgumentList) {
+    elseif ($null -eq $psi.GetType().GetProperty('ArgumentList')) {
         $psi.Arguments = ($processArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' '
     }
     $psi.RedirectStandardInput = $true

@@ -228,10 +228,23 @@ cd ..\src-tauri
 cargo test
 
 cd ..
-python -m pytest
+.\scripts\codexhub-python.cmd -m pytest
 ```
 
-源码运行 Gateway 时需要 Python 可用。可通过 `CODEXHUB_PYTHON` 或 `CODEXHUB_PROXY_PYTHON` 指定 Python 路径。
+源码要求 Python 3.13 或更高版本。不要在可能把其他虚拟环境置于首位的
+Shell 中直接使用 `python` 或 `pytest`；测试和脚本统一使用
+`scripts\codexhub-python.cmd`。它会解析并校验同一个解释器、导出精确路径，
+并把该解释器及仓库的 `scripts` 目录置于子进程 `PATH` 首位，避免嵌套进程
+回退到 Python 3.11。准备好的应用运行时存在时，源码启动器仍对所有仓库
+脚本统一使用已校验的本地或主机 Python 3.13；这是为了避免脚本通过
+`sys.executable` 调用 pytest 时落到不含开发模块的嵌入式运行时。生产、打包
+和 Gateway 入口会显式选择嵌入式运行时。`scripts\pytest.cmd` 是匹配的 pytest
+转发入口。如需在
+当前 PowerShell 会话中直接使用这些命令，可一次性执行
+`. .\scripts\Enter-CodexHubPython.ps1`。也可以通过 `CODEXHUB_PYTHON` 或
+`CODEXHUB_PROXY_PYTHON` 显式指定 Python 3.13+ 可执行文件。测试命令还会
+验证 pytest 是否安装在同一个解释器中；缺失时会直接给出安装命令，不会
+静默切换到另一个 3.13 环境。
 
 ## 和其他方式的区别
 

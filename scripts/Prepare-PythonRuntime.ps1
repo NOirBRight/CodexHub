@@ -1,17 +1,42 @@
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot = "",
     [string]$PythonVersion = "3.13.14",
     [string]$PythonZipUrl = "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
     [string]$PythonZipSha256 = "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
     [string]$ZstandardVersion = "0.25.0",
     [string]$ZstandardWheelUrl = "https://files.pythonhosted.org/packages/d9/82/b9c06c870f3bd8767c201f1edbdf9e8dc34be5b0fbc5682c4f80fe948475/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
     [string]$ZstandardWheelSha256 = "1f830a0dac88719af0ae43b8b2d6aef487d437036468ef3c2ea59c51f9d55fd5",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$CheckOnly
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = Split-Path -Parent $scriptRoot
+}
+
+# The embedded runtime is the packaged application's source of truth. Do not
+# let a developer shell's active 3.11/Conda/Pipenv environment redirect its
+# stdlib or inject host modules while we validate or prepare the bundle.
+foreach ($name in @(
+    'PYTHONHOME',
+    'PYTHONPATH',
+    'PYTHONSTARTUP',
+    'PYTHONUSERBASE',
+    'VIRTUAL_ENV',
+    'CONDA_PREFIX',
+    'CONDA_DEFAULT_ENV',
+    'CONDA_PROMPT_MODIFIER',
+    'PIPENV_ACTIVE'
+)) {
+    Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+}
 
 $repoRootPath = [System.IO.Path]::GetFullPath($RepoRoot)
 $tauriDir = Join-Path $repoRootPath "src-tauri"
@@ -23,6 +48,19 @@ $zipPath = Join-Path $downloadDir $zipName
 $zstandardWheelName = "zstandard-$ZstandardVersion-cp313-cp313-win_amd64.whl"
 $zstandardWheelPath = Join-Path $downloadDir $zstandardWheelName
 $runtimeManifestPath = Join-Path $runtimeDir "codexhub-python-runtime.json"
+
+function ConvertTo-PythonVersion([string]$Value) {
+    $version = $null
+    if (-not [System.Version]::TryParse($Value, [ref]$version)) {
+        throw "PythonVersion must be a numeric version such as 3.13.14: $Value"
+    }
+    return $version
+}
+
+$requestedPythonVersion = ConvertTo-PythonVersion $PythonVersion
+if ($requestedPythonVersion -lt [System.Version]::new(3, 13, 0)) {
+    throw "CodexHub requires a bundled Python runtime of 3.13 or newer: $PythonVersion"
+}
 
 function Assert-UnderPath([string]$Path, [string]$Root) {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
@@ -53,9 +91,47 @@ function Invoke-Download([string]$Url, [string]$Destination) {
     Invoke-WebRequest -Uri $Url -OutFile $Destination
 }
 
+function Get-PythonRuntimeVersion([string]$PythonPath) {
+    # Keep this probe free of nested quotes. Windows PowerShell 5.1 rewrites
+    # embedded double quotes while building a native command line, turning the
+    # previous ".join(...)" expression into invalid Python before it reaches
+    # the interpreter. The numeric probe is equivalent and works in both
+    # Windows PowerShell 5.1 and PowerShell 7.
+    $versionOutput = @(& $PythonPath -c 'import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2], sep=chr(46))' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -eq 0) {
+        return $null
+    }
+    $version = $null
+    if (-not [System.Version]::TryParse(([string]($versionOutput | Select-Object -Last 1)).Trim(), [ref]$version)) {
+        return $null
+    }
+    return $version
+}
+
 function Test-PythonRuntimeReady {
     $python = Join-Path $runtimeDir "python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        return $false
+    }
+
+    $actualVersion = Get-PythonRuntimeVersion $python
+    if ($null -eq $actualVersion -or
+        $actualVersion -lt [System.Version]::new(3, 13, 0) -or
+        $actualVersion -ne $requestedPythonVersion) {
+        return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $runtimeManifestPath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+        $manifestVersion = ConvertTo-PythonVersion ([string]$manifest.python_version)
+    }
+    catch {
+        return $false
+    }
+    if ($manifestVersion -ne $actualVersion) {
         return $false
     }
 
@@ -90,6 +166,14 @@ function Update-PythonPathFile {
 
 Assert-UnderPath $runtimeDir $repoRootPath
 Assert-UnderPath $downloadDir $repoRootPath
+
+if ($CheckOnly) {
+    if (Test-PythonRuntimeReady) {
+        Write-Output "Python runtime check passed: $runtimeDir"
+        exit 0
+    }
+    throw "Python runtime check failed: $runtimeDir is missing, incompatible, or incomplete."
+}
 
 New-Item -ItemType Directory -Force -Path $resourcesDir, $downloadDir | Out-Null
 
@@ -148,8 +232,16 @@ if ($LASTEXITCODE -ne 0) {
     throw "zstandard wheel extraction failed with exit code $LASTEXITCODE."
 }
 
+$actualPythonVersion = Get-PythonRuntimeVersion $python
+if ($null -eq $actualPythonVersion -or
+    $actualPythonVersion -lt [System.Version]::new(3, 13, 0) -or
+    $actualPythonVersion -ne $requestedPythonVersion) {
+    throw "Extracted Python runtime version is not the requested compatible version: expected $PythonVersion, got $actualPythonVersion"
+}
+
 $manifest = [ordered]@{
-    python_version = $PythonVersion
+    python_version = $actualPythonVersion.ToString()
+    requested_python_version = $PythonVersion
     source_url = $PythonZipUrl
     sha256 = $PythonZipSha256.ToLowerInvariant()
     zstandard_version = $ZstandardVersion

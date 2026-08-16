@@ -55,6 +55,22 @@ def _collaboration_namespace(version: str) -> dict:
     }
 
 
+def _ordinary_overlapping_tools() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": name,
+            "description": "Ordinary provider tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {"provider_field": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        }
+        for name in ("send_message", "interrupt_agent", "list_agents")
+    ]
+
+
 def _decoded_sse(line: bytes) -> dict:
     assert line.startswith(b"data:")
     return json.loads(line.split(b":", 1)[1].strip())
@@ -107,6 +123,392 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
     assert "must-not-be-logged" not in serialized
     assert "req-private" not in serialized
     assert "__codexhub_" not in serialized
+
+
+def test_dsh_shaped_overlapping_tools_without_tool_choice_reach_provider_route():
+    context: dict = {}
+    body = json.dumps(
+        {
+            "model": "ordinary-model",
+            "input": [{"type": "message", "role": "user", "content": "Use a tool."}],
+            "tools": _ordinary_overlapping_tools(),
+        }
+    ).encode("utf-8")
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            body,
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert context.get("collaboration_protocol") is None
+    assert [tool["name"] for tool in transformed["tools"]] == [
+        "send_message",
+        "interrupt_agent",
+        "list_agents",
+    ]
+    assert "tool_choice" not in transformed
+
+
+def test_ordinary_request_version_metadata_does_not_enter_collaboration_boundary():
+    context: dict = {}
+    body = json.dumps(
+        {
+            "model": "ordinary-model",
+            "input": [{"type": "message", "role": "user", "content": "Continue."}],
+            "metadata": {"multi_agent_version": "v2"},
+            "tools": _ordinary_overlapping_tools(),
+        }
+    ).encode("utf-8")
+
+    transformed = json.loads(
+        codex_proxy.compatible_request_body(
+            body,
+            _external_chat_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert context.get("collaboration_protocol") is None
+    assert transformed["metadata"] == {"multi_agent_version": "v2"}
+    assert "tool_choice" not in transformed
+
+
+def test_attempted_collaboration_namespace_without_tool_choice_still_fails_closed():
+    body = json.loads(_request([_collaboration_namespace(COLLABORATION_V2)]))
+    body.pop("tool_choice")
+
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+        codex_proxy.compatible_request_body(
+            json.dumps(body).encode("utf-8"),
+            _external_responses_upstream(),
+            event_context={},
+            inject_codex_tools=False,
+        )
+
+    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+
+
+def test_runtime_plan_aliases_are_deterministic_for_identical_external_request():
+    tools = [
+        {"type": "function", "name": "plain", "parameters": {"type": "object"}},
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "tools": [{"type": "function", "name": "run", "parameters": {"type": "object"}}],
+        },
+        {"type": "custom", "name": "editor", "format": {"type": "text"}},
+        {"type": "tool_search", "execution": "client"},
+    ]
+    request = json.loads(_request(tools))
+    request["prompt_cache_key"] = "stable-runtime-tool-prefix"
+    body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        _external_chat_upstream(),
+        event_context={},
+        inject_codex_tools=False,
+    )
+    second = codex_proxy.compatible_request_body(
+        body,
+        _external_chat_upstream(),
+        event_context={},
+        inject_codex_tools=False,
+    )
+
+    assert first == second
+    payload = json.loads(first)
+    assert payload["prompt_cache_key"] == "stable-runtime-tool-prefix"
+    assert [tool["name"].rsplit("_", 2)[0] for tool in payload["tools"][1:]] == [
+        "__codexhub_ns",
+        "__codexhub_custom",
+        "__codexhub_search",
+    ]
+
+
+def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "description": "dynamic",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "run",
+                    "description": "dynamic",
+                    "strict": False,
+                    "parameters": {"type": "object"},
+                }
+            ],
+        }
+    ]
+    events: list[tuple[str, dict]] = []
+    context: dict = {}
+    upstream = _external_chat_upstream()
+    with patch.object(
+        codex_proxy,
+        "write_proxy_event",
+        lambda name, **fields: events.append((name, fields)),
+    ):
+        encoded = json.loads(
+            codex_proxy.compatible_request_body(
+                _request(tools), upstream, event_context=context, inject_codex_tools=False
+            )
+        )
+        plan = context["_runtime_tool_compatibility_plan"]
+        alias = plan.aliases[0]
+        decoded = json.loads(
+            codex_proxy.compatible_response_body(
+                json.dumps(
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "name": alias,
+                                "call_id": "adapter-call",
+                                "item_id": "adapter-item",
+                                "arguments": "{}",
+                            }
+                        ]
+                    }
+                ).encode(),
+                upstream["name"],
+                event_context=context,
+            )
+        )
+
+    request_event = next(
+        fields for name, fields in events if name == "runtime_tool_adapter_request"
+    )
+    response_event = next(
+        fields for name, fields in events if name == "runtime_tool_adapter_response"
+    )
+    assert len(encoded["tools"]) == 1
+    assert encoded["tools"][0]["type"] == "function"
+    assert encoded["tools"][0]["name"] == alias
+    assert request_event["adapted_alias_count"] == 1
+    assert request_event["adapted_alias_unique_count"] == 1
+    assert request_event["upstream_namespace_count"] == 0
+    assert response_event["reverse_mapped_call_count"] == 1
+    assert response_event["reverse_mapped_output_count"] == 0
+    assert decoded["output"][0]["namespace"] == "vendor"
+    assert decoded["output"][0]["name"] == "run"
+
+
+def test_v2_default_role_namespace_adapter_removes_encrypted_provider_schema_flags():
+    declaration = _collaboration_namespace(COLLABORATION_V2)
+    spawn = next(child for child in declaration["tools"] if child["name"] == "spawn_agent")
+    del spawn["parameters"]["properties"]["agent_type"]
+    context: dict = {}
+
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request([declaration]),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert all(tool["type"] == "function" for tool in payload["tools"])
+    assert all("encrypted" not in json.dumps(tool) for tool in payload["tools"])
+    assert all(
+        entry.disposition == "adapt"
+        for entry in context["_runtime_tool_compatibility_plan"].entries
+    )
+
+
+def test_runtime_plan_aliases_do_not_change_with_tool_choice_policy():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "vendor",
+            "tools": [
+                {"type": "function", "name": "run", "parameters": {"type": "object"}}
+            ],
+        }
+    ]
+
+    def encoded(tool_choice) -> dict:
+        request = json.loads(_request(tools, tool_choice=tool_choice))
+        return json.loads(
+            codex_proxy.compatible_request_body(
+                json.dumps(request).encode("utf-8"),
+                _external_chat_upstream(),
+                event_context={},
+                inject_codex_tools=False,
+            )
+        )
+
+    automatic = encoded("auto")
+    required = encoded("required")
+    specific = encoded(
+        {"type": "function", "namespace": "vendor", "name": "run"}
+    )
+
+    aliases = [payload["tools"][0]["name"] for payload in (automatic, required, specific)]
+    assert aliases[0] == aliases[1] == aliases[2]
+    assert specific["tool_choice"] == {"type": "function", "name": aliases[0]}
+
+
+def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
+    body = _request(
+        [
+            {
+                "type": "namespace",
+                "name": "vendor",
+                "tools": [
+                    {"type": "function", "name": "run", "parameters": {"type": "object"}}
+                ],
+            }
+        ]
+    )
+    first_upstream = {
+        **_external_chat_upstream(),
+        "hosted_tool_capabilities": {"web_search": True, "file_search": True},
+        "tool_protocol_capabilities": {
+            "hosted_lifecycles": ["web_search", "file_search"],
+            "max_alias_attempts": 128,
+        },
+    }
+    equivalent_upstream = {
+        **_external_chat_upstream(),
+        "hosted_tool_capabilities": {"file_search": True, "web_search": True},
+        "tool_protocol_capabilities": {
+            "hosted_lifecycles": ["file_search", "web_search"],
+            "max_alias_attempts": 128,
+        },
+    }
+    changed_capabilities = copy.deepcopy(first_upstream)
+    changed_capabilities["tool_protocol_capabilities"]["max_alias_attempts"] = 127
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        first_upstream,
+        event_context={},
+        inject_codex_tools=False,
+    )
+    equivalent = codex_proxy.compatible_request_body(
+        body,
+        equivalent_upstream,
+        event_context={},
+        inject_codex_tools=False,
+    )
+    changed = codex_proxy.compatible_request_body(
+        body,
+        changed_capabilities,
+        event_context={},
+        inject_codex_tools=False,
+    )
+
+    assert first == equivalent
+    assert json.loads(first)["tools"][0]["name"] == json.loads(changed)["tools"][0]["name"]
+
+
+def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
+    core_tools = [
+        {"type": "function", "name": "plain", "parameters": {"type": "object"}},
+        {"type": "custom", "name": "editor", "format": {"type": "text"}},
+    ]
+    namespace = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+
+    def prepare(tools: list[dict], strategy: str) -> tuple[dict, dict]:
+        context: dict = {}
+        upstream = {**_external_chat_upstream(), "tool_surface_strategy": strategy}
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request(tools),
+                upstream,
+                event_context=context,
+            )
+        )
+        return payload, context
+
+    bounded, bounded_context = prepare(core_tools, "deferred_core")
+    deferred, deferred_context = prepare([*core_tools, namespace], "deferred_core")
+    eager_baseline, _ = prepare(core_tools, "eager")
+    eager, eager_context = prepare([*core_tools, namespace], "eager")
+
+    assert len(bounded["tools"]) == 8
+    assert len(deferred["tools"]) == len(bounded["tools"])
+    assert not any(tool.get("type") == "namespace" for tool in deferred["tools"])
+    assert not any(
+        entry.family == "namespace"
+        for entry in deferred_context["_runtime_tool_compatibility_plan"].entries
+    )
+    assert len(eager["tools"]) == len(eager_baseline["tools"]) + 249
+    eager_namespace_entries = [
+        entry
+        for entry in eager_context["_runtime_tool_compatibility_plan"].entries
+        if entry.family == "namespace"
+    ]
+    assert len(eager_namespace_entries) == 1
+    assert len(eager_namespace_entries[0].aliases) == 249
+    assert bounded_context["_runtime_tool_compatibility_plan"].entries
+
+    def canonical_core(payload: dict) -> list[dict]:
+        return [
+            {
+                key: value
+                for key, value in tool.items()
+                if key not in {"name"} or not str(value).startswith("__codexhub_")
+            }
+            for tool in payload["tools"]
+            if not str(tool.get("name", "")).startswith("__codexhub_ns_")
+        ]
+
+    assert canonical_core(deferred) == canonical_core(bounded)
+
+
+def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespaces():
+    namespace = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+    request = json.loads(_request([namespace], model="gpt-5.6-luna"))
+    request["prompt_cache_key"] = "stable-official-prefix"
+    body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    first_context: dict = {}
+    second_context: dict = {}
+
+    first = codex_proxy.compatible_request_body(
+        body,
+        {"name": "official"},
+        event_context=first_context,
+        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    )
+    second = codex_proxy.compatible_request_body(
+        body,
+        {"name": "official"},
+        event_context=second_context,
+        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    )
+
+    assert first == second
+    payload = json.loads(first)
+    assert payload["prompt_cache_key"] == "stable-official-prefix"
+    assert payload["tools"] == [namespace]
+    assert "__codexhub_" not in first.decode("utf-8")
+    assert "_runtime_tool_compatibility_plan" not in first_context
+    assert "_runtime_tool_compatibility_plan" not in second_context
 
 
 def test_required_unsupported_hosted_tool_fails_before_request_is_returned():
@@ -602,6 +1004,62 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     assert not any(name.startswith("multi_agent_v1__") for name in aliases)
 
 
+def test_collaboration_v2_interrupt_error_replay_accepts_plain_text_history():
+    context: dict = {}
+    tools = [_collaboration_namespace(COLLABORATION_V2)]
+    error_text = "agent with id /root/missing not found"
+    history = [
+        {
+            "type": "function_call",
+            "id": "item_interrupt",
+            "namespace": "collaboration",
+            "name": "interrupt_agent",
+            "call_id": "call_interrupt",
+            "arguments": '{"target":"/root/missing"}',
+        },
+        {
+            "type": "function_call_output",
+            "id": "item_interrupt_output",
+            "call_id": "call_interrupt",
+            "output": error_text,
+        },
+    ]
+
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "custom-model",
+                    "input": history,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                }
+            ).encode("utf-8"),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert payload["input"][1]["output"] == error_text
+
+
+def test_collaboration_v2_provider_wire_drops_encrypted_schema_extension():
+    context: dict = {}
+    payload = json.loads(
+        codex_proxy.compatible_request_body(
+            _request([_collaboration_namespace(COLLABORATION_V2)]),
+            _external_responses_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+
+    assert all(tool.get("type") == "function" for tool in payload["tools"])
+    assert all("namespace" not in tool for tool in payload["tools"])
+    assert "encrypted" not in json.dumps(payload["tools"], sort_keys=True)
+
+
 @pytest.mark.parametrize(
     ("current_namespace", "foreign_history"),
     [
@@ -737,6 +1195,79 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
     entries = context["_runtime_tool_compatibility_plan"].entries
     assert [entry.disposition for entry in entries] == ["native", "native", "native"]
     assert payload["tools"] == tools
+
+
+def test_deferred_core_v1_telemetry_uses_removed_surface_without_request_context():
+    collaboration = _collaboration_namespace(COLLABORATION_V1)
+    vendor = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request([collaboration, vendor]),
+                {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
+            )
+        )
+
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V1]) + 1
+    assert not any("child_" in tool.get("name", "") for tool in payload["tools"])
+    surface_event = next(
+        call.kwargs
+        for call in write_proxy_event.call_args_list
+        if call.args and call.args[0] == "external_tool_surface_prepared"
+    )
+    assert surface_event["namespace_declaration_count"] == 2
+    assert surface_event["deferred_tool_count"] == 249
+
+
+def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_namespaces():
+    collaboration = _collaboration_namespace(COLLABORATION_V2)
+    vendor = {
+        "type": "namespace",
+        "name": "vendor",
+        "tools": [
+            {"type": "function", "name": f"child_{index:03d}", "parameters": {"type": "object"}}
+            for index in range(249)
+        ],
+    }
+    context: dict = {}
+
+    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+        payload = json.loads(
+            codex_proxy.compatible_request_body(
+                _request([collaboration, vendor]),
+                {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
+                event_context=context,
+            )
+        )
+
+    plan = context["_runtime_tool_compatibility_plan"]
+    namespace_entries = [entry for entry in plan.entries if entry.family == "namespace"]
+    assert len(namespace_entries) == 1
+    assert namespace_entries[0].namespace == "collaboration"
+    assert len(namespace_entries[0].aliases) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert len(payload["tools"]) == len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
+    assert not any("child_" in tool.get("name", "") for tool in payload["tools"])
+    surface_event = next(
+        call.kwargs
+        for call in write_proxy_event.call_args_list
+        if call.args and call.args[0] == "external_tool_surface_prepared"
+    )
+    assert surface_event == {
+        "tool_surface_strategy": "deferred_core",
+        "namespace_declaration_count": 1,
+        "eager_tool_count": 0,
+        "retained_core_count": 0,
+        "deferred_tool_count": 249,
+        "final_tool_count": len(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]),
+    }
 
 
 def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required_choice():

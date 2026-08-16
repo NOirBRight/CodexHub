@@ -3,13 +3,13 @@
 Run from the repository root:
 
 ```powershell
-python scripts/report_quality_gates.py
+.\scripts\codexhub-python.cmd scripts/report_quality_gates.py
 ```
 
 Machine-readable output for automation or review:
 
 ```powershell
-python scripts/report_quality_gates.py --json
+.\scripts\codexhub-python.cmd scripts/report_quality_gates.py --json
 ```
 
 These checks are intentionally **report-only**. Findings must not fail CI or block a release until the baseline noise is reviewed and the allowlist is tightened.

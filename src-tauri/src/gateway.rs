@@ -7801,13 +7801,63 @@ mod tests {
 
     #[test]
     fn gateway_client_sync_default_model_skips_disabled_default_model() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
+        let root = unique_temp_dir("codexhub-client-sync-official-catalog");
+        let catalog_dir = root.join("model-catalogs");
+        fs::create_dir_all(&catalog_dir).unwrap();
+        fs::write(
+            catalog_dir.join("codexhub-model-catalog.json"),
+            serde_json::to_vec_pretty(&json!({
+                "models": [
+                    {
+                        "slug": "gpt-5.5",
+                        "codex_proxy_metadata": {
+                            "provider": "openai",
+                            "upstream_name": "official",
+                            "official_context_budget": {
+                                "source": "degraded_last_known_official",
+                                "freshness": "stale",
+                                "model_context_window": 272000,
+                                "effective_context_window_percent": 95,
+                                "effective_context_window": 258400,
+                                "model_auto_compact_token_limit": 244800
+                            }
+                        }
+                    },
+                    {
+                        "slug": "gpt-5.4",
+                        "codex_proxy_metadata": {
+                            "provider": "openai",
+                            "upstream_name": "official",
+                            "official_context_budget": {
+                                "source": "degraded_last_known_official",
+                                "freshness": "stale",
+                                "model_context_window": 272000,
+                                "effective_context_window_percent": 95,
+                                "effective_context_window": 258400,
+                                "model_auto_compact_token_limit": 244800
+                            }
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &root);
+        std::env::set_var("CODEXHUB_RUNTIME_HOME", &root);
+
         let settings = Settings {
             official_disabled_models: vec!["openai/gpt-5.5".to_string()],
             ..Settings::default()
         };
 
-        let model = super::default_gateway_client_sync_model(&settings, &[])
-            .expect("enabled fallback model");
+        let result = super::default_gateway_client_sync_model(&settings, &[]);
+        restore_env("CODEX_HOME", previous_codex_home);
+        restore_env("CODEXHUB_RUNTIME_HOME", previous_runtime_home);
+        let model = result.expect("enabled fallback model");
 
         assert_eq!(model, "gpt-5.4");
     }
@@ -8703,10 +8753,44 @@ mod tests {
 
     #[test]
     fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
+        let root = unique_temp_dir("codexhub-official-fast-selection");
+        let catalog_dir = root.join("model-catalogs");
+        fs::create_dir_all(&catalog_dir).unwrap();
+        fs::write(
+            catalog_dir.join("codexhub-model-catalog.json"),
+            serde_json::to_vec_pretty(&json!({
+                "models": [{
+                    "slug": "gpt-5.5",
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "degraded_last_known_official",
+                            "freshness": "stale",
+                            "model_context_window": 272000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258400,
+                            "model_auto_compact_token_limit": 244800
+                        }
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &root);
+        std::env::set_var("CODEXHUB_RUNTIME_HOME", &root);
+
         let settings = Settings::default();
         let providers = client_export_test_providers();
 
-        let text = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast").unwrap();
+        let result = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast");
+        restore_env("CODEX_HOME", previous_codex_home);
+        restore_env("CODEXHUB_RUNTIME_HOME", previous_runtime_home);
+        let text = result.unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let openai_models = value
             .pointer("/provider/codexhub-openai/models")
@@ -12779,6 +12863,7 @@ mod tests {
         use super::{
             apply_gateway_client_config_isolated, validate_isolated_root, IsolatedClientApplyInput,
         };
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let root = unique_temp_dir("isolated-default-provenance");
         let isolated = validate_isolated_root(&root).unwrap();
         let settings = Settings {
@@ -14004,11 +14089,12 @@ mod tests {
             readback_gateway_client_config_isolated, route_protocol_for_selection,
             validate_isolated_root, IsolatedClientApplyInput,
         };
-        use super::{case_sensitive_client_export_test_providers, unique_temp_dir};
+        use super::{case_sensitive_client_export_test_providers, unique_temp_dir, TEST_ENV_LOCK};
         use crate::{Model, Provider, Settings, UpstreamFormat};
         use serde_json::json;
         use std::fs;
         use std::path::PathBuf;
+        use std::sync::Mutex;
 
         fn fresh_root(label: &str) -> PathBuf {
             unique_temp_dir(&format!("isolated-mcc-{label}"))
@@ -14193,6 +14279,7 @@ mod tests {
 
         #[test]
         fn isolated_apply_then_readback_round_trips_for_omp() {
+            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
             let root = fresh_root("apply-omp");
             let isolated = validate_isolated_root(&root).unwrap();
             let settings = settings_with_port(9099);

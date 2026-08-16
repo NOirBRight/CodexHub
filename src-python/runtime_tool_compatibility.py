@@ -331,6 +331,7 @@ class RequestScopedToolAliasRegistry:
         self._max_length = max_tool_name_length
         self._max_attempts = max_alias_attempts
         self._aliases: dict[str, AliasRecord] = {}
+        self._remapped_aliases: dict[str, str] = {}
         self._by_declaration: dict[tuple[int, int | None], str] = {}
         self._calls: dict[str, AliasRecord] = {}
         # ``max_alias_attempts`` bounds collision probing for one allocation;
@@ -362,6 +363,7 @@ class RequestScopedToolAliasRegistry:
             }.get(record.family, _CUSTOM_ALIAS_PREFIX)
             replacement = self._allocate(record, prefix)
             remapped[alias] = replacement
+            self._remapped_aliases[alias] = replacement
         return remapped
 
     def is_native_name(self, value: Any) -> bool:
@@ -460,6 +462,19 @@ class RequestScopedToolAliasRegistry:
     def record_for_alias(self, alias: Any) -> AliasRecord | None:
         return self._aliases.get(alias) if isinstance(alias, str) else None
 
+    def remapped_alias(self, alias: Any) -> str | None:
+        if not isinstance(alias, str):
+            return None
+        current = alias
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            replacement = self._remapped_aliases.get(current)
+            if replacement is None:
+                return current if current != alias else None
+            current = replacement
+        return None
+
     def alias_for(self, declaration_index: int, child_index: int | None = None) -> str | None:
         return self._by_declaration.get((declaration_index, child_index))
 
@@ -494,6 +509,7 @@ class RequestScopedToolAliasRegistry:
         attempt._max_length = self._max_length
         attempt._max_attempts = self._max_attempts
         attempt._aliases = dict(self._aliases)
+        attempt._remapped_aliases = dict(self._remapped_aliases)
         attempt._by_declaration = dict(self._by_declaration)
         attempt._calls = {}
         attempt._next_ordinals = dict(self._next_ordinals)
@@ -572,6 +588,44 @@ def _namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tupl
     return namespace, tuple(children), version, bool(namespace and children)
 
 
+def _provider_function_declaration(
+    child: Mapping[str, Any],
+    alias: str,
+    *,
+    strip_encrypted_annotations: bool = False,
+) -> dict[str, Any]:
+    """Return the plain-function shape exposed to a non-Codex provider.
+
+    Collaboration V2 marks message fields as ``encrypted`` for the Codex
+    client contract. That annotation is not part of an ordinary provider
+    JSON-schema function contract: the value is already an opaque string at
+    this boundary, so forwarding the marker would ask a third party to
+    understand an Official-only schema extension. Keep all other declaration
+    fields and remove only that nested annotation.
+    """
+
+    def _strip_encrypted_annotations(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                key: _strip_encrypted_annotations(child)
+                for key, child in value.items()
+                if key != "encrypted"
+            }
+        if isinstance(value, list):
+            return [_strip_encrypted_annotations(child) for child in value]
+        return value
+
+    function = _copy_mapping(child)
+    function["type"] = "function"
+    function["name"] = alias
+    function.pop("namespace", None)
+    return (
+        _strip_encrypted_annotations(function)
+        if strip_encrypted_annotations
+        else function
+    )
+
+
 def classify_declaration(declaration: Mapping[str, Any]) -> str:
     item_type = declaration.get("type")
     if item_type == "namespace":
@@ -602,6 +656,17 @@ def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
     # second search entry with a different alias.
     if family == TOOL_SEARCH:
         return (family, "tool_search")
+    if family == NAMESPACE:
+        namespace, children, version, _valid = _namespace_details(_copy_mapping(declaration))
+        return (
+            family,
+            declaration.get("type"),
+            declaration.get("name"),
+            declaration.get("namespace"),
+            namespace,
+            version,
+            tuple(str(child.get("name")) for child in children),
+        )
     return (
         family,
         declaration.get("type"),
@@ -1040,6 +1105,13 @@ def _item_identity(item: Mapping[str, Any]) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _is_legacy_message_identity(value: str) -> bool:
+    """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
+
+    prefix = "message_"
+    return value.startswith(prefix) and value[len(prefix) :].isdigit()
 
 
 def _hosted_kind_for_item_type(item_type: Any) -> str | None:
@@ -1521,7 +1593,10 @@ class ToolCompatibilityPlan:
             if isinstance(effective_tool_choice, Mapping)
             else None
         )
-        choice_is_known_alias = self.registry.record_for_alias(choice_name) is not None
+        choice_is_known_alias = (
+            self.registry.record_for_alias(choice_name) is not None
+            or self.registry.remapped_alias(choice_name) is not None
+        )
         if _has_explicit_named_tool_choice(effective_tool_choice) and not choice_is_known_alias and not any(
             _tool_choice_matches_declaration(declaration, effective_tool_choice)
             for declaration in final
@@ -1758,10 +1833,11 @@ class ToolCompatibilityPlan:
                 if not valid:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_declaration")
                 for child_index, child in enumerate(children):
-                    function = _copy_mapping(child)
-                    function["type"] = "function"
-                    function["name"] = entry.aliases[child_index]
-                    function.pop("namespace", None)
+                    function = _provider_function_declaration(
+                        child,
+                        entry.aliases[child_index],
+                        strip_encrypted_annotations=namespace == "collaboration",
+                    )
                     encoded.append(function)
                 changed = True
                 continue
@@ -1806,6 +1882,11 @@ class ToolCompatibilityPlan:
     def _encode_tool_choice(self, value: Any) -> tuple[Any, bool]:
         thawed = _thaw(value)
         if isinstance(thawed, str):
+            if self.registry.is_native_name(thawed):
+                return thawed, False
+            remapped = self.registry.remapped_alias(thawed)
+            if remapped is not None:
+                return remapped, True
             entry = self._entry_for_name(thawed)
             if entry is None and thawed == "tool_search":
                 candidates = [
@@ -1822,6 +1903,14 @@ class ToolCompatibilityPlan:
         result = dict(thawed)
         name = result.get("name")
         choice_type = result.get("type")
+        if self.registry.is_native_name(name) and result.get("namespace") is None:
+            return result, False
+        remapped = self.registry.remapped_alias(name)
+        if remapped is not None:
+            result["name"] = remapped
+            result["type"] = "function"
+            result.pop("namespace", None)
+            return result, True
         namespace_choice = name if isinstance(name, str) else result.get("namespace")
         if choice_type == "namespace" and isinstance(namespace_choice, str):
             candidates = [
@@ -1874,6 +1963,8 @@ class ToolCompatibilityPlan:
         item_type = item.get("type")
         name = item.get("name")
         namespace = item.get("namespace")
+        if item_type == "agent_message":
+            return self._encode_agent_message(item)
         if item_type in {"tool_search_call", "tool_search_output"}:
             native_entry = self._native_entry_for_item(item)
             if native_entry is not None:
@@ -1966,6 +2057,42 @@ class ToolCompatibilityPlan:
                 return item, True
             return item, False
         return item, False
+
+    def _encode_agent_message(self, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Adapt plaintext V2 handoff history for an ordinary provider.
+
+        ``agent_message`` is an Official collaboration item.  A third-party
+        Responses endpoint can consume the plaintext meaning as a normal user
+        message, but it cannot consume the native item or decrypt Official
+        encrypted content.  Never discard encrypted content or pretend that it
+        was decoded: rejecting the request is the only lossless boundary.
+        """
+
+        entry = self._collaboration_v2_entry()
+        if entry is None or entry.disposition != ADAPT:
+            return item, False
+
+        try:
+            validate_agent_message(item)
+        except CollaborationContractError as exc:
+            self._raise_collaboration_contract(exc, surface="history")
+
+        content = item["content"]
+        if any(part.get("type") == "encrypted_content" for part in content):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "encrypted_agent_message_unavailable",
+                surface="history",
+            )
+
+        return {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": part["text"]}
+                for part in content
+            ],
+        }, True
 
     @staticmethod
     def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
@@ -2546,7 +2673,7 @@ class ToolCompatibilityPlan:
                     surface="history",
                 )
 
-            seen_history_item_ids: set[str] = set()
+            seen_history_item_ids: dict[str, bool] = {}
             seen_history_output_call_ids: set[str] = set()
             for item_index, item in enumerate(raw_input):
                 if not isinstance(item, Mapping):
@@ -2559,13 +2686,24 @@ class ToolCompatibilityPlan:
                 if not is_optional_omitted_hosted:
                     item_id = _item_identity(item)
                     if item_id is not None:
-                        if item_id in seen_history_item_ids:
+                        # Older Codex Desktop rollouts reused a synthetic id
+                        # such as ``message_1`` for ordinary message items.
+                        # Permit only that message-to-message duplicate; dual
+                        # IDs and collisions with every other history family
+                        # remain fail-closed.
+                        legacy_message = (
+                            item_type == "message" and _is_legacy_message_identity(item_id)
+                        )
+                        prior_legacy_message = seen_history_item_ids.get(item_id)
+                        if prior_legacy_message is not None and not (
+                            prior_legacy_message and legacy_message
+                        ):
                             raise ToolCompatibilityError(
                                 "tool_compatibility_boundary",
                                 "duplicate_item_identity",
                                 surface="history",
                             )
-                        seen_history_item_ids.add(item_id)
+                        seen_history_item_ids.setdefault(item_id, legacy_message)
                 if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                     call_id = item.get("call_id")
                     if omitted_entry is None and (not isinstance(call_id, str) or not call_id):

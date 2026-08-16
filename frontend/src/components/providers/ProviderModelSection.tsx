@@ -12,7 +12,7 @@ import {
 } from "../../lib/officialModels";
 import { normalizeOfficialModelId } from "../../lib/settings";
 import { reasoningLevelOptions, type InlineTestState } from "../../lib/providerForm";
-import { normalizeModel } from "../../lib/providerModel";
+import { normalizeModel, providerQualifiedModelId } from "../../lib/providerModel";
 import type { Model } from "../../lib/types";
 import { Field } from "./ProviderFormControls";
 
@@ -360,15 +360,6 @@ export function ModelSection({
       )}
     </div>
   );
-}
-
-function providerQualifiedModelId(providerId: string, modelId: string) {
-  const cleanProviderId = providerId.trim();
-  const cleanModelId = modelId.trim();
-  if (!cleanProviderId || !cleanModelId || cleanModelId.startsWith(`${cleanProviderId}/`)) {
-    return cleanModelId;
-  }
-  return `${cleanProviderId}/${cleanModelId}`;
 }
 
 function ModelIdentity({

@@ -210,6 +210,27 @@ def _normalize_schema(value: Any) -> Any:
     return value
 
 
+def _parameter_schema_matches(version: str, name: str, parameters: Mapping[str, Any]) -> bool:
+    normalized = _normalize_schema(parameters)
+    expected = _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name])
+    if normalized == expected:
+        return True
+    if version not in {COLLABORATION_V1, COLLABORATION_V2} or name != "spawn_agent":
+        return False
+
+    # Codex CLI 0.146.1 omits only ``agent_type`` from the spawn declaration
+    # when no agent role is configured. The runtime argument type still accepts
+    # the field, so keep the full frozen schema as the canonical contract while
+    # recognizing this one exact declaration variant for both protocol
+    # namespaces. No other property, annotation, or required-field drift is
+    # accepted.
+    default_role_expected = dict(expected)
+    default_role_properties = dict(expected["properties"])
+    default_role_properties.pop("agent_type")
+    default_role_expected["properties"] = default_role_properties
+    return normalized == default_role_expected
+
+
 def _namespace_candidates(tools: Sequence[Any]) -> list[Mapping[str, Any]]:
     return [
         tool
@@ -224,13 +245,10 @@ def _has_collaboration_marker(tools: Any) -> bool:
     if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes, bytearray)):
         return False
     collaboration_names = {V1_NAMESPACE, V2_NAMESPACE}
-    child_names = set(V1_TOOLS) | set(V2_TOOLS)
     return any(
         isinstance(tool, Mapping)
-        and (
-            tool.get("name") in collaboration_names
-            or (tool.get("type") == "function" and tool.get("name") in child_names)
-        )
+        and tool.get("type") == "namespace"
+        and tool.get("name") in collaboration_names
         for tool in tools
     )
 
@@ -310,8 +328,7 @@ def classify_collaboration_tools(tools: Sequence[Any]) -> str:
             "namespace_child_parameters_invalid",
         )
         _require(
-            _normalize_schema(parameters)
-            == _normalize_schema(EXPECTED_PARAMETER_SCHEMAS[version][name]),
+            _parameter_schema_matches(version, name, parameters),
             "namespace_child_parameter_schema_mismatch",
         )
     return version
@@ -331,13 +348,16 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
     """Return the exact request version or ``None`` when no marker exists."""
 
     _require(isinstance(request, Mapping), "request_invalid")
+    tools = request.get("tools")
+    if not _has_collaboration_marker(tools):
+        # Ordinary provider requests may carry similarly named metadata and
+        # may omit tool_choice.  They are not Collaboration requests unless
+        # the exact frozen namespace declaration is present.
+        return None
     _require(
         not _has_unexpected_version_signal(request),
         "collaboration_version_signal_unexpected",
     )
-    tools = request.get("tools")
-    if not _has_collaboration_marker(tools):
-        return None
     _require(request.get("tool_choice") == "auto", "tool_choice_invalid")
     return classify_collaboration_tools(tools)  # type: ignore[arg-type]
 
@@ -445,7 +465,19 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
     if schema is None and value == "":
         parsed: Any = None
     else:
-        parsed = _json_object_or_value(value, "malformed_collaboration_result")
+        try:
+            parsed = _json_object_or_value(value, "malformed_collaboration_result")
+        except CollaborationContractError:
+            # Codex CLI serializes a failed V2 interrupt as the tool's plain
+            # error text rather than a JSON result object.  Preserve that
+            # replay value; JSON-shaped failures (including duplicate keys)
+            # still go through the strict result schema below.
+            if version == COLLABORATION_V2 and name == "interrupt_agent" and value.strip():
+                try:
+                    json.loads(value)
+                except (TypeError, ValueError):
+                    return
+            raise
     if (schema is None and parsed is not None) or (
         isinstance(schema, Mapping) and not _matches_schema(parsed, schema)
     ):

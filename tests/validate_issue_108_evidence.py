@@ -10,6 +10,11 @@ import re
 import sys
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src-python"))
+from python_runtime_contract import require_python_313  # noqa: E402
+
+require_python_313(__file__)
+
 
 TOOL_SURFACE_SCHEMA = "codexhub.issue108.tool-surface-replay.v1"
 QUALIFICATION_SCHEMA = "codexhub.issue108.qualification-evidence.v2"

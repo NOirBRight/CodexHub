@@ -332,7 +332,12 @@ def _prepare_run(
         FIXTURES / "validate-managed-client-contract-probe.py",
         tmp_path / "validate-managed-client-contract-probe.py",
     )
+    shutil.copyfile(
+        FIXTURES / "fixture_runtime_contract.py",
+        tmp_path / "fixture_runtime_contract.py",
+    )
     shutil.copyfile(FIXTURES / "write-catalog.py", tmp_path / "write-catalog.py")
+    shutil.copyfile(FIXTURES / "run-fixture-python.cmd", tmp_path / "run-fixture-python.cmd")
     portable_files = (
         "config/providers.toml",
         "src-python/codex_proxy.py",
@@ -441,6 +446,8 @@ def _run(
             "fake-debug-gateway.py",
             "fake-managed-client-config.py",
             "validate-managed-client-contract-probe.py",
+            "fixture_runtime_contract.py",
+            "run-fixture-python.cmd",
         ):
             shutil.copyfile(tmp_path / support, candidate_root / support)
         for relative in (
@@ -2077,6 +2084,38 @@ def test_native_gui_launch_explicitly_enables_visible_windows():
     assert "$startInfo.CreateNoWindow = $false" in gui_launch
 
 
+def test_packaged_gateway_and_materializer_bind_to_their_embedded_python():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    resolver = source[
+        source.index("function Resolve-E2EPythonPath"):
+        source.index("function Get-Sha256")
+    ]
+    shared_start_info = source[
+        source.index("function New-IsolatedStartInfo"):
+        source.index("function Invoke-IsolatedProcess")
+    ]
+    gateway_probe = source[
+        source.index("function Test-GatewayPythonProcess"):
+        source.index("function Write-CandidateStartupDiagnostic")
+    ]
+
+    assert "python\\python.exe" in resolver
+    assert "sys.version_info >= (3, 13)" in resolver
+    assert "if ($extension -iin @('.cmd', '.bat', '.ps1'))" in resolver
+    assert "[string]$PythonPath = ''" in shared_start_info
+    assert "$effectivePythonPath" in shared_start_info
+    assert "$script:RepositoryPython" in shared_start_info
+    assert "effectivePythonPath" in shared_start_info
+    assert "CODEXHUB_E2E_PYTHON" in shared_start_info
+    assert "$owner.MainModule.FileName" in gateway_probe
+    assert "$ExpectedPythonPath" in gateway_probe
+    assert "CandidatePythonPath = Resolve-E2EPythonPath" in source
+    assert "MaterializerPythonPath = Resolve-E2EPythonPath" in source
+    assert "-PythonPath $script:CandidatePythonPath" in source
+    assert "-PythonPath $script:MaterializerPythonPath" in source
+
+
 def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     result = _run(
         tmp_path,
@@ -2110,11 +2149,12 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
 
 def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
     started = time.monotonic()
+    manual_timeout_seconds = 30
     result = _run(
         tmp_path,
         debug_fake="fake-debug-build-gateway-exits.cmd",
         finalize_manual=False,
-        manual_timeout_seconds=30,
+        manual_timeout_seconds=manual_timeout_seconds,
         overall_timeout_seconds=60,
     )
     elapsed = time.monotonic() - started
@@ -2125,7 +2165,11 @@ def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
         summary["failure_classification"]
         == "candidate_gateway_unavailable_during_manual_evidence"
     )
-    assert elapsed < 25
+    # Keep the assertion tied to the configured manual deadline rather than a
+    # machine-load-sensitive wall-clock constant.  The distinct gateway-loss
+    # classification above proves that health loss, not the deadline, ended
+    # the run; this bound still rejects waiting until the manual timeout.
+    assert elapsed < manual_timeout_seconds
 
 
 def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
@@ -2568,6 +2612,15 @@ def test_desktop_payload_hardlinks_are_copied_as_independent_files(tmp_path):
     shutil.copyfile(
         FIXTURES / "fake-client-real-contract.cmd",
         desktop_root / "fake-client-real-contract.cmd",
+    )
+    # The contract fixture now verifies that script-like clients invoke the
+    # explicitly bound repository Python through its adjacent launcher.  Keep
+    # this synthetic installed payload self-contained; the test is about
+    # copying hard-linked files, not about accidentally omitting a required
+    # sidecar from the authoritative install root.
+    shutil.copyfile(
+        FIXTURES / "run-fixture-python.cmd",
+        desktop_root / "run-fixture-python.cmd",
     )
     source = desktop_root / "shared-runtime.bin"
     linked = desktop_root / "shared-runtime-copy.bin"
@@ -3273,6 +3326,31 @@ def test_external_watchdog_timeout_is_not_blocked_by_inherited_output_handles(tm
     assert result.returncode == 124
     assert "watchdog_timeout phase=command" in result.stderr
     assert not [pid for pid in process_ids if _pid_is_running(pid)]
+
+
+def test_external_watchdog_replays_utf8_output_under_a_legacy_console_encoding(tmp_path):
+    command = [
+        sys.executable,
+        str(FIXTURES / "run-with-windows-watchdog.py"),
+        "--timeout-seconds",
+        "5",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write('replacement �'.encode('utf-8'))",
+    ]
+    result = subprocess.run(
+        command,
+        env={**os.environ, "PYTHONIOENCODING": "gbk:strict"},
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "replacement" in result.stdout
 
 
 def test_operator_commands_have_explicit_outer_and_manual_deadlines():

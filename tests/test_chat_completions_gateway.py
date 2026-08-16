@@ -343,6 +343,41 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
 
 
 class RequestKindDetectionTests(unittest.TestCase):
+    def test_codex_turn_metadata_marks_compaction_without_prompt_heuristic(self):
+        payload = {"model": "gpt-5.5", "input": "summarize"}
+
+        request_kind = _request_kind_from_headers_and_payload(
+            {
+                "x-codex-turn-metadata": json.dumps(
+                    {
+                        "request_kind": "compaction",
+                        "compaction": {
+                            "trigger": "auto",
+                            "reason": "model_downshift",
+                            "phase": "pre_turn",
+                        },
+                    }
+                )
+            },
+            payload,
+            "responses",
+        )
+
+        self.assertEqual(request_kind, "compact")
+
+    def test_malformed_codex_turn_metadata_does_not_mark_compaction(self):
+        payload = {"model": "gpt-5.5", "input": "ordinary turn"}
+
+        for metadata in ("{", "[]", '{"request_kind":"turn"}'):
+            with self.subTest(metadata=metadata):
+                request_kind = _request_kind_from_headers_and_payload(
+                    {"x-codex-turn-metadata": metadata},
+                    payload,
+                    "responses",
+                )
+
+                self.assertEqual(request_kind, "main_generation")
+
     def test_compact_header_marks_request_kind_without_prompt_heuristic(self):
         payload = {"model": "gpt-5.5", "input": "summarize"}
 
@@ -3000,7 +3035,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
-            patch("codex_proxy.time.sleep") as mock_sleep,
+            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
 
