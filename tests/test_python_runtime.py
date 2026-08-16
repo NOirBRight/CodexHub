@@ -36,11 +36,24 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/capture_issue_392_collaboration_runtime.py",
     "scripts/capture_issue_62_live_evidence.py",
     "scripts/check_codex_task_creation_lifecycle.py",
+    "scripts/ci/check_python_test_partitions.py",
+    "scripts/ci/ci_change_plan.py",
+    "scripts/ci/python_test_plan.py",
+    "scripts/e2e_codex_active_call_regression.py",
+    "scripts/e2e_codex_app_transport.py",
+    "scripts/e2e_codex_catalog_roundtrip.py",
+    "scripts/e2e_gateway_client_matrix.py",
+    "scripts/e2e_history_online_sync.py",
     "scripts/generate_wayfinder_final_audit.py",
     "scripts/issue_278_fixture_mcp.py",
+    "scripts/qualify_beta3_protocol_cli.py",
     "scripts/replay_official_transport.py",
     "scripts/report_quality_gates.py",
     "scripts/run_claude_messages_spike_smoke.py",
+    "scripts/run_issue_106_task_lifecycle.py",
+    "scripts/run_issue_283_app_v2_request_shape.py",
+    "scripts/run_issue_283_cli_v2_lifecycle.py",
+    "scripts/run_issue_62_live_control.py",
     "scripts/validate_issue_278_evidence.py",
     "scripts/validate_issue_369_matrix.py",
     "scripts/validate_issue_63_evidence.py",
@@ -53,6 +66,7 @@ DIRECT_FIXTURE_PYTHON_ENTRYPOINTS = (
     "tests/fixtures/real_client_e2e/fake-gui-expanding-tree.py",
     "tests/fixtures/real_client_e2e/fake-managed-client-config.py",
     "tests/fixtures/real_client_e2e/fake-watchdog-child.py",
+    "tests/fixtures/real_client_e2e/run-with-windows-watchdog.py",
     "tests/fixtures/real_client_e2e/validate-client-routing.py",
     "tests/fixtures/real_client_e2e/validate-managed-client-contract-probe.py",
     "tests/fixtures/real_client_e2e/validate-zcode-structures.py",
@@ -263,6 +277,9 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
 def test_every_direct_python_entrypoint_declares_the_runtime_preflight() -> None:
     entrypoints = _direct_entrypoints()
     assert entrypoints
+    assert {
+        str(path.relative_to(ROOT)).replace(os.sep, "/") for path in entrypoints
+    } == set(DIRECT_PYTHON_ENTRYPOINTS)
     missing = [
         str(path.relative_to(ROOT))
         for path in entrypoints
