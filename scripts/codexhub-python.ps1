@@ -16,9 +16,12 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 }
 
 . (Join-Path $scriptRoot 'Resolve-CodexHubPython.ps1')
-$requiresPytest = @($PythonArguments).Count -ge 2 -and
+$requiresPytest = (@($PythonArguments).Count -ge 2 -and
     $PythonArguments[0] -eq '-m' -and
-    $PythonArguments[1] -eq 'pytest'
+    $PythonArguments[1] -eq 'pytest') -or
+    (@($PythonArguments).Count -ge 1 -and
+        [System.IO.Path]::GetFileName([string]$PythonArguments[0]) -ieq
+        'run-with-windows-watchdog.py')
 $python = Resolve-CodexHubPythonPath `
     -Root $RepoRoot `
     -RequirePytest:$requiresPytest

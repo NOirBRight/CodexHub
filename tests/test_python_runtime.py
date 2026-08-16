@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -785,6 +786,32 @@ def test_cmd_launcher_preserves_separator_and_script_arguments(tmp_path: Path) -
     assert "['alpha', '--', 'omega']" in result.stdout
 
 
+def test_watchdog_launcher_requires_a_pytest_capable_runtime() -> None:
+    """The watchdog must bind a runtime that can execute its pytest child."""
+    watchdog = ROOT / "tests" / "fixtures" / "real_client_e2e" / "run-with-windows-watchdog.py"
+    result = subprocess.run(
+        [
+            str(CMD_LAUNCHER),
+            str(watchdog),
+            "--timeout-seconds",
+            "10",
+            "--",
+            str(CMD_LAUNCHER),
+            "-m",
+            "pytest",
+            "--version",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pytest" in result.stdout.lower()
+
+
 def test_repository_selector_rejects_an_explicit_python_311_override() -> None:
     ambient = _find_incompatible_python()
     if ambient is None:
@@ -800,7 +827,7 @@ def test_repository_selector_rejects_an_explicit_python_311_override() -> None:
         },
     )
     assert result.returncode != 0
-    assert "explicit interpreter is not compatible" in result.stdout + result.stderr
+    assert re.search(r"interpreter\s+is\s+not.*compatible", result.stdout + result.stderr, re.DOTALL)
 
 
 def test_repository_selector_rejects_an_incompatible_proxy_override_without_fallback() -> None:
@@ -818,7 +845,7 @@ def test_repository_selector_rejects_an_incompatible_proxy_override_without_fall
         },
     )
     assert result.returncode != 0
-    assert "explicit interpreter is not compatible" in result.stdout + result.stderr
+    assert re.search(r"interpreter\s+is\s+not.*compatible", result.stdout + result.stderr, re.DOTALL)
 
 
 def test_fixture_launcher_rejects_an_incompatible_proxy_override(tmp_path: Path) -> None:

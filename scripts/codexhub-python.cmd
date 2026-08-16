@@ -18,6 +18,10 @@ rem launcher.  Prefer the checkout/host 3.13 environment so scripts that
 rem invoke pytest through sys.executable keep their development modules.
 rem Production and packaging entrypoints opt into -PreferBundled directly.
 if /I "%~1"=="-m" if /I "%~2"=="pytest" set "CODEXHUB_RESOLVER_OPTIONS=-RequirePytest"
+rem The watchdog is a test entrypoint: its child command is normally pytest.
+rem Select a pytest-capable development runtime before exporting the binding so
+rem the nested launcher cannot inherit a valid 3.13 interpreter without pytest.
+if /I "%~nx1"=="run-with-windows-watchdog.py" set "CODEXHUB_RESOLVER_OPTIONS=-RequirePytest"
 where pwsh.exe >nul 2>&1
 if %errorlevel% equ 0 (
   for /f "usebackq delims=" %%P in (`pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0Resolve-CodexHubPython.ps1" -RepoRoot "%~dp0.." -PrintPath %CODEXHUB_RESOLVER_OPTIONS%`) do set "CODEXHUB_RESOLVED_PYTHON=%%P"
