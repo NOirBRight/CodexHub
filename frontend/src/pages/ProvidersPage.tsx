@@ -151,7 +151,6 @@ function ProvidersPageImpl({
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
-  const officialModelRefreshStartedRef = useRef(false);
   const [form, setForm] = useState(emptyProvider);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -190,7 +189,6 @@ function ProvidersPageImpl({
   } = useProviderCatalogActions({
     form,
     officialModelOrderDraft,
-    officialModelRefreshStartedRef,
     onProvidersChanged,
     providers,
     refreshGatewayState,
@@ -279,7 +277,6 @@ function ProvidersPageImpl({
     if (selectedId !== OFFICIAL_ID || codexAuthState !== "authorized") {
       return;
     }
-    void primeOfficialModels();
     void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(false), OPENAI_USAGE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(usageRefreshTimer);
@@ -470,14 +467,6 @@ function ProvidersPageImpl({
     } catch {
       // Refresh failures are surfaced by the owning runtime loader.
     }
-  }
-
-  async function primeOfficialModels() {
-    if (officialModelRefreshStartedRef.current) {
-      return;
-    }
-    officialModelRefreshStartedRef.current = true;
-    await refreshOfficialModelsAndCollaborationState({ quiet: true });
   }
 
   async function primeOfficialOpenAIUsage() {

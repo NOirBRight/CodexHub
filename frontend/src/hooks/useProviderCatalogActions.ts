@@ -1,4 +1,4 @@
-import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import type { ToastContextValue } from "../components/PageToast";
 import { mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import {
@@ -39,7 +39,6 @@ export type SaveProviders = (
 type ProviderCatalogActionOptions = {
   form: AddProviderForm;
   officialModelOrderDraft: string[];
-  officialModelRefreshStartedRef: MutableRefObject<boolean>;
   onProvidersChanged?: (providers: Provider[]) => void;
   providers: Provider[];
   refreshGatewayState: () => Promise<void>;
@@ -63,7 +62,6 @@ type ProviderCatalogActionOptions = {
 export function useProviderCatalogActions({
   form,
   officialModelOrderDraft,
-  officialModelRefreshStartedRef,
   onProvidersChanged,
   providers,
   refreshGatewayState,
@@ -331,7 +329,6 @@ export function useProviderCatalogActions({
       return !syncResult?.failed;
     } catch (err) {
       if (quiet) {
-        officialModelRefreshStartedRef.current = false;
         setModelDiscoveryError(messageFromError(err));
         if (options?.throwOnError) {
           throw err;

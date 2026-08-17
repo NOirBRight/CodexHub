@@ -354,15 +354,12 @@ fn switch_mode(
     auto_sync: bool,
     force_takeover: Option<bool>,
 ) -> Result<AppStatus, String> {
-    if mode == "custom" {
-        official_refresh::refresh_before_official_activation()?;
-    }
     config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
 }
 
 #[tauri::command]
 fn start_proxy() -> Result<AppStatus, String> {
-    proxy::start_after(official_refresh::refresh_before_official_activation)
+    proxy::start_after(|| Ok(()))
 }
 
 #[tauri::command]
@@ -372,7 +369,7 @@ fn stop_proxy() -> Result<AppStatus, String> {
 
 #[tauri::command]
 fn restart_proxy() -> Result<AppStatus, String> {
-    proxy::restart_after(official_refresh::refresh_before_official_activation)
+    proxy::restart_after(|| Ok(()))
 }
 
 #[tauri::command]
@@ -1207,26 +1204,35 @@ fn start_gateway_on_launch() {
             return;
         };
         let start = || {
+            // Keep Gateway lifecycle startup independent from the network-bound
+            // Official refresh; the refresh is scheduled after this callback.
             proxy::start_after(|| {
                 launch_ready.signal();
-                if let Err(error) = official_refresh::refresh_at_startup() {
-                    log::warn!("startup Official model refresh failed: {error}");
-                }
-                official_refresh::refresh_before_official_activation()
+                Ok(())
             })
         };
         if let Err(error) = start_gateway_after_startup(settings.auto_start_gateway, start) {
             eprintln!("failed to start CodexHub gateway on app launch: {error}");
-        } else if !settings.auto_start_gateway {
-            launch_ready.signal();
-            if let Err(error) = official_refresh::refresh_at_startup() {
-                log::warn!("startup Official model refresh failed: {error}");
-            }
         }
+        launch_ready.signal();
+        spawn_startup_official_refresh();
     });
     // Do not expose the initial window until automatic startup either owns the
     // cross-process gate (and publishes Starting) or has already completed.
     let _ = ready_rx.recv();
+}
+
+fn spawn_startup_official_refresh() {
+    if let Err(error) = std::thread::Builder::new()
+        .name("codexhub-startup-official-refresh".to_string())
+        .spawn(|| {
+            if let Err(error) = official_refresh::refresh_at_startup() {
+                log::warn!("startup Official model refresh failed: {error}");
+            }
+        })
+    {
+        log::warn!("failed to start background Official model refresh: {error}");
+    }
 }
 
 struct StartupLaunchReady(Option<std::sync::mpsc::SyncSender<()>>);
