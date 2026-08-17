@@ -85,7 +85,7 @@ required live/manual evidence are recorded.
 | `B42-425` | Bounded `deferred_core` surface | `df926739`, `b86a6c6` | 249-child/zero-child parity plus eager and Official controls | live evidence passed in sanitized candidate `125db563` tools-only run |
 | `B42-426` | Independent request-body write budget | `38ed1b69`, `f18527e0`, `d4964a3` | New/reused connection, `request_write`, `response_headers`/`response_body`/`stream_body` read-timeout classification, and recovery tests | automated core gate passed on `e8360417`; read-phase regression and affected routing checks passed on `d4964a32`; live release evidence pending |
 | `B42-429` | Generic Collaboration classifier boundary | `ec034882` and routing/runtime regressions | Ordinary overlap accepted; malformed Collaboration rejected; no client special case | automated gate passed; live release evidence pending |
-| `B42-EXT-V2` | Third-party ordinary-tool V2 Gateway adapter | `ddd88b44`, `e3c1219b`, `0a3d7bb5` | Real `ollama-cloud/glm-5.2` lifecycle, stream/history, restart/readback, terminal/error replay | real route reached ordinary function-tool adapter and inverse mapping; complete cross-provider lifecycle blocked by `encrypted_agent_message_unavailable` / `blocked_upstream_provider_aware_delivery` |
+| `B42-EXT-V2` | Third-party ordinary-tool V2 Gateway adapter | `ddd88b44`, `e3c1219b`, `0a3d7bb5` | Real `ollama-cloud/glm-5.2` coordinator + configured `glm-5.2` subagent, stream/history, restart/readback, terminal/error replay | live adapter qualification passed on candidate `fbd3cf78677ff5fd8d1756c114eef9a3ae5dcabc`; six stable aliases, 14 ordinary tools, zero upstream namespaces, inverse mapping, and no encrypted handoff; OpenAI-parent → third-party remains separately `blocked_upstream_provider_aware_delivery` |
 | `B42-MODELS` | OpenAI-compatible `/v1/models` projection and stable app-server model-list test boundary | `ec034882`, `e7c804a7` | HTTP `data[]`; no internal `models`/`fetched_at` fields; full serial Rust suite remains green under Windows process-start jitter | current candidate packaged HTTP smoke passed; Desktop packaged smoke pending |
 | `B42-COPY` | Provider-qualified model copy | `ec034882` | Packaged UI clipboard reads `provider/model` for existing/new Provider | disposable packaged-like UI smoke passed; final asset smoke pending |
 | `B42-419` | Luna V1/V2 save contract and restart persistence | `454d1a39` and `ec034882` | Desktop saves each selection with `modelId`, then reads it back after restart | disposable packaged-like UI smoke passed; final asset smoke pending |
@@ -166,14 +166,20 @@ a fix. Beta4.2 does not include the #430 DSH managed-client/UI/YAML support.
      to the client-owned V2 lifecycle. The pre-Gateway capture alone is not
      adapter evidence. Any missing phase, provider/model mismatch, absent
      Gateway adapter evidence, or synthetic/legacy fixture use fails the
-     adapter gate. Do not convert a failed OpenAI-parent → third-party-child
-     handoff into a product failure or a false pass: record the separate
-     upstream-blocked result and keep the full cross-provider gate unpassed.
-     On candidate `125db563`, the real route reached the adapter and produced
-     ordinary function-tool traffic, but the restart/error phase observed only
-     the bounded `encrypted_agent_message_unavailable` classification; this is
-     recorded as `blocked_upstream_provider_aware_delivery`, not as a passed
-     lifecycle.
+     adapter gate. On candidate `fbd3cf78677ff5fd8d1756c114eef9a3ae5dcabc`,
+     the live qualification used `ollama-cloud/glm-5.2` for the coordinator
+     and the CLI-configured default subagent model `glm-5.2`. The eight-call
+     lifecycle, streamed readback after a fresh CLI/Gateway process, and an
+     independent terminal/error replay all completed with HTTP 200 and no
+     SSE errors. The Gateway recorded six stable aliases, 14 ordinary
+     function tools, zero upstream namespaces/children, and inverse-mapped
+     calls back to the client-owned V2 history. This passes the narrow
+     statement **“V2 works for GLM5.2 through the CodexHub Gateway adapter”**;
+     it is not a provider-native capability claim and it does not use an
+     Official encrypted handoff.
+     Do not convert a failed OpenAI-parent → third-party-child handoff into a
+     product failure or a false pass: keep that separate gate labelled
+     `blocked_upstream_provider_aware_delivery`.
 
 5. **Historical recovery**
    - Start from the copied operator-supplied historical Session.
