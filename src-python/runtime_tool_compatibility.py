@@ -1289,7 +1289,7 @@ class ToolCompatibilityPlan:
                 "missing_item_identity",
                 surface=surface,
             )
-        allowed_fields = {
+        required_fields = {
             "type",
             "id",
             "call_id",
@@ -1297,17 +1297,37 @@ class ToolCompatibilityPlan:
             "name",
             "arguments",
         }
+        valid_field_sets = [required_fields, required_fields | {"encrypted_function_args"}]
         if surface in {"response", "stream"}:
-            allowed_fields.add("status")
-        valid_field_sets = [allowed_fields]
-        if "status" in allowed_fields:
-            valid_field_sets.append(allowed_fields - {"status"})
+            valid_field_sets.extend(
+                [
+                    required_fields | {"status"},
+                    required_fields | {"status", "encrypted_function_args"},
+                ]
+            )
         if set(item) not in valid_field_sets:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
                 "collaboration_call_fields_invalid",
                 surface=surface,
             )
+        if "encrypted_function_args" in item:
+            encrypted_function_args = item.get("encrypted_function_args")
+            if not isinstance(encrypted_function_args, list) or not all(
+                isinstance(name, str) for name in encrypted_function_args
+            ):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "collaboration_call_fields_invalid",
+                    surface=surface,
+                )
+            entry = self._collaboration_v2_entry()
+            if entry is not None and entry.disposition == ADAPT and encrypted_function_args:
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "encrypted_collaboration_arguments_unavailable",
+                    surface=surface,
+                )
         call_id = item.get("call_id")
         if not isinstance(call_id, str) or not call_id:
             raise ToolCompatibilityError(
@@ -1986,6 +2006,8 @@ class ToolCompatibilityPlan:
             call_aliases[str(call_id)] = alias
             item["name"] = alias
             item.pop("namespace", None)
+            if entry.version == "v2" and entry.family == NAMESPACE:
+                item.pop("encrypted_function_args", None)
             if entry.family == CUSTOM_FREEFORM:
                 if "input" not in item:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
@@ -2867,6 +2889,10 @@ class ToolCompatibilityPlan:
         result["name"] = record.child_name if record.family == NAMESPACE else record.original_name
         if record.family == NAMESPACE:
             result["namespace"] = record.namespace
+            if record.version == "v2":
+                # Codex 0.148 uses an explicitly empty list to distinguish
+                # plaintext V2 message arguments from an encrypted handoff.
+                result["encrypted_function_args"] = []
         elif record.family == CUSTOM_FREEFORM:
             if "arguments" in result:
                 envelope = _json_object_exact(result["arguments"])

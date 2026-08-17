@@ -33,16 +33,20 @@ class ProvidersConfigTests(unittest.TestCase):
     def test_bundled_ollama_glm_uses_the_only_deferred_core_model_override(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         ollama = next(provider for provider in providers if provider.id == "ollama-cloud")
+        glm = next(model for model in ollama.models if model.id == "glm-5.2")
         configured_models = [
             model.id for provider in providers for model in provider.models if model.tool_surface_strategy is not None
         ]
 
         self.assertEqual(ollama.tool_surface_strategy, "eager")
-        self.assertEqual(
-            next(model.tool_surface_strategy for model in ollama.models if model.id == "glm-5.2"),
-            "deferred_core",
-        )
+        self.assertEqual(glm.tool_surface_strategy, "deferred_core")
+        self.assertEqual(glm.multi_agent_version, "v2")
         self.assertEqual(configured_models, ["glm-5.2"])
+
+        configured, index = build_ollama_cloud_model_index(providers, require_api_key=False)
+        self.assertTrue(configured)
+        self.assertEqual(index["glm-5.2"]["multi_agent_version"], "v2")
+        self.assertEqual(index["ollama-cloud/glm-5.2"]["multi_agent_version"], "v2")
 
     def test_bundled_ollama_models_select_the_exact_strict_apply_patch_native_responses_codec_whitelist(
         self,
@@ -481,6 +485,35 @@ api_key = "ollama-secret"
         self.assertTrue(qualified_configured)
         self.assertEqual(unqualified["tool_surface_strategy"], "deferred_core")
         self.assertEqual(qualified["tool_surface_strategy"], "deferred_core")
+
+    def test_runtime_omission_inherits_bundled_multi_agent_version_for_ollama_glm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.example.test/v1"
+api_key = "ollama-secret"
+
+  [[providers.models]]
+  id = "glm-5.2"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            configured, unqualified = resolve_ollama_cloud_model(
+                "glm-5.2", providers_path=path, require_api_key=False
+            )
+            qualified_configured, qualified = resolve_ollama_cloud_model(
+                "ollama-cloud/glm-5.2", providers_path=path, require_api_key=False
+            )
+
+        self.assertTrue(configured)
+        self.assertTrue(qualified_configured)
+        self.assertEqual(unqualified["multi_agent_version"], "v2")
+        self.assertEqual(qualified["multi_agent_version"], "v2")
 
     def test_runtime_omission_inherits_only_the_bundled_ollama_codec_whitelist_for_aliases(self):
         with tempfile.TemporaryDirectory() as tmpdir:

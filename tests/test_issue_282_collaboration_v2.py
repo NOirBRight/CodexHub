@@ -156,6 +156,9 @@ def _v2_history_without_encrypted_agent_message() -> list[dict[str, object]]:
 
 def _v2_provider_neutral_history() -> list[dict[str, object]]:
     history = _v2_history_without_encrypted_agent_message()
+    for item in history:
+        if item.get("type") == "function_call":
+            item["encrypted_function_args"] = []
     history[-1] = {
         "type": "message",
         "role": "user",
@@ -639,6 +642,37 @@ def test_v2_external_plaintext_agent_message_becomes_provider_neutral_message() 
     ]
 
 
+def test_v2_adapted_response_marks_message_arguments_as_plaintext() -> None:
+    plan = _v2_plan()
+    alias = plan.entries[0].aliases[3]
+
+    decoded = plan.decode_payload(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "v2-plaintext-item",
+                    "call_id": "v2-plaintext-call",
+                    "name": alias,
+                    "arguments": json.dumps(V2_ARGUMENTS["send_message"]),
+                }
+            ]
+        }
+    )
+
+    assert decoded["output"] == [
+        {
+            "type": "function_call",
+            "id": "v2-plaintext-item",
+            "call_id": "v2-plaintext-call",
+            "namespace": "collaboration",
+            "name": "send_message",
+            "arguments": json.dumps(V2_ARGUMENTS["send_message"]),
+            "encrypted_function_args": [],
+        }
+    ]
+
+
 def test_v2_external_encrypted_agent_message_fails_closed_without_forwarding_content() -> None:
     plan = _v2_plan()
     item = {
@@ -670,6 +704,37 @@ def test_v2_native_agent_message_keeps_official_encrypted_history_opaque() -> No
     )
 
     assert encoded["input"] == [item]
+
+
+def test_v2_native_call_keeps_official_encrypted_arguments_opaque() -> None:
+    plan = _v2_plan(native=True)
+    call = _v2_history()[0]
+    call["encrypted_function_args"] = ["message"]
+
+    encoded = plan.encode_payload(
+        {
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": [call],
+        }
+    )
+
+    assert encoded["input"] == [call]
+
+
+def test_v2_external_call_rejects_official_encrypted_arguments() -> None:
+    call = _v2_history()[0]
+    call["encrypted_function_args"] = ["message"]
+
+    with pytest.raises(ToolCompatibilityError) as caught:
+        _v2_plan().encode_payload(
+            {
+                "tools": [_declaration(COLLABORATION_V2)],
+                "input": [call],
+            }
+        )
+
+    assert caught.value.classification == "encrypted_collaboration_arguments_unavailable"
+    assert caught.value.surface == "history"
 
 
 @pytest.mark.parametrize(
@@ -759,6 +824,9 @@ def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
     expected = history
     if not native:
         expected = [*history]
+        for item in expected:
+            if item.get("type") == "function_call":
+                item["encrypted_function_args"] = []
         expected[-1] = {
             "type": "message",
             "role": "user",
@@ -829,6 +897,7 @@ def test_v2_adapted_stream_restores_all_six_calls_and_preserves_boundaries() -> 
             if decoded[0]["type"] == "response.output_item.done":
                 decoded_names.append(decoded[0]["item"]["name"])
                 assert decoded[0]["item"]["namespace"] == "collaboration"
+                assert decoded[0]["item"]["encrypted_function_args"] == []
                 assert decoded[0]["item"]["id"] == item_id
                 assert decoded[0]["item"]["call_id"] == call_id
         wire_output.append(done_item)
@@ -1048,7 +1117,11 @@ def test_v2_history_preserves_unrelated_function_call_and_result(native: bool) -
         assert "namespace" not in encoded["input"][0]
 
     decoded = plan.decode_payload({"input": encoded["input"]})
-    assert decoded["input"] == history
+    expected = history
+    if not native:
+        expected = [*history]
+        expected[0] = {**history[0], "encrypted_function_args": []}
+    assert decoded["input"] == expected
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted-alias", "native-namespace"])

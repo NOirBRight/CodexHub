@@ -1910,6 +1910,10 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
         if isinstance(input_modalities, (list, tuple)) and input_modalities:
             entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
 
+        multi_agent_version = model.get("multi_agent_version")
+        if multi_agent_version in {"v1", "v2"}:
+            entry["multi_agent_version"] = multi_agent_version
+
         if entry:
             metadata[slug] = entry
     return metadata
@@ -2307,9 +2311,9 @@ def build_ollama_model(
     else:
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
-    # Planner metadata is an Official-model contract.  A fallback catalog is
-    # shared input for third-party rows and must never be able to make one of
-    # those rows advertise an Official Code Mode/version.
+    # Never inherit planner metadata from the shared Official fallback.
+    # Provider configuration may add its own explicit multi-agent capability
+    # after this reset.
     for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
         model.pop(key, None)
     model["use_responses_lite"] = False
@@ -2319,6 +2323,9 @@ def build_ollama_model(
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
     apply_ollama_model_limits(model, slug, model_metadata or {})
+    multi_agent_version = (model_metadata or {}).get(slug, {}).get("multi_agent_version")
+    if multi_agent_version in {"v1", "v2"}:
+        model["multi_agent_version"] = multi_agent_version
     inherited_metadata = model.get("codex_proxy_metadata")
     safe_metadata = {
         key: inherited_metadata[key]
@@ -2409,12 +2416,14 @@ def build_external_provider_model(
     else:
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
-    # Never inherit Official planner fields from the fallback template.  The
-    # third-party catalog may retain the normal explicit false value for
-    # Responses Lite, but it cannot claim a native Official planner contract.
+    # Never inherit Official planner fields from the fallback template.  A
+    # third-party row may retain its own provider-declared multi-agent version.
     for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
         model.pop(key, None)
     model["use_responses_lite"] = False
+    multi_agent_version = external_model.get("multi_agent_version")
+    if multi_agent_version in {"v1", "v2"}:
+        model["multi_agent_version"] = multi_agent_version
 
     alias = str(external_model["alias"])
     display_prefix = str(external_model.get("display_prefix") or external_model.get("provider_alias") or "provider")

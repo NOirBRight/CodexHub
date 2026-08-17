@@ -26,6 +26,7 @@ enabled = true
   enabled = true
   tool_surface_strategy = "deferred_core"
   native_responses_tool_codec = "strict_apply_patch"
+  multi_agent_version = "v2"
 
   [[providers.models]]
   id = "kimi-k2.7-code"
