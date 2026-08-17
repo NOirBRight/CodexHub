@@ -431,6 +431,10 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .unwrap_or(false);
             to_value(gateway::list_gateway_clients(include_versions))
         }
+        "dsh_client_info" => to_value(Ok(gateway::detect_dsh_client())),
+        "dsh_client_connect" => to_value(gateway::dsh_client_connect()),
+        "dsh_client_disconnect" => to_value(gateway::dsh_client_disconnect()),
+        "dsh_client_readback" => to_value(gateway::dsh_client_readback()),
         "preview_gateway_client_config" => {
             let client_id = string_arg(&request.args, "clientId")?;
             let model = request

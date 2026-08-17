@@ -4,25 +4,18 @@ import test from "node:test";
 
 const source = async (path) => readFile(new URL(path, import.meta.url), "utf8");
 
-test("Gateway keeps the original two-option route control and makes foreign ownership the takeover target", async () => {
-  const [card, switchSource, page] = await Promise.all([
+test("Gateway connect toggle maps foreign ownership to takeover without a segmented control", async () => {
+  const [card, page] = await Promise.all([
     source("../src/components/GatewayClientCard.tsx"),
-    source("../src/components/SegmentedSwitch.tsx"),
     source("../src/pages/GatewayPage.tsx"),
   ]);
 
-  assert.doesNotMatch(card, /\{t\("gateway\.takeover"\)\}/);
-  assert.match(card, /const takeoverRequired = routeOwner !== "official" && info\?\.managed_by_current_app === false/);
-  assert.match(card, /<SegmentedSwitch/);
-  assert.match(card, /activeTone=\{takeoverRequired \? "foreign" : "default"\}/);
-  assert.match(card, /takeoverRequired && mode === "current_owner" \? "takeover" : mode/);
-  assert.match(card, /routeOwnerLabel/);
-  assert.match(switchSource, /activeTone\?: "default" \| "foreign"/);
-  assert.match(switchSource, /activeTone === "foreign"/);
-  assert.match(switchSource, /bg-\[#e7e7e4\] text-slate-500/);
-  assert.match(switchSource, /bg-ink text-white shadow-raised/);
+  assert.doesNotMatch(card, /SegmentedSwitch/);
+  assert.match(card, /<SwitchControl/);
+  assert.match(card, /onToggle: \(connect: boolean\) => void/);
   assert.doesNotMatch(page, /TakeoverSummaryDialog/);
-  assert.match(page, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
+  assert.match(page, /takeoverRequired/);
+  assert.match(page, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
 });
 
 test("Codex keeps connected surfaces visible for a foreign owner and takes over through the existing button", async () => {

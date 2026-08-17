@@ -10,6 +10,11 @@
       "config_path": "~/.config/opencode/opencode.json"
     },
     {
+      "id": "dsh",
+      "name": "DeepSeek Harness",
+      "config_path": "~/.dsh/settings.yaml"
+    },
+    {
       "id": "zcode",
       "name": "ZCode",
       "config_path": "~/.zcode/v2/config.json"

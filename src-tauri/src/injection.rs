@@ -876,6 +876,7 @@ fn backup_file(path: &Path) -> Result<Option<PathBuf>, String> {
 pub(crate) struct DshLifecycleReport {
     pub client_id: String,
     pub connected: bool,
+    pub block_present: bool,
     pub config_path: PathBuf,
     pub credential_path: PathBuf,
     pub activation: Option<String>,
@@ -890,6 +891,7 @@ fn dsh_report(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifec
     Ok(DshLifecycleReport {
         client_id: descriptor.client_id.to_owned(),
         connected: matches!(readback.status, ReadbackStatus::Clean),
+        block_present: readback.block_present,
         config_path: descriptor.config_file.resolve(root),
         credential_path: descriptor.credential.file.resolve(root),
         activation: readback.activation,

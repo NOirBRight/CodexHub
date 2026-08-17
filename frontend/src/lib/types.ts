@@ -537,7 +537,19 @@ export interface CodexContextGuardStatus {
 
 export type TabId = "codexhub" | "gateway";
 
-export type GatewayClientId = "opencode" | "zcode" | "pi" | "omp";
+export type GatewayClientId = "opencode" | "dsh" | "zcode" | "pi" | "omp";
+
+export interface DshLifecycleReport {
+  client_id: string;
+  connected: boolean;
+  block_present: boolean;
+  config_path: string;
+  credential_path: string;
+  activation?: string | null;
+  fingerprint?: string | null;
+  drift_details: string[];
+  restart_required: string;
+}
 
 export interface GatewayClientContract {
   id: GatewayClientId;

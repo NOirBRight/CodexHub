@@ -581,23 +581,23 @@ fn apply_gateway_client_config(
 }
 
 #[tauri::command]
-fn dsh_client_info() -> gateway::DshClientInfo {
-    gateway::detect_dsh_client()
+async fn dsh_client_info() -> Result<gateway::DshClientInfo, String> {
+    run_blocking("dsh_client_info", || Ok(gateway::detect_dsh_client())).await
 }
 
 #[tauri::command]
-fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
-    gateway::dsh_client_connect()
+async fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
+    run_blocking("dsh_client_connect", gateway::dsh_client_connect).await
 }
 
 #[tauri::command]
-fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
-    gateway::dsh_client_disconnect()
+async fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
+    run_blocking("dsh_client_disconnect", gateway::dsh_client_disconnect).await
 }
 
 #[tauri::command]
-fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
-    gateway::dsh_client_readback()
+async fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
+    run_blocking("dsh_client_readback", gateway::dsh_client_readback).await
 }
 
 #[tauri::command]

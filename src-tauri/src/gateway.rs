@@ -908,18 +908,45 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .flatten(),
     });
     let dsh = detect_dsh_client();
+    let dsh_report = if dsh.installed {
+        dsh_client_readback().ok()
+    } else {
+        None
+    };
+    let dsh_unreadable = dsh.installed && dsh_report.is_none();
+    let dsh_connected = dsh_report.as_ref().is_some_and(|report| report.connected);
+    let dsh_block_present = dsh_report.as_ref().is_some_and(|report| report.block_present);
+    let dsh_route_mode = if !dsh.installed {
+        "official"
+    } else if dsh_connected {
+        "hub"
+    } else if dsh_block_present || dsh_unreadable {
+        "stale"
+    } else {
+        "official"
+    };
+    let mut dsh_status_parts = vec![format!("DSH {}", dsh.qualification)];
+    dsh_status_parts.push("hot reload".to_owned());
+    dsh_status_parts.extend(dsh.drift_details.iter().cloned());
+    if let Some(report) = &dsh_report {
+        dsh_status_parts.extend(report.drift_details.iter().cloned());
+    }
     clients.push(GatewayClientInfo {
         id: "dsh".to_owned(),
-        name: "DeepSeek DSH".to_owned(),
-        kind: "Terminal client".to_owned(),
+        name: "DeepSeek Harness".to_owned(),
+        kind: "Agent runtime".to_owned(),
         installed: dsh.installed,
         auto_apply_supported: dsh.installed,
         config_path: Some(dsh.config_path),
-        route_owner: current_owner,
+        route_owner: if dsh_connected || dsh_block_present {
+            current_owner
+        } else {
+            RoutingOwner::Official
+        },
         route_endpoint: Some(endpoints(settings.proxy_port).base_url),
-        managed_by_current_app: true,
-        route_mode: "hub".to_owned(),
-        status: format!("DSH {} (hot reload; {})", dsh.qualification, dsh.drift_details.join("; ")),
+        managed_by_current_app: dsh_connected || dsh_block_present,
+        route_mode: dsh_route_mode.to_owned(),
+        status: dsh_status_parts.join("; "),
         versions_checked: include_versions && dsh.installed,
         current_version: dsh.version,
         latest_version: None,

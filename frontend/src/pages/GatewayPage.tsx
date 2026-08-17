@@ -1,4 +1,4 @@
-import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, RefreshCcw, Save, Server, X } from "lucide-react";
+import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, Network, RefreshCcw, Save, Server, X } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DebugDiagnosticsOverlay } from "../components/DebugDiagnosticsPanel";
@@ -24,8 +24,6 @@ import type {
   TelemetryStatus,
   UsageQueryWindow,
 } from "../lib/types";
-
-type RouteAction = "official" | "current_owner" | "takeover";
 
 interface GatewayPageProps {
   appFlavor?: AppFlavorInfo | null;
@@ -143,6 +141,14 @@ function GatewayPageImpl({
   );
   const defaultModel = status?.official_models[0]?.id ?? null;
   const runtimeOwner = appFlavor?.routing_owner ?? null;
+  const enabledModelCount = useMemo(
+    () => providers.reduce((count, provider) => (
+      provider.enabled
+        ? count + provider.models.filter((model) => model.enabled).length
+        : count
+    ), 0),
+    [providers],
+  );
   const clientInfoById = useMemo(
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
@@ -362,18 +368,52 @@ function GatewayPageImpl({
   const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
-  function handleRouteAction(clientId: string, action: RouteAction) {
+  function handleConnectionToggle(clientId: string, connect: boolean) {
+    if (clientId === "dsh") {
+      return void toggleDshConnection(connect);
+    }
     if (!runtimeOwner) {
       showToast(t("gateway.ownerUnavailable"), "error");
       return;
     }
-    if (action === "official") {
+    if (!connect) {
       return void switchClientMode(clientId, "official");
     }
-    if (action === "takeover") {
-      return void switchClientMode(clientId, runtimeOwner, true);
+    const info = clientInfoById.get(clientId);
+    const takeoverRequired = info?.route_owner !== "official" && info?.managed_by_current_app === false;
+    return void switchClientMode(clientId, runtimeOwner, takeoverRequired);
+  }
+
+  async function toggleDshConnection(connect: boolean) {
+    const info = clientInfoById.get("dsh");
+    const name = info?.name ?? clients.find((client) => client.id === "dsh")?.name ?? "DeepSeek Harness";
+    const repairing = connect && info?.route_mode === "stale";
+    setClientBusy(connect ? "dsh:connect" : "dsh:disconnect");
+    const toastId = showToast(
+      t(repairing ? "gateway.repairClient" : connect ? "gateway.connectClient" : "gateway.disconnectClient", { name }),
+      "loading",
+    );
+    try {
+      if (connect) {
+        await api.dshClientConnect();
+      } else {
+        await api.dshClientDisconnect();
+      }
+      await onRefreshClients();
+      updateToast(toastId, {
+        action: null,
+        text: t(
+          repairing ? "gateway.repairClientDone" : connect ? "gateway.connectClientDone" : "gateway.disconnectClientDone",
+          { name },
+        ),
+        tone: "success",
+      });
+      setError(null);
+    } catch (err) {
+      updateToastWithError(toastId, err);
+    } finally {
+      setClientBusy(null);
     }
-    return void switchClientMode(clientId, runtimeOwner);
   }
 
   async function toggleRuntime() {
@@ -585,7 +625,10 @@ function GatewayPageImpl({
       <aside className="grid h-full min-h-[704px] min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-ink">{t("gateway.clientRouting")}</h2>
+            <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
+              <Network size={15} className="shrink-0 text-action" />
+              <span className="truncate">{t("gateway.clientRouting")}</span>
+            </h2>
             <button
               type="button"
               className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-300"
@@ -598,41 +641,17 @@ function GatewayPageImpl({
             </button>
           </div>
         </div>
-        <div
-          className={cx(
-            "bg-panel p-3",
-            clients.length > 4 ? "min-h-0 overflow-auto" : "overflow-visible",
-          )}
-        >
-          <div
-            className={cx(
-              "grid gap-2",
-              clients.length > 4 ? "auto-rows-[minmax(144px,auto)]" : "min-h-full auto-rows-fr",
-            )}
-          >
+        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3">
+          <div className="space-y-2.5 py-1 pl-1">
             {clients.map((client) => (
-              (() => {
-                const info = clientInfoById.get(client.id);
-                return (
-                  <GatewayClientCard
-                    key={client.id}
-                    client={client}
-                    info={info}
-                    busy={Boolean(clientBusy?.startsWith(client.id))}
-                    busyMode={
-                      clientBusy === `${client.id}:switch:official`
-                        ? "official"
-                        : clientBusy === `${client.id}:switch:${runtimeOwner}`
-                          ? info?.managed_by_current_app === false
-                            ? "takeover"
-                            : "current_owner"
-                          : null
-                    }
-                    runtimeOwner={runtimeOwner}
-                    onSwitchMode={(mode) => handleRouteAction(client.id, mode)}
-                  />
-                );
-              })()
+              <GatewayClientCard
+                key={client.id}
+                client={client}
+                info={clientInfoById.get(client.id)}
+                busy={Boolean(clientBusy?.startsWith(client.id))}
+                enabledModelCount={enabledModelCount}
+                onToggle={(connect) => handleConnectionToggle(client.id, connect)}
+              />
             ))}
           </div>
         </div>

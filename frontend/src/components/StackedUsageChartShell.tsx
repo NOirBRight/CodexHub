@@ -1406,6 +1406,9 @@ function clientLabel(client: string, t: Translate) {
   if (normalized === "omp") {
     return "OMP";
   }
+  if (normalized === "dsh") {
+    return "DeepSeek Harness";
+  }
   return titleizeProviderId(client);
 }
 
