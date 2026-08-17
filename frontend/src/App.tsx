@@ -84,7 +84,6 @@ type GatewayClientVersionCacheEntry = {
 };
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
-const BACKGROUND_VERSION_PROBE_DELAY_MS = 1000;
 const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
 const APP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_INSTALL_STATUS_POLL_MS = 500;
@@ -751,15 +750,12 @@ export default function App() {
 
   useEffect(() => {
     void refreshCoreRuntime();
+    // Version probes execute installed CLI shims and hit package registries;
+    // keep them behind the explicit Gateway refresh action instead of startup.
     void loadGatewayClients();
-    const versionProbeTimer = window.setTimeout(
-      () => void loadGatewayClients({ includeClientVersions: true }),
-      BACKGROUND_VERSION_PROBE_DELAY_MS,
-    );
     const timer = window.setInterval(() => void refreshRuntimeStatus(), 5000);
     const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
     return () => {
-      window.clearTimeout(versionProbeTimer);
       window.clearInterval(timer);
       window.clearInterval(clientTimer);
     };

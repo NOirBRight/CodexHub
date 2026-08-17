@@ -167,6 +167,9 @@ pub(crate) fn refresh_at_startup() -> Result<(), String> {
     refresh(RefreshTrigger::Startup).map(|_| ())
 }
 
+// Retained for callers that explicitly require the legacy activation gate;
+// normal startup and route switching now run without this synchronous path.
+#[allow(dead_code)]
 pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
     if !config::get_settings()?.include_official_models {
         return Ok(());

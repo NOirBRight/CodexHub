@@ -640,6 +640,9 @@ test("desktop startup opens the gateway backend and reuses the existing app inst
   assert.match(mainSource, /std::thread::spawn\(move \|\|/);
   assert.match(mainSource, /proxy::start_after\(\|\|/);
   assert.match(mainSource, /launch_ready\.signal\(\)/);
+  const startupStart = mainSource.match(/let start = \|\| \{[\s\S]*?\n        \};/)?.[0] ?? "";
+  assert.doesNotMatch(startupStart, /official_refresh::refresh/);
+  assert.match(mainSource, /spawn_startup_official_refresh\(\)/);
   assert.match(mainSource, /ready_rx\.recv\(\)/);
   assert.match(cargoSource, /tauri-plugin-single-instance\s*=\s*"2"/);
   assert.match(mainSource, /tauri_plugin_single_instance::init\(\|app,[\s\S]*show_main_window\(app\)/);
@@ -1409,12 +1412,12 @@ test("gateway client route switching refreshes without version probes", async ()
   assert.match(appSource, /const clientTimer = window\.setInterval\(\(\) => void loadGatewayClients\(\), 12 \* 60 \* 60 \* 1000\)/);
 });
 
-test("gateway client versions are cached and refreshed after startup or manually", async () => {
+test("gateway client versions are cached and refreshed manually", async () => {
   const appSource = await readFile(appPath, "utf8");
   const startupEffect = appSource.match(/useEffect\(\(\) => \{[\s\S]*?return \(\) => \{[\s\S]*?\};/)?.[0] ?? "";
 
   assert.match(appSource, /GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub\.gatewayClientVersions\.v1"/);
-  assert.match(appSource, /BACKGROUND_VERSION_PROBE_DELAY_MS = 1000/);
+  assert.doesNotMatch(appSource, /BACKGROUND_VERSION_PROBE_DELAY_MS/);
   assert.match(appSource, /function readGatewayClientVersionCache/);
   assert.match(appSource, /function applyGatewayClientVersionCache/);
   assert.match(appSource, /function writeGatewayClientVersionCache/);
@@ -1423,12 +1426,8 @@ test("gateway client versions are cached and refreshed after startup or manually
   assert.match(appSource, /const cachedClients = applyGatewayClientVersionCache\(clients\)/);
   assert.match(appSource, /client\.id === "generic"/);
   assert.match(startupEffect, /void loadGatewayClients\(\);/);
-  assert.match(startupEffect, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
-  assert.ok(
-    startupEffect.indexOf("void loadGatewayClients();") <
-      startupEffect.indexOf("void loadGatewayClients({ includeClientVersions: true })"),
-  );
-  assert.match(startupEffect, /window\.clearTimeout\(versionProbeTimer\)/);
+  assert.doesNotMatch(startupEffect, /includeClientVersions/);
+  assert.doesNotMatch(startupEffect, /versionProbeTimer/);
 });
 
 test("gateway toast uses the shared dismissible page toast", async () => {
@@ -2099,10 +2098,7 @@ test("Luna Collaboration save uses the Tauri modelId contract and reloads persis
     providersSource,
     /async function refreshOfficialModelsAndCollaborationState[\s\S]*api\.listOfficialMultiAgentBaselines\(\)/,
   );
-  assert.match(
-    providersSource,
-    /async function primeOfficialModels\(\)[\s\S]*refreshOfficialModelsAndCollaborationState\(\{ quiet: true \}\)/,
-  );
+  assert.doesNotMatch(providersSource, /primeOfficialModels/);
   assert.match(providersSource, /onRefresh\(\{ quiet: true, throwOnError: true \}\)/);
 });
 
@@ -2545,7 +2541,8 @@ test("startup refresh follows Codex catalog order until the user customizes it",
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
   const { shouldFollowOfficialCatalogOrder, refreshedOfficialModelOrder } = await import(moduleUrl);
 
-  assert.match(providersSource, /void primeOfficialModels\(\);[\s\S]*void primeOfficialOpenAIUsage\(\);/);
+  assert.doesNotMatch(providersSource, /primeOfficialModels/);
+  assert.match(providersSource, /void primeOfficialOpenAIUsage\(\);/);
   assert.match(refresh, /const followsAutomaticOrder = shouldFollowOfficialCatalogOrder\(officialModelOrderDraft\)/);
   assert.match(refresh, /refreshedOfficialModelOrder\(officialModelOrderDraft, refreshed\)/);
   assert.match(refresh, /if \(!followsAutomaticOrder\) \{\s*setOfficialModelOrderDraft\(nextOrder\);\s*\}/);

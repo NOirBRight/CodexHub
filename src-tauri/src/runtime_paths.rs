@@ -34,6 +34,20 @@ pub(crate) fn configure_python_command(command: &mut Command) {
     ] {
         command.env_remove(name);
     }
+    configure_no_window(command);
+}
+
+fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+    }
 }
 
 /// Construct a Python child command with the repository runtime boundary
@@ -159,6 +173,15 @@ pub(crate) fn find_python(resource_root: Option<&Path>) -> Result<PathBuf, Strin
     }
 
     for candidate in python_candidates(resource_root) {
+        if let Some(path) = compatible_python_path(&candidate) {
+            return Ok(path);
+        }
+    }
+
+    // Only probe host launchers after packaged and repository runtimes have
+    // failed.  Resolving `py.exe` starts another Python process and used to
+    // happen eagerly on every Gateway/configuration operation.
+    for candidate in host_python_candidates() {
         if let Some(path) = compatible_python_path(&candidate) {
             return Ok(path);
         }
@@ -356,7 +379,6 @@ fn python_candidates(resource_root: Option<&Path>) -> Vec<PathBuf> {
     }
     candidates.extend(current_exe_python_candidates());
     candidates.extend(repository_python_candidates());
-    candidates.extend(host_python_candidates());
     dedupe_paths(candidates)
 }
 
@@ -400,7 +422,7 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_python_candidates, configured_python_command, configure_python_command,
+        bundled_python_candidates, configure_python_command, configured_python_command,
         find_test_python, homes_for_flavor,
     };
     use crate::app_flavor::RuntimeFlavor;

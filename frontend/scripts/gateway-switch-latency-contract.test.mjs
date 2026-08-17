@@ -14,18 +14,13 @@ test("manual gateway client refresh can run version probes", async () => {
   assert.match(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)/);
 });
 
-test("startup gateway client load defers slow external version probes", async () => {
+test("startup gateway client load does not run slow external version probes", async () => {
   const appSource = await readFile(appPath, "utf8");
   const startupEffect = appSource.match(/useEffect\(\(\) => \{[\s\S]*?return \(\) => \{[\s\S]*?\};/)?.[0] ?? "";
 
   assert.match(startupEffect, /void loadGatewayClients\(\);/);
-  assert.match(startupEffect, /const versionProbeTimer = window\.setTimeout/);
-  assert.match(startupEffect, /void loadGatewayClients\(\{ includeClientVersions: true \}\)/);
-  assert.ok(
-    startupEffect.indexOf("void loadGatewayClients();") <
-      startupEffect.indexOf("void loadGatewayClients({ includeClientVersions: true })"),
-  );
-  assert.match(startupEffect, /window\.clearTimeout\(versionProbeTimer\)/);
+  assert.doesNotMatch(startupEffect, /includeClientVersions/);
+  assert.doesNotMatch(startupEffect, /versionProbeTimer/);
 });
 
 test("web bridge handles requests concurrently so slow probes do not block switches", async () => {

@@ -49,6 +49,7 @@ UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
+MULTI_AGENT_VERSIONS = {"v1", "v2"}
 
 
 @dataclass
@@ -64,6 +65,7 @@ class ModelConfig:
     default_reasoning_level: str | None = None
     tool_surface_strategy: str | None = None
     native_responses_tool_codec: str | None = None
+    multi_agent_version: str | None = None
     # Optional, endpoint-provided lifecycle facts.  These are deliberately
     # kept separate from the protocol name: a Responses endpoint is
     # conservative until it explicitly declares which native tool lifecycles
@@ -73,6 +75,9 @@ class ModelConfig:
         default=None, init=False, repr=False, compare=False
     )
     _bundled_native_responses_tool_codec: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _bundled_multi_agent_version: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
     sort_order: int = 0
@@ -240,6 +245,7 @@ def build_external_model_index(
                 "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
+                "multi_agent_version": _resolved_multi_agent_version(model),
                 "reports_cached_input_tokens": provider.reports_cached_input_tokens,
                 "supports_developer_role": provider.supports_developer_role,
                 "upstream_model": _upstream_model_name(model),
@@ -323,6 +329,7 @@ def build_ollama_cloud_model_index(
                 "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,
                 "native_responses_tool_codec": native_responses_tool_codec,
+                "multi_agent_version": _resolved_multi_agent_version(model),
                 "upstream_model": _upstream_model_name(model),
                 "context_window": model.context_window,
                 "max_output_tokens": model.max_output_tokens,
@@ -415,6 +422,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
     if path.resolve() != DEFAULT_PROVIDERS_PATH.resolve():
         _apply_bundled_tool_surface_strategy_defaults(providers)
         _apply_bundled_native_responses_tool_codec_defaults(providers)
+        _apply_bundled_multi_agent_version_defaults(providers)
     return providers
 
 
@@ -451,6 +459,9 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 ),
                 native_responses_tool_codec=_native_responses_tool_codec_field(
                     raw_model.get("native_responses_tool_codec"), default=None
+                ),
+                multi_agent_version=_multi_agent_version_field(
+                    raw_model.get("multi_agent_version")
                 ),
                 tool_protocol_capabilities=_mapping_field(
                     raw_model.get("tool_protocol_capabilities")
@@ -575,6 +586,37 @@ def _apply_bundled_native_responses_tool_codec_defaults(
                 runtime_model._bundled_native_responses_tool_codec = (
                     bundled_model.native_responses_tool_codec
                 )
+
+
+def _apply_bundled_multi_agent_version_defaults(
+    runtime_providers: Iterable[ProviderConfig],
+) -> None:
+    runtime_providers = list(runtime_providers)
+    if not any(
+        model.multi_agent_version is None
+        for provider in runtime_providers
+        for model in provider.models
+    ):
+        return
+
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError):
+        return
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        for runtime_model in runtime_provider.models:
+            if runtime_model.multi_agent_version is not None:
+                continue
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is not None:
+                runtime_model._bundled_multi_agent_version = bundled_model.multi_agent_version
 
 
 def _provider_native_responses_tool_codec_is_explicit(provider: ProviderConfig) -> bool:
@@ -736,6 +778,15 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                     _toml_string_line(
                         "native_responses_tool_codec",
                         model_native_responses_tool_codec,
+                        indent="  ",
+                    )
+                )
+            model_multi_agent_version = _multi_agent_version_field(model.multi_agent_version)
+            if model_multi_agent_version is not None:
+                chunks.append(
+                    _toml_string_line(
+                        "multi_agent_version",
+                        model_multi_agent_version,
                         indent="  ",
                     )
                 )
@@ -932,6 +983,24 @@ def _native_responses_tool_codec_field(value: Any, *, default: str | None) -> st
     if codec not in NATIVE_RESPONSES_TOOL_CODECS:
         raise ValueError("native_responses_tool_codec must be none or strict_apply_patch")
     return codec
+
+
+def _multi_agent_version_field(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("multi_agent_version must be v1 or v2")
+    version = value.strip().lower()
+    if version not in MULTI_AGENT_VERSIONS:
+        raise ValueError("multi_agent_version must be v1 or v2")
+    return version
+
+
+def _resolved_multi_agent_version(model: ModelConfig) -> str | None:
+    explicit = _multi_agent_version_field(model.multi_agent_version)
+    if explicit is not None:
+        return explicit
+    return _multi_agent_version_field(model._bundled_multi_agent_version)
 
 
 def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: ModelConfig) -> str:

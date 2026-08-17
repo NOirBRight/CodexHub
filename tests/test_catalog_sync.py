@@ -2706,7 +2706,14 @@ class CatalogSyncTests(unittest.TestCase):
             }
         ]
 
-        catalog = build_codex_catalog([], ["glm-5.2:cloud"], self.policy, "0.142.0", fallback_models=fallback_models)
+        catalog = build_codex_catalog(
+            [],
+            ["glm-5.2:cloud"],
+            self.policy,
+            "0.142.0",
+            fallback_models=fallback_models,
+            ollama_model_metadata={"glm-5.2": {"multi_agent_version": "v2"}},
+        )
         glm_model = next(model for model in catalog["models"] if model["slug"] == "glm-5.2")
 
         self.assertEqual(glm_model["display_name"], "GLM-5.2")
@@ -2714,6 +2721,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(glm_model["context_window"], 1000000)
         self.assertEqual(glm_model["max_context_window"], 1000000)
         self.assertEqual(glm_model["max_output_tokens"], 131072)
+        self.assertEqual(glm_model["multi_agent_version"], "v2")
 
     def test_build_catalog_appends_provider_prefixed_external_models(self):
         external_models = [
