@@ -13,6 +13,8 @@ mod gateway_lifecycle;
 mod gateway_transaction;
 mod history;
 mod injection;
+#[cfg(target_os = "linux")]
+mod linux_window;
 #[cfg(test)]
 mod lock_test_fixtures;
 mod models;
@@ -1195,6 +1197,8 @@ fn run_gui() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 runtime_paths::set_resource_root(resource_dir);
             }
+            #[cfg(target_os = "linux")]
+            linux_window::install_full_input_region(app);
             #[cfg(desktop)]
             if let Err(error) = setup_tray(app) {
                 log::warn!("failed to setup tray icon: {error}");

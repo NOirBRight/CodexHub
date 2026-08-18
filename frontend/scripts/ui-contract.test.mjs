@@ -539,6 +539,19 @@ test("linux maximize toggle restores a saved size instead of trusting GTK is_max
   assert.match(mainSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
 });
 
+test("linux window forces a full GTK input region so WebKitGTK alpha cannot punch through", async () => {
+  const [mainSource, linuxWindowSource] = await Promise.all([
+    readFile(tauriMainPath, "utf8"),
+    readFile(new URL("../../src-tauri/src/linux_window.rs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(mainSource, /mod linux_window;/);
+  assert.match(mainSource, /linux_window::install_full_input_region\(app\)/);
+  assert.match(linuxWindowSource, /fn apply_full_input_region/);
+  assert.match(linuxWindowSource, /input_shape_combine_region/);
+  assert.match(linuxWindowSource, /set_opaque_region/);
+});
+
 test("main desktop window opens at the release candidate height", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
   const mainWindow = tauriConfig.app.windows[0];
