@@ -47,9 +47,20 @@ impl BuildFlavor {
 
     pub fn updater_endpoint(self) -> String {
         format!(
-            "https://github.com/NOirBRight/CodexHub/releases/latest/download/{}",
+            "https://github.com/NOirBRight/CodexHub/releases/{}/{}",
+            self.updater_feed_release(),
             self.updater_manifest_name()
         )
+    }
+
+    pub const fn updater_feed_release(self) -> &'static str {
+        if cfg!(target_os = "linux") {
+            // GitHub Latest stays v0.1.7 (Windows-only). Linux betas read this
+            // prerelease latest.json; overwrite that file to ship the next AppImage.
+            "download/v0.1.9-beta.1.1"
+        } else {
+            "latest/download"
+        }
     }
 
     pub fn installer_name(self, version: &str) -> String {
@@ -121,6 +132,32 @@ mod tests {
         assert_eq!(BuildFlavor::from_name(" DEBUG "), Some(BuildFlavor::Debug));
         assert_eq!(BuildFlavor::from_name("stable"), None);
         assert_eq!(BuildFlavor::from_name("beta"), None);
+    }
+
+    #[test]
+    fn updater_endpoint_keeps_windows_on_github_latest_and_linux_on_the_beta_feed() {
+        let endpoint = BuildFlavor::Normal.updater_endpoint();
+        let debug_endpoint = BuildFlavor::Debug.updater_endpoint();
+
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                endpoint,
+                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/latest.json"
+            );
+            assert_eq!(
+                debug_endpoint,
+                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/latest-debug.json"
+            );
+        } else {
+            assert_eq!(
+                endpoint,
+                "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json"
+            );
+            assert_eq!(
+                debug_endpoint,
+                "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest-debug.json"
+            );
+        }
     }
 
     #[test]

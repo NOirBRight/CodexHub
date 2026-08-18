@@ -7,15 +7,7 @@ export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
 export const FIT_STAGE_SCALE = 0.93;
 
-function usesCssTransformScale() {
-  if (typeof navigator === "undefined") {
-    return true;
-  }
-  return !/Linux/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
-}
-
 export function FitStage({ children }: { children: ReactNode }) {
-  const cssTransform = usesCssTransformScale();
   const [metrics, setMetrics] = useState({
     scale: FIT_STAGE_SCALE,
     width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
@@ -37,11 +29,8 @@ export function FitStage({ children }: { children: ReactNode }) {
         width: viewport.width / scale,
         height: viewport.height / scale,
       });
-      if (!cssTransform) {
-        await setWebviewZoom(scale);
-      } else {
-        await setWebviewZoom(1);
-      }
+      // WebKitGTK setZoom != 1 letterboxes unpainted pixels that punch through.
+      await setWebviewZoom(1);
     };
 
     void apply();
@@ -60,16 +49,16 @@ export function FitStage({ children }: { children: ReactNode }) {
       stopListening?.();
       void setWebviewZoom(1);
     };
-  }, [cssTransform]);
+  }, []);
 
   return (
     <div className="h-full w-full overflow-hidden bg-canvas">
       <div
-        className={cssTransform ? "origin-top-left" : undefined}
+        className="origin-top-left"
         style={{
           width: metrics.width,
           height: metrics.height,
-          ...(cssTransform ? { transform: "scale(" + metrics.scale + ")" } : {}),
+          transform: "scale(" + metrics.scale + ")",
         }}
       >
         {children}

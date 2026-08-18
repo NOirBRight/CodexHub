@@ -211,7 +211,7 @@ fn configured_updater_endpoints() -> Result<Vec<reqwest::Url>, String> {
 async fn checked_update(app: &AppHandle, action: &str) -> Result<Option<Update>, String> {
     match updater(app, action)?.check().await {
         Ok(update) => Ok(update),
-        Err(UpdaterError::ReleaseNotFound) => Ok(None),
+        Err(error) if is_no_update_error(&error) => Ok(None),
         Err(error) => Err(operation_error(action, error)),
     }
 }
@@ -401,11 +401,21 @@ fn status_from_update_check(
     let checked_at = checked_at.into();
     match update {
         Ok(Some(candidate)) => Ok(update_status(current_version, candidate, checked_at)),
-        Ok(None) | Err(UpdaterError::ReleaseNotFound) => {
+        Ok(None) => Ok(no_update_status(current_version, checked_at)),
+        Err(error) if is_no_update_error(&error) => {
             Ok(no_update_status(current_version, checked_at))
         }
         Err(error) => Err(operation_error("check for updates", error)),
     }
+}
+
+fn is_no_update_error(error: &UpdaterError) -> bool {
+    matches!(
+        error,
+        UpdaterError::ReleaseNotFound
+            | UpdaterError::TargetNotFound(_)
+            | UpdaterError::TargetsNotFound(_)
+    )
 }
 
 async fn run_app_update_install(app: AppHandle) -> Result<(), String> {
@@ -751,6 +761,29 @@ mod tests {
         assert_eq!(
             status_from_update_check("0.1.0", "unix:789", Err(UpdaterError::ReleaseNotFound)),
             Ok(no_update_status("0.1.0", "unix:789")),
+        );
+    }
+
+    #[test]
+    fn missing_linux_platform_in_windows_manifest_counts_as_no_update() {
+        assert_eq!(
+            status_from_update_check(
+                "0.1.9-beta.1.1",
+                "unix:789",
+                Err(UpdaterError::TargetsNotFound(vec![
+                    "linux-x86_64-appimage".into(),
+                    "linux-x86_64".into(),
+                ])),
+            ),
+            Ok(no_update_status("0.1.9-beta.1.1", "unix:789")),
+        );
+        assert_eq!(
+            status_from_update_check(
+                "0.1.9-beta.1.1",
+                "unix:789",
+                Err(UpdaterError::TargetNotFound("linux-x86_64".into())),
+            ),
+            Ok(no_update_status("0.1.9-beta.1.1", "unix:789")),
         );
     }
 

@@ -1877,13 +1877,20 @@ test("providers page uses stable zero-min split columns", async () => {
 
 test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
   const fitStageSource = await readFile(new URL("../src/components/FitStage.tsx", import.meta.url), "utf8");
+  const cssSource = await readFile(indexCssPath, "utf8");
+  const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
 
   assert.match(fitStageSource, /export const FIT_STAGE_WIDTH = 1024/);
   assert.match(fitStageSource, /export const FIT_STAGE_HEIGHT = 768/);
   assert.match(fitStageSource, /export const FIT_STAGE_SCALE = 0\.93/);
-  assert.match(fitStageSource, /setWebviewZoom\(scale\)/);
+  assert.match(fitStageSource, /className="h-full w-full overflow-hidden bg-canvas"/);
   assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
+  assert.match(fitStageSource, /setWebviewZoom\(1\)/);
+  assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
+  assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
+  assert.match(cssSource, /html,\s*body,\s*#root \{[\s\S]*?background: #f8f8f7;/);
+  assert.equal(tauriConfig.app.windows[0].transparent, false);
 });
 
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
@@ -3138,6 +3145,8 @@ test("app updater has an opt-in E2E script for virtual release detection and ins
   assert.match(appUpdatesSource, /linux-x86_64/);
   assert.match(appUpdatesSource, /current_updater_platform/);
   assert.match(appUpdatesSource, /amd64\.AppImage/);
+  assert.match(appUpdatesSource, /TargetsNotFound/);
+  assert.match(appUpdatesSource, /fn is_no_update_error/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_ENDPOINT/);
   assert.match(appUpdatesSource, /CODEXHUB_UPDATE_E2E_SKIP_INSTALL/);
   assert.match(appUpdatesSource, /configured_updater_endpoints/);
@@ -3169,6 +3178,8 @@ test("linux release writes a signed AppImage updater manifest", async () => {
   assert.match(appUpdatesSource, /UPDATER_PLATFORM_LINUX/);
   assert.match(buildInfoSource, /linux_appimage_name/);
   assert.match(buildInfoSource, /amd64\.AppImage/);
+  assert.match(buildInfoSource, /download\/v0\.1\.9-beta\.1\.1/);
+  assert.match(buildInfoSource, /latest\/download/);
 });
 
 test("app update e2e script supports normal and debug manifests", async () => {
