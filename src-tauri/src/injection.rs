@@ -319,7 +319,7 @@ pub(crate) fn inject(
     let activation_before = read_path(&config, descriptor.activation_path).cloned();
 
     let config_backup = backup_file(&config_path)?;
-    crate::safe_file::write_text_atomic(&config_path, &serialize_yaml(&config)?)?;
+    write_yaml_atomic(&config_path, &config, existing_unix_mode(&config_path).or(Some(0o600)))?;
 
     let mut credentials = read_yaml_mapping(&credential_path)?;
     credentials.insert(
@@ -327,7 +327,7 @@ pub(crate) fn inject(
         Value::String(request.api_key.reveal().to_owned()),
     );
     let credential_backup = backup_file(&credential_path)?;
-    crate::safe_file::write_text_atomic(&credential_path, &serialize_yaml(&credentials)?)?;
+    write_yaml_atomic(&credential_path, &credentials, Some(0o600))?;
 
     debug_assert_eq!(
         read_yaml_mapping(&config_path)
@@ -375,7 +375,11 @@ pub(crate) fn detach(
             {
                 config_changed = true;
                 config_backup = backup_file(&config_path)?;
-                crate::safe_file::write_text_atomic(&config_path, &serialize_yaml(&config)?)?;
+                write_yaml_atomic(
+                    &config_path,
+                    &config,
+                    existing_unix_mode(&config_path).or(Some(0o600)),
+                )?;
             }
         }
     }
@@ -402,10 +406,7 @@ pub(crate) fn detach(
                 })?;
                 credential_file_removed = true;
             } else {
-                crate::safe_file::write_text_atomic(
-                    &credential_path,
-                    &serialize_yaml(&credentials)?,
-                )?;
+                write_yaml_atomic(&credential_path, &credentials, Some(0o600))?;
             }
         }
     }
@@ -465,9 +466,24 @@ pub(crate) fn activation_state(
         return Ok(None);
     }
     let config = read_yaml_mapping(&config_path)?;
-    Ok(read_path(&config, descriptor.activation_path)
-        .and_then(Value::as_str)
-        .map(str::to_owned))
+    Ok(read_path(&config, descriptor.activation_path).and_then(format_activation))
+}
+
+/// DSH stores `agent-default-model` as a mapping (`provider` + `model`);
+/// some fixtures and other clients use a single `provider/model` string.
+/// Surface both as the same informational `provider/model` form.
+fn format_activation(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    let mapping = value.as_mapping()?;
+    let provider = mapping
+        .get(Value::String("provider".to_owned()))
+        .and_then(Value::as_str)?;
+    let model = mapping
+        .get(Value::String("model".to_owned()))
+        .and_then(Value::as_str)?;
+    Some(format!("{provider}/{model}"))
 }
 
 /// What readback expects the Injected Block to contain: the local Gateway
@@ -798,6 +814,25 @@ fn read_yaml_mapping(path: &Path) -> Result<Mapping, String> {
 
 fn serialize_yaml(mapping: &Mapping) -> Result<String, String> {
     serde_yaml::to_string(mapping).map_err(|error| format!("failed to serialize YAML: {error}"))
+}
+
+fn existing_unix_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn write_yaml_atomic(path: &Path, mapping: &Mapping, mode: Option<u32>) -> Result<(), String> {
+    crate::safe_file::write_text_atomic_with_mode(path, &serialize_yaml(mapping)?, mode)
 }
 
 fn read_path<'a>(root: &'a Mapping, path: &[&str]) -> Option<&'a Value> {
@@ -1392,6 +1427,93 @@ mod tests {
             activation_state(&root, &descriptor).unwrap(),
             None,
             "injection must not activate"
+        );
+    }
+
+    #[test]
+    fn activation_state_formats_dsh_mapping_as_provider_slash_model() {
+        let root = dsh_root("codexhub-injection-activation-map");
+        let descriptor = dsh_descriptor();
+        fs::write(
+            root.join("settings.yaml"),
+            concat!(
+                "agent-default-model:\n",
+                "  provider: grok\n",
+                "  model: grok-4.6\n",
+                "  reasoningEffort: high\n"
+            ),
+        )
+        .unwrap();
+        inject(&root, &descriptor, &request()).unwrap();
+        assert_eq!(
+            activation_state(&root, &descriptor).unwrap(),
+            Some("grok/grok-4.6".to_owned()),
+            "DSH stores activation as a mapping; surface it in the same provider/model form as a string key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inject_and_detach_keep_dsh_files_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = dsh_root("codexhub-injection-mode");
+        let descriptor = dsh_descriptor();
+        let settings = root.join("settings.yaml");
+        let credentials = root.join(".credentials.yaml");
+        fs::write(
+            &settings,
+            concat!(
+                "agent-default-model:\n",
+                "  provider: grok\n",
+                "  model: grok-4.6\n",
+                "llm-pi-ai:\n",
+                "  providers:\n",
+                "    kimi-coding:\n",
+                "      apiKeyEnv: KIMI_CODING_API_KEY\n"
+            ),
+        )
+        .unwrap();
+        fs::write(&credentials, "KIMI_CODING_API_KEY: dummy\n").unwrap();
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
+
+        inject(&root, &descriptor, &request()).unwrap();
+        assert_eq!(
+            fs::metadata(&settings).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&credentials).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        detach(&root, &descriptor).unwrap();
+        assert_eq!(
+            fs::metadata(&settings).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&credentials).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inject_creates_credential_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = dsh_root("codexhub-injection-cred-mode");
+        let descriptor = dsh_descriptor();
+        inject(&root, &descriptor, &request()).unwrap();
+        assert_eq!(
+            fs::metadata(root.join(".credentials.yaml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 
