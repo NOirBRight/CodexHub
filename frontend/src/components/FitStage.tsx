@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-/** Comfortable composed size of the desktop shell. Smaller viewports scale down uniformly. */
+/** Composed desktop shell that keeps title, tabs, Gateway, Recovery, a full usage chart, and five client cards on-screen. Smaller viewports scale down uniformly instead of clipping the bottom. */
 export const FIT_STAGE_WIDTH = 1280;
-export const FIT_STAGE_HEIGHT = 800;
+export const FIT_STAGE_HEIGHT = 960;
 
 export function FitStage({ children }: { children: ReactNode }) {
   const hostRef = useRef<HTMLDivElement>(null);
