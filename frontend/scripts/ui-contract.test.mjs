@@ -1883,14 +1883,15 @@ test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
   assert.match(fitStageSource, /export const FIT_STAGE_WIDTH = 1024/);
   assert.match(fitStageSource, /export const FIT_STAGE_HEIGHT = 768/);
   assert.match(fitStageSource, /export const FIT_STAGE_SCALE = 0\.93/);
-  assert.match(fitStageSource, /className="h-full w-full overflow-hidden bg-canvas"/);
+  assert.match(fitStageSource, /className="relative h-full w-full overflow-hidden bg-canvas"/);
+  assert.match(fitStageSource, /function usesCssTransformScale/);
   assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
+  assert.match(fitStageSource, /setWebviewZoom\(scale\)/);
   assert.match(fitStageSource, /setWebviewZoom\(1\)/);
-  assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
-  assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
   assert.match(cssSource, /html,\s*body,\s*#root \{[\s\S]*?background: #f8f8f7;/);
   assert.equal(tauriConfig.app.windows[0].transparent, false);
+  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#f8f8f7");
 });
 
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
@@ -3182,6 +3183,7 @@ test("linux release writes a signed AppImage updater manifest", async () => {
   assert.match(buildInfoSource, /latest\/download/);
   assert.match(buildInfoSource, /fn version_is_prerelease/);
   assert.match(buildInfoSource, /fn updater_feed_path/);
+  assert.match(linuxRelease, /Updater endpoint:/);
 });
 
 test("app update e2e script supports normal and debug manifests", async () => {

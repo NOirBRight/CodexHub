@@ -7,7 +7,17 @@ export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
 export const FIT_STAGE_SCALE = 0.93;
 
+function usesCssTransformScale() {
+  if (typeof navigator === "undefined") {
+    return true;
+  }
+  // WebKitGTK does not keep hit-testing aligned with CSS transform, so clicks
+  // miss the painted UI and punch through. Linux uses webview zoom instead.
+  return !/Linux/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
+}
+
 export function FitStage({ children }: { children: ReactNode }) {
+  const cssTransform = usesCssTransformScale();
   const [metrics, setMetrics] = useState({
     scale: FIT_STAGE_SCALE,
     width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
@@ -29,8 +39,11 @@ export function FitStage({ children }: { children: ReactNode }) {
         width: viewport.width / scale,
         height: viewport.height / scale,
       });
-      // WebKitGTK setZoom != 1 letterboxes unpainted pixels that punch through.
-      await setWebviewZoom(1);
+      if (!cssTransform) {
+        await setWebviewZoom(scale);
+      } else {
+        await setWebviewZoom(1);
+      }
     };
 
     void apply();
@@ -49,16 +62,17 @@ export function FitStage({ children }: { children: ReactNode }) {
       stopListening?.();
       void setWebviewZoom(1);
     };
-  }, []);
+  }, [cssTransform]);
 
   return (
-    <div className="h-full w-full overflow-hidden bg-canvas">
+    <div className="relative h-full w-full overflow-hidden bg-canvas">
+      <div className="pointer-events-none absolute inset-0 bg-canvas" aria-hidden="true" />
       <div
-        className="origin-top-left"
+        className={cssTransform ? "relative origin-top-left" : "relative"}
         style={{
           width: metrics.width,
           height: metrics.height,
-          transform: "scale(" + metrics.scale + ")",
+          ...(cssTransform ? { transform: "scale(" + metrics.scale + ")" } : {}),
         }}
       >
         {children}
