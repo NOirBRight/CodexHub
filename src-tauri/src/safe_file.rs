@@ -81,6 +81,18 @@ mod flock_op {
 }
 
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
+    write_text_atomic_with_mode(path, text, None)
+}
+
+/// Same as `write_text_atomic`, with an optional Unix mode applied to the
+/// replacement file before rename. `None` preserves the existing target mode
+/// when the file already exists and otherwise leaves the process umask in
+/// place. Windows ignores `mode`.
+pub(crate) fn write_text_atomic_with_mode(
+    path: &Path,
+    text: &str,
+    mode: Option<u32>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!("failed to create file directory {}: {error}", parent.display())
@@ -88,7 +100,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     }
 
     let lock = FileLock::acquire(path)?;
-    write_text_locked(path, text, &lock)
+    write_text_locked_with_mode(path, text, &lock, mode)
 }
 
 /// Write `text` to `path` using a temp file and atomic rename while already
@@ -98,6 +110,15 @@ pub(crate) fn write_text_locked(
     path: &Path,
     text: &str,
     lock: &FileLock,
+) -> Result<(), String> {
+    write_text_locked_with_mode(path, text, lock, None)
+}
+
+fn write_text_locked_with_mode(
+    path: &Path,
+    text: &str,
+    lock: &FileLock,
+    mode: Option<u32>,
 ) -> Result<(), String> {
     if lock.target_path() != path {
         return Err("atomic write lock does not match target path".to_owned());
@@ -112,6 +133,10 @@ pub(crate) fn write_text_locked(
     let temp_path = unique_temp_path(path);
     let mut temp_file = File::create(&temp_path)
         .map_err(|error| format!("failed to write temp file {}: {error}", temp_path.display()))?;
+    if let Err(error) = apply_atomic_write_mode(path, &temp_file, mode) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
     temp_file
         .write_all(text.as_bytes())
         .and_then(|_| temp_file.sync_all())
@@ -138,6 +163,27 @@ fn unique_temp_path(path: &Path) -> PathBuf {
         std::process::id(),
         timestamp_millis()
     ))
+}
+
+#[cfg(unix)]
+fn apply_atomic_write_mode(path: &Path, temp_file: &File, requested: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = match requested {
+        Some(mode) => mode,
+        None => match fs::metadata(path) {
+            Ok(metadata) => metadata.permissions().mode() & 0o777,
+            Err(_) => return Ok(()),
+        },
+    };
+    temp_file
+        .set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("failed to set file mode on {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn apply_atomic_write_mode(_path: &Path, _temp_file: &File, _requested: Option<u32>) -> Result<(), String> {
+    Ok(())
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -735,8 +781,8 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic, write_text_locked,
-        FileLock, LockState, LOCK_PROTOCOL,
+        install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic,
+        write_text_atomic_with_mode, write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
     };
     use std::{
         fs,
@@ -765,6 +811,41 @@ mod tests {
         let target = root.join("providers.toml");
         write_text_atomic(&target, "new").unwrap();
         assert_eq!(fs::read_to_string(root.join("providers.toml.lock")).unwrap(), "codexhub-atomic-lock=1\n");
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_text_atomic_preserves_existing_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("preserve-mode");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("secret.yaml");
+        fs::write(&target, "old\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_text_atomic(&target, "new\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(unix_mode(&target), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_text_atomic_with_mode_creates_owner_only_file() {
+        let root = test_root("explicit-mode");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join(".credentials.yaml");
+
+        write_text_atomic_with_mode(&target, "CODEXHUB_API_KEY: ***\n", Some(0o600)).unwrap();
+
+        assert_eq!(unix_mode(&target), 0o600);
     }
 
     #[test]

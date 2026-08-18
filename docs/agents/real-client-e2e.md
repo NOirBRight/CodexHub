@@ -6,6 +6,14 @@ routes. HTTP/configuration preflight alone is never an E2E pass. Beta3 uses the
 explicit `-CliOnly` scope described below; the full GUI matrix remains available
 for a later release qualification.
 
+Linux has its own GUI preflight, `scripts/e2e_linux_gui_clients.py`. It is
+required for a Linux ship and does not substitute for the Windows AppX host.
+On Linux, Codex Desktop is the installed `chatgpt` package (`codex-launcher`);
+CodexHub still calls it Codex Desktop. ZCode is `/opt/ZCode/zcode`. The Linux
+preflight checks package floors, isolated apply/readback, and an isolated-HOME
+GUI start/stop. Human finalization of `desktop-luna` / `zcode-luna` remains a
+separate Linux manual-evidence step.
+
 ## Authoritative host and compatibility baselines
 
 Run on the authoritative machine-bound local dedicated Windows host

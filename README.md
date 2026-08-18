@@ -81,6 +81,21 @@ The build scripts reject unsupported flavor names before compilation. Use the no
 .\scripts\build-windows-release.ps1 -Flavor debug
 ```
 
+Linux uses the same flavors and updater endpoints. The current Linux ship gate
+is a portable tarball plus AppImage/deb; it does not replace the Windows
+real-client E2E host.
+
+```bash
+./scripts/build-linux-portable.sh --dry-run
+./scripts/build-linux-portable.sh --flavor debug --dry-run
+./scripts/build-linux-portable.sh
+./scripts/build-linux-release.sh --flavor normal
+```
+
+See `docs/agents/linux-packaging.md` for artifact names and the host-Python
+note. Windows installers still embed CPython; Linux packages use Python 3.13+
+on the host unless `python/bin/python` is bundled beside the executable.
+
 Both installer artifacts and both manifests belong to the same GitHub Release tag. Debug manifests declare their flavor and artifact name; a mismatch is rejected before download/install. A normal manifest without flavor metadata remains accepted only when it points to the historical normal artifact name, preserving installed normal-user update compatibility.
 
 For a packaged same-version replacement smoke, first inspect the contract, then run the explicit installer sequence only in a dedicated Windows test environment with a known settings fixture:
@@ -302,7 +317,10 @@ Token and cost data depend on upstream usage fields and local pricing metadata. 
 
 ### Do normal users need Python, Node.js, or Rust?
 
-Release installers include the runtime required for normal use. Local development, debugging, or unpackaged source runs still require the development toolchain.
+Windows release installers include the runtime required for normal use. Linux
+AppImage/deb/portable builds currently require a host Python 3.13+ unless a
+bundled `python/bin/python` is present. Local development, debugging, or
+unpackaged source runs still require the development toolchain.
 
 ## License
 

@@ -1,261 +1,216 @@
-import type { GatewayClientContract, GatewayClientInfo, RoutingOwner } from "../lib/types";
+import { AlertTriangle, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import ompIcon from "../assets/omp-icon.png";
 import opencodeIcon from "../assets/opencode-icon.png";
 import piIcon from "../assets/pi-icon.png";
+import dshIcon from "../assets/dsh-icon.svg";
 import zcodeIcon from "../assets/zcode-icon.png";
 import { cx } from "../lib/format";
-import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
+import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
+import { SwitchControl } from "./SettingsDrawer";
 
-type RouteAction = "official" | "current_owner" | "takeover";
-type DisplayRouteMode = RoutingOwner | "hub" | "stale" | "unknown";
-type ClientStatusKind = "checking" | "not_installed" | "installed" | "ready" | "pending_sync" | "unknown";
+export type ClientConnectionState = "connected" | "disconnected" | "busy" | "drift" | "unavailable";
 
 interface GatewayClientCardProps {
   busy?: boolean;
-  busyMode?: RouteAction | null;
   client: GatewayClientContract;
+  enabledModelCount?: number;
   info?: GatewayClientInfo;
-  onSwitchMode: (mode: RouteAction) => void;
-  runtimeOwner: RoutingOwner | null;
+  onToggle: (connect: boolean) => void;
 }
 
 export function GatewayClientCard({
   busy,
-  busyMode,
   client,
+  enabledModelCount,
   info,
-  onSwitchMode,
-  runtimeOwner,
+  onToggle,
 }: GatewayClientCardProps) {
   const { t } = useTranslation();
-  const routeMode = routeModeFromInfo(info);
-  const routeOwner = info?.route_owner ?? "unknown_external";
-  const runtimeOwnerAvailable = runtimeOwner !== null;
-  const routeValue = routeOwner === "official" ? "official" : "current_owner";
-  const pendingRouteValue = busy && busyMode !== "takeover" ? busyMode ?? null : null;
-  const hasInfo = Boolean(info);
+  const state = connectionStateFromInfo(info, busy);
   const installed = Boolean(info?.installed);
-  const autoApplySupported = Boolean(info?.auto_apply_supported);
   const configPath = info?.config_path ?? client.config_path;
   const currentVersion = info?.current_version?.trim() || null;
-  const latestVersion = info?.latest_version?.trim() || null;
-  const versionsChecked = Boolean(info?.versions_checked);
-  const kindLabel = info?.kind ?? t(`gateway.clientKind.${client.id}`);
-  const takeoverRequired = routeOwner !== "official" && info?.managed_by_current_app === false;
-  const routeOwnerLabel = takeoverRequired ? ownerDisplayName(routeOwner, t) : ownerDisplayName(runtimeOwner, t);
-  const routeOptions: Array<SegmentedOption<RouteAction>> = [
-    { value: "official", label: t("common.official") },
-    {
-      value: "current_owner",
-      label: runtimeOwnerAvailable
-        ? `${t("common.codexHub")} · ${routeOwnerLabel}`
-        : t("gateway.ownerUnavailable"),
-    },
-  ];
-  const routeDisabledReason = !runtimeOwnerAvailable
-    ? t("gateway.ownerUnavailable")
-    : !installed
-      ? t("gateway.notInstalled")
-      : !autoApplySupported
-        ? t("gateway.configUnavailable")
-        : undefined;
-  const routeTitle = busy
-    ? t("gateway.switchingRoute", { name: info?.name ?? client.name })
-    : routeDisabledReason ??
-      (routeMode === "stale"
-        ? t("gateway.routePendingSyncTitle")
-        : routeMode === "unknown"
-          ? t("gateway.routeUnknownTitle")
-          : undefined);
-  const statusKind: ClientStatusKind = !hasInfo
-    ? "checking"
-    : !installed
-      ? "not_installed"
-      : routeMode === "stale"
-        ? "pending_sync"
-        : routeMode === "hub" || routeMode === "release" || routeMode === "beta"
-          ? "ready"
-          : routeMode === "official"
-            ? "installed"
-            : "unknown";
-  const statusLabel = busy
-    ? t("gateway.switching")
-    : statusKind === "checking"
-    ? t("gateway.checking")
-    : statusKind === "not_installed"
-      ? t("gateway.notInstalled")
-      : statusKind === "pending_sync"
-        ? t("gateway.routePendingSync")
-      : statusKind === "ready"
-        ? t("gateway.routeReady")
-      : statusKind === "unknown"
-        ? t("gateway.routeUnknown")
-        : t("gateway.installed");
-  const statusClass = busy
-    ? "border-amber-200 bg-amber-50 text-amber-700"
-    : statusKind === "checking"
-      ? "border-line bg-panel text-slate-500"
-      : statusKind === "not_installed"
-        ? "border-line bg-panel text-slate-500"
-        : statusKind === "pending_sync"
-          ? "border-amber-200 bg-amber-50 text-amber-700"
-        : statusKind === "ready"
-          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-        : statusKind === "unknown"
-          ? "border-amber-200 bg-amber-50 text-amber-700"
-          : "border-blue-200 bg-blue-50 text-blue-700";
-  const statusTitle =
-    statusKind === "pending_sync"
-      ? routeTitle
-      : statusKind === "ready"
-        ? info?.status
-        : statusKind === "unknown"
-          ? routeTitle
-          : undefined;
-  const versionLabel = !hasInfo
-    ? t("gateway.checkingVersion")
-    : !installed
-      ? t("gateway.notInstalled")
-      : !versionsChecked
-        ? t("gateway.versionNotChecked")
-      : currentVersion || latestVersion
-        ? t("gateway.currentLatest", {
-            current: currentVersion ?? t("common.unknown").toLowerCase(),
-            latest: latestVersion ?? t("common.unknown").toLowerCase(),
-          })
-        : t("gateway.versionUnknown");
+  const kindLabel = info?.kind ?? t("gateway.clientKind." + client.id);
+  const name = info?.name ?? client.name;
+  const checked = state === "connected" || state === "busy" || state === "drift";
+  const disabled = state === "unavailable" || state === "busy" || !info;
+  const label = busy
+    ? t("gateway.connectionUpdating")
+    : state === "connected"
+      ? t("gateway.connected")
+      : state === "drift"
+        ? t("gateway.connectionRepair")
+        : state === "unavailable"
+          ? t("gateway.connectionUnavailable")
+          : t("gateway.connectionDisconnected");
+  const labelTone =
+    state === "connected" || state === "busy"
+      ? "text-action"
+      : state === "drift"
+        ? "text-warn"
+        : "text-muted";
+
   return (
     <section
       className={cx(
-        "grid h-full min-h-[136px] content-between gap-1.5 rounded-panel p-2 shadow-card",
-        statusKind === "not_installed" ? "bg-panel opacity-75 grayscale" : "bg-surface",
+        "rounded-inner bg-surface px-3 py-2.5 shadow-control transition-[box-shadow,opacity,background-color]",
+        state === "connected" && "shadow-raised",
+        state === "drift" && "bg-amber-50/30 ring-1 ring-amber-300/70",
+        state === "unavailable" && "opacity-55",
       )}
     >
-      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
-        <ClientLogo id={client.id} name={info?.name ?? client.name} />
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-ink">{info?.name ?? client.name}</h3>
-          <p className="truncate text-xs text-slate-500">{kindLabel}</p>
-        </div>
-        {statusKind === "pending_sync" ? (
-          <button
-            type="button"
-            className={cx(
-              "focus-ring rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
-              statusClass,
+      <div className="flex items-center gap-2.5">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-control bg-panel-soft shadow-control">
+          <ClientLogo id={client.id} name={name} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate text-sm font-semibold text-ink">{name}</h3>
+            {currentVersion && (
+              <span className="rounded-control bg-panel px-1.5 py-0.5 text-[9px] font-medium text-muted">
+                {currentVersion}
+              </span>
             )}
-            disabled={busy || Boolean(routeDisabledReason)}
-            onClick={() => onSwitchMode("current_owner")}
-            title={statusTitle}
-          >
-            {statusLabel}
-          </button>
-        ) : (
-          <span
-            className={cx(
-              "rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-control",
-              statusClass,
-            )}
-            title={statusTitle}
-          >
-            {statusLabel}
-          </span>
-        )}
-      </div>
-
-      <div className="grid min-w-0 gap-1 text-xs text-slate-600">
-        <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] items-center gap-2">
-          <span className="font-semibold text-slate-500">{t("common.config")}</span>
-          <code className="truncate text-left font-mono">{configPath || t("common.copyOnly")}</code>
+          </div>
+          <p className="mt-0.5 truncate text-[11px] text-muted">{kindLabel}</p>
         </div>
-        <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] items-center gap-2">
-          <span className="font-semibold text-slate-500">{t("common.version")}</span>
-          <span className="truncate" title={versionLabel}>
-            {versionLabel}
-          </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className={cx("text-xs font-medium", labelTone)}>{label}</span>
+          <SwitchControl
+            ariaLabel={t("gateway.routeMode", { name })}
+            checked={checked}
+            disabled={disabled}
+            tone={state === "drift" ? "warn" : "action"}
+            onChange={onToggle}
+          />
         </div>
       </div>
-
-      <div title={routeTitle}>
-        <SegmentedSwitch
-          activeTone={takeoverRequired ? "foreign" : "default"}
-          ariaLabel={t("gateway.routeMode", { name: client.name })}
-          className="grid-cols-2 [&_button]:min-h-8 [&_button]:py-1 [&_button]:text-xs"
-          disabled={busy || Boolean(routeDisabledReason)}
-          pendingValue={pendingRouteValue}
-          value={routeValue}
-          options={routeOptions}
-          onChange={(mode) => onSwitchMode(takeoverRequired && mode === "current_owner" ? "takeover" : mode)}
+      <div className="mt-2 flex items-center gap-2 rounded-inner bg-panel-soft px-2.5 py-1.5">
+        <FileText className="h-3 w-3 shrink-0 text-muted" />
+        <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink">
+          {configPath || t("common.copyOnly")}
+        </code>
+      </div>
+      <div className="mt-1.5 flex min-h-3.5 items-center gap-1.5 text-[10px] text-muted">
+        <ConnectionNarrative
+          clientId={client.id}
+          enabledModelCount={enabledModelCount}
+          installed={installed}
+          state={state}
+          onRepair={() => onToggle(true)}
         />
       </div>
     </section>
   );
 }
 
-function routeModeFromInfo(info?: GatewayClientInfo): DisplayRouteMode {
-  if (
-    info?.route_mode === "other_channel" &&
-    (info.route_owner === "release" || info.route_owner === "beta")
-  ) {
-    return info.route_owner;
+function ConnectionNarrative({
+  clientId,
+  enabledModelCount,
+  installed,
+  onRepair,
+  state,
+}: {
+  clientId: string;
+  enabledModelCount?: number;
+  installed: boolean;
+  onRepair: () => void;
+  state: ClientConnectionState;
+}) {
+  const { t } = useTranslation();
+  if (state === "busy") {
+    return (
+      <>
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+        <span>{t("gateway.updatingClientConfig")}</span>
+      </>
+    );
   }
-  if (
-    info?.route_mode === "official" ||
-    info?.route_mode === "release" ||
-    info?.route_mode === "beta" ||
-    info?.route_mode === "hub" ||
-    info?.route_mode === "stale"
-  ) {
-    return info.route_mode;
+  if (state === "drift") {
+    return (
+      <>
+        <AlertTriangle className="h-3 w-3 text-amber-600" />
+        <button type="button" className="text-left text-amber-700 underline-offset-2 hover:underline" onClick={onRepair}>
+          {t("gateway.configDriftRepair")}
+        </button>
+      </>
+    );
   }
-  return "unknown";
+  if (state === "unavailable" || !installed) {
+    return (
+      <>
+        <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+        <span>{t("gateway.installToConnect")}</span>
+      </>
+    );
+  }
+  if (state === "connected") {
+    return (
+      <>
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span>
+          {clientId === "dsh"
+            ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
+            : t("gateway.connectedViaHub")}
+        </span>
+      </>
+    );
+  }
+  return (
+    <>
+      <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+      <span>{t("gateway.configUnchanged")}</span>
+    </>
+  );
 }
 
-function ownerDisplayName(owner: RoutingOwner | null, t: (key: string) => string) {
-  if (owner === "release") {
-    return t("gateway.ownerRelease");
+export function connectionStateFromInfo(
+  info: GatewayClientInfo | undefined,
+  busy?: boolean,
+): ClientConnectionState {
+  if (busy) {
+    return "busy";
   }
-  if (owner === "beta") {
-    return t("gateway.ownerBeta");
+  if (!info) {
+    return "disconnected";
   }
-  if (owner === "unknown_external") {
-    return t("gateway.ownerExternal");
+  if (!info.installed) {
+    return "unavailable";
   }
-  return owner === "official" ? t("common.official") : t("gateway.ownerUnavailable");
+  if (info.route_mode === "stale") {
+    return "drift";
+  }
+  if (
+    info.route_mode === "other_channel" &&
+    (info.route_owner === "release" || info.route_owner === "beta")
+  ) {
+    return "connected";
+  }
+  if (info.route_mode === "hub" || info.route_mode === "release" || info.route_mode === "beta") {
+    return "connected";
+  }
+  return "disconnected";
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {
   const icon = clientIcon(id);
   if (icon) {
     return (
-      <div
-        className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-control bg-surface shadow-control"
-        title={`${name} logo`}
-        aria-hidden="true"
-      >
-        <img
-          src={icon}
-          alt=""
-          className={clientIconClass(id)}
-        />
-      </div>
+      <img src={icon} alt="" title={name + " logo"} className={clientIconClass(id)} aria-hidden="true" />
     );
   }
-
   return (
-    <div
-      className="grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-[9px] font-black tracking-normal text-slate-600 shadow-control"
-      title={`${name} official logo asset pending`}
-      aria-hidden="true"
-    >
+    <span className="text-[9px] font-black tracking-normal text-slate-600" aria-hidden="true">
       {id.slice(0, 2).toUpperCase()}
-    </div>
+    </span>
   );
 }
 
 function clientIcon(id: string) {
   switch (id) {
+    case "dsh":
+      return dshIcon;
     case "opencode":
       return opencodeIcon;
     case "zcode":
@@ -270,11 +225,11 @@ function clientIcon(id: string) {
 }
 
 function clientIconClass(id: string) {
-  if (id === "opencode") {
-    return "h-6 w-6";
+  if (id === "dsh") {
+    return "h-8 w-8 object-contain";
   }
   if (id === "pi") {
     return "h-full w-full scale-125 object-cover";
   }
-  return "h-full w-full object-cover";
+  return "h-5 w-5 object-cover";
 }

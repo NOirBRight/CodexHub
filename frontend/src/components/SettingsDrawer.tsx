@@ -559,11 +559,13 @@ export function SwitchControl({
   checked,
   disabled,
   onChange,
+  tone = "action",
 }: {
   ariaLabel?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (value: boolean) => void;
+  tone?: "action" | "warn";
 }) {
   return (
     <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
@@ -575,7 +577,12 @@ export function SwitchControl({
         disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
       />
-      <span className="absolute inset-0 rounded-full bg-slate-200 shadow-control transition-colors peer-checked:bg-action peer-disabled:opacity-60" />
+      <span
+        className={cx(
+          "absolute inset-0 rounded-full shadow-control transition-colors peer-disabled:opacity-60",
+          checked ? (tone === "warn" ? "bg-warn" : "bg-action") : "bg-slate-200 peer-checked:bg-action",
+        )}
+      />
       <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
     </span>
   );

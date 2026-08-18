@@ -4,6 +4,8 @@ name = "Ollama Cloud"
 base_url = "https://ollama.com/v1"
 api_key = "{env:OLLAMA_API_KEY}"
 display_prefix = "Ollama"
+upstream_format = "responses"
+available_upstream_formats = ["responses"]
 # Set true only when an external provider returns truthful cached-input-token counts.
 reports_cached_input_tokens = false
 sort_order = 1

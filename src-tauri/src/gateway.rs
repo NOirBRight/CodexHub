@@ -126,7 +126,9 @@ fn official_gateway_reasoning_levels() -> Vec<String> {
 
 #[derive(Debug, Clone)]
 struct GatewayClientProviderGroups {
+    #[allow(dead_code)]
     default_provider_id: String,
+    #[allow(dead_code)]
     default_model_id: String,
     default_selector: String,
     providers: Vec<GatewayClientProviderGroup>,
@@ -621,6 +623,90 @@ pub fn gateway_copy_client_config(
     })
 }
 
+const DSH_PINNED_VERSION: &str = "0.1.0-rc.6";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DshClientInfo {
+    pub client_id: String,
+    pub installed: bool,
+    pub executable_path: Option<PathBuf>,
+    pub package_name: String,
+    pub config_path: PathBuf,
+    pub version: Option<String>,
+    pub qualification: String,
+    pub drift_details: Vec<String>,
+    pub restart_required: String,
+}
+
+fn dsh_executable_path() -> Option<PathBuf> {
+    std::env::var_os("CODEXHUB_DSH_EXECUTABLE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| which::which("dsh").ok())
+}
+
+fn dsh_package_version() -> Option<String> {
+    let mut command = Command::new("npm");
+    command.args(["list", "-g", "@deepseek-ai/dsh", "--json", "--depth=0"]);
+    let output = command_output_no_window(command)?;
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    value.get("dependencies")?.get("@deepseek-ai/dsh")?.get("version")?.as_str().map(ToOwned::to_owned)
+}
+
+fn dsh_version() -> Option<String> {
+    dsh_executable_path().and_then(|path| version_output_for_path(&path)).and_then(|output| {
+        let text = if output.stdout.is_empty() { String::from_utf8_lossy(&output.stderr) } else { String::from_utf8_lossy(&output.stdout) };
+        parse_version_output(&text)
+    }).or_else(dsh_package_version)
+}
+
+pub fn detect_dsh_client() -> DshClientInfo {
+    let descriptor = crate::injection::dsh_descriptor();
+    let config_path = descriptor.config_file.resolve(&descriptor.client_home().unwrap_or_else(|| PathBuf::from("~/.dsh")));
+    let executable_path = dsh_executable_path();
+    let version = dsh_version();
+    let installed = executable_path.is_some() || version.is_some() || config_path.exists();
+    let mut drift_details = Vec::new();
+    let qualification = match version.as_deref() {
+        Some(DSH_PINNED_VERSION) => "qualified",
+        Some(found) => { drift_details.push(format!("installed DSH version {found} differs from pinned baseline {DSH_PINNED_VERSION}")); "drifted" },
+        None if installed => { drift_details.push(format!("DSH version could not be determined; pinned baseline is {DSH_PINNED_VERSION}")); "unqualified" },
+        None => "unavailable",
+    };
+    DshClientInfo { client_id: "dsh".to_owned(), installed, executable_path, package_name: "@deepseek-ai/dsh".to_owned(), config_path, version, qualification: qualification.to_owned(), drift_details, restart_required: "none".to_owned() }
+}
+
+fn dsh_expectation(settings: &Settings, providers: &[Provider]) -> crate::injection::ReadbackExpectation {
+    crate::injection::ReadbackExpectation { base_url: endpoints(settings.proxy_port).base_url, models: gateway_models_from_config(settings, providers).into_iter().map(|m| m.id).collect() }
+}
+
+pub fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
+    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
+    let request = crate::injection::MaskedSecret::new(settings.gateway_client_key.clone());
+    let base_url = endpoints(settings.proxy_port).base_url;
+    let models = gateway_models_from_config(&settings, &providers).into_iter().map(|m| m.id).collect();
+    crate::injection::dsh_connect(&root, base_url, request, models)
+}
+
+pub fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
+    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
+    let expectation = dsh_expectation(&settings, &providers);
+    crate::injection::dsh_disconnect(&root, &expectation)
+}
+
+pub fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
+    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
+    let expectation = dsh_expectation(&settings, &providers);
+    crate::injection::dsh_readback(&root, &expectation)
+}
+
 pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientInfo>, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
@@ -822,6 +908,50 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         latest_version: (include_versions && omp_installed)
             .then(|| npm_latest_version("@oh-my-pi/pi-coding-agent"))
             .flatten(),
+    });
+    let dsh = detect_dsh_client();
+    let dsh_report = if dsh.installed {
+        dsh_client_readback().ok()
+    } else {
+        None
+    };
+    let dsh_unreadable = dsh.installed && dsh_report.is_none();
+    let dsh_connected = dsh_report.as_ref().is_some_and(|report| report.connected);
+    let dsh_block_present = dsh_report.as_ref().is_some_and(|report| report.block_present);
+    let dsh_route_mode = if !dsh.installed {
+        "official"
+    } else if dsh_connected {
+        "hub"
+    } else if dsh_block_present || dsh_unreadable {
+        "stale"
+    } else {
+        "official"
+    };
+    let mut dsh_status_parts = vec![format!("DSH {}", dsh.qualification)];
+    dsh_status_parts.push("hot reload".to_owned());
+    dsh_status_parts.extend(dsh.drift_details.iter().cloned());
+    if let Some(report) = &dsh_report {
+        dsh_status_parts.extend(report.drift_details.iter().cloned());
+    }
+    clients.push(GatewayClientInfo {
+        id: "dsh".to_owned(),
+        name: "DeepSeek Harness".to_owned(),
+        kind: "Agent runtime".to_owned(),
+        installed: dsh.installed,
+        auto_apply_supported: dsh.installed,
+        config_path: Some(dsh.config_path),
+        route_owner: if dsh_connected || dsh_block_present {
+            current_owner
+        } else {
+            RoutingOwner::Official
+        },
+        route_endpoint: Some(endpoints(settings.proxy_port).base_url),
+        managed_by_current_app: dsh_connected || dsh_block_present,
+        route_mode: dsh_route_mode.to_owned(),
+        status: dsh_status_parts.join("; "),
+        versions_checked: include_versions && dsh.installed,
+        current_version: dsh.version,
+        latest_version: None,
     });
     Ok(clients)
 }
@@ -1148,7 +1278,13 @@ pub fn verify_apply_readback(
     providers: &[Provider],
     model: &str,
 ) -> Result<(), String> {
-    for path in target_paths {
+    let required_paths: &[PathBuf] = match client_id {
+        // settings.json is user-owned under Provider Injection and is not an
+        // apply output. Only models.json is produced/verified.
+        "pi" if target_paths.len() >= 2 => &target_paths[1..],
+        _ => target_paths,
+    };
+    for path in required_paths {
         if !path.exists() {
             return Err(format!(
                 "readback failed: missing output file {}",
@@ -1191,13 +1327,10 @@ pub fn verify_apply_readback(
             }
         }
         "pi" => {
-            let written_settings = fs::read_to_string(&target_paths[0])
-                .map_err(|error| format!("readback failed: {error}"))?;
             let written_models = fs::read_to_string(&target_paths[1])
                 .map_err(|error| format!("readback failed: {error}"))?;
-            let expected_settings = pi_settings_text(&target_paths[0], settings, providers, model)?;
             let expected_models = pi_models_text(&target_paths[1], settings, providers, model)?;
-            if written_settings != expected_settings || written_models != expected_models {
+            if written_models != expected_models {
                 return Err("readback failed: pi output does not round-trip production preview".to_string());
             }
         }
@@ -3641,6 +3774,7 @@ fn detect_zcode_executable_path() -> Option<PathBuf> {
     if let Ok(path) = which::which("ZCode.exe") {
         candidates.push(path);
     }
+    candidates.push(std::path::PathBuf::from("/opt/ZCode/zcode"));
     if let Some(path) = windows_app_path("ZCode.exe") {
         candidates.push(path);
     }
@@ -4661,9 +4795,11 @@ fn pi_ownership_bounded_cleanup(
     settings_path: &Path,
     models_path: &Path,
 ) -> Result<GatewayClientApplyResult, String> {
-    let settings_exists = settings_path.exists();
+    // settings.json is user-owned under Provider Injection; detach never
+    // reads or mutates it. The Injected Block lives only in models.json.
+    let _ = settings_path;
     let models_exists = models_path.exists();
-    if !settings_exists && !models_exists {
+    if !models_exists {
         return Ok(GatewayClientApplyResult {
             client_id: "pi".to_string(),
             applied: true,
@@ -4673,73 +4809,15 @@ fn pi_ownership_bounded_cleanup(
         });
     }
 
-    let settings_text = if settings_exists {
-        fs::read_to_string(settings_path)
-            .map_err(|_| "failed to read Pi settings for cleanup.".to_string())?
-    } else {
-        String::new()
-    };
-    let models_text = if models_exists {
-        fs::read_to_string(models_path)
-            .map_err(|_| "failed to read Pi models for cleanup.".to_string())?
-    } else {
-        String::new()
-    };
+    let models_text = fs::read_to_string(models_path)
+        .map_err(|_| "failed to read Pi models for cleanup.".to_string())?;
+    let mut models_value: Value = serde_json::from_str(&models_text)
+        .map_err(|_| "Pi models is not valid JSON; refusing cleanup.".to_string())?;
 
-    let mut settings_value: Value = if settings_exists {
-        serde_json::from_str(&settings_text)
-            .map_err(|_| "Pi settings is not valid JSON; refusing cleanup.".to_string())?
-    } else {
-        json!({})
-    };
-    let mut models_value: Value = if models_exists {
-        serde_json::from_str(&models_text)
-            .map_err(|_| "Pi models is not valid JSON; refusing cleanup.".to_string())?
-    } else {
-        json!({})
-    };
-
-    let settings_object = settings_value.as_object().ok_or_else(|| {
-        "Pi settings root must be a JSON object; refusing cleanup.".to_string()
-    })?;
     let models_object = models_value.as_object().ok_or_else(|| {
         "Pi models root must be a JSON object; refusing cleanup.".to_string()
     })?;
 
-    // Validate shape: fail closed on non-object values inside managed keys.
-    if settings_object
-        .get("defaultProvider")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err(
-            "Pi defaultProvider has an unexpected shape; refusing cleanup.".to_string(),
-        );
-    }
-    if settings_object
-        .get("defaultModel")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err(
-            "Pi defaultModel has an unexpected shape; refusing cleanup.".to_string(),
-        );
-    }
-    if settings_object
-        .get("enabledModels")
-        .is_some_and(|value| !value.is_array() && !value.is_null())
-    {
-        return Err(
-            "Pi enabledModels has an unexpected shape; refusing cleanup.".to_string(),
-        );
-    }
-    if settings_object
-        .get("enabledModels")
-        .and_then(Value::as_array)
-        .is_some_and(|models| models.iter().any(|value| !value.is_string()))
-    {
-        return Err(
-            "Pi enabledModels contains non-string entries; refusing cleanup.".to_string(),
-        );
-    }
     if models_object
         .get("providers")
         .is_some_and(|value| !value.is_object() && !value.is_null())
@@ -4754,28 +4832,6 @@ fn pi_ownership_bounded_cleanup(
         return Err("Pi providers map contains malformed entries; refusing cleanup.".to_string());
     }
 
-    let default_provider_managed = settings_object
-        .get("defaultProvider")
-        .and_then(Value::as_str)
-        .is_some_and(is_recognized_codexhub_client_provider_id);
-    let default_model_managed = settings_object
-        .get("defaultModel")
-        .and_then(Value::as_str)
-        .is_some_and(|model| {
-            default_provider_managed || is_codexhub_client_model_selector(model)
-        });
-    let enabled_models_has_managed = settings_object
-        .get("enabledModels")
-        .and_then(Value::as_array)
-        .is_some_and(|models| {
-            models
-                .iter()
-                .filter_map(Value::as_str)
-                .any(is_codexhub_client_model_selector)
-        });
-    let settings_has_managed =
-        default_provider_managed || default_model_managed || enabled_models_has_managed;
-
     let providers_object = models_object.get("providers").and_then(Value::as_object);
     let providers_has_managed = providers_object.is_some_and(|providers| {
         providers
@@ -4783,86 +4839,17 @@ fn pi_ownership_bounded_cleanup(
             .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
     });
 
-    // Refuse to mutate any existing target that does not show CodexHub ownership.
-    if settings_exists && !settings_has_managed {
-        return Err("Pi settings is not managed by CodexHub; refusing cleanup.".to_string());
-    }
-    if models_exists && !providers_has_managed {
-        return Err("Pi models is not managed by CodexHub; refusing cleanup.".to_string());
-    }
-
-    let settings_owned_keys: HashSet<&str> =
-        ["defaultProvider", "defaultModel", "enabledModels"]
-            .iter()
-            .copied()
-            .collect();
-    let settings_only_owned =
-        settings_object.keys().all(|key| settings_owned_keys.contains(key.as_str()));
-    let settings_all_enabled_managed = settings_object
-        .get("enabledModels")
-        .and_then(Value::as_array)
-        .is_none_or(|models| {
-            models
-                .iter()
-                .filter_map(Value::as_str)
-                .all(is_codexhub_client_model_selector)
-        });
-    let settings_completely_owned = settings_only_owned
-        && settings_all_enabled_managed
-        && (default_provider_managed
-            || settings_object.get("defaultProvider").is_none())
-        && (default_model_managed
-            || settings_object.get("defaultModel").is_none());
-
-    let models_only_providers = models_object.keys().all(|key| key == "providers");
-    let providers_all_managed = providers_object.is_some_and(|providers| {
-        !providers.is_empty()
-            && providers
-                .iter()
-                .all(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-    });
-    let models_completely_owned = models_only_providers && providers_all_managed;
-
-    if settings_completely_owned && models_completely_owned {
-        if settings_exists {
-            fs::remove_file(settings_path)
-                .map_err(|_| "failed to remove CodexHub-owned Pi settings.".to_string())?;
-        }
-        if models_exists {
-            fs::remove_file(models_path)
-                .map_err(|_| "failed to remove CodexHub-owned Pi models.".to_string())?;
-        }
+    if !providers_has_managed {
         return Ok(GatewayClientApplyResult {
             client_id: "pi".to_string(),
             applied: true,
             config_path: None,
             backup_path: None,
-            message: "Pi CodexHub config removed.".to_string(),
+            message: "Pi CodexHub config was already absent.".to_string(),
         });
     }
 
-    // Partial cleanup: mutate both targets only after validation above.
-    let settings_object = settings_value.as_object_mut().unwrap();
     let models_object = models_value.as_object_mut().unwrap();
-
-    if default_provider_managed {
-        settings_object.remove("defaultProvider");
-    }
-    if default_model_managed {
-        settings_object.remove("defaultModel");
-    }
-    if let Some(enabled_models) = settings_object
-        .get_mut("enabledModels")
-        .and_then(Value::as_array_mut)
-    {
-        enabled_models.retain(|value| {
-            !value.as_str().is_some_and(is_codexhub_client_model_selector)
-        });
-        if enabled_models.is_empty() {
-            settings_object.remove("enabledModels");
-        }
-    }
-
     if let Some(providers) = models_object.get_mut("providers").and_then(Value::as_object_mut) {
         remove_codexhub_client_provider_entries(providers);
         if providers.is_empty() {
@@ -4871,21 +4858,6 @@ fn pi_ownership_bounded_cleanup(
     }
 
     let mut mutated = false;
-    if settings_object.is_empty() {
-        if settings_exists {
-            fs::remove_file(settings_path)
-                .map_err(|_| "failed to remove cleaned Pi settings.".to_string())?;
-            mutated = true;
-        }
-    } else {
-        let next = serde_json::to_string_pretty(&settings_value)
-            .map(|text| format!("{text}\n"))
-            .map_err(|error| format!("failed to serialize cleaned Pi settings: {error}"))?;
-        write_text_replace(settings_path, &next)
-            .map_err(|_| "failed to write cleaned Pi settings".to_string())?;
-        mutated = true;
-    }
-
     if models_object.is_empty() {
         if models_exists {
             fs::remove_file(models_path)
@@ -4964,7 +4936,7 @@ fn preview_pi_config_with_paths(
             ("models.json", &next_models),
         ])),
         backup_required: settings_path.exists() || models_path.exists(),
-        message: "Apply will snapshot Pi settings/models, then route Pi through CodexHub Gateway."
+        message: "Apply will inject the CodexHub provider into Pi models.json without changing model selection."
             .to_string(),
     })
 }
@@ -5152,18 +5124,16 @@ fn apply_pi_config_with_paths(
     )
     .map_err(|_| "failed to create Pi backup snapshot".to_string())?;
     record_pi_rollback_baseline(settings_path, models_path, backup_roots)?;
-    let next_settings = pi_settings_text(settings_path, settings, providers, &model)?;
     let next_models = pi_models_text(models_path, settings, providers, &model)?;
-    write_text_replace(settings_path, &next_settings)
-        .map_err(|_| "failed to write managed Pi settings".to_string())?;
     write_text_replace(models_path, &next_models)
         .map_err(|_| "failed to write managed Pi models".to_string())?;
     Ok(GatewayClientApplyResult {
         client_id: "pi".to_string(),
         applied: true,
-        config_path: Some(settings_path.to_path_buf()),
+        config_path: Some(models_path.to_path_buf()),
         backup_path,
-        message: "Pi now routes through CodexHub Gateway.".to_string(),
+        message: "Pi now has the CodexHub provider available. Model selection is unchanged."
+            .to_string(),
     })
 }
 
@@ -5721,24 +5691,16 @@ fn opencode_config_text(
 
 fn pi_settings_text(
     settings_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
+    _settings: &Settings,
+    _providers: &[Provider],
+    _model: &str,
 ) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
+    // Provider Injection (ADR-0004 Q1): settings.json is user-owned.
+    // Never force defaultProvider/defaultModel and never strip enabledModels.
     let mut value = read_json_file_or_empty(settings_path, "Pi settings")?;
     if !value.is_object() {
         value = json!({});
     }
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "Pi settings root must be a JSON object".to_string())?;
-    object.insert(
-        "defaultProvider".to_string(),
-        json!(codexhub_client_provider_id(&groups.default_provider_id)),
-    );
-    object.insert("defaultModel".to_string(), json!(groups.default_model_id));
-    object.remove("enabledModels");
     serde_json::to_string_pretty(&value)
         .map(|text| format!("{text}\n"))
         .map_err(|error| format!("failed to serialize Pi settings: {error}"))
@@ -8670,8 +8632,8 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
-        assert_eq!(pi_value["defaultProvider"], "codexhub-ollama-cloud");
-        assert_eq!(pi_value["defaultModel"], "glm-5.2");
+        assert!(pi_value.get("defaultProvider").is_none());
+        assert!(pi_value.get("defaultModel").is_none());
         assert!(pi_value.get("enabledModels").is_none());
         assert!(ollama_models.iter().any(|model| model["id"] == "glm-5.2"));
         assert!(volc_models.iter().any(|model| model["id"] == "glm-5.2"));
@@ -8828,8 +8790,8 @@ mod tests {
             .unwrap();
 
         assert!(settings_value.get("enabledModels").is_none());
-        assert_eq!(settings_value["defaultProvider"], "codexhub-openai");
-        assert_eq!(settings_value["defaultModel"], "gpt-5.5");
+        assert!(settings_value.get("defaultProvider").is_none());
+        assert!(settings_value.get("defaultModel").is_none());
         assert_eq!(
             models_value
                 .pointer("/providers/codexhub-openai/api")
@@ -8894,13 +8856,13 @@ mod tests {
     }
 
     #[test]
-    fn pi_settings_remove_enabled_model_patterns_for_gateway_exports() {
+    fn pi_settings_preserve_activation_and_enabled_models() {
         let root = unique_temp_dir("codexhub-pi-enabled-models");
         let settings_path = root.join("settings.json");
         fs::create_dir_all(root.as_path()).unwrap();
         fs::write(
             &settings_path,
-            r#"{"enabledModels":["codexhub/minimax-cn/MiniMax-M3"],"theme":"dark"}"#,
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4","enabledModels":["codexhub/minimax-cn/MiniMax-M3"],"theme":"dark"}"#,
         )
         .unwrap();
         let settings = Settings::default();
@@ -8915,9 +8877,18 @@ mod tests {
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-        assert!(value.get("enabledModels").is_none());
-        assert_eq!(value["defaultProvider"], "codexhub-ollama-cloud");
-        assert_eq!(value["defaultModel"], "glm-5.2");
+        assert_eq!(
+            value
+                .get("enabledModels")
+                .and_then(serde_json::Value::as_array)
+                .map(|models| models
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["codexhub/minimax-cn/MiniMax-M3"])
+        );
+        assert_eq!(value["defaultProvider"], "anthropic");
+        assert_eq!(value["defaultModel"], "claude-sonnet-4");
         assert_eq!(value["theme"], "dark");
     }
 
@@ -10508,13 +10479,13 @@ mod tests {
             written_settings
                 .get("defaultProvider")
                 .and_then(serde_json::Value::as_str),
-            Some("codexhub-openai")
+            Some("anthropic")
         );
         assert_eq!(
             written_settings
                 .get("defaultModel")
                 .and_then(serde_json::Value::as_str),
-            Some("gpt-5.5")
+            Some("claude-sonnet-4")
         );
         assert_eq!(
             written_settings
@@ -10522,7 +10493,16 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("dark")
         );
-        assert!(written_settings.get("enabledModels").is_none());
+        assert_eq!(
+            written_settings
+                .get("enabledModels")
+                .and_then(serde_json::Value::as_array)
+                .map(|models| models
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["anthropic/*"])
+        );
 
         let written_models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
@@ -10548,6 +10528,121 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("gpt-5.5")
         );
+    }
+
+    #[test]
+    fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
+        let root = unique_temp_dir("codexhub-pi-apply-detach-cycle");
+        let settings_path = root.join("settings.json");
+        let models_path = root.join("models.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        let original_settings = r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4","enabledModels":["anthropic/*"],"theme":"dark"}"#;
+        fs::write(&settings_path, original_settings).unwrap();
+        fs::write(
+            &models_path,
+            r#"{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1","api":"openai-completions","apiKey":"ollama","models":[{"id":"qwen2.5-coder:7b"}]}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+
+        super::apply_pi_config_with_paths(
+            &settings_path,
+            &models_path,
+            &[stable_root(backup_root.clone())],
+            &settings,
+            &[],
+            "openai/gpt-5.5",
+        )
+        .unwrap();
+
+        let connected_settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let connected_models: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+        assert_eq!(
+            connected_settings
+                .get("defaultProvider")
+                .and_then(serde_json::Value::as_str),
+            Some("anthropic")
+        );
+        assert_eq!(
+            connected_settings
+                .get("enabledModels")
+                .and_then(serde_json::Value::as_array)
+                .map(|models| models
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["anthropic/*"])
+        );
+        assert!(connected_models.pointer("/providers/ollama").is_some());
+        assert!(connected_models.pointer("/providers/codexhub-openai").is_some());
+
+        let detach = super::pi_ownership_bounded_cleanup(&settings_path, &models_path).unwrap();
+        assert!(detach.applied);
+
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        let detached_models: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+        assert!(detached_models.pointer("/providers/ollama").is_some());
+        assert!(detached_models.pointer("/providers/codexhub-openai").is_none());
+        assert_eq!(
+            detached_models
+                .pointer("/providers/ollama/models/0/id")
+                .and_then(serde_json::Value::as_str),
+            Some("qwen2.5-coder:7b")
+        );
+    }
+
+    #[test]
+    fn pi_apply_on_takeover_state_leaves_user_owned_activation() {
+        let root = unique_temp_dir("codexhub-pi-takeover-upgrade");
+        let settings_path = root.join("settings.json");
+        let models_path = root.join("models.json");
+        let backup_root = root.join("backups");
+        fs::create_dir_all(root.as_path()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &models_path,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]},"ollama":{"baseUrl":"http://localhost:11434/v1","api":"openai-completions","models":[{"id":"qwen2.5-coder:7b"}]}}}"#,
+        )
+        .unwrap();
+        let settings = Settings::default();
+
+        super::apply_pi_config_with_paths(
+            &settings_path,
+            &models_path,
+            &[stable_root(backup_root.clone())],
+            &settings,
+            &[],
+            "openai/gpt-5.5",
+        )
+        .unwrap();
+
+        let written_settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let written_models: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+        assert_eq!(
+            written_settings
+                .get("defaultProvider")
+                .and_then(serde_json::Value::as_str),
+            Some("codexhub-openai"),
+            "takeover leftovers stay user-owned; apply must not rewrite activation"
+        );
+        assert_eq!(
+            written_settings
+                .get("defaultModel")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert!(written_models.pointer("/providers/ollama").is_some());
+        assert!(written_models.pointer("/providers/codexhub-openai").is_some());
     }
 
     #[test]
@@ -10726,7 +10821,11 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
-        assert!(!settings_path.exists());
+        assert!(settings_path.exists());
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#
+        );
         assert!(!models_path.exists());
         assert!(
             !result.message.contains("\\\\") && !result.message.contains('/'),
@@ -10812,7 +10911,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         let provenance_dir = root.join("provenance");
@@ -11033,7 +11132,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -11090,7 +11189,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -11171,7 +11270,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -11324,7 +11423,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -11490,7 +11589,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         // Identical snapshot names so name cannot break the tie.
@@ -11631,7 +11730,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_restore_malformed_config_fails_without_mutation() {
+    fn pi_restore_ignores_malformed_settings_and_detaches_models() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-malformed");
@@ -11641,7 +11740,7 @@ mod tests {
         fs::write(&settings_path, "not json").unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -11650,11 +11749,13 @@ mod tests {
             &settings_path,
             &models_path,
             &[stable_root(root.join("backups"))],
-        );
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
+        assert!(result.applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), "not json");
+        assert!(!models_path.exists());
     }
 
     #[test]
@@ -11726,7 +11827,8 @@ mod tests {
             baseline.files.get("models.json"),
             Some(&super::BaselineFile::Absent)
         );
-        assert!(settings_path.exists());
+        assert!(!settings_path.exists());
+        assert!(models_path.exists());
     }
 
     #[test]
@@ -11825,7 +11927,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::create_dir_all(provenance_dir.join("pi")).unwrap();
@@ -11864,7 +11966,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
@@ -11907,7 +12009,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
@@ -12017,20 +12119,27 @@ mod tests {
         assert!(result.applied);
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert_eq!(settings.get("defaultProvider"), None);
-        assert_eq!(settings.get("defaultModel"), None);
+        assert_eq!(
+            settings.get("defaultProvider").and_then(serde_json::Value::as_str),
+            Some("codexhub-openai")
+        );
+        assert_eq!(
+            settings.get("defaultModel").and_then(serde_json::Value::as_str),
+            Some("gpt-5.5")
+        );
         assert_eq!(settings.get("theme").and_then(serde_json::Value::as_str), Some("dark"));
         let enabled = settings
             .get("enabledModels")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0], "anthropic/claude-sonnet-4");
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(enabled[0], "codexhub-openai/gpt-5.5");
+        assert_eq!(enabled[1], "anthropic/claude-sonnet-4");
         assert!(!models_path.exists());
     }
 
     #[test]
-    fn pi_cleanup_rejects_unmanaged_settings_without_mutation() {
+    fn pi_cleanup_detaches_models_without_requiring_managed_settings() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-unmanaged-settings");
@@ -12042,7 +12151,7 @@ mod tests {
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -12051,16 +12160,17 @@ mod tests {
             &settings_path,
             &models_path,
             &[stable_root(root.join("backups"))],
-        );
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
+        assert!(result.applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
-        assert!(fs::read_to_string(&models_path).unwrap().contains("codexhub-openai"));
+        assert!(!models_path.exists());
     }
 
     #[test]
-    fn pi_cleanup_rejects_wrong_shaped_enabled_models() {
+    fn pi_cleanup_ignores_wrong_shaped_enabled_models_and_detaches_models() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-shape");
@@ -12072,7 +12182,7 @@ mod tests {
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -12081,12 +12191,13 @@ mod tests {
             &settings_path,
             &models_path,
             &[stable_root(root.join("backups"))],
-        );
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unexpected shape"));
+        assert!(result.applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert!(!models_path.exists());
     }
 
     #[test]
@@ -12109,7 +12220,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_cleanup_rejects_heterogeneous_enabled_models_without_mutation() {
+    fn pi_cleanup_leaves_user_activation_even_when_enabled_models_are_heterogeneous() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-heterogeneous-enabled");
@@ -12121,7 +12232,7 @@ mod tests {
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]},"anthropic":{"models":[{"id":"claude"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -12129,9 +12240,12 @@ mod tests {
         let result = super::pi_ownership_bounded_cleanup(&settings_path, &models_path);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("non-string entries"));
+        assert!(result.unwrap().applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        let models: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+        assert!(models.pointer("/providers/codexhub-openai").is_none());
+        assert!(models.pointer("/providers/anthropic").is_some());
     }
 
     #[test]
@@ -12198,7 +12312,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_cleanup_rejects_wrong_shaped_default_provider_without_mutation() {
+    fn pi_cleanup_ignores_wrong_shaped_default_provider_and_detaches_models() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-provider-shape");
@@ -12209,7 +12323,7 @@ mod tests {
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -12217,13 +12331,13 @@ mod tests {
         let result = super::pi_ownership_bounded_cleanup(&settings_path, &models_path);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unexpected shape"));
+        assert!(result.unwrap().applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert!(!models_path.exists());
     }
 
     #[test]
-    fn pi_cleanup_rejects_wrong_shaped_default_model_without_mutation() {
+    fn pi_cleanup_ignores_wrong_shaped_default_model_and_detaches_models() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-model-shape");
@@ -12234,7 +12348,7 @@ mod tests {
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
@@ -12242,9 +12356,9 @@ mod tests {
         let result = super::pi_ownership_bounded_cleanup(&settings_path, &models_path);
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unexpected shape"));
+        assert!(result.unwrap().applied);
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert!(!models_path.exists());
     }
 
     #[test]
@@ -12294,9 +12408,8 @@ mod tests {
             r#"{"providers":{"codexhub-openai":{"name":"CodexHub Gateway","models":[{"id":"gpt-5.5"}]},"anthropic":{"models":[{"id":"claude"}]}}}"#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&settings_path).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&settings_path, permissions).unwrap();
+        fs::remove_file(&models_path).unwrap();
+        fs::create_dir(&models_path).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         let result = super::pi_ownership_bounded_cleanup(&settings_path, &models_path);
@@ -12305,7 +12418,8 @@ mod tests {
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(
-            error.contains("failed to write cleaned Pi settings"),
+            error.contains("failed to read Pi models")
+                || error.contains("failed to write cleaned Pi models"),
             "unexpected error: {error}"
         );
         assert!(!error.contains("\\") && !error.contains('/'));
@@ -12354,7 +12468,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -12424,7 +12538,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -12469,7 +12583,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         fs::write(
@@ -12606,7 +12720,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         // Baseline A from Stable, baseline B from Beta; both are complete and eligible.
@@ -12778,7 +12892,7 @@ mod tests {
         .unwrap();
         fs::write(
             &models_path,
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]}}}"#,
+            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
         )
         .unwrap();
         // Baseline A from Stable, baseline B from Beta; equal mtimes so channel breaks the tie.

@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.8-beta.4.2"
+version = "0.1.9-beta.1"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
@@ -31,8 +31,9 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 which = "6"
 log = "0.4"
-
-[dev-dependencies]
+# YAML strategy for the injection descriptor engine (#432): DSH settings and
+# credentials are YAML; the engine parses and re-serializes mappings while
+# preserving every user-owned key.
 serde_yaml = "0.9"
 
 [target.'cfg(windows)'.dependencies]

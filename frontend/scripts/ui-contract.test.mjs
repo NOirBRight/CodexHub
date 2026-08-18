@@ -420,6 +420,7 @@ test("ui contract keeps ids and paths but no localizable display copy", async ()
     contract.gatewayClients.map((client) => ({ id: client.id, name: client.name, config_path: client.config_path })),
     [
       { id: "opencode", name: "OpenCode", config_path: "~/.config/opencode/opencode.json" },
+      { id: "dsh", name: "DeepSeek Harness", config_path: "~/.dsh/settings.yaml" },
       { id: "zcode", name: "ZCode", config_path: "~/.zcode/v2/config.json" },
       { id: "pi", name: "Pi", config_path: "~/.pi/agent/settings.json" },
       { id: "omp", name: "OMP", config_path: "~/.omp/agent/config.yml" },
@@ -733,12 +734,12 @@ test("sortable drag cursors override the global cursor contract", async () => {
   assert.match(sortableSource, /style=\{\{ cursor: draggedId \? "grabbing" : "grab" \}\}/);
 });
 
-test("gateway client rail is limited to the four planned clients", async () => {
+test("gateway client rail includes DSH as a first-class client", async () => {
   const contract = await readContract();
 
   assert.deepEqual(
     contract.gatewayClients.map((client) => client.name),
-    ["OpenCode", "ZCode", "Pi", "OMP"],
+    ["OpenCode", "DeepSeek Harness", "ZCode", "Pi", "OMP"],
   );
 });
 
@@ -749,6 +750,7 @@ test("gateway client rail shows active managed config paths", async () => {
     Object.fromEntries(contract.gatewayClients.map((client) => [client.id, client.config_path])),
     {
       opencode: "~/.config/opencode/opencode.json",
+      dsh: "~/.dsh/settings.yaml",
       zcode: "~/.zcode/v2/config.json",
       pi: "~/.pi/agent/settings.json",
       omp: "~/.omp/agent/config.yml",
@@ -1175,6 +1177,9 @@ test("slow desktop commands run off the Tauri invoke thread", async () => {
     "gateway_usage_snapshot",
     "gateway_usage_events",
     "list_gateway_clients",
+    "dsh_client_connect",
+    "dsh_client_disconnect",
+    "dsh_client_readback",
     "sync_gateway_clients",
     "generate_catalog",
   ]) {
@@ -1262,7 +1267,7 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-h-\[704px\] w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,340px\)\] gap-4 overflow-hidden/);
+  assert.match(gatewaySource, /min-h-0 w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,360px\)\] gap-4 overflow-hidden/);
   assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
   assert.match(gatewaySource, /grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2\.5/);
   assert.doesNotMatch(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
@@ -1283,10 +1288,11 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
   assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
   assert.match(gatewaySource, /<h3 className="shrink-0 text-xs font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
-  assert.match(gatewaySource, /<aside className="grid h-full min-h-\[704px\] min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
-  assert.match(gatewaySource, /clients\.length > 4 \? "min-h-0 overflow-auto" : "overflow-visible"/);
-  assert.match(gatewaySource, /clients\.length > 4 \? "auto-rows-\[minmax\(144px,auto\)\]" : "min-h-full auto-rows-fr"/);
-  assert.match(usageSource, /min-h-\[320px\] min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
+  assert.match(gatewaySource, /<aside className="grid h-full min-h-0 min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3/);
+  assert.match(gatewaySource, /space-y-2\.5/);
+  assert.match(gatewaySource, /scrollbar-gutter:stable/);
+  assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
   assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
   assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-1\.5">/);
   assert.match(usageSource, /left-14 right-4 top-6/);
@@ -1354,10 +1360,9 @@ test("gateway copy actions use inline copied state instead of success toasts", a
 });
 
 test("gateway client route switching reports completion", async () => {
-  const [gatewaySource, cardSource, segmentedSource, enSource, zhSource] = await Promise.all([
+  const [gatewaySource, cardSource, enSource, zhSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
     readFile(gatewayClientCardPath, "utf8"),
-    readFile(segmentedSwitchPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -1369,35 +1374,29 @@ test("gateway client route switching reports completion", async () => {
   assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDoneRestart", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
   assert.match(enSource, /switchClientDoneRestart: "Switched to \{\{routeName\}\}; restart \{\{clientName\}\} to apply"/);
   assert.match(zhSource, /switchClientDoneRestart: "已切换到 \{\{routeName\}\}；请重启 \{\{clientName\}\} 使其生效"/);
-  assert.match(cardSource, /const routeMode = routeModeFromInfo\(info\);/);
-  assert.match(cardSource, /const pendingRouteValue = busy && busyMode !== "takeover" \? busyMode \?\? null : null;/);
-  assert.match(cardSource, /pendingValue=\{pendingRouteValue\}/);
-  assert.doesNotMatch(cardSource, /busyMode \?\? routeModeFromInfo\(info\)/);
-  assert.match(segmentedSource, /pendingValue\?: T \| null;/);
-  assert.match(segmentedSource, /const pending = !active && option\.value === pendingValue;/);
-  assert.match(segmentedSource, /pending[\s\S]*\? "bg-slate-200\/80 text-slate-500 shadow-control"/);
-  assert.match(segmentedSource, /aria-busy=\{pending \|\| undefined\}/);
+  assert.match(cardSource, /onToggle: \(connect: boolean\) => void/);
+  assert.match(cardSource, /<SwitchControl/);
+  assert.doesNotMatch(cardSource, /SegmentedSwitch/);
+  assert.match(gatewaySource, /handleConnectionToggle/);
+  assert.match(gatewaySource, /api\.dshClientConnect\(\)/);
+  assert.match(gatewaySource, /api\.dshClientDisconnect\(\)/);
+  assert.match(enSource, /connectClientDone:/);
+  assert.match(zhSource, /connectClientDone:/);
 });
 
-test("gateway client stale CodexHub route is shown as reapply state", async () => {
+test("gateway client stale CodexHub route is shown as repair state", async () => {
   const [cardSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
 
-  assert.match(cardSource, /type DisplayRouteMode = RoutingOwner \| "hub" \| "stale" \| "unknown";/);
-  assert.match(cardSource, /type ClientStatusKind = "checking" \| "not_installed" \| "installed" \| "ready" \| "pending_sync" \| "unknown";/);
-  assert.match(cardSource, /const routeValue = routeOwner === "official" \? "official" : "current_owner";/);
-  assert.match(cardSource, /routeMode === "stale"[\s\S]*\? "pending_sync"/);
-  assert.match(cardSource, /statusKind === "pending_sync"[\s\S]*t\("gateway\.routePendingSync"\)/);
-  assert.match(zhSource, /routePendingSync: "未更新"/);
-  assert.match(cardSource, /statusKind === "ready"[\s\S]*t\("gateway\.routeReady"\)/);
-  assert.match(cardSource, /routeMode === "stale"[\s\S]*t\("gateway\.routePendingSyncTitle"\)/);
-  assert.match(cardSource, /onClick=\{\(\) => onSwitchMode\("current_owner"\)\}/);
-  assert.match(cardSource, /statusKind === "not_installed" \? "bg-panel opacity-75 grayscale" : "bg-surface"/);
-  assert.match(cardSource, /grid-cols-\[56px_minmax\(0,1fr\)\]/);
-  assert.match(cardSource, /<code className="truncate text-left font-mono">/);
-  assert.match(cardSource, /info\?\.route_mode === "official" \|\|[\s\S]*info\?\.route_mode === "release" \|\|[\s\S]*info\?\.route_mode === "beta" \|\|[\s\S]*info\?\.route_mode === "hub" \|\|[\s\S]*info\?\.route_mode === "stale"/);
+  assert.match(cardSource, /info\.route_mode === "stale"/);
+  assert.match(cardSource, /t\("gateway\.connectionRepair"\)/);
+  assert.match(cardSource, /t\("gateway\.configDriftRepair"\)/);
+  assert.match(zhSource, /connectionRepair: "需修复"/);
+  assert.match(cardSource, /onRepair=\{\(\) => onToggle\(true\)\}/);
+  assert.match(cardSource, /state === "unavailable" && "opacity-55"/);
+  assert.doesNotMatch(cardSource, /gateway\.routeReady/);
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -1711,7 +1710,7 @@ test("gateway foreign-channel routes render as ready instead of unknown", async 
   assert.match(typesSource, /route_mode: GatewayClientRouteMode;/);
   assert.match(
     cardSource,
-    /info\?\.route_mode === "other_channel"[\s\S]*info\.route_owner === "release" \|\| info\.route_owner === "beta"[\s\S]*return info\.route_owner/,
+    /info\.route_mode === "other_channel"[\s\S]*info\.route_owner === "release" \|\| info\.route_owner === "beta"[\s\S]*return "connected"/,
   );
 });
 
@@ -1799,8 +1798,8 @@ test("settings save restarts running gateway when retry or image proxy runtime s
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
-  assert.match(cardSource, /min-h-\[136px\]/);
-  assert.match(cardSource, /t\("gateway\.versionNotChecked"\)/);
+  assert.match(cardSource, /currentVersion &&/);
+  assert.doesNotMatch(cardSource, /min-h-\[136px\]/);
   assert.doesNotMatch(cardSource, /manualUpdateAvailable/);
   assert.doesNotMatch(cardSource, /noUpdateAction/);
   assert.doesNotMatch(cardSource, /<button[\s\S]*?\{hasUpdate \? "Manual" : "Update"\}/);
@@ -1831,11 +1830,12 @@ test("providers page uses stable zero-min split columns", async () => {
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
   const appSource = await readFile(appPath, "utf8");
 
-  assert.match(appSource, /h-screen min-h-\[720px\] min-w-0/);
+  assert.match(appSource, /<FitStage>/);
+  assert.match(appSource, /h-full min-h-0 min-w-0/);
   assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
   assert.match(appSource, /<div className="relative min-h-0 min-w-0 max-w-full overflow-hidden">/);
   assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">/);
-  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">/);
+  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-hidden">/);
   assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 
@@ -2484,6 +2484,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
   assert.match(mainSource, /open_codex_app,/);
   assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*Get-StartApps[\s\S]*Start-Process \('shell:AppsFolder\\' \+ \$app\.AppID\)/);
+  assert.match(mainSource, /fn detect_codex_desktop_executable\(\) -> Option<std::path::PathBuf>/);
+  assert.match(mainSource, /\/usr\/lib\/chatgpt\/codex-launcher/);
   assert.match(webBridgeSource, /"open_codex_app" => to_value\(crate::open_codex_app\(\)\)/);
   assert.match(enSource, /codexAuthRequiredTitle: "Sign in to Codex"/);
   assert.match(zhSource, /codexAuthRequiredTitle: "需要登录 Codex"/);
@@ -3121,7 +3123,7 @@ test("settings drawer places version updates at the bottom and keeps backdrop bl
   assert.match(zhSource, /installUpdate: "安装更新"/);
 });
 
-test("gateway client takeover stays inside the original two-option control", async () => {
+test("gateway client takeover stays behind the connection toggle", async () => {
   const [cardSource, typesSource, tauriSource, gatewaySource, enSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
     readFile(typesPath, "utf8"),
@@ -3136,16 +3138,10 @@ test("gateway client takeover stays inside the original two-option control", asy
   assert.match(tauriSource, /getAppFlavor/);
   assert.match(tauriSource, /forceTakeover/);
   assert.doesNotMatch(cardSource, /ROUTING_OWNER_STYLES|hostPort\(|route_endpoint/);
-  assert.doesNotMatch(cardSource, /\{t\("gateway\.takeover"\)\}/);
-  assert.match(cardSource, /const takeoverRequired = routeOwner !== "official" && info\?\.managed_by_current_app === false/);
-  assert.match(cardSource, /<SegmentedSwitch/);
-  assert.match(cardSource, /activeTone=\{takeoverRequired \? "foreign" : "default"\}/);
-  assert.match(cardSource, /takeoverRequired && mode === "current_owner" \? "takeover" : mode/);
-  assert.match(cardSource, /`\$\{t\("common\.codexHub"\)\} · \$\{routeOwnerLabel\}`/);
-  assert.match(cardSource, /runtimeOwner: RoutingOwner \| null/);
-  assert.match(cardSource, /ownerUnavailable/);
-  assert.match(gatewaySource, /takeover/i);
-  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
+  assert.doesNotMatch(cardSource, /SegmentedSwitch/);
+  assert.match(cardSource, /<SwitchControl/);
+  assert.match(gatewaySource, /takeoverRequired/);
+  assert.match(gatewaySource, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
   assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
   assert.doesNotMatch(gatewaySource, /routing_owner \?\? "release"/);
   assert.match(enSource, /managedByRelease/);
@@ -3234,7 +3230,7 @@ test("gateway takeover is direct and does not add a confirmation surface", async
 
   assert.doesNotMatch(gatewaySource, /window\.confirm/);
   assert.doesNotMatch(gatewaySource, /TakeoverSummaryDialog/);
-  assert.match(gatewaySource, /action === "takeover"[\s\S]*switchClientMode\(clientId, runtimeOwner, true\)/);
+  assert.match(gatewaySource, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
 });
 
 test("startup update check is delayed and silent on failure", async () => {
@@ -3346,7 +3342,7 @@ test("debug diagnostics open from Recovery in a localized accessible overlay", a
 test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
   const leftColumn = gatewaySource.match(
-    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
   )?.[0] ?? "";
 
   assert.ok(leftColumn, "Gateway left column should restore three rows");

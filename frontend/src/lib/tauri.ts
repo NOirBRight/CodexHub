@@ -16,6 +16,7 @@ import type {
   GatewayClientConfig,
   GatewayClientApplyResult,
   GatewayClientConfigPreview,
+  DshLifecycleReport,
   GatewayClientInfo,
   GatewayClientSyncSummary,
   GatewayEvent,
@@ -274,6 +275,9 @@ export const api = {
       includeVersions,
       include_versions: includeVersions,
     }),
+  dshClientConnect: () => call<DshLifecycleReport>("dsh_client_connect"),
+  dshClientDisconnect: () => call<DshLifecycleReport>("dsh_client_disconnect"),
+  dshClientReadback: () => call<DshLifecycleReport>("dsh_client_readback"),
   previewGatewayClientConfig: (clientId: string, model?: string | null) =>
     call<GatewayClientConfigPreview>("preview_gateway_client_config", {
       clientId,

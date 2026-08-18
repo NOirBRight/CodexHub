@@ -58,7 +58,7 @@ CodexHub Desktop App
 7. 启用需要暴露给 Codex/Gateway 的模型，刷新模型目录后回到 Codex 选择模型使用。
 8. 需要接入其他编程工具时，打开 Gateway 页面，复制通用连接信息或对支持的客户端执行托管配置。
 
-发布版安装包随附普通使用所需的运行时；普通用户不需要额外安装 Python、Node.js 或 Rust。从源码开发时仍需要本机具备 Node.js、Rust/Tauri 工具链和 Python 运行环境。
+Windows 发布版安装包随附普通使用所需的运行时。Linux 的 AppImage/deb/portable 目前需要本机 Python 3.13+，除非产物中带有 `python/bin/python`。从源码开发时仍需要本机具备 Node.js、Rust/Tauri 工具链和 Python 运行环境。
 
 ## Normal 与 Debug 构建风味
 
@@ -80,6 +80,17 @@ CodexHub Desktop App
 .\scripts\build-windows-release.ps1 -Flavor normal
 .\scripts\build-windows-release.ps1 -Flavor debug
 ```
+
+Linux 使用同一套风味和 updater 端点。当前 Linux 发布门是 portable tarball 加上 AppImage/deb，不替代 Windows 真机 E2E 主机。
+
+```bash
+./scripts/build-linux-portable.sh --dry-run
+./scripts/build-linux-portable.sh --flavor debug --dry-run
+./scripts/build-linux-portable.sh
+./scripts/build-linux-release.sh --flavor normal
+```
+
+产物名称见 `docs/agents/linux-packaging.md`。Windows 安装包仍内嵌 CPython；Linux 包默认使用本机 Python 3.13+，除非可执行文件旁提供了 `python/bin/python`。
 
 两个安装包和两个 manifest 属于同一个 GitHub Release tag。Debug manifest 会声明风味和产物名称；不匹配会在下载和安装前被拒绝。没有风味元数据的 normal manifest 只会在其指向历史 normal 产物名称时被接受，以保持已安装 normal 用户的更新兼容性。
 
