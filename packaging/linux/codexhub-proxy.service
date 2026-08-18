@@ -1,0 +1,13 @@
+[Unit]
+Description=CodexHub local Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/CodexHub
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

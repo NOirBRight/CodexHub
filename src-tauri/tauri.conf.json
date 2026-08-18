@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "appimage", "deb"],
     "createUpdaterArtifacts": true,
     "resources": {
       "../config/*.toml": "config",
@@ -45,6 +45,19 @@
     "windows": {
       "nsis": {
         "installerHooks": "windows/nsis-hooks.nsh"
+      }
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "section": "utils",
+        "priority": "optional",
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
       }
     }
   },

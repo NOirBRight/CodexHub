@@ -39,6 +39,26 @@ function Get-ReleaseArtifactName {
     return "CodexHub_${Version}${suffix}_x64-setup.exe"
 }
 
+function Get-LinuxReleaseArtifactName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("normal", "debug")]
+        [string]$Flavor,
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("appimage", "deb")]
+        [string]$Kind
+    )
+
+    $suffix = if ($Flavor -eq "debug") { "_debug" } else { "" }
+    switch ($Kind) {
+        "appimage" { return "CodexHub_${Version}${suffix}_amd64.AppImage" }
+        "deb" { return "CodexHub_${Version}${suffix}_amd64.deb" }
+    }
+}
+
 function Get-ReleaseManifestName {
     [CmdletBinding()]
     param(

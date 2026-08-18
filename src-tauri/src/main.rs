@@ -1054,7 +1054,33 @@ Write-Output ('Opened Codex App via ' + $app.AppID)
 
 #[cfg(not(target_os = "windows"))]
 fn launch_codex_app() -> Result<String, String> {
-    Err("Open Codex App is currently implemented on Windows only. Run `codex login` from a terminal to sign in.".to_string())
+    let path = detect_codex_desktop_executable().ok_or_else(|| {
+        "Codex App is not installed. Install the ChatGPT desktop package or set CODEXHUB_CODEX_DESKTOP.".to_string()
+    })?;
+    Command::new(&path)
+        .spawn()
+        .map_err(|error| format!("failed to open Codex App at {}: {error}", path.display()))?;
+    Ok(format!("Opened Codex App via {}", path.display()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_codex_desktop_executable() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("CODEXHUB_CODEX_DESKTOP")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+    {
+        candidates.push(path);
+    }
+    if let Ok(path) = which::which("chatgpt") {
+        candidates.push(path);
+    }
+    candidates.push(std::path::PathBuf::from("/usr/lib/chatgpt/codex-launcher"));
+    candidates.push(std::path::PathBuf::from("/usr/bin/chatgpt"));
+    if let Ok(path) = which::which("Codex") {
+        candidates.push(path);
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(desktop)]
@@ -1110,7 +1136,9 @@ fn run_gui() {
                 runtime_paths::set_resource_root(resource_dir);
             }
             #[cfg(desktop)]
-            setup_tray(app)?;
+            if let Err(error) = setup_tray(app) {
+                log::warn!("failed to setup tray icon: {error}");
+            }
             gateway::start_telemetry_ingester();
             web_bridge::start_background(app.handle().clone())?;
             start_gateway_on_launch();

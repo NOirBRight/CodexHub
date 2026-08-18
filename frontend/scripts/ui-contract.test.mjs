@@ -2484,6 +2484,8 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
   assert.match(mainSource, /open_codex_app,/);
   assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*Get-StartApps[\s\S]*Start-Process \('shell:AppsFolder\\' \+ \$app\.AppID\)/);
+  assert.match(mainSource, /fn detect_codex_desktop_executable\(\) -> Option<std::path::PathBuf>/);
+  assert.match(mainSource, /\/usr\/lib\/chatgpt\/codex-launcher/);
   assert.match(webBridgeSource, /"open_codex_app" => to_value\(crate::open_codex_app\(\)\)/);
   assert.match(enSource, /codexAuthRequiredTitle: "Sign in to Codex"/);
   assert.match(zhSource, /codexAuthRequiredTitle: "需要登录 Codex"/);
