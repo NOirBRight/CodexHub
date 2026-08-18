@@ -333,6 +333,9 @@ def test_release_plan_places_both_flavors_in_one_immutable_release(tmp_path):
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
     assert plan["flavor"] == "debug"
+    assert plan["updater_endpoint"] == (
+        "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest-debug.json"
+    )
     assert plan["manifest"] == {
         "name": "latest-debug.json",
         "asset_url": "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
@@ -360,6 +363,9 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
 
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
+    assert plan["updater_endpoint"] == (
+        "https://github.com/NOirBRight/CodexHub/releases/download/beta/latest.json"
+    )
     assert plan["manifest"] == {
         "name": "latest.json",
         "asset_url": (
@@ -369,6 +375,12 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
     }
     assert plan["immutable_release"]["tag"] == "v0.1.8-beta.4.1"
     assert plan["immutable_release"]["prerelease"] is True
+    assert plan["channel_release"] == {
+        "tag": "beta",
+        "prerelease": True,
+        "latest": False,
+        "assets": ["latest.json"],
+    }
     assert plan["immutable_release"]["assets"] == [
         "CodexHub_0.1.8-beta.4.1_x64-setup.exe",
         "CodexHub_0.1.8-beta.4.1_x64-setup.exe.sig",
@@ -501,4 +513,6 @@ def test_release_scripts_share_flavor_validation_helpers():
     assert "Assert-ReleaseVersion" in manifest_script
     assert "Get-ReleaseArtifactName" in helpers
     assert "Get-ReleaseManifestName" in helpers
+    assert "Get-UpdaterEndpoint" in helpers
+    assert "Get-UpdaterChannelTag" in helpers
     assert "Get-FlavorTargetRoot" in helpers

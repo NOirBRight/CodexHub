@@ -42,7 +42,7 @@ if (
     [string]$generatedTauriConfig.productName -ne [string]$flavorConfig.productName -or
     [string]$generatedTauriConfig.identifier -ne [string]$flavorConfig.identifier -or
     [string]$generatedTauriConfig.app.windows[0].title -ne [string]$flavorConfig.windowTitle -or
-    $generatedEndpoint -ne [string]$flavorConfig.updaterEndpoint
+    $generatedEndpoint -ne (Get-UpdaterEndpoint -Flavor $Flavor -Version $version)
 ) {
     throw "Generated Tauri config does not match the requested $Flavor flavor."
 }

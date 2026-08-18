@@ -48,19 +48,9 @@ impl BuildFlavor {
     pub fn updater_endpoint(self) -> String {
         format!(
             "https://github.com/NOirBRight/CodexHub/releases/{}/{}",
-            self.updater_feed_release(),
+            updater_feed_path(env!("CARGO_PKG_VERSION")),
             self.updater_manifest_name()
         )
-    }
-
-    pub const fn updater_feed_release(self) -> &'static str {
-        if cfg!(target_os = "linux") {
-            // GitHub Latest stays v0.1.7 (Windows-only). Linux betas read this
-            // prerelease latest.json; overwrite that file to ship the next AppImage.
-            "download/v0.1.9-beta.1.1"
-        } else {
-            "latest/download"
-        }
     }
 
     pub fn installer_name(self, version: &str) -> String {
@@ -104,6 +94,22 @@ pub struct BuildInfo {
     pub diagnostics_enabled: bool,
 }
 
+pub fn version_is_prerelease(version: &str) -> bool {
+    version
+        .split_once('+')
+        .map(|(core, _)| core)
+        .unwrap_or(version)
+        .contains('-')
+}
+
+pub fn updater_feed_path(version: &str) -> &'static str {
+    if version_is_prerelease(version) {
+        "download/beta"
+    } else {
+        "latest/download"
+    }
+}
+
 pub fn current() -> BuildInfo {
     let flavor = BuildFlavor::from_name(option_env!("CODEXHUB_BUILD_FLAVOR").unwrap_or("normal"))
         .expect("build.rs must provide a valid CodexHub build flavor");
@@ -135,29 +141,27 @@ mod tests {
     }
 
     #[test]
-    fn updater_endpoint_keeps_windows_on_github_latest_and_linux_on_the_beta_feed() {
-        let endpoint = BuildFlavor::Normal.updater_endpoint();
-        let debug_endpoint = BuildFlavor::Debug.updater_endpoint();
-
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                endpoint,
-                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/latest.json"
-            );
-            assert_eq!(
-                debug_endpoint,
-                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/latest-debug.json"
-            );
-        } else {
-            assert_eq!(
-                endpoint,
-                "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json"
-            );
-            assert_eq!(
-                debug_endpoint,
-                "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest-debug.json"
-            );
-        }
+    fn prerelease_versions_use_the_beta_updater_feed() {
+        assert!(version_is_prerelease("0.1.9-beta.1.1"));
+        assert!(version_is_prerelease("0.1.9-beta.1.1+local"));
+        assert!(!version_is_prerelease("0.1.7"));
+        assert!(!version_is_prerelease("0.1.7+build"));
+        assert_eq!(updater_feed_path("0.1.9-beta.1.1"), "download/beta");
+        assert_eq!(updater_feed_path("0.1.7"), "latest/download");
+        assert_eq!(
+            BuildFlavor::Normal.updater_endpoint(),
+            format!(
+                "https://github.com/NOirBRight/CodexHub/releases/{}/latest.json",
+                updater_feed_path(env!("CARGO_PKG_VERSION"))
+            )
+        );
+        assert_eq!(
+            BuildFlavor::Debug.updater_endpoint(),
+            format!(
+                "https://github.com/NOirBRight/CodexHub/releases/{}/latest-debug.json",
+                updater_feed_path(env!("CARGO_PKG_VERSION"))
+            )
+        );
     }
 
     #[test]

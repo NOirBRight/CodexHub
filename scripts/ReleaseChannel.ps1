@@ -59,6 +59,36 @@ function Get-LinuxReleaseArtifactName {
     }
 }
 
+function Get-UpdaterChannelTag {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    if (Test-ReleaseVersionIsPrerelease -Version $Version) {
+        return "beta"
+    }
+    return "latest"
+}
+
+function Get-UpdaterEndpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("normal", "debug")]
+        [string]$Flavor,
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $manifestName = Get-ReleaseManifestName -Flavor $Flavor
+    if ((Get-UpdaterChannelTag -Version $Version) -eq "beta") {
+        return "https://github.com/NOirBRight/CodexHub/releases/download/beta/$manifestName"
+    }
+    return "https://github.com/NOirBRight/CodexHub/releases/latest/download/$manifestName"
+}
+
 function Get-ReleaseManifestName {
     [CmdletBinding()]
     param(

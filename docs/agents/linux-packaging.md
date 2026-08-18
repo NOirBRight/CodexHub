@@ -18,10 +18,13 @@ Updater platform key: `linux-x86_64`. `scripts/build-linux-release.sh` writes
 `latest.json` / `latest-debug.json` with that key and the signed AppImage.
 The Windows release script still writes `windows-x86_64`. A combined ship
 keeps both keys in one payload; do not invent a second product channel.
-Linux auto-update is AppImage-only. The live endpoint remains
-`releases/latest/download/latest.json`; prereleases are not that Latest
-release, so a Beta tester must install this build first and then point a
-newer signed AppImage at a reachable `latest.json`.
+
+Stable builds check `releases/latest/download/latest.json` (GitHub Latest,
+currently `v0.1.7`). SemVer prerelease builds check the Beta channel at
+`releases/download/beta/latest.json`. That `beta` tag is a rolling prerelease
+and is never marked Latest. Versioned artifacts stay on `v<version>`; each
+Beta ship overwrites the `beta` feed's `latest.json` so the next Beta is
+offered. Linux auto-update is AppImage-only.
 
 ## Build
 

@@ -3178,8 +3178,10 @@ test("linux release writes a signed AppImage updater manifest", async () => {
   assert.match(appUpdatesSource, /UPDATER_PLATFORM_LINUX/);
   assert.match(buildInfoSource, /linux_appimage_name/);
   assert.match(buildInfoSource, /amd64\.AppImage/);
-  assert.match(buildInfoSource, /download\/v0\.1\.9-beta\.1\.1/);
+  assert.match(buildInfoSource, /download\/beta/);
   assert.match(buildInfoSource, /latest\/download/);
+  assert.match(buildInfoSource, /fn version_is_prerelease/);
+  assert.match(buildInfoSource, /fn updater_feed_path/);
 });
 
 test("app update e2e script supports normal and debug manifests", async () => {

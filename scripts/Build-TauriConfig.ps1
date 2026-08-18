@@ -15,6 +15,7 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = Split-Path -Parent $scriptRoot
 }
+. (Join-Path $scriptRoot "ReleaseChannel.ps1")
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $RepoRoot ".generated\tauri\$Flavor"
@@ -33,7 +34,7 @@ $config.productName = [string]$flavorConfig.productName
 $config.identifier = [string]$flavorConfig.identifier
 $config.build.devUrl = "http://localhost:$($flavorConfig.frontendPort)"
 $config.app.windows[0].title = [string]$flavorConfig.windowTitle
-$config.plugins.updater.endpoints = @([string]$flavorConfig.updaterEndpoint)
+$config.plugins.updater.endpoints = @(Get-UpdaterEndpoint -Flavor $Flavor -Version ([string]$config.version))
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 $outputPath = Join-Path $OutputRoot "tauri.$Flavor.conf.json"

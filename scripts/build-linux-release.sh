@@ -147,6 +147,7 @@ echo "  Deb:      $deb_dst"
 echo "  Signature:$appimage_dst.sig"
 echo "  Manifest: $manifest_path"
 echo "  Updater platform key: linux-x86_64"
+echo "  Updater endpoint: $updaterEndpoint"
 if [[ -n "$notes" ]]; then
   echo "  Notes: $notes"
 fi

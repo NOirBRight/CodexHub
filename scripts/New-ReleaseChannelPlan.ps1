@@ -47,11 +47,13 @@ $debugManifest = Get-ReleaseManifestName -Flavor "debug"
 $normalPortable = "CodexHub_{0}_portable_{1}.zip" -f $Version, $commitSha.Substring(0, 8)
 $selectedInstaller = Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
 $selectedManifest = Get-ReleaseManifestName -Flavor $Flavor
+$channelTag = Get-UpdaterChannelTag -Version $Version
 $plan = [ordered]@{
     flavor = $Flavor
     version = $Version
     commit = $commitSha
     dry_run = $true
+    updater_endpoint = (Get-UpdaterEndpoint -Flavor $Flavor -Version $Version)
     manifest = [ordered]@{
         name = $selectedManifest
         asset_url = "https://github.com/NOirBRight/CodexHub/releases/download/v$Version/$selectedInstaller"
@@ -69,7 +71,16 @@ $plan = [ordered]@{
             $debugManifest
         )
     }
-    channel_release = $null
+    channel_release = if ($channelTag -eq "beta") {
+        [ordered]@{
+            tag = "beta"
+            prerelease = $true
+            latest = $false
+            assets = @($selectedManifest)
+        }
+    } else {
+        $null
+    }
 }
 
 $plan | ConvertTo-Json -Depth 8 -Compress
