@@ -184,7 +184,7 @@ export function OfficialOpenAIUsageLimitBars({
   const usingPlaceholders = !visibleLimits.length;
 
   return (
-    <div className="grid w-[252px] shrink-0 grid-cols-2 gap-2">
+    <div className="grid min-w-0 max-w-[252px] grid-cols-2 gap-2">
       {renderedLimits.map((limit) => {
         const label = usageLimitPeriodLabel(limit, t as Translate);
         const endTime = usingPlaceholders
@@ -320,7 +320,7 @@ export function OfficialOpenAIUsagePanel({
   }
 
   return (
-    <section className="grid gap-3 rounded-inner bg-panel-soft p-3 shadow-hairline">
+    <section className="grid min-w-0 gap-3 rounded-inner bg-panel-soft p-3 shadow-hairline">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <h3 className="truncate text-sm font-semibold text-ink">{t("providers.openaiUsage")}</h3>
@@ -350,7 +350,7 @@ export function OfficialOpenAIUsagePanel({
         <OfficialOpenAIUsageSkeleton label={t("providers.loadingOpenAIUsage")} />
       ) : (
         <>
-          <div className="grid grid-cols-5 gap-2 text-xs">
+          <div className="grid grid-cols-[repeat(5,minmax(0,1fr))] gap-2 text-xs">
             <UsageMetric
               label={t("gateway.tokens")}
               value={snapshot ? formatUsageNumber(snapshot.total_tokens, locale) : t("common.unknown")}
@@ -375,12 +375,12 @@ export function OfficialOpenAIUsagePanel({
 
           <div
             ref={chartHostRef}
-            className="relative min-w-0 overflow-visible rounded-inner bg-surface px-3 py-2 shadow-control"
+            className="relative min-w-0 max-w-full overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control"
             data-openai-usage-chart
             onPointerLeave={() => setHoveredUsageCell(null)}
           >
             {snapshot && days.length ? (
-              <div className="overflow-hidden">
+              <div className="max-w-full overflow-x-auto overflow-y-hidden">
                 <div
                   className="grid"
                   role="img"
@@ -461,7 +461,7 @@ function OfficialOpenAIUsageSkeleton({ label }: { label: string }) {
 
   return (
     <div className="grid gap-3 animate-pulse" role="status" aria-label={label}>
-      <div className="grid grid-cols-5 gap-2 text-xs" aria-hidden="true">
+      <div className="grid grid-cols-[repeat(5,minmax(0,1fr))] gap-2 text-xs" aria-hidden="true">
         {Array.from({ length: 5 }, (_, index) => (
           <div
             key={`metric-${index}`}

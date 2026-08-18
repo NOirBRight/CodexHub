@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { FitStage } from "./components/FitStage";
+import { WindowResizeHandles } from "./components/WindowResizeHandles";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
@@ -1071,7 +1072,8 @@ export default function App() {
 
   return (
     <FitStage>
-    <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+    <div className="relative grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+      <WindowResizeHandles />
       <RuntimeBar
         appFlavor={appFlavor}
         busy={busy}
@@ -1100,7 +1102,7 @@ export default function App() {
             )}
           </button>
         ))}
-        <span className="ml-auto hidden truncate text-xs text-slate-400 lg:block">
+        <span className="ml-auto hidden truncate text-xs text-slate-400 xl:block">
           {t("runtime.gatewayHint")}
         </span>
       </nav>

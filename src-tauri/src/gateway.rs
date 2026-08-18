@@ -3657,22 +3657,44 @@ fn gateway_client_status(installed: bool, route_mode: &str) -> String {
     }
 }
 
-fn detect_zcode_config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CODEXHUB_ZCODE_CONFIG")
+fn nonempty_os_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-    {
+}
+
+fn zcode_os_config_root_from(
+    appdata: Option<PathBuf>,
+    xdg_config: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = appdata.filter(|path| !path.as_os_str().is_empty()) {
+        return path.join("ZCode");
+    }
+    if let Some(path) = xdg_config.filter(|path| !path.as_os_str().is_empty()) {
+        return path.join("ZCode");
+    }
+    home.filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".config")
+        .join("ZCode")
+}
+
+fn zcode_os_config_root() -> PathBuf {
+    zcode_os_config_root_from(
+        nonempty_os_path("APPDATA"),
+        nonempty_os_path("XDG_CONFIG_HOME"),
+        dirs::home_dir(),
+    )
+}
+
+fn detect_zcode_config_path() -> PathBuf {
+    if let Some(path) = nonempty_os_path("CODEXHUB_ZCODE_CONFIG") {
         return path;
     }
-    std::env::var_os("APPDATA")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join("ZCode")
-                .join("model-providers")
-                .join("codexhub.json")
-        })
-        .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode/model-providers/codexhub.json"))
+    zcode_os_config_root()
+        .join("model-providers")
+        .join("codexhub.json")
 }
 
 fn detect_zcode_config_targets() -> ZcodeConfigTargets {
@@ -3746,15 +3768,9 @@ fn zcode_v2_root_from_data_base_dir(data_base_dir: &Path) -> PathBuf {
 }
 
 fn detect_zcode_store_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join("ZCode")
-                .join("rum-electron-store")
-                .join("ZGVmYXVsdA.json")
-        })
-        .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode/rum-electron-store/ZGVmYXVsdA.json"))
+    zcode_os_config_root()
+        .join("rum-electron-store")
+        .join("ZGVmYXVsdA.json")
 }
 
 fn detect_zcode_executable_path() -> Option<PathBuf> {
@@ -7129,7 +7145,8 @@ mod tests {
         read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,
-        sanitize_event, sanitize_text, usage_pricing_by_model, zcode_catalog_text, UsagePricing,
+        sanitize_event, sanitize_text, usage_pricing_by_model, zcode_catalog_text,
+        zcode_os_config_root_from, UsagePricing,
     };
     use crate::{Model, Provider, Settings, UpstreamFormat};
     use serde_json::json;
@@ -7151,6 +7168,31 @@ mod tests {
             .iter()
             .map(|(id, context_window)| ((*id).to_string(), *context_window))
             .collect()
+    }
+
+    #[test]
+    fn zcode_os_config_root_prefers_appdata_then_xdg_then_home() {
+        assert_eq!(
+            zcode_os_config_root_from(
+                Some(PathBuf::from("/roaming")),
+                Some(PathBuf::from("/xdg")),
+                Some(PathBuf::from("/home/u")),
+            ),
+            PathBuf::from("/roaming/ZCode")
+        );
+        assert_eq!(
+            zcode_os_config_root_from(None, Some(PathBuf::from("/xdg")), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/xdg/ZCode")
+        );
+        assert_eq!(
+            zcode_os_config_root_from(None, None, Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.config/ZCode")
+        );
+        assert!(
+            !zcode_os_config_root_from(None, None, Some(PathBuf::from("/home/u")))
+                .to_string_lossy()
+                .contains("%APPDATA%")
+        );
     }
 
     fn stable_root(path: PathBuf) -> (PathBuf, super::BackupChannel) {

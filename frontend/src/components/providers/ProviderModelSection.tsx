@@ -139,7 +139,7 @@ export function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap text-xs text-slate-500">
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
         {modelCapabilityTags(model).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -262,15 +262,15 @@ export function ModelSection({
         interactionDisabled && "text-slate-400",
       )}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{t("common.models")}</h3>
           <p className="mt-1 text-xs text-slate-500">{t("providers.configured", { count: models.length })}</p>
-          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
+          <p className="mt-1 truncate text-xs leading-4 text-slate-500">
             {t("providers.appsMaySortModels")}
           </p>
         </div>
-        <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+        <div className="flex shrink-0 items-center justify-end gap-2">
           {headerControl}
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
@@ -285,10 +285,12 @@ export function ModelSection({
                 headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
               )}
               disabled={interactionDisabled || refreshBusy}
+              aria-label={t("common.refresh")}
+              title={t("common.refresh")}
               onClick={onRefresh}
             >
               <RefreshCcw size={16} />
-              {t("common.refresh")}
+              {!headerControl && t("common.refresh")}
             </button>
           )}
           {onDiscover && (
@@ -319,7 +321,7 @@ export function ModelSection({
         className={cx(
           "min-h-0 overflow-auto",
           interactionDisabled && "opacity-60 grayscale",
-          modelListHasOverflow && "-mr-5 pr-1",
+          modelListHasOverflow && "-mr-5 pr-3",
         )}
       >
         {models.length === 0 ? (

@@ -230,13 +230,27 @@ fn parse_flavor_manifest(
 
 #[cfg(test)]
 fn validate_flavor_manifest(manifest: &str, expected_flavor: BuildFlavor) -> Result<(), String> {
+    validate_flavor_manifest_for(
+        manifest,
+        expected_flavor,
+        build_info::UPDATER_PLATFORM_WINDOWS,
+    )
+}
+
+#[cfg(test)]
+fn validate_flavor_manifest_for(
+    manifest: &str,
+    expected_flavor: BuildFlavor,
+    platform: &str,
+) -> Result<(), String> {
     let manifest = parse_flavor_manifest(manifest, expected_flavor)?;
-    validate_flavor_manifest_data(&manifest, expected_flavor)
+    validate_flavor_manifest_data(&manifest, expected_flavor, platform)
 }
 
 fn validate_flavor_manifest_data(
     manifest: &FlavorUpdateManifest,
     expected_flavor: BuildFlavor,
+    platform_key: &str,
 ) -> Result<(), String> {
     let version = manifest.version.trim();
     if version.is_empty() {
@@ -264,9 +278,9 @@ fn validate_flavor_manifest_data(
         }
     }
 
-    let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
+    let platform = manifest.platforms.get(platform_key).ok_or_else(|| {
         format!(
-            "Rejected {} update manifest: windows-x86_64 artifact is missing.",
+            "Rejected {} update manifest: {platform_key} artifact is missing.",
             expected_flavor.as_str()
         )
     })?;
@@ -283,7 +297,7 @@ fn validate_flavor_manifest_data(
             expected_flavor.as_str()
         )
     })?;
-    let expected_name = expected_flavor.installer_name(version);
+    let expected_name = expected_flavor.artifact_name(version, platform_key)?;
     if !url.path().ends_with(&format!("/{expected_name}")) {
         return Err(format!(
             "Rejected {} update manifest: expected artifact {expected_name}, got {}.",
@@ -307,6 +321,7 @@ fn validate_checked_update(update: &Update, expected_flavor: BuildFlavor) -> Res
         &update.version,
         update.download_url.as_str(),
         expected_flavor,
+        build_info::current_updater_platform(),
     )
 }
 
@@ -315,9 +330,10 @@ fn validate_checked_update_payload(
     selected_version: &str,
     selected_download_url: &str,
     expected_flavor: BuildFlavor,
+    platform_key: &str,
 ) -> Result<(), String> {
     let manifest = parse_flavor_manifest(raw_manifest, expected_flavor)?;
-    validate_flavor_manifest_data(&manifest, expected_flavor)?;
+    validate_flavor_manifest_data(&manifest, expected_flavor, platform_key)?;
 
     let manifest_version = manifest.version.trim();
     if manifest_version != selected_version.trim() {
@@ -335,7 +351,7 @@ fn validate_checked_update_payload(
             expected_flavor.as_str()
         )
     })?;
-    let expected_name = expected_flavor.installer_name(manifest_version);
+    let expected_name = expected_flavor.artifact_name(manifest_version, platform_key)?;
     if !selected_url.path().ends_with(&format!("/{expected_name}")) {
         return Err(format!(
             "Rejected {} update: updater selected {}, expected {expected_name}.",
@@ -818,6 +834,7 @@ mod tests {
             "0.1.5",
             "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
             BuildFlavor::Debug,
+            build_info::UPDATER_PLATFORM_WINDOWS,
         )
         .expect_err("debug must reject a checked update that selects the normal artifact");
 
@@ -838,6 +855,7 @@ mod tests {
                 "0.1.5",
                 "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
                 BuildFlavor::Normal,
+                build_info::UPDATER_PLATFORM_WINDOWS,
             ),
             Ok(())
         );
@@ -967,11 +985,115 @@ mod tests {
         assert!(checked_at_now().starts_with("unix:"));
     }
 
+    #[test]
+    fn linux_manifest_accepts_appimage_on_linux_platform() {
+        let manifest = flavor_manifest_for_platform(
+            Some("normal"),
+            "0.1.9-beta.1.1",
+            build_info::UPDATER_PLATFORM_LINUX,
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_amd64.AppImage",
+        );
+
+        assert_eq!(
+            validate_flavor_manifest_for(
+                &manifest,
+                BuildFlavor::Normal,
+                build_info::UPDATER_PLATFORM_LINUX,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_checked_update_payload(
+                &manifest,
+                "0.1.9-beta.1.1",
+                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_amd64.AppImage",
+                BuildFlavor::Normal,
+                build_info::UPDATER_PLATFORM_LINUX,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn linux_platform_rejects_windows_installer_artifact() {
+        let manifest = flavor_manifest(
+            Some("normal"),
+            "0.1.9-beta.1.1",
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_x64-setup.exe",
+        );
+
+        let error = validate_flavor_manifest_for(
+            &manifest,
+            BuildFlavor::Normal,
+            build_info::UPDATER_PLATFORM_LINUX,
+        )
+        .expect_err("linux must require the AppImage platform key");
+
+        assert!(error.contains("linux-x86_64 artifact is missing"));
+    }
+
+    #[test]
+    fn combined_manifest_validates_the_selected_platform_only() {
+        let mut manifest = serde_json::json!({
+            "version": "0.1.9-beta.1.1",
+            "codexhub_flavor": "normal",
+            "platforms": {
+                "windows-x86_64": {
+                    "signature": "signed-value",
+                    "url": "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_x64-setup.exe"
+                },
+                "linux-x86_64": {
+                    "signature": "signed-value",
+                    "url": "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_amd64.AppImage"
+                }
+            }
+        });
+        let encoded = serde_json::to_string(&manifest).expect("serialize combined manifest");
+
+        assert_eq!(
+            validate_flavor_manifest_for(
+                &encoded,
+                BuildFlavor::Normal,
+                build_info::UPDATER_PLATFORM_WINDOWS,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_flavor_manifest_for(
+                &encoded,
+                BuildFlavor::Normal,
+                build_info::UPDATER_PLATFORM_LINUX,
+            ),
+            Ok(())
+        );
+        manifest["platforms"]["linux-x86_64"]["url"] = serde_json::Value::String(
+            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.9-beta.1.1/CodexHub_0.1.9-beta.1.1_x64-setup.exe"
+                .to_string(),
+        );
+        let mismatched = serde_json::to_string(&manifest).expect("serialize mismatched linux url");
+        let error = validate_flavor_manifest_for(
+            &mismatched,
+            BuildFlavor::Normal,
+            build_info::UPDATER_PLATFORM_LINUX,
+        )
+        .expect_err("linux must reject a Windows installer URL");
+        assert!(error.contains("expected artifact CodexHub_0.1.9-beta.1.1_amd64.AppImage"));
+    }
+
     fn flavor_manifest(flavor: Option<&str>, version: &str, url: &str) -> String {
+        flavor_manifest_for_platform(flavor, version, build_info::UPDATER_PLATFORM_WINDOWS, url)
+    }
+
+    fn flavor_manifest_for_platform(
+        flavor: Option<&str>,
+        version: &str,
+        platform: &str,
+        url: &str,
+    ) -> String {
         let mut manifest = serde_json::json!({
             "version": version,
             "platforms": {
-                "windows-x86_64": {
+                platform: {
                     "signature": "signed-value",
                     "url": url,
                 }

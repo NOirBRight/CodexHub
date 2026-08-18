@@ -220,12 +220,12 @@ export function StackedUsageChartShell({
 
   return (
     <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
-      <div className="flex min-w-0 items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <BarChart3 size={15} className="shrink-0 text-action" />
-          <h2 className="shrink-0 text-sm font-semibold text-ink">{t("usage.usageCost")}</h2>
+          <h2 className="truncate text-sm font-semibold text-ink">{t("usage.usageCost")}</h2>
         </div>
-        <div className="flex shrink-0 items-center justify-end gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           <UsageDropdown
             label={t("usage.metric")}
             open={metricOpen}
@@ -333,7 +333,7 @@ export function StackedUsageChartShell({
         <Metric label={t("gateway.cachedInput")} value={cachedInputLabel(visibleSummary, t("common.unknown"))} title={cachedInputTitle(visibleSummary, tr)} />
       </div>
 
-      <div className="relative min-h-0 overflow-hidden rounded-panel bg-panel shadow-inner">
+      <div className="relative min-h-0 overflow-hidden rounded-inner bg-panel shadow-inner">
         {metric === "token" && !stacked.hasData ? (
           <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} locale={locale} t={tr} />
         ) : (
@@ -376,7 +376,7 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="focus-ring flex h-8 w-[108px] items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
+        className="focus-ring flex h-8 min-w-0 items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
         aria-expanded={open}
         onClick={onToggle}
       >
@@ -640,8 +640,8 @@ function StackedUsageChart({
   }
 
   return (
-    <div className="grid h-full min-h-[260px] p-3">
-      <div className="grid h-full min-h-[220px] grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-0 p-3">
+      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-inner bg-surface/70 shadow-hairline">
         <div className="relative min-h-0">
           <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
             <span title={formatNumber(maxTotal, locale)}>{formatAxisNumber(maxTotal, locale)}</span>
@@ -651,7 +651,7 @@ function StackedUsageChart({
             <span>0</span>
           </div>
           <div
-            className="absolute bottom-8 left-14 right-4 top-6"
+            className="absolute bottom-8 left-12 right-3 top-6 min-w-0"
             onMouseMove={handleHover}
             onMouseLeave={() => setHover(null)}
           >
@@ -743,7 +743,7 @@ function StackedUsageChart({
               </div>
             )}
           </div>
-          <div className="absolute bottom-2 left-14 right-4 h-5 text-center text-[10px] font-semibold text-slate-400">
+          <div className="absolute bottom-2 left-12 right-3 h-5 text-center text-[10px] font-semibold text-slate-400">
             {buckets.map((bucket, index) => (
               <span
                 key={`${bucket.label}-${bucket.start.toISOString()}`}
@@ -837,8 +837,8 @@ function NoTokenChart({
 }) {
   const columns = chartColumns(axis.length);
   return (
-    <div className="grid h-full min-h-[260px] p-3">
-      <div className="grid h-full min-h-[220px] grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-panel bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-0 p-3">
+      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-inner bg-surface/70 shadow-hairline">
         <div className="relative overflow-hidden">
           <div className="absolute inset-x-8 bottom-0 top-4 grid grid-rows-4">
             {Array.from({ length: 4 }).map((_, index) => (

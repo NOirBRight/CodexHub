@@ -860,7 +860,7 @@ function ProvidersPageImpl({
 
   return (
     <>
-    <main className="relative grid h-full min-h-0 min-w-[972px] grid-cols-[430px_minmax(0,1fr)] gap-4 overflow-hidden">
+    <main className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
@@ -1173,12 +1173,12 @@ function OfficialOpenAICard({
   const authChip = codexAuthChip(authState, t as Translate);
 
   return (
-    <section className="relative grid gap-3 overflow-hidden rounded-panel border border-line bg-surface p-3 shadow-card transition-[background-color,border-color,box-shadow] duration-150 ease-out">
+    <section className="relative grid gap-3 overflow-hidden rounded-inner border border-line bg-surface p-3 transition-[background-color,border-color,box-shadow] duration-150 ease-out">
       <div className="rounded-inner text-left">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold">{t("providers.codexDesktop")}</h2>
-            <p className="mt-1 text-xs text-slate-500">{t("providers.codexAppAuth")}</p>
+            <p className="mt-1 truncate text-xs text-slate-500">{t("providers.codexAppAuth")}</p>
           </div>
           <SourceStatusChip {...authChip} />
         </div>
@@ -1197,7 +1197,9 @@ function OfficialOpenAICard({
           toggleLabel={included ? t("providers.openaiSourceIncluded") : t("providers.openaiSourceExcluded")}
         />
       </div>
-      <p className="px-1 text-[11px] leading-4 text-slate-500">{t("providers.openaiExportHint")}</p>
+      <p className="truncate px-1 text-[11px] leading-4 text-slate-500" title={t("providers.openaiExportHint")}>
+        {t("providers.openaiExportHint")}
+      </p>
     </section>
   );
 }
@@ -1301,10 +1303,10 @@ function CodexHubProviderCard({
   return (
     <section
       className={cx(
-        "relative grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-panel border px-3 pt-3 shadow-card transition-[background-color,border-color,box-shadow]",
+        "relative grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 rounded-inner border px-3 pt-3 transition-[background-color,border-color,box-shadow]",
         connected
-          ? "border-emerald-300/70 bg-emerald-50/55 shadow-[0_0_0_1px_rgba(16,185,129,0.08),0_18px_40px_rgba(15,118,110,0.10)]"
-          : "border-transparent bg-surface",
+          ? "border-emerald-300/70 bg-emerald-50/55"
+          : "border-line bg-surface",
         "pb-3",
       )}
     >
@@ -1312,7 +1314,9 @@ function CodexHubProviderCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold">{t("common.codexHub")}</h2>
-          <p className="mt-1 truncate text-xs text-slate-500">{t("providers.externalProviderCatalog")}</p>
+          <p className="mt-1 truncate text-xs text-slate-500" title={t("providers.externalProviderCatalog")}>
+            {t("providers.externalProviderCatalog")}
+          </p>
           <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
             {t("providers.appsMaySortModels")}
           </p>
@@ -1329,7 +1333,7 @@ function CodexHubProviderCard({
 
       <div
         ref={providerListRef}
-        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-1")}
+        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-3")}
       >
         {items.length ? (
           <SortableList
@@ -1751,7 +1755,7 @@ function OfficialDetail({
               checked={contextGuardStatus?.enabled ?? false}
               className="h-7"
               disabled={contextGuardBusy || !contextGuardStatus}
-              label={t("providers.contextGuard")}
+              label={t("providers.contextGuardShort")}
               onChange={(enabled) => void toggleContextGuard(enabled)}
             />
             <div

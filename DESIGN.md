@@ -72,18 +72,19 @@ shadow depth to separate panels without looking like a web dashboard.
 - Charts: chart container should read as a soft inset work surface; tooltips
   use floating shadow and 12px radius.
 - Scrollable regions: keep scrollbars as close to the owning pane edge as
-  possible so the central content area stays wide. For vertical lists inside a
+  possible so they do not cover cards. For vertical lists inside a
   padded card, first keep the normal panel padding when the content does not
   overflow. Only when the list actually needs a scrollbar should the viewport
-  extend toward the card edge with a negative margin and a reduced inner gutter,
-  for example `overflow-auto -mr-3 pr-1` inside a `px-3` panel. The content
-  should gain width when the scrollbar moves outward; do not pair the negative
-  margin with equal padding that leaves the content width unchanged. When a
-  scrollbar is present, preserve standard padding where there is room, and
-  reduce the inset only as much as needed to keep the scrollbar near the owning
-  pane edge. Apply the same edge-scrollbar rule across sidebars, drawers, model
-  lists, client lists, and popovers; use an inset scrollbar only when it is
-  intentionally part of a framed control.
+  extend toward the card edge with a negative margin matching the parent
+  padding, for example `overflow-auto -mr-3 pr-3` inside a `px-3` panel. The
+  scrollbar sits on the pane edge; cards keep a ~12px right gutter so a thin
+  overlay bar cannot cover switches or actions. Prefer moving the scrollbar
+  outward onto the pane edge before shrinking cards. When the overflow
+  container can own no padding of its own, put padding on the inner list
+  instead and leave the bar flush to the pane. Do not use
+  `scrollbar-gutter: stable` on card lists. Apply the same edge-scrollbar rule
+  across sidebars, drawers, model lists, client lists, and popovers; use an
+  inset scrollbar only when it is intentionally part of a framed control.
 
 ### Avoid
 

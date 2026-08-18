@@ -14,9 +14,14 @@ Each flavor produces:
 | AppImage | `CodexHub_<version>[_debug]_amd64.AppImage` |
 | Debian | `CodexHub_<version>[_debug]_amd64.deb` |
 
-Updater platform key: `linux-x86_64`. Add that platform to the existing
-`latest.json` / `latest-debug.json` payload; do not invent a second product
-channel.
+Updater platform key: `linux-x86_64`. `scripts/build-linux-release.sh` writes
+`latest.json` / `latest-debug.json` with that key and the signed AppImage.
+The Windows release script still writes `windows-x86_64`. A combined ship
+keeps both keys in one payload; do not invent a second product channel.
+Linux auto-update is AppImage-only. The live endpoint remains
+`releases/latest/download/latest.json`; prereleases are not that Latest
+release, so a Beta tester must install this build first and then point a
+newer signed AppImage at a reachable `latest.json`.
 
 ## Build
 

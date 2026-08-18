@@ -13,6 +13,7 @@ export type ClientConnectionState = "connected" | "disconnected" | "busy" | "dri
 
 interface GatewayClientCardProps {
   busy?: boolean;
+  className?: string;
   client: GatewayClientContract;
   enabledModelCount?: number;
   info?: GatewayClientInfo;
@@ -21,6 +22,7 @@ interface GatewayClientCardProps {
 
 export function GatewayClientCard({
   busy,
+  className,
   client,
   enabledModelCount,
   info,
@@ -33,7 +35,7 @@ export function GatewayClientCard({
   const currentVersion = info?.current_version?.trim() || null;
   const kindLabel = info?.kind ?? t("gateway.clientKind." + client.id);
   const name = info?.name ?? client.name;
-  const checked = state === "connected" || state === "busy" || state === "drift";
+  const checked = state === "connected" || state === "busy";
   const disabled = state === "unavailable" || state === "busy" || !info;
   const label = busy
     ? t("gateway.connectionUpdating")
@@ -58,6 +60,7 @@ export function GatewayClientCard({
         state === "connected" && "shadow-raised",
         state === "drift" && "bg-amber-50/30 ring-1 ring-amber-300/70",
         state === "unavailable" && "opacity-55",
+        className,
       )}
     >
       <div className="flex items-center gap-2.5">

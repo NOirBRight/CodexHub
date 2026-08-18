@@ -26,7 +26,10 @@ mod web_bridge;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
+use std::sync::Mutex;
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Window, WindowEvent,
+};
 
 #[cfg(desktop)]
 use tauri::{
@@ -790,8 +793,24 @@ fn window_minimize(window: Window) -> Result<(), String> {
         .map_err(|error| format!("failed to minimize window: {error}"))
 }
 
+#[derive(Clone, Copy, Default)]
+struct LinuxWindowRestore {
+    maximized: bool,
+    size: Option<PhysicalSize<u32>>,
+    position: Option<PhysicalPosition<i32>>,
+}
+
+static LINUX_WINDOW_RESTORE: Mutex<LinuxWindowRestore> = Mutex::new(LinuxWindowRestore {
+    maximized: false,
+    size: None,
+    position: None,
+});
+
 #[tauri::command]
 fn window_toggle_maximize(window: Window) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        return toggle_linux_window_maximize(window);
+    }
     let maximized = window
         .is_maximized()
         .map_err(|error| format!("failed to read window state: {error}"))?;
@@ -804,6 +823,47 @@ fn window_toggle_maximize(window: Window) -> Result<(), String> {
             .maximize()
             .map_err(|error| format!("failed to maximize window: {error}"))
     }
+}
+
+fn toggle_linux_window_maximize(window: Window) -> Result<(), String> {
+    let (restore, size, position) = {
+        let mut state = LINUX_WINDOW_RESTORE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.maximized {
+            let size = state.size.take();
+            let position = state.position.take();
+            state.maximized = false;
+            (true, size, position)
+        } else {
+            state.size = window.inner_size().ok();
+            state.position = window.outer_position().ok();
+            state.maximized = true;
+            (false, None, None)
+        }
+    };
+    if !restore {
+        return window
+            .maximize()
+            .map_err(|error| format!("failed to maximize window: {error}"));
+    }
+    let unmaximize_error = window.unmaximize().err();
+    if let Some(size) = size {
+        window
+            .set_size(size)
+            .map_err(|error| format!("failed to restore window: {error}"))?;
+    }
+    if let Some(position) = position {
+        if let Err(error) = window.set_position(position) {
+            log::warn!("failed to restore window position: {error}");
+        }
+    }
+    if size.is_none() {
+        if let Some(error) = unmaximize_error {
+            return Err(format!("failed to restore window: {error}"));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1357,6 +1417,14 @@ mod tests {
 
         assert!(error.contains("safe Official snapshot"));
         assert_eq!(starts.get(), 1);
+    }
+
+    #[test]
+    fn linux_window_restore_defaults_to_windowed() {
+        let state = super::LinuxWindowRestore::default();
+        assert!(!state.maximized);
+        assert!(state.size.is_none());
+        assert!(state.position.is_none());
     }
 
     #[test]

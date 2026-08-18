@@ -6,6 +6,7 @@ set -euo pipefail
 flavor="normal"
 skip_frontend=0
 notes=""
+release_base_url=""
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 private_key_path="${TAURI_SIGNING_PRIVATE_KEY:-$HOME/.codexhub/codexhub-updater.key}"
 
@@ -25,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --private-key)
       private_key_path="${2:-}"
+      shift 2
+      ;;
+    --release-base-url)
+      release_base_url="${2:-}"
       shift 2
       ;;
     *)
@@ -117,11 +122,30 @@ if [[ ! -f "$appimage_dst.sig" ]]; then
   exit 1
 fi
 
+manifest_path="$bundle_root/$manifestName"
+write_args=(
+  -NoProfile
+  -File "$repo_root/scripts/Write-LinuxReleaseManifest.ps1"
+  -Flavor "$flavor"
+  -Version "$version"
+  -AppImagePath "$appimage_dst"
+  -SignaturePath "$appimage_dst.sig"
+  -ManifestPath "$manifest_path"
+  -RepoRoot "$repo_root"
+)
+if [[ -n "$release_base_url" ]]; then
+  write_args+=(-ReleaseBaseUrl "$release_base_url")
+fi
+if [[ -n "$notes" ]]; then
+  write_args+=(-Notes "$notes")
+fi
+"$pwsh_bin" "${write_args[@]}"
+
 echo "Linux release artifacts ready:"
 echo "  AppImage: $appimage_dst"
 echo "  Deb:      $deb_dst"
 echo "  Signature:$appimage_dst.sig"
-echo "  Manifest: $manifestName"
+echo "  Manifest: $manifest_path"
 echo "  Updater platform key: linux-x86_64"
 if [[ -n "$notes" ]]; then
   echo "  Notes: $notes"

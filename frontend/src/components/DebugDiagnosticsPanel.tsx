@@ -157,8 +157,8 @@ export function DebugDiagnosticsOverlay({
           </div>
         </div>
 
-        <div className="min-h-0 overflow-auto p-3">
-          <div className="grid gap-2">
+        <div className="min-h-0 overflow-auto">
+          <div className="grid gap-2 p-3">
             <p className="text-xs text-slate-500">{t("diagnostics.subtitle")}</p>
 
             {!gatewayRunning ? (

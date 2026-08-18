@@ -10,7 +10,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
     [Parameter(Mandatory = $true)]
-    [string]$SignaturePath
+    [string]$SignaturePath,
+    [ValidateSet("windows-x86_64", "linux-x86_64")]
+    [string]$Platform = "windows-x86_64"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +30,11 @@ foreach ($path in @($ManifestPath, $InstallerPath, $SignaturePath)) {
 $manifestName = [System.IO.Path]::GetFileName($ManifestPath)
 $installerName = [System.IO.Path]::GetFileName($InstallerPath)
 $expectedManifestName = Get-ReleaseManifestName -Flavor $Flavor
-$expectedInstallerName = Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
+$expectedInstallerName = if ($Platform -eq "linux-x86_64") {
+    Get-LinuxReleaseArtifactName -Flavor $Flavor -Version $Version -Kind appimage
+} else {
+    Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
+}
 
 if ($manifestName -ne $expectedManifestName) {
     throw "$Flavor release manifest must be named $expectedManifestName."
@@ -40,7 +46,10 @@ if ([System.IO.Path]::GetFileName($SignaturePath) -ne "$expectedInstallerName.si
     throw "$Flavor signature must be paired with $expectedInstallerName."
 }
 $manifest = Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json
-$platform = $manifest.platforms."windows-x86_64"
+$platformEntry = $manifest.platforms.$Platform
+if ($null -eq $platformEntry) {
+    throw "Manifest is missing the $Platform artifact."
+}
 $signature = (Get-Content -Raw -LiteralPath $SignaturePath).Trim()
 if ($manifest.version -ne $Version) {
     throw "Manifest version does not match $Version."
@@ -48,14 +57,14 @@ if ($manifest.version -ne $Version) {
 if ($manifest.codexhub_flavor -ne $Flavor) {
     throw "Manifest flavor does not match $Flavor."
 }
-if ([string]::IsNullOrWhiteSpace($signature) -or $platform.signature -ne $signature) {
+if ([string]::IsNullOrWhiteSpace($signature) -or $platformEntry.signature -ne $signature) {
     throw "Manifest signature does not match the paired signature artifact."
 }
 $immutablePath = "/releases/download/v$Version/"
-if (-not ([string]$platform.url).Contains($immutablePath)) {
+if (-not ([string]$platformEntry.url).Contains($immutablePath)) {
     throw "Manifest asset URL must use the immutable version tag v$Version."
 }
-if (-not ([string]$platform.url).EndsWith("/$expectedInstallerName")) {
+if (-not ([string]$platformEntry.url).EndsWith("/$expectedInstallerName")) {
     throw "Manifest asset URL must point to $expectedInstallerName."
 }
 

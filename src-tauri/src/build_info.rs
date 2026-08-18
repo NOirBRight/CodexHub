@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+pub const UPDATER_PLATFORM_WINDOWS: &str = "windows-x86_64";
+pub const UPDATER_PLATFORM_LINUX: &str = "linux-x86_64";
+
+pub fn current_updater_platform() -> &'static str {
+    if cfg!(target_os = "linux") {
+        UPDATER_PLATFORM_LINUX
+    } else {
+        UPDATER_PLATFORM_WINDOWS
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildFlavor {
@@ -42,9 +53,30 @@ impl BuildFlavor {
     }
 
     pub fn installer_name(self, version: &str) -> String {
-        match self {
-            Self::Normal => format!("CodexHub_{version}_x64-setup.exe"),
-            Self::Debug => format!("CodexHub_{version}_debug_x64-setup.exe"),
+        self.artifact_name(version, UPDATER_PLATFORM_WINDOWS)
+            .expect("windows updater platform is always supported")
+    }
+
+    pub fn linux_appimage_name(self, version: &str) -> String {
+        self.artifact_name(version, UPDATER_PLATFORM_LINUX)
+            .expect("linux updater platform is always supported")
+    }
+
+    pub fn artifact_name(self, version: &str, platform: &str) -> Result<String, String> {
+        match (self, platform) {
+            (Self::Normal, UPDATER_PLATFORM_WINDOWS) => {
+                Ok(format!("CodexHub_{version}_x64-setup.exe"))
+            }
+            (Self::Debug, UPDATER_PLATFORM_WINDOWS) => {
+                Ok(format!("CodexHub_{version}_debug_x64-setup.exe"))
+            }
+            (Self::Normal, UPDATER_PLATFORM_LINUX) => {
+                Ok(format!("CodexHub_{version}_amd64.AppImage"))
+            }
+            (Self::Debug, UPDATER_PLATFORM_LINUX) => {
+                Ok(format!("CodexHub_{version}_debug_amd64.AppImage"))
+            }
+            (_, other) => Err(format!("unsupported updater platform: {other}")),
         }
     }
 
@@ -107,6 +139,20 @@ mod tests {
         assert_eq!(
             BuildFlavor::Debug.installer_name(version),
             "CodexHub_0.2.0_debug_x64-setup.exe"
+        );
+        assert_eq!(
+            BuildFlavor::Normal.linux_appimage_name(version),
+            "CodexHub_0.2.0_amd64.AppImage"
+        );
+        assert_eq!(
+            BuildFlavor::Debug.linux_appimage_name(version),
+            "CodexHub_0.2.0_debug_amd64.AppImage"
+        );
+        assert_eq!(
+            BuildFlavor::Normal
+                .artifact_name(version, UPDATER_PLATFORM_LINUX)
+                .expect("linux artifact"),
+            "CodexHub_0.2.0_amd64.AppImage"
         );
     }
 
