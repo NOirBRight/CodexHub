@@ -447,8 +447,8 @@ function GatewayPageImpl({
   }
 
   return (
-    <main className="relative grid h-full min-h-[704px] w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,340px)] gap-4 overflow-hidden">
-      <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(320px,1fr)] gap-2.5">
+    <main className="relative grid h-full min-h-0 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,360px)] gap-4 overflow-hidden">
+      <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5">
         <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
@@ -622,7 +622,7 @@ function GatewayPageImpl({
         />
       </section>
 
-      <aside className="grid h-full min-h-[704px] min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
+      <aside className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
@@ -641,8 +641,8 @@ function GatewayPageImpl({
             </button>
           </div>
         </div>
-        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3">
-          <div className="space-y-2.5 py-1 pl-1">
+        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3 [scrollbar-gutter:stable]">
+          <div className="space-y-2.5">
             {clients.map((client) => (
               <GatewayClientCard
                 key={client.id}

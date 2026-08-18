@@ -1267,7 +1267,7 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-h-\[704px\] w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,340px\)\] gap-4 overflow-hidden/);
+  assert.match(gatewaySource, /min-h-0 w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,360px\)\] gap-4 overflow-hidden/);
   assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
   assert.match(gatewaySource, /grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2\.5/);
   assert.doesNotMatch(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
@@ -1288,10 +1288,11 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.match(gatewaySource, /whitespace-nowrap rounded-control bg-ink/);
   assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
   assert.match(gatewaySource, /<h3 className="shrink-0 text-xs font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
-  assert.match(gatewaySource, /<aside className="grid h-full min-h-\[704px\] min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
+  assert.match(gatewaySource, /<aside className="grid h-full min-h-0 min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
   assert.match(gatewaySource, /min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3/);
-  assert.match(gatewaySource, /space-y-2\.5 py-1 pl-1/);
-  assert.match(usageSource, /min-h-\[320px\] min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
+  assert.match(gatewaySource, /space-y-2\.5/);
+  assert.match(gatewaySource, /scrollbar-gutter:stable/);
+  assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
   assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
   assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-1\.5">/);
   assert.match(usageSource, /left-14 right-4 top-6/);
@@ -1829,11 +1830,12 @@ test("providers page uses stable zero-min split columns", async () => {
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
   const appSource = await readFile(appPath, "utf8");
 
-  assert.match(appSource, /h-screen min-h-\[720px\] min-w-0/);
+  assert.match(appSource, /<FitStage>/);
+  assert.match(appSource, /h-full min-h-0 min-w-0/);
   assert.doesNotMatch(appSource, /min-w-\[1004px\]/);
   assert.match(appSource, /<div className="relative min-h-0 min-w-0 max-w-full overflow-hidden">/);
   assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">/);
-  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">/);
+  assert.match(appSource, /<div className="h-full min-h-0 min-w-0 overflow-hidden">/);
   assert.doesNotMatch(appSource, /className="min-h-0 overflow-hidden p-4"/);
 });
 
@@ -3338,7 +3340,7 @@ test("debug diagnostics open from Recovery in a localized accessible overlay", a
 test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
   const leftColumn = gatewaySource.match(
-    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(320px,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
+    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
   )?.[0] ?? "";
 
   assert.ok(leftColumn, "Gateway left column should restore three rows");

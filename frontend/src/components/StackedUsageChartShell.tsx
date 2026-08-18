@@ -219,7 +219,7 @@ export function StackedUsageChartShell({
   }
 
   return (
-    <section className="grid h-full min-h-[320px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden rounded-panel bg-surface p-3 shadow-card">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <BarChart3 size={15} className="shrink-0 text-action" />

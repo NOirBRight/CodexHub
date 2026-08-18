@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
+import { FitStage } from "./components/FitStage";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
@@ -1069,7 +1070,8 @@ export default function App() {
   }, [saveSettings]);
 
   return (
-    <div className="grid h-screen min-h-[720px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+    <FitStage>
+    <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
       <RuntimeBar
         appFlavor={appFlavor}
         busy={busy}
@@ -1135,7 +1137,7 @@ export default function App() {
             className={tabPaneClass(visibleTab === "gateway")}
             data-tab-pane="gateway"
           >
-            <div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+            <div className="h-full min-h-0 min-w-0 overflow-hidden">
               <GatewayPage
                 appFlavor={appFlavor}
                 settings={settings}
@@ -1177,6 +1179,7 @@ export default function App() {
         onSyncHistory={syncHistory}
       />
     </div>
+    </FitStage>
   );
 }
 

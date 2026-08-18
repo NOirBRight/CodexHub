@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import ompIcon from "../assets/omp-icon.png";
 import opencodeIcon from "../assets/opencode-icon.png";
 import piIcon from "../assets/pi-icon.png";
+import dshIcon from "../assets/dsh-icon.svg";
 import zcodeIcon from "../assets/zcode-icon.png";
 import { cx } from "../lib/format";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
@@ -193,9 +194,6 @@ export function connectionStateFromInfo(
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {
-  if (id === "dsh") {
-    return <DshIcon className="h-5 w-5" />;
-  }
   const icon = clientIcon(id);
   if (icon) {
     return (
@@ -209,17 +207,10 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
   );
 }
 
-function DshIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
-      <path d="M12 2.5 20 12l-8 9.5L4 12z" fill="#4D6BFE" />
-      <path d="M12 7 16 12l-4 5-4-5z" fill="#fff" opacity="0.85" />
-    </svg>
-  );
-}
-
 function clientIcon(id: string) {
   switch (id) {
+    case "dsh":
+      return dshIcon;
     case "opencode":
       return opencodeIcon;
     case "zcode":
@@ -234,6 +225,9 @@ function clientIcon(id: string) {
 }
 
 function clientIconClass(id: string) {
+  if (id === "dsh") {
+    return "h-8 w-8 object-contain";
+  }
   if (id === "pi") {
     return "h-full w-full scale-125 object-cover";
   }
