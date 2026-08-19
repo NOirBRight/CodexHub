@@ -515,11 +515,11 @@ test("main desktop window opens at the release candidate height", async () => {
   assert.equal(mainWindow.minHeight, 800);
 });
 
-test("tauri config enables Windows updater packaging", async () => {
+test("tauri config enables cross-platform updater packaging", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
 
   assert.equal(tauriConfig.bundle.active, true);
-  assert.deepEqual(tauriConfig.bundle.targets, ["nsis"]);
+  assert.deepEqual([...tauriConfig.bundle.targets].sort(), ["appimage", "deb", "nsis"]);
   assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
   assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
     "https://github.com/NOirBRight/CodexHub/releases/latest/download/latest.json",
