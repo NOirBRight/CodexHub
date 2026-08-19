@@ -19,7 +19,8 @@ pub struct CatalogOverrideDiagnostics {
 }
 
 pub fn generate_catalog() -> Result<Vec<Model>, String> {
-    models::generate_catalog()
+    sync_catalog()?;
+    models::list_models()
 }
 
 pub fn sync_catalog() -> Result<String, String> {
