@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
+
+import pytest
+
 import codex_proxy
 import gateway_errors
 import gateway_settings
@@ -315,6 +320,7 @@ def test_route_plan_source_does_not_import_facade() -> None:
         source = handle.read()
     assert "_proxy_attr" not in source
     assert "import codex_proxy" not in source
+    assert "_request_header" not in source
 
 
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
@@ -327,3 +333,84 @@ def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
     assert "class _GatewayDownstreamStreamCommit" not in facade_source
     assert "class DownstreamStreamCommit" not in facade_source
     assert "import codex_proxy" not in sse_source
+
+
+def _sample_retry_execution_plan() -> route_plan.RetryExecutionPlan:
+    return route_plan.RetryExecutionPlan(
+        eligibility=route_primitives.CapabilityState.SUPPORTED,
+        policy=route_primitives.RetryPolicy.GATEWAY_FULL,
+        request_kind=route_primitives.RETRY_REQUEST_MAIN_GENERATION,
+        request_timeout_seconds=30,
+        base_open_attempts=2,
+        base_relay_attempts=2,
+        failure_expansion_attempts=2,
+        request_kind_attempts_configured=False,
+        retry_http_errors=True,
+        open_attempt_budget=None,
+        capacity_elapsed_limit_seconds=0.0,
+        stream_elapsed_limit_seconds=0.0,
+        emit_downstream_retry_notice=False,
+        pre_response_budget_seconds=None,
+        lifecycle_final_retry_eligible=False,
+    )
+
+
+def test_retry_delay_seconds_rejects_exc_parameter() -> None:
+    plan = _sample_retry_execution_plan()
+    assert "exc" not in inspect.signature(plan.retry_delay_seconds).parameters
+    with pytest.raises(TypeError):
+        plan.retry_delay_seconds(
+            1,
+            failure_class=route_primitives.RETRY_FAILURE_QUICK_TRANSIENT,
+            exc=RuntimeError("leftover Retry-After caller"),
+        )
+    assert (
+        plan.retry_delay_seconds(
+            1,
+            failure_class=route_primitives.RETRY_FAILURE_QUICK_TRANSIENT,
+            retry_after_seconds=7,
+        )
+        == 7
+    )
+
+
+def test_invalid_codec_still_raises_when_planning_event_sink_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(route_plan, "_planning_event_sink", None)
+    with caplog.at_level(logging.WARNING, logger="route_plan"):
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as raised:
+            route_plan._external_native_responses_tool_codec(
+                {"native_responses_tool_codec": "not-a-codec"}
+            )
+    assert raised.value.cause.code == route_plan.NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE
+    assert "native_responses_tool_codec_rejected" in caplog.text
+
+
+def test_handler_authorization_uses_facade_get_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEX_PROXY_GATEWAY_CLIENT_KEY", "local-key")
+    seen: list[str] = []
+    real_get_header = codex_proxy._get_header
+
+    def wrapped_get_header(headers: object, name: str) -> str | None:
+        seen.append(name)
+        return real_get_header(headers, name)
+
+    monkeypatch.setattr(codex_proxy, "_get_header", wrapped_get_header)
+    assert codex_proxy._local_request_authorized(
+        {"Authorization": "Bearer local-key"},
+        {"client_id": "unknown"},
+    )
+    assert not codex_proxy._local_request_authorized(
+        {"Authorization": "Bearer wrong"},
+        {"client_id": "unknown"},
+    )
+    assert "Authorization" in seen
+    assert not hasattr(route_plan, "_request_header")
+    assert not hasattr(route_plan, "_local_request_authorized")
+    assert getattr(codex_proxy, "_local_request_authorized") is not getattr(
+        route_plan, "_local_request_authorized", None
+    )

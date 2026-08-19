@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 import hashlib
-import hmac
+import logging
 import re
 
 from catalog import canonical_model_id
@@ -22,7 +22,6 @@ from gateway_settings import (
     _upstream_retry_attempts,
     gateway_auto_retry_max_attempts,
     gateway_capacity_retry_elapsed_limit_seconds,
-    gateway_client_key,
     gateway_downstream_retry_notice_enabled,
     gateway_official_http_passthrough_enabled,
     gateway_stream_retry_elapsed_limit_seconds,
@@ -98,6 +97,7 @@ KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = (
     "/models",
 )
 
+_LOGGER = logging.getLogger(__name__)
 _planning_event_sink = None
 
 
@@ -105,17 +105,8 @@ def _emit_planning_event(event: str, **fields: Any) -> None:
     sink = _planning_event_sink
     if sink is not None:
         sink(event, **fields)
-
-
-def _request_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
-    wanted = name.lower()
-    items = getattr(headers, "items", None)
-    if items is None:
-        return None
-    for key, value in items():
-        if str(key).lower() == wanted:
-            return str(value)
-    return None
+        return
+    _LOGGER.warning("planning diagnostic %s %s", event, dict(fields))
 
 
 def _upstream_endpoint_root(base_url: str) -> str:
@@ -215,29 +206,6 @@ OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
 
 def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
     return request_context.get("client_id") == "codex-app"
-
-
-def _bearer_token(headers: Mapping[str, str] | Any) -> str | None:
-    auth_header = _request_header(headers, "Authorization")
-    if not auth_header:
-        return None
-    value = auth_header.strip()
-    if not value:
-        return None
-    if value.lower().startswith("bearer "):
-        return value[7:].strip() or None
-    return value
-
-
-def _local_request_authorized(
-    headers: Mapping[str, str] | Any,
-    request_context: Mapping[str, str],
-) -> bool:
-    expected_key = gateway_client_key()
-    if expected_key is None:
-        return True
-    token = _bearer_token(headers)
-    return bool(token and hmac.compare_digest(token, expected_key))
 
 
 def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
@@ -376,9 +344,7 @@ class RetryExecutionPlan:
         *,
         failure_class: str,
         retry_after_seconds: int | None = None,
-        exc: BaseException | None = None,
     ) -> int:
-        del exc
         if retry_after_seconds is not None:
             return retry_after_seconds
         if failure_class == RETRY_FAILURE_PROVIDER_THROTTLE:
