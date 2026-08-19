@@ -193,7 +193,7 @@ test("one Gateway Apply delegates its single restart to App settings save", asyn
   assert.equal((applyAction.match(/onRestartProxy\(/g) ?? []).length, 0);
   assert.equal((saveAction.match(/api\.restartProxy\(\)/g) ?? []).length, 1);
   assert.doesNotMatch(gatewaySource, /onRestartProxy:/);
-  assert.match(gatewaySource, /const message = await onApplySettings\(next\)/);
+  assert.match(gatewaySource, /work: \(\) => onApplySettings\(next\)/);
   assert.doesNotMatch(applyAction, /gatewaySettingsSavedRestarted|restartRequired/);
 });
 

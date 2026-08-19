@@ -285,18 +285,21 @@ function GatewayPageImpl({
       proxy_port: Math.min(65535, Math.max(1024, cleanPort)),
       gateway_request_timeout_seconds: Math.min(600, Math.max(5, cleanTimeout)),
     };
-    const toastId = showToast(t("gateway.savingSettings"), "loading");
-
     try {
-      const message = await onApplySettings(next);
-      updateToast(toastId, {
-        action: null,
-        text: message,
-        tone: "success",
+      await runPersistentAction({
+        ...persistentActionBase(),
+        loading: t("gateway.savingSettings"),
+        work: () => onApplySettings(next),
+        success: (message) => ({
+          text: message,
+          restart: { kind: "none" },
+        }),
+        formatRestart: (target) =>
+          target.kind === "none" ? "" : persistentActionBase().formatRestart(target),
       });
       setError(null);
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     }
   }
 
@@ -458,32 +461,18 @@ function GatewayPageImpl({
   }
 
   async function toggleRuntime() {
-    const toastId = showToast(
-      running ? t("runtime.stoppingRuntime") : t("runtime.startingRuntime"),
-      "loading",
-    );
-    if (running) {
-      try {
-        await onStopProxy();
-        updateToast(toastId, {
-          action: null,
-          text: t("runtime.runtimeStopped"),
-          tone: "success",
-        });
-      } catch (err) {
-        updateToastWithError(toastId, err);
-      }
-      return;
-    }
     try {
-      await onStartProxy();
-      updateToast(toastId, {
-        action: null,
-        text: t("runtime.runtimeStarted"),
-        tone: "success",
+      await runPersistentAction({
+        ...persistentActionBase(),
+        loading: running ? t("runtime.stoppingRuntime") : t("runtime.startingRuntime"),
+        work: () => (running ? onStopProxy() : onStartProxy()),
+        success: () => ({
+          text: running ? t("runtime.runtimeStopped") : t("runtime.runtimeStarted"),
+          restart: { kind: "none" },
+        }),
       });
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     }
   }
 
