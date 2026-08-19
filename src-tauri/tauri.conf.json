@@ -18,7 +18,8 @@
         "decorations": false,
         "resizable": true,
         "transparent": false,
-        "backgroundColor": "#f8f8f7"
+        "backgroundColor": "#f8f8f7",
+        "skipTaskbar": false
       }
     ],
     "security": {

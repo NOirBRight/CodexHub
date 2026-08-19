@@ -883,6 +883,8 @@ fn window_close_to_tray(window: Window) -> Result<(), String> {
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "linux")]
+        linux_window::reveal_on_taskbar(&window);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -1162,6 +1164,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tray = TrayIconBuilder::with_id("codexhub")
         .tooltip("CodexHub")
+        .title("CodexHub")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| run_tray_action(app, event.id().as_ref()))
@@ -1198,10 +1201,10 @@ fn run_gui() {
                 runtime_paths::set_resource_root(resource_dir);
             }
             #[cfg(target_os = "linux")]
-            linux_window::install_full_input_region(app);
+            linux_window::install(app);
             #[cfg(desktop)]
             if let Err(error) = setup_tray(app) {
-                log::warn!("failed to setup tray icon: {error}");
+                log::error!("failed to setup tray icon: {error}");
             }
             gateway::start_telemetry_ingester();
             web_bridge::start_background(app.handle().clone())?;

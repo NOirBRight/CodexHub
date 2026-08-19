@@ -546,10 +546,17 @@ test("linux window forces a full GTK input region so WebKitGTK alpha cannot punc
   ]);
 
   assert.match(mainSource, /mod linux_window;/);
-  assert.match(mainSource, /linux_window::install_full_input_region\(app\)/);
+  assert.match(mainSource, /linux_window::install\(app\)/);
+  assert.match(mainSource, /linux_window::reveal_on_taskbar/);
+  assert.match(mainSource, /fn setup_tray/);
+  assert.match(mainSource, /\.title\("CodexHub"\)/);
+  assert.match(mainSource, /show_menu_on_left_click\(false\)/);
   assert.match(linuxWindowSource, /fn apply_full_input_region/);
   assert.match(linuxWindowSource, /input_shape_combine_region/);
   assert.match(linuxWindowSource, /set_opaque_region/);
+  assert.match(linuxWindowSource, /com\.codexhub\.app\.desktop/);
+  assert.match(linuxWindowSource, /set_skip_taskbar_hint\(false\)/);
+  assert.match(linuxWindowSource, /WindowTypeHint::Normal/);
 });
 
 test("main desktop window opens at the release candidate height", async () => {
@@ -1897,14 +1904,15 @@ test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
   assert.match(fitStageSource, /export const FIT_STAGE_HEIGHT = 768/);
   assert.match(fitStageSource, /export const FIT_STAGE_SCALE = 0\.93/);
   assert.match(fitStageSource, /className="relative h-full w-full overflow-hidden bg-canvas"/);
-  assert.match(fitStageSource, /function usesCssTransformScale/);
   assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
-  assert.match(fitStageSource, /setWebviewZoom\(scale\)/);
   assert.match(fitStageSource, /setWebviewZoom\(1\)/);
+  assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
+  assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
   assert.match(cssSource, /html,\s*body,\s*#root \{[\s\S]*?background: #f8f8f7;/);
   assert.equal(tauriConfig.app.windows[0].transparent, false);
   assert.equal(tauriConfig.app.windows[0].backgroundColor, "#f8f8f7");
+  assert.equal(tauriConfig.app.windows[0].skipTaskbar, false);
 });
 
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
