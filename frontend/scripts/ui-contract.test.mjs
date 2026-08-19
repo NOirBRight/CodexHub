@@ -127,7 +127,7 @@ test("history sync is explicit and never participates in startup or settings sav
   assert.match(tauriSource, /getConversationSyncStatus/);
   assert.match(tauriSource, /syncConversationHistory/);
   assert.match(tauriSource, /diagnoseConversationHistory/);
-  assert.match(tauriSource, /call<UnifiedHistoryResult>\("preflight_unified_history"/);
+  assert.match(tauriSource, /call<UnifiedHistoryResult>\(COMMANDS.preflightUnifiedHistory/);
   assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
   assert.match(webBridgeSource, /"preflight_unified_history"/);
   assert.doesNotMatch(appSource, /historyPreflightStarted/);
@@ -399,7 +399,7 @@ test("catalog override diagnostics stay bounded and disclose the Codex restart",
     ]);
 
   assert.match(tauriSource, /catalogOverrideDiagnostics: \(\) =>/);
-  assert.match(tauriSource, /get_catalog_override_diagnostics/);
+  assert.match(tauriSource, /COMMANDS.getCatalogOverrideDiagnostics/);
   assert.match(typesSource, /interface CatalogOverrideDiagnostics/);
   assert.match(typesSource, /catalog_override_diagnostics\?: CatalogOverrideDiagnostics/);
   assert.match(actionsSource, /api\.catalogOverrideDiagnostics\(\)/);
@@ -986,7 +986,7 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
   ]);
 
   assert.match(tauriSource, /gatewayUsageSnapshot: \(window\?: UsageQueryWindow \| null\) =>/);
-  assert.match(tauriSource, /call<GatewayUsageSnapshot>\("gateway_usage_snapshot"/);
+  assert.match(tauriSource, /call<GatewayUsageSnapshot>\(COMMANDS.gatewayUsageSnapshot/);
   const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[runCachedRequest, usageWindow\]\);/)?.[0] ?? "";
   assert.match(appSource, /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
   assert.match(telemetryRefresh, /api\.gatewayUsageSnapshot\(usageWindow\)/);
@@ -1016,7 +1016,7 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
     ]);
 
   assert.match(tauriSource, /openaiUsageCompletions: \(window\?: OpenAIUsageQueryWindow \| null\) =>/);
-  assert.match(tauriSource, /call<OpenAIUsageSnapshot>\("openai_usage_completions"/);
+  assert.match(tauriSource, /call<OpenAIUsageSnapshot>\(COMMANDS.openaiUsageCompletions/);
   assert.match(typesSource, /export interface OpenAIUsageSnapshot/);
   assert.match(typesSource, /export interface OpenAIUsageBucket/);
   assert.match(typesSource, /export interface OpenAIUsageLimit/);
@@ -1189,17 +1189,19 @@ test("slow desktop commands run off the Tauri invoke thread", async () => {
 });
 
 test("Codex app-server probes time out and avoid visible Windows consoles", async () => {
-  const [openAiUsageSource, modelsSource] = await Promise.all([
+  const appServerPath = new URL("../../src-tauri/src/app_server.rs", import.meta.url);
+  const [openAiUsageSource, modelsSource, appServerSource] = await Promise.all([
     readFile(tauriOpenAiUsagePath, "utf8"),
     readFile(tauriModelsPath, "utf8"),
+    readFile(appServerPath, "utf8"),
   ]);
 
-  for (const source of [openAiUsageSource, modelsSource]) {
-    assert.match(source, /CREATE_NO_WINDOW/);
-    assert.match(source, /configure_no_window/);
-    assert.match(source, /recv_timeout/);
-    assert.match(source, /kill_child/);
-  }
+  assert.match(appServerSource, /CREATE_NO_WINDOW/);
+  assert.match(appServerSource, /configure_no_window/);
+  assert.match(appServerSource, /recv_timeout/);
+  assert.match(appServerSource, /fn kill\(/);
+  assert.match(openAiUsageSource, /AppServerSession/);
+  assert.match(modelsSource, /AppServerSession/);
   assert.match(openAiUsageSource, /CODEX_APP_SERVER_RESPONSE_TIMEOUT/);
   assert.match(modelsSource, /CODEX_APP_SERVER_MODEL_LIST_TIMEOUT/);
 });
@@ -1509,7 +1511,7 @@ test("settings normalization restores default-on fields when persisted settings 
   assert.match(settingsSource, /unified_codex_history:\s*true/);
   assert.match(settingsSource, /unified_codex_history:\s*source\.unified_codex_history \?\? DEFAULT_SETTINGS\.unified_codex_history/);
   assert.match(settingsSource, /source\.auto_sync_clients\s*\?\?\s*source\.auto_sync_catalog\s*\?\?\s*DEFAULT_SETTINGS\.auto_sync_clients/s);
-  assert.match(tauriSource, /getSettings: async \(\) => normalizeSettings\(await call<Partial<Settings>>\("get_settings"\)\)/);
+  assert.match(tauriSource, /getSettings: async \(\) => normalizeSettings\(await call<Partial<Settings>>\(COMMANDS.getSettings\)\)/);
   assert.match(tauriSource, /settings: normalizeSettings\(settings\)/);
 });
 
@@ -1593,7 +1595,7 @@ test("settings drawer separates software and gateway autostart controls", async 
   assert.match(typesSource, /auto_start_software: boolean;/);
   assert.match(typesSource, /interface AutostartStatus/);
   assert.match(typesSource, /authoritative: boolean;/);
-  assert.match(tauriSource, /getAutostartStatus:\s*\(\)\s*=>\s*call<AutostartStatus>\("get_autostart_status"\)/);
+  assert.match(tauriSource, /getAutostartStatus:\s*\(\)\s*=>\s*call<AutostartStatus>\(COMMANDS.getAutostartStatus\)/);
   assert.match(mainSource, /autostart::reconcile_settings\(config::get_settings\(\)\?\)/);
   assert.match(mainSource, /get_autostart_status/);
   assert.match(typesSource, /auto_start_gateway: boolean;/);
@@ -1727,8 +1729,8 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(typesSource, /codex_enabled: boolean;/);
   assert.match(typesSource, /gateway_enabled: boolean;/);
   assert.match(typesSource, /global_override_conflict\?: boolean;/);
-  assert.match(tauriSource, /get_codex_context_guard_status/);
-  assert.match(tauriSource, /set_codex_context_guard/);
+  assert.match(tauriSource, /COMMANDS.getCodexContextGuardStatus/);
+  assert.match(tauriSource, /COMMANDS.setCodexContextGuard/);
   assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
   assert.match(providersSource, /api\.setCodexContextGuard\(enabled\)/);
   const toggleAction = providersSource.match(
@@ -1977,7 +1979,7 @@ test("model test buttons use the selected endpoint connectivity check", async ()
 
   assert.match(typesSource, /export interface ModelEndpointTestResult/);
   assert.match(tauriSource, /testModelEndpoint: \(baseUrl: string, apiKey: string, model: string, upstreamFormat: UpstreamFormat\)/);
-  assert.match(tauriSource, /call<ModelEndpointTestResult>\("test_model_endpoint"/);
+  assert.match(tauriSource, /call<ModelEndpointTestResult>\(COMMANDS.testModelEndpoint/);
   assert.equal(modelTestBlocks.length, 2);
   for (const block of modelTestBlocks) {
     assert.match(block, /const upstreamFormat = normalizedEndpointFormat/);
@@ -2084,10 +2086,10 @@ test("Luna Collaboration save uses the Tauri modelId contract and reloads persis
   ]);
   const saveApi = tauriSource.match(/saveOfficialMultiAgentVersion[\s\S]*?listOfficialMultiAgentOverrides/)?.[0] ?? "";
 
-  assert.match(saveApi, /call<Model>\("save_official_multi_agent_version"/);
+  assert.match(saveApi, /call<Model>\(COMMANDS.saveOfficialMultiAgentVersion/);
   assert.match(saveApi, /modelId,\s*version/);
   assert.doesNotMatch(saveApi, /model_id/);
-  assert.match(tauriSource, /listOfficialMultiAgentBaselines:[\s\S]*list_official_multi_agent_baselines/);
+  assert.match(tauriSource, /listOfficialMultiAgentBaselines:[\s\S]*COMMANDS.listOfficialMultiAgentBaselines/);
   assert.match(
     bridgeSource,
     /"save_official_multi_agent_version"[\s\S]*optional_string_arg\(&request\.args, &\["modelId", "model_id"\]\)/,
@@ -2480,7 +2482,7 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(authPrompt, /<ExternalLink size=\{15\} \/>/);
   assert.match(authPrompt, /<Copy size=\{15\} \/>/);
   assert.match(authPrompt, /<RefreshCcw size=\{15\}/);
-  assert.match(tauriSource, /openCodexApp: \(\) => call<string>\("open_codex_app"\)/);
+  assert.match(tauriSource, /openCodexApp: \(\) => call<string>\(COMMANDS.openCodexApp\)/);
   assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
   assert.match(mainSource, /open_codex_app,/);
   assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*Get-StartApps[\s\S]*Start-Process \('shell:AppsFolder\\' \+ \$app\.AppID\)/);
@@ -2847,7 +2849,7 @@ test("provider catalog writes trigger best-effort bound client sync", async () =
   ]);
 
   assert.match(tauriSource, /syncGatewayClients/);
-  assert.match(tauriSource, /"sync_gateway_clients"/);
+  assert.match(tauriSource, /COMMANDS.syncGatewayClients/);
   assert.match(providersSource, /updateGatewayAfterCatalog/);
   assert.match(providersSource, /api\.syncGatewayClients\(\)/);
   assert.match(providersSource, /auto_sync_clients/);
@@ -2873,8 +2875,8 @@ test("settings drawer reports a localized structured sync result", async () => {
   assert.match(drawerSource, /updateToast\(toastId,[\s\S]*text: message,[\s\S]*tone: "success"/);
   assert.doesNotMatch(drawerSource, /onMigrateOfficialHistory/);
   assert.doesNotMatch(drawerSource, /onRestoreOfficialHistory/);
-  assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\("migrate_official_history_to_unified"\)/);
-  assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\("restore_official_history_from_unified"\)/);
+  assert.match(tauriSource, /migrateOfficialHistoryToUnified: \(\) => call<string>\(COMMANDS.migrateOfficialHistoryToUnified\)/);
+  assert.match(tauriSource, /restoreOfficialHistoryFromUnified: \(\) => call<string>\(COMMANDS.restoreOfficialHistoryFromUnified\)/);
   assert.doesNotMatch(drawerSource, /History sync requested/);
 });
 
@@ -2894,7 +2896,7 @@ test("CodexHub route switches never control Codex processes", async () => {
   ]);
 
   assert.match(tauriSource, /reconcileAfterRouteSwitch/);
-  assert.match(tauriSource, /"reconcile_after_route_switch"/);
+  assert.match(tauriSource, /COMMANDS.reconcileAfterRouteSwitch/);
   assert.doesNotMatch(providersSource, /api\.reconcileAfterRouteSwitch/);
   assert.doesNotMatch(providersSource, /codexRestartedForRoute/);
   assert.match(providersSource, /codexRouteChangedRestart/);
@@ -2990,11 +2992,11 @@ test("app update APIs use the web bridge fallback and bridge dispatches updater 
   assert.match(typesSource, /downloaded_bytes: number/);
   assert.match(typesSource, /total_bytes\?: number \| null/);
   assert.match(typesSource, /export interface AppUpdateCompletionStatus/);
-  assert.match(tauriSource, /getAppVersion: \(\) => call<AppVersionInfo>\("get_app_version"\)/);
-  assert.match(tauriSource, /checkAppUpdate: \(\) => call<AppUpdateStatus>\("check_app_update"\)/);
-  assert.match(tauriSource, /startAppUpdateInstall: \(\) => call<AppUpdateInstallStatus>\("start_app_update_install"\)/);
-  assert.match(tauriSource, /getAppUpdateInstallStatus: \(\) => call<AppUpdateInstallStatus>\("get_app_update_install_status"\)/);
-  assert.match(tauriSource, /consumeAppUpdateCompletion: \(\) =>\s*call<AppUpdateCompletionStatus \| null>\("consume_app_update_completion"\)/);
+  assert.match(tauriSource, /getAppVersion: \(\) => call<AppVersionInfo>\(COMMANDS.getAppVersion\)/);
+  assert.match(tauriSource, /checkAppUpdate: \(\) => call<AppUpdateStatus>\(COMMANDS.checkAppUpdate\)/);
+  assert.match(tauriSource, /startAppUpdateInstall: \(\) => call<AppUpdateInstallStatus>\(COMMANDS.startAppUpdateInstall\)/);
+  assert.match(tauriSource, /getAppUpdateInstallStatus: \(\) => call<AppUpdateInstallStatus>\(COMMANDS.getAppUpdateInstallStatus\)/);
+  assert.match(tauriSource, /consumeAppUpdateCompletion: \(\) =>\s*call<AppUpdateCompletionStatus \| null>\(COMMANDS.consumeAppUpdateCompletion\)/);
   assert.match(mainSource, /web_bridge::start_background\(app\.handle\(\)\.clone\(\)\)/);
   assert.match(bridgeSource, /"get_app_version"\s*=>\s*to_value\(Ok\(app_updates::get_app_version\(desktop_app\(&app\)\?\)\)\)/);
   assert.match(bridgeSource, /"check_app_update"\s*=>\s*to_value\(tauri::async_runtime::block_on\([\s\S]*app_updates::check_app_update\(desktop_app\(&app\)\?\)/);
@@ -3203,7 +3205,7 @@ test("manual Official refresh carries and discloses a Codex restart requirement"
   ]);
 
   assert.match(typesSource, /export interface OfficialRefreshResult[\s\S]*restart_required: boolean/);
-  assert.match(tauriSource, /refreshOfficialModels: \(\) => call<OfficialRefreshResult>\("refresh_official_models"\)/);
+  assert.match(tauriSource, /refreshOfficialModels: \(\) => call<OfficialRefreshResult>\(COMMANDS.refreshOfficialModels\)/);
   assert.match(actionsSource, /const refreshResult = await api\.refreshOfficialModels\(\)/);
   assert.match(actionsSource, /refreshResult\.restart_required[\s\S]*officialContextLimitsRestartCodex/);
   const refresh = actionsSource.match(/async function refreshOfficialModels[\s\S]*?async function discoverForForm/)?.[0] ?? "";
@@ -3281,9 +3283,9 @@ test("debug diagnostics are compile-selected, content-free, and expose bounded c
   assert.match(panelSource, /api\.diagnosticsResume\(\)/);
   assert.match(panelSource, /api\.diagnosticsDeleteIncident\(incidentId\)/);
   assert.doesNotMatch(panelSource, /diagnosticsRead|zip|artifact/i);
-  assert.match(tauriSource, /diagnostics_status/);
-  assert.match(tauriSource, /diagnostics_manual_mark/);
-  assert.match(tauriSource, /diagnostics_delete_incident/);
+  assert.match(tauriSource, /COMMANDS.diagnosticsStatus/);
+  assert.match(tauriSource, /COMMANDS.diagnosticsManualMark/);
+  assert.match(tauriSource, /COMMANDS.diagnosticsDeleteIncident/);
   assert.match(typesSource, /export interface DiagnosticsStatus/);
   assert.match(typesSource, /incident_ids: string\[\]/);
   assert.match(enSource, /diagnostics: \{/);

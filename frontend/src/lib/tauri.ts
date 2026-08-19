@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { COMMANDS, type CommandName } from "./commands";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -72,7 +73,7 @@ const KNOWN_BRIDGE_URLS = [
 ];
 const LOCAL_DEV_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+async function call<T>(command: CommandName, args?: Record<string, unknown>): Promise<T> {
   if (window.__TAURI_INTERNALS__) {
     try {
       return await invoke<T>(command, args);
@@ -85,7 +86,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return bridgeInvoke<T>(command, args);
 }
 
-async function desktopCall<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+async function desktopCall<T>(command: CommandName, args?: Record<string, unknown>): Promise<T | null> {
   if (!window.__TAURI_INTERNALS__) {
     return null;
   }
@@ -182,121 +183,121 @@ function openaiUsageWindowArgs(window?: OpenAIUsageQueryWindow | null) {
 }
 
 export const api = {
-  getAppFlavor: () => call<AppFlavorInfo>("get_app_flavor"),
-  getAppVersion: () => call<AppVersionInfo>("get_app_version"),
-  checkAppUpdate: () => call<AppUpdateStatus>("check_app_update"),
-  startAppUpdateInstall: () => call<AppUpdateInstallStatus>("start_app_update_install"),
-  getAppUpdateInstallStatus: () => call<AppUpdateInstallStatus>("get_app_update_install_status"),
+  getAppFlavor: () => call<AppFlavorInfo>(COMMANDS.getAppFlavor),
+  getAppVersion: () => call<AppVersionInfo>(COMMANDS.getAppVersion),
+  checkAppUpdate: () => call<AppUpdateStatus>(COMMANDS.checkAppUpdate),
+  startAppUpdateInstall: () => call<AppUpdateInstallStatus>(COMMANDS.startAppUpdateInstall),
+  getAppUpdateInstallStatus: () => call<AppUpdateInstallStatus>(COMMANDS.getAppUpdateInstallStatus),
   consumeAppUpdateCompletion: () =>
-    call<AppUpdateCompletionStatus | null>("consume_app_update_completion"),
-  installAppUpdate: () => call<AppUpdateInstallResult>("install_app_update"),
-  getStatus: () => call<AppStatus>("get_status"),
+    call<AppUpdateCompletionStatus | null>(COMMANDS.consumeAppUpdateCompletion),
+  installAppUpdate: () => call<AppUpdateInstallResult>(COMMANDS.installAppUpdate),
+  getStatus: () => call<AppStatus>(COMMANDS.getStatus),
   switchMode: (mode: string, autoSync: boolean, forceTakeover = false) =>
-    call<AppStatus>("switch_mode", { mode, autoSync, forceTakeover, force_takeover: forceTakeover }),
-  startProxy: () => call<AppStatus>("start_proxy"),
-  stopProxy: () => call<AppStatus>("stop_proxy"),
-  restartProxy: () => call<AppStatus>("restart_proxy"),
-  getProviders: () => call<Provider[]>("get_providers"),
-  saveProviders: (providers: Provider[]) => call<Provider[]>("save_providers", { providers }),
-  getSettings: async () => normalizeSettings(await call<Partial<Settings>>("get_settings")),
+    call<AppStatus>(COMMANDS.switchMode, { mode, autoSync, forceTakeover, force_takeover: forceTakeover }),
+  startProxy: () => call<AppStatus>(COMMANDS.startProxy),
+  stopProxy: () => call<AppStatus>(COMMANDS.stopProxy),
+  restartProxy: () => call<AppStatus>(COMMANDS.restartProxy),
+  getProviders: () => call<Provider[]>(COMMANDS.getProviders),
+  saveProviders: (providers: Provider[]) => call<Provider[]>(COMMANDS.saveProviders, { providers }),
+  getSettings: async () => normalizeSettings(await call<Partial<Settings>>(COMMANDS.getSettings)),
   saveSettings: async (settings: Settings) =>
     normalizeSettings(
-      await call<Partial<Settings>>("save_settings", {
+      await call<Partial<Settings>>(COMMANDS.saveSettings, {
         settings: normalizeSettings(settings),
       }),
     ),
   getCodexContextGuardStatus: () =>
-    call<CodexContextGuardStatus>("get_codex_context_guard_status"),
+    call<CodexContextGuardStatus>(COMMANDS.getCodexContextGuardStatus),
   setCodexContextGuard: (enabled: boolean) =>
-    call<CodexContextGuardStatus>("set_codex_context_guard", { enabled }),
-  refreshOfficialModels: () => call<OfficialRefreshResult>("refresh_official_models"),
+    call<CodexContextGuardStatus>(COMMANDS.setCodexContextGuard, { enabled }),
+  refreshOfficialModels: () => call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
-    call<OpenAIUsageSnapshot>("openai_usage_completions", openaiUsageWindowArgs(window)),
+    call<OpenAIUsageSnapshot>(COMMANDS.openaiUsageCompletions, openaiUsageWindowArgs(window)),
   discoverProviderModels: (baseUrl: string, apiKey: string) =>
-    call<Model[]>("discover_provider_models", { baseUrl, apiKey }),
+    call<Model[]>(COMMANDS.discoverProviderModels, { baseUrl, apiKey }),
   probeUpstreamFormat: (baseUrl: string, apiKey: string, model?: string | null) =>
-    call<UpstreamFormatProbeResult>("probe_upstream_format", {
+    call<UpstreamFormatProbeResult>(COMMANDS.probeUpstreamFormat, {
       baseUrl,
       apiKey,
       model: model ?? null,
     }),
   providerProbeUpstreamFormat: (providerId: string, model?: string | null) =>
-    call<UpstreamFormatProbeResult>("provider_probe_upstream_format", {
+    call<UpstreamFormatProbeResult>(COMMANDS.providerProbeUpstreamFormat, {
       providerId,
       model: model ?? null,
     }),
   testModelEndpoint: (baseUrl: string, apiKey: string, model: string, upstreamFormat: UpstreamFormat) =>
-    call<ModelEndpointTestResult>("test_model_endpoint", {
+    call<ModelEndpointTestResult>(COMMANDS.testModelEndpoint, {
       baseUrl,
       apiKey,
       model,
       upstreamFormat,
     }),
-  gatewayStatus: () => call<GatewayStatus>("gateway_status"),
-  diagnosticsStatus: () => call<DiagnosticsStatus>("diagnostics_status"),
-  diagnosticsManualMark: () => call<DiagnosticsActionResult>("diagnostics_manual_mark"),
-  diagnosticsPause: () => call<DiagnosticsActionResult>("diagnostics_pause"),
-  diagnosticsResume: () => call<DiagnosticsActionResult>("diagnostics_resume"),
+  gatewayStatus: () => call<GatewayStatus>(COMMANDS.gatewayStatus),
+  diagnosticsStatus: () => call<DiagnosticsStatus>(COMMANDS.diagnosticsStatus),
+  diagnosticsManualMark: () => call<DiagnosticsActionResult>(COMMANDS.diagnosticsManualMark),
+  diagnosticsPause: () => call<DiagnosticsActionResult>(COMMANDS.diagnosticsPause),
+  diagnosticsResume: () => call<DiagnosticsActionResult>(COMMANDS.diagnosticsResume),
   diagnosticsDeleteIncident: (incidentId: string) =>
-    call<DiagnosticsActionResult>("diagnostics_delete_incident", {
+    call<DiagnosticsActionResult>(COMMANDS.diagnosticsDeleteIncident, {
       incidentId,
       incident_id: incidentId,
     }),
   gatewayTestRequest: (kind: GatewayTestKind, model?: string | null) =>
-    call<GatewayTestResult>("gateway_test_request", { kind, model: model ?? null }),
+    call<GatewayTestResult>(COMMANDS.gatewayTestRequest, { kind, model: model ?? null }),
   gatewayRecentEvents: (
     limitOrOptions: number | { limit?: number; sinceTs?: string | null } = 20,
   ) => {
     const args = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
-    return call<GatewayEvent[]>("gateway_recent_events", args);
+    return call<GatewayEvent[]>(COMMANDS.gatewayRecentEvents, args);
   },
   gatewayUsageSnapshot: (window?: UsageQueryWindow | null) =>
-    call<GatewayUsageSnapshot>("gateway_usage_snapshot", usageWindowArgs(window)),
+    call<GatewayUsageSnapshot>(COMMANDS.gatewayUsageSnapshot, usageWindowArgs(window)),
   gatewayUsageSummary: (window?: UsageQueryWindow | null) =>
-    call<GatewayUsageSummary>("gateway_usage_summary", usageWindowArgs(window)),
+    call<GatewayUsageSummary>(COMMANDS.gatewayUsageSummary, usageWindowArgs(window)),
   gatewayUsageEvents: (
     limitOrWindow: number | UsageQueryWindow | null = 100,
     window?: UsageQueryWindow | null,
   ) => {
     const limit = typeof limitOrWindow === "number" ? limitOrWindow : null;
     const activeWindow = typeof limitOrWindow === "number" ? window : limitOrWindow;
-    return call<GatewayUsageEvent[]>("gateway_usage_events", {
+    return call<GatewayUsageEvent[]>(COMMANDS.gatewayUsageEvents, {
       limit,
       ...usageWindowArgs(activeWindow),
     });
   },
   gatewayCopyClientConfig: (model?: string | null, clientKind = "zcode") =>
-    call<GatewayClientConfig>("gateway_copy_client_config", {
+    call<GatewayClientConfig>(COMMANDS.gatewayCopyClientConfig, {
       clientKind,
       model: model ?? null,
     }),
   listGatewayClients: (includeVersions = false) =>
-    call<GatewayClientInfo[]>("list_gateway_clients", {
+    call<GatewayClientInfo[]>(COMMANDS.listGatewayClients, {
       includeVersions,
       include_versions: includeVersions,
     }),
-  dshClientConnect: () => call<DshLifecycleReport>("dsh_client_connect"),
-  dshClientDisconnect: () => call<DshLifecycleReport>("dsh_client_disconnect"),
-  dshClientReadback: () => call<DshLifecycleReport>("dsh_client_readback"),
+  dshClientConnect: () => call<DshLifecycleReport>(COMMANDS.dshClientConnect),
+  dshClientDisconnect: () => call<DshLifecycleReport>(COMMANDS.dshClientDisconnect),
+  dshClientReadback: () => call<DshLifecycleReport>(COMMANDS.dshClientReadback),
   previewGatewayClientConfig: (clientId: string, model?: string | null) =>
-    call<GatewayClientConfigPreview>("preview_gateway_client_config", {
+    call<GatewayClientConfigPreview>(COMMANDS.previewGatewayClientConfig, {
       clientId,
       model: model ?? null,
     }),
   applyGatewayClientConfig: (clientId: string, model?: string | null) =>
-    call<GatewayClientApplyResult>("apply_gateway_client_config", {
+    call<GatewayClientApplyResult>(COMMANDS.applyGatewayClientConfig, {
       clientId,
       model: model ?? null,
     }),
   restoreGatewayClientConfig: (clientId: string) =>
-    call<GatewayClientApplyResult>("restore_gateway_client_config", { clientId }),
+    call<GatewayClientApplyResult>(COMMANDS.restoreGatewayClientConfig, { clientId }),
   switchGatewayClientRoute: (
     clientId: string,
     mode: RoutingOwner | "hub",
     model?: string | null,
     forceTakeover = false,
   ) =>
-    call<GatewayClientApplyResult>("switch_gateway_client_route", {
+    call<GatewayClientApplyResult>(COMMANDS.switchGatewayClientRoute, {
       clientId,
       mode,
       model: model ?? null,
@@ -304,49 +305,49 @@ export const api = {
       force_takeover: forceTakeover,
     }),
   syncGatewayClients: (model?: string | null) =>
-    call<GatewayClientSyncSummary>("sync_gateway_clients", { model: model ?? null }),
-  subagentMatrixStatus: () => call<SubagentMatrixStatus>("subagent_matrix_status"),
-  generateCatalog: () => call<Model[]>("generate_catalog"),
+    call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
+  subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
+  generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
   catalogOverrideDiagnostics: () =>
-    call<CatalogOverrideDiagnostics>("get_catalog_override_diagnostics"),
-  listModels: () => call<Model[]>("list_models"),
-  refreshModelMetadata: () => call<Model[]>("refresh_model_metadata"),
-  listModelMetadata: () => call<Model[]>("list_model_metadata"),
+    call<CatalogOverrideDiagnostics>(COMMANDS.getCatalogOverrideDiagnostics),
+  listModels: () => call<Model[]>(COMMANDS.listModels),
+  refreshModelMetadata: () => call<Model[]>(COMMANDS.refreshModelMetadata),
+  listModelMetadata: () => call<Model[]>(COMMANDS.listModelMetadata),
   saveModelMetadataOverride: (model: Model) =>
-    call<Model>("save_model_metadata_override", { model }),
+    call<Model>(COMMANDS.saveModelMetadataOverride, { model }),
   saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null) =>
-    call<Model>("save_official_multi_agent_version", {
+    call<Model>(COMMANDS.saveOfficialMultiAgentVersion, {
       modelId,
       version,
     }),
   listOfficialMultiAgentOverrides: () =>
-    call<Record<string, "v1" | "v2">>("list_official_multi_agent_overrides"),
+    call<Record<string, "v1" | "v2">>(COMMANDS.listOfficialMultiAgentOverrides),
   listOfficialMultiAgentBaselines: () =>
-    call<Record<string, "v1" | "v2">>("list_official_multi_agent_baselines"),
+    call<Record<string, "v1" | "v2">>(COMMANDS.listOfficialMultiAgentBaselines),
   syncHistory: (targetProvider?: string) =>
-    call<string>("sync_history", { targetProvider: targetProvider ?? null }),
+    call<string>(COMMANDS.syncHistory, { targetProvider: targetProvider ?? null }),
   reconcileAfterRouteSwitch: (targetProvider?: string) =>
-    call<UnifiedHistoryResult>("reconcile_after_route_switch", {
+    call<UnifiedHistoryResult>(COMMANDS.reconcileAfterRouteSwitch, {
       targetProvider: targetProvider ?? null,
     }),
-  migrateOfficialHistoryToUnified: () => call<string>("migrate_official_history_to_unified"),
-  restoreOfficialHistoryFromUnified: () => call<string>("restore_official_history_from_unified"),
+  migrateOfficialHistoryToUnified: () => call<string>(COMMANDS.migrateOfficialHistoryToUnified),
+  restoreOfficialHistoryFromUnified: () => call<string>(COMMANDS.restoreOfficialHistoryFromUnified),
   preflightUnifiedHistory: (applyRepairs = false, targetUnified?: boolean) =>
-    call<UnifiedHistoryResult>("preflight_unified_history", { applyRepairs, targetUnified }),
+    call<UnifiedHistoryResult>(COMMANDS.preflightUnifiedHistory, { applyRepairs, targetUnified }),
   getConversationSyncStatus: () =>
-    call<UnifiedHistoryResult>("get_conversation_sync_status"),
+    call<UnifiedHistoryResult>(COMMANDS.getConversationSyncStatus),
   syncConversationHistory: (targetProvider?: string) =>
-    call<UnifiedHistoryResult>("sync_conversation_history", { targetProvider: targetProvider ?? null }),
+    call<UnifiedHistoryResult>(COMMANDS.syncConversationHistory, { targetProvider: targetProvider ?? null }),
   diagnoseConversationHistory: (fullScan = true) =>
-    call<UnifiedHistoryResult>("diagnose_conversation_history", { fullScan }),
-  syncCatalog: () => call<string>("sync_catalog"),
-  setAutostart: (enabled: boolean) => call<string>("set_autostart", { enabled }),
-  removeAutostart: () => call<string>("remove_autostart"),
-  getAutostartStatus: () => call<AutostartStatus>("get_autostart_status"),
-  openCodexApp: () => call<string>("open_codex_app"),
-  windowMinimize: () => desktopCall<void>("window_minimize"),
-  windowToggleMaximize: () => desktopCall<void>("window_toggle_maximize"),
-  windowCloseToTray: () => desktopCall<void>("window_close_to_tray"),
+    call<UnifiedHistoryResult>(COMMANDS.diagnoseConversationHistory, { fullScan }),
+  syncCatalog: () => call<string>(COMMANDS.syncCatalog),
+  setAutostart: (enabled: boolean) => call<string>(COMMANDS.setAutostart, { enabled }),
+  removeAutostart: () => call<string>(COMMANDS.removeAutostart),
+  getAutostartStatus: () => call<AutostartStatus>(COMMANDS.getAutostartStatus),
+  openCodexApp: () => call<string>(COMMANDS.openCodexApp),
+  windowMinimize: () => desktopCall<void>(COMMANDS.windowMinimize),
+  windowToggleMaximize: () => desktopCall<void>(COMMANDS.windowToggleMaximize),
+  windowCloseToTray: () => desktopCall<void>(COMMANDS.windowCloseToTray),
 };
 
 export function messageFromError(error: unknown): string {
