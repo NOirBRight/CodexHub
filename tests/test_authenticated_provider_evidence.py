@@ -75,6 +75,7 @@ def test_all_authenticated_chat_cells_cover_text_patch_and_v2() -> None:
         assert gateway["has_v2_observation"] is True
         assert gateway["event_types"]["chat_stream_shape_summary"] > 0
         assert gateway["event_types"]["chat_to_responses_event_summary"] > 0
+        assert gateway["event_types"]["chat_reasoning_extensions_suppressed"] > 0
         assert gateway["event_types"]["runtime_tool_adapter_response"] >= 6
         for failure in gateway["failures"]:
             assert set(failure) <= {
