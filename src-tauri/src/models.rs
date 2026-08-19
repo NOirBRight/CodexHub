@@ -2529,10 +2529,13 @@ impl CatalogSyncRunner for ProcessCatalogSyncRunner {
         codex_dir: &Path,
     ) -> Result<CatalogCommandOutcome, String> {
         let mut command = runtime_paths::configured_python_command(python);
+        let target_home = runtime_paths::codex_target_home_dir()
+            .unwrap_or_else(|_| codex_dir.to_path_buf());
         command
             .arg(script)
             .arg("--sync")
-            .env("CODEX_HOME", codex_dir);
+            .env("CODEX_HOME", codex_dir)
+            .env("CODEXHUB_CODEX_TARGET_HOME", target_home);
         configure_no_window(&mut command);
         let output = command
             .output()
