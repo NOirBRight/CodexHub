@@ -91,7 +91,15 @@ def test_gateway_summary_retains_only_bounded_route_and_failure_fields(tmp_path:
             "route_provider_id": "ollama-cloud",
             "route_upstream_model": "glm-5.2",
             "executed_upstream_protocol": "chat_completions",
+            "reasoning_policy": "explicit",
             "request_id": "must-not-survive",
+        },
+        {
+            "event": "chat_stream_shape_summary",
+            "chunk_count": 4,
+            "delta_source_count": 3,
+            "text_chars": 19,
+            "request_body": "must-not-survive",
         },
         {
             "event": "request_complete",
@@ -121,7 +129,15 @@ def test_gateway_summary_retains_only_bounded_route_and_failure_fields(tmp_path:
         "status": 499,
         "failure_class": "downstream_client_closed",
         "failure_phase": "downstream_write",
+        "category": "client_cancellation",
     }]
+    assert value["reasoning_policies"] == ["explicit"]
+    assert value["streaming"] == {
+        "summary_count": 1,
+        "max_chunk_count": 4,
+        "text_delta_source_count": 3,
+        "progressive_text_stream_count": 1,
+    }
     assert "must-not-survive" not in serialized
 
 
@@ -156,6 +172,63 @@ def test_session_structural_evidence_keeps_names_not_identities(tmp_path: Path) 
 
     assert runner._session_collaboration_counts(tmp_path) == {"spawn_agent": 1}
     assert runner._session_agent_message_count(tmp_path) == 1
+
+
+
+
+def test_session_tool_evidence_requires_exact_call_result_and_task_identity(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    values: list[dict[str, object]] = []
+
+    def lifecycle(item_type: str, name: str, call_id: str, output: str, namespace: str | None = None) -> None:
+        call: dict[str, object] = {"type": item_type, "name": name, "call_id": call_id}
+        if namespace is not None:
+            call["namespace"] = namespace
+        output_type = "custom_tool_call_output" if item_type == "custom_tool_call" else "function_call_output"
+        values.extend((call, {"type": output_type, "call_id": call_id, "output": output}))
+
+    lifecycle("function_call", "exec_command", "exec-1", "ok")
+    lifecycle("custom_tool_call", "apply_patch", "patch-1", "Done!")
+    results = {
+        "spawn_agent": json.dumps({"task_name": "/root/provider_worker"}),
+        "wait_agent": json.dumps({"message": "CHILD_DONE", "timed_out": False}),
+        "send_message": "",
+        "followup_task": "",
+        "list_agents": json.dumps(
+            {"agents": [{"agent_name": "/root/provider_worker", "agent_status": "running"}]}
+        ),
+        "interrupt_agent": json.dumps({"previous_status": "running"}),
+    }
+    for index, name in enumerate(runner.EXPECTED_V2_SEQUENCE):
+        lifecycle("function_call", name, f"collab-{index}", results[name], "collaboration")
+    values.append(
+        {
+            "type": "agent_message",
+            "author": "/root/provider_worker",
+            "recipient": "/root",
+            "content": [],
+        }
+    )
+    (session_dir / "rollout.jsonl").write_text(
+        chr(10).join(json.dumps(value) for value in values) + chr(10), encoding="utf-8"
+    )
+
+    evidence = runner._session_tool_evidence(tmp_path)
+    assert evidence == {
+        "exec_command_call_count": 1,
+        "exec_command_identity_preserved": True,
+        "apply_patch_call_count": 1,
+        "apply_patch_identity_preserved": True,
+        "collaboration_sequence": list(runner.EXPECTED_V2_SEQUENCE),
+        "collaboration_call_count": 6,
+        "collaboration_history_identity_preserved": True,
+        "canonical_task_identity_observed": True,
+        "child_result_delivery_observed": True,
+        "wait_result_shape_valid": True,
+        "list_result_shape_valid": True,
+        "interrupt_result_shape_valid": True,
+    }
 
 
 def test_capture_writes_bounded_summary_without_credential(

@@ -48,9 +48,19 @@ QUALIFICATION_KEY_ENV = "CODEXHUB_AUTH_QUAL_KEY"
 DEFAULT_CREDENTIAL_SOURCE = Path.home() / ".codex" / "proxy" / "config" / "providers.toml"
 DEFAULT_OUTPUT_DIR = Path("docs/evidence/authenticated-provider")
 EXPECTED_V2_TOOLS = frozenset(V2_TOOLS)
+EXPECTED_V2_SEQUENCE = (
+    "spawn_agent",
+    "wait_agent",
+    "followup_task",
+    "send_message",
+    "list_agents",
+    "interrupt_agent",
+)
 SENTINELS = {
     "identity_text": "AUTH_PROVIDER_TEXT_OK",
+    "identity_resume": "AUTH_PROVIDER_TEXT_RESUME_OK",
     "file_workflow": "AUTH_PROVIDER_PATCH_OK",
+    "collaboration_phase1": "AUTH_PROVIDER_V2_PHASE1_OK",
     "collaboration": "AUTH_PROVIDER_V2_OK",
     "resume": "AUTH_PROVIDER_RESUME_OK",
 }
@@ -311,8 +321,7 @@ def _walk(value: Any) -> Iterable[Mapping[str, Any]]:
             yield from _walk(child)
 
 
-def _session_collaboration_counts(home: Path) -> Counter[str]:
-    counts: Counter[str] = Counter()
+def _session_items(home: Path) -> Iterator[Mapping[str, Any]]:
     for path in home.rglob("*.jsonl"):
         if "sessions" not in path.parts:
             continue
@@ -325,37 +334,158 @@ def _session_collaboration_counts(home: Path) -> Counter[str]:
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            for item in _walk(value):
-                if (
-                    item.get("type") == "function_call"
-                    and item.get("namespace") == "collaboration"
-                    and isinstance(item.get("name"), str)
-                ):
-                    counts[item["name"]] += 1
+            yield from _walk(value)
+
+
+def _session_tool_evidence(home: Path) -> dict[str, Any]:
+    calls: dict[str, tuple[str, str | None]] = {}
+    call_order: list[str] = []
+    outputs: dict[str, Any] = {}
+    for item in _session_items(home):
+        item_type = item.get("type")
+        if item_type in {"function_call", "custom_tool_call"}:
+            call_id = item.get("call_id")
+            name = item.get("name")
+            namespace = item.get("namespace")
+            if isinstance(call_id, str) and isinstance(name, str) and call_id not in calls:
+                calls[call_id] = (name, namespace if isinstance(namespace, str) else None)
+                call_order.append(call_id)
+        elif item_type in {"function_call_output", "custom_tool_call_output"}:
+            call_id = item.get("call_id")
+            if isinstance(call_id, str) and call_id not in outputs:
+                outputs[call_id] = item.get("output")
+
+    def lifecycle(name: str, namespace: str | None = None) -> tuple[list[str], bool]:
+        matching = [
+            call_id
+            for call_id in call_order
+            if calls[call_id] == (name, namespace)
+            or (namespace is None and calls[call_id][0] == name)
+        ]
+        return matching, bool(matching) and all(call_id in outputs for call_id in matching)
+
+    exec_calls, exec_identity = lifecycle("exec_command")
+    patch_calls, patch_identity = lifecycle("apply_patch")
+    collaboration_ids = [
+        call_id for call_id in call_order if calls[call_id][1] == "collaboration"
+    ]
+    raw_sequence = [calls[call_id][0] for call_id in collaboration_ids]
+    collaboration_sequence = list(dict.fromkeys(raw_sequence))
+    results_by_name: dict[str, list[Any]] = {}
+    for call_id in collaboration_ids:
+        if call_id in outputs:
+            results_by_name.setdefault(calls[call_id][0], []).append(outputs[call_id])
+
+    spawn_results = results_by_name.get("spawn_agent", [])
+    spawn_objects: list[Mapping[str, Any]] = []
+    for value in spawn_results:
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, Mapping):
+            spawn_objects.append(parsed)
+    canonical_task = any(
+        isinstance(result.get("task_name"), str)
+        and result["task_name"].startswith("/root/")
+        for result in spawn_objects
+    )
+
+    wait_outputs = results_by_name.get("wait_agent", [])
+    list_outputs = results_by_name.get("list_agents", [])
+    interrupt_outputs = results_by_name.get("interrupt_agent", [])
+    def parsed_object(value: Any) -> Mapping[str, Any] | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+
+    def object_keys(value: Any) -> set[str]:
+        parsed = parsed_object(value)
+        return set(parsed) if parsed is not None else set()
+
+    wait_objects = [parsed_object(value) for value in wait_outputs]
+    wait_result_shape_valid = any(
+        result is not None
+        and set(result) == {"message", "timed_out"}
+        and isinstance(result.get("message"), str)
+        and isinstance(result.get("timed_out"), bool)
+        for result in wait_objects
+    )
+    child_delivery = any(
+        result is not None
+        and result.get("timed_out") is False
+        and isinstance(result.get("message"), str)
+        and bool(result["message"].strip())
+        for result in wait_objects
+    )
+    list_status_valid = False
+    for value in list_outputs:
+        result = parsed_object(value)
+        agents = result.get("agents") if result is not None else None
+        if (
+            result is not None
+            and set(result) == {"agents"}
+            and isinstance(agents, list)
+            and bool(agents)
+            and all(
+                isinstance(agent, Mapping)
+                and isinstance(agent.get("agent_name"), str)
+                and isinstance(agent.get("agent_status"), str)
+                for agent in agents
+            )
+        ):
+            list_status_valid = True
+    interrupt_result_shape_valid = any(
+        object_keys(value) == {"previous_status"}
+        and isinstance(parsed_object(value).get("previous_status"), str)
+        for value in interrupt_outputs
+        if parsed_object(value) is not None
+    )
+
+    return {
+        "exec_command_call_count": len(exec_calls),
+        "exec_command_identity_preserved": exec_identity,
+        "apply_patch_call_count": len(patch_calls),
+        "apply_patch_identity_preserved": patch_identity,
+        "collaboration_sequence": collaboration_sequence,
+        "collaboration_call_count": len(collaboration_ids),
+        "collaboration_history_identity_preserved": bool(collaboration_ids)
+        and all(call_id in outputs for call_id in collaboration_ids),
+        "canonical_task_identity_observed": canonical_task,
+        "child_result_delivery_observed": child_delivery,
+        "wait_result_shape_valid": wait_result_shape_valid,
+        "list_result_shape_valid": list_status_valid,
+        "interrupt_result_shape_valid": interrupt_result_shape_valid,
+    }
+
+
+def _session_collaboration_counts(home: Path) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for item in _session_items(home):
+        if (
+            item.get("type") == "function_call"
+            and item.get("namespace") == "collaboration"
+            and isinstance(item.get("name"), str)
+        ):
+            counts[item["name"]] += 1
     return counts
 
 
 def _session_agent_message_count(home: Path) -> int:
     count = 0
-    for path in home.rglob("*.jsonl"):
-        if "sessions" not in path.parts:
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            count += sum(
-                1
-                for item in _walk(value)
-                if item.get("type") == "agent_message"
-                and isinstance(item.get("author"), str)
-                and isinstance(item.get("recipient"), str)
-            )
+    count += sum(
+        1
+        for item in _session_items(home)
+        if item.get("type") == "agent_message"
+        and isinstance(item.get("author"), str)
+        and isinstance(item.get("recipient"), str)
+    )
     return count
 
 
@@ -379,6 +509,10 @@ def _gateway_summary(path: Path) -> dict[str, Any]:
     protocols: set[str] = set()
     failures: list[dict[str, Any]] = []
     event_types: Counter[str] = Counter()
+    reasoning_policies: set[str] = set()
+    stream_chunk_counts: list[int] = []
+    text_delta_sources = 0
+    progressive_text_streams = 0
     if path.exists():
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
@@ -397,22 +531,57 @@ def _gateway_summary(path: Path) -> dict[str, Any]:
                     models.add(event["route_upstream_model"])
                 if isinstance(event.get("executed_upstream_protocol"), str):
                     protocols.add(event["executed_upstream_protocol"])
+                if isinstance(event.get("reasoning_policy"), str):
+                    reasoning_policies.add(event["reasoning_policy"])
+            if name == "chat_stream_shape_summary":
+                chunk_count = event.get("chunk_count")
+                delta_sources = event.get("delta_source_count")
+                text_chars = event.get("text_chars")
+                if isinstance(chunk_count, int):
+                    stream_chunk_counts.append(chunk_count)
+                if isinstance(delta_sources, int):
+                    text_delta_sources += delta_sources
+                if (
+                    isinstance(chunk_count, int)
+                    and chunk_count >= 3
+                    and isinstance(delta_sources, int)
+                    and delta_sources >= 2
+                    and isinstance(text_chars, int)
+                    and text_chars > 0
+                ):
+                    progressive_text_streams += 1
             if name in {"request_error", "downstream_stream_closed"} or (
                 name == "request_complete" and event.get("status") != 200
             ):
-                failures.append(
-                    {
-                        key: event.get(key)
-                        for key in ("event", "status", "failure_class", "failure_phase", "retry_safety")
-                        if event.get(key) is not None
-                    }
-                )
+                bounded = {
+                    key: event.get(key)
+                    for key in ("event", "status", "failure_class", "failure_phase", "retry_safety")
+                    if event.get(key) is not None
+                }
+                if event.get("failure_phase") in {"connect", "tls_handshake", "upstream_open"}:
+                    bounded["category"] = "upstream_transport_or_availability"
+                elif event.get("failure_phase") == "downstream_write" or event.get("status") == 499:
+                    bounded["category"] = "client_cancellation"
+                elif event.get("status") == 400:
+                    bounded["category"] = "request_or_semantic_rejection"
+                elif isinstance(event.get("status"), int) and event["status"] >= 500:
+                    bounded["category"] = "upstream_or_gateway_failure"
+                else:
+                    bounded["category"] = "other_non_success"
+                failures.append(bounded)
     analyzed = lifecycle._analyze_gateway_log(path)
     return {
         "providers": sorted(providers),
         "models": sorted(models),
         "protocols": sorted(protocols),
         "event_types": dict(sorted(event_types.items())),
+        "reasoning_policies": sorted(reasoning_policies),
+        "streaming": {
+            "summary_count": len(stream_chunk_counts),
+            "max_chunk_count": max(stream_chunk_counts, default=0),
+            "text_delta_source_count": text_delta_sources,
+            "progressive_text_stream_count": progressive_text_streams,
+        },
         "failures": failures[:64],
         "fallback_count": analyzed.get("fallback_count", 0),
         "has_v1_observation": analyzed.get("has_v1_observation", False),
@@ -428,13 +597,50 @@ def _run_identity(home: Path, port: int, workspace: Path) -> dict[str, Any]:
         workspace,
     )
     analysis = lifecycle._analyze_cli_events(lines)
-    passed = code == 0 and analysis.get("terminal_event") == "turn.completed" and SENTINELS["identity_text"] in stdout
+    session_id = lifecycle._thread_id_from_cli_lines(lines)
+    resume_code = -1
+    resume_terminal: str | None = None
+    resume_sentinel = False
+    resume_item_types: list[str] = []
+    if session_id:
+        resume_code, resume_lines, resume_stdout, _resume_stderr = lifecycle._run_cli_resume(
+            home,
+            session_id,
+            "Continue this same text-only conversation. Do not call tools. Reply with exactly "
+            + SENTINELS["identity_resume"] + ".",
+            workspace,
+        )
+        resume_analysis = lifecycle._analyze_cli_events(resume_lines)
+        resume_terminal = resume_analysis.get("terminal_event")
+        resume_sentinel = SENTINELS["identity_resume"] in resume_stdout
+        resume_item_types = _item_types(resume_lines)
+    multi_turn = (
+        bool(session_id)
+        and resume_code == 0
+        and resume_terminal == "turn.completed"
+        and resume_sentinel
+        and resume_item_types == ["agent_message"]
+    )
+    passed = (
+        code == 0
+        and analysis.get("terminal_event") == "turn.completed"
+        and SENTINELS["identity_text"] in stdout
+        and _item_types(lines) == ["agent_message"]
+        and multi_turn
+    )
     return {
         "status": "passed" if passed else "failed",
         "exit_code": code,
         "terminal_event": analysis.get("terminal_event"),
         "sentinel_observed": SENTINELS["identity_text"] in stdout,
         "item_types": _item_types(lines),
+        "multi_turn_history": {
+            "passed": multi_turn,
+            "resume_exit_code": resume_code,
+            "resume_terminal_event": resume_terminal,
+            "resume_sentinel_observed": resume_sentinel,
+            "resume_item_types": resume_item_types,
+        },
     }
 
 
@@ -463,6 +669,7 @@ def _run_file_workflow(home: Path, port: int, workspace: Path) -> dict[str, Any]
     analysis = lifecycle._analyze_cli_events(lines)
     item_types = _item_types(lines)
     file_verified = target.read_text(encoding="utf-8") == "beta" + chr(10)
+    tool_evidence = _session_tool_evidence(home)
     passed = (
         code == 0
         and analysis.get("terminal_event") == "turn.completed"
@@ -470,6 +677,10 @@ def _run_file_workflow(home: Path, port: int, workspace: Path) -> dict[str, Any]
         and file_verified
         and "command_execution" in item_types
         and "file_change" in item_types
+        and tool_evidence["exec_command_call_count"] >= 2
+        and tool_evidence["exec_command_identity_preserved"]
+        and tool_evidence["apply_patch_call_count"] >= 1
+        and tool_evidence["apply_patch_identity_preserved"]
     )
     return {
         "status": "passed" if passed else "failed",
@@ -478,6 +689,14 @@ def _run_file_workflow(home: Path, port: int, workspace: Path) -> dict[str, Any]
         "sentinel_observed": SENTINELS["file_workflow"] in stdout,
         "file_verified": file_verified,
         "item_types": item_types,
+        "standard_function_lifecycle": {
+            "call_count": tool_evidence["exec_command_call_count"],
+            "exact_call_result_identity": tool_evidence["exec_command_identity_preserved"],
+        },
+        "custom_tool_lifecycle": {
+            "call_count": tool_evidence["apply_patch_call_count"],
+            "exact_call_result_identity": tool_evidence["apply_patch_identity_preserved"],
+        },
         "terminal_error": _terminal_error_classification(lines),
     }
 
@@ -496,19 +715,35 @@ def _run_collaboration(
     config_path = home / "config.toml"
     config_before = _sha256_file(config_path)
     agents_before = _sha256_file(agents_path)
-    prompt = (
-        "Exercise all six collaboration tools in this exact order. Spawn agent provider_worker "
-        "with task: run exec_command sleep 90 and then report CHILD_DONE. Call wait_agent with "
-        "timeout_ms 30000 while it is sleeping. Call send_message to /root/provider_worker with "
-        "ACK. Call followup_task to /root/provider_worker with FOLLOWUP. Call list_agents. Call "
-        "interrupt_agent on /root/provider_worker. Wait for interruption delivery if needed. "
-        f"Then reply {SENTINELS['collaboration']}."
+    phase1_prompt = (
+        "Use collaboration spawn_agent to spawn provider_worker with task: reply CHILD_DONE "
+        "exactly and do not call tools. Then call wait_agent with timeout_ms 30000 until that "
+        f"child result arrives. Reply {SENTINELS['collaboration_phase1']}."
     )
-    code, lines, stdout, _stderr = lifecycle._run_cli(home, port, prompt, workspace)
-    analysis = lifecycle._analyze_cli_events(lines)
-    session_id = lifecycle._thread_id_from_cli_lines(lines)
+    phase1_code, phase1_lines, phase1_stdout, _phase1_stderr = lifecycle._run_cli(
+        home, port, phase1_prompt, workspace
+    )
+    phase1_analysis = lifecycle._analyze_cli_events(phase1_lines)
+    session_id = lifecycle._thread_id_from_cli_lines(phase1_lines)
+    code = -1
+    lines: list[str] = []
+    stdout = ""
+    analysis: dict[str, Any] = {}
+    if session_id:
+        phase2_prompt = (
+            "Continue this collaboration lifecycle. Call followup_task on "
+            "/root/provider_worker with task: run exec_command sleep 90 and then reply "
+            "FOLLOWUP_DONE. Call send_message to /root/provider_worker with ACK while the "
+            "follow-up is active. Call list_agents and observe canonical task status. Then "
+            "call interrupt_agent on /root/provider_worker. Wait for interruption delivery "
+            f"if needed. Reply {SENTINELS['collaboration']}."
+        )
+        code, lines, stdout, _stderr = lifecycle._run_cli_resume(
+            home, session_id, phase2_prompt, workspace
+        )
+        analysis = lifecycle._analyze_cli_events(lines)
     counts_before_resume = _session_collaboration_counts(home)
-    session_agent_messages = _session_agent_message_count(home)
+    tool_evidence = _session_tool_evidence(home)
     observed = set(counts_before_resume)
 
     lifecycle._stop_gateway(process)
@@ -563,11 +798,21 @@ def _run_collaboration(
         and _sha256_file(agents_path) == agents_before
     )
     passed = (
-        code == 0
+        phase1_code == 0
+        and phase1_analysis.get("terminal_event") == "turn.completed"
+        and SENTINELS["collaboration_phase1"] in phase1_stdout
+        and code == 0
         and analysis.get("terminal_event") == "turn.completed"
         and SENTINELS["collaboration"] in stdout
         and observed == EXPECTED_V2_TOOLS
-        and session_agent_messages >= 1
+        and tool_evidence["collaboration_sequence"] == list(EXPECTED_V2_SEQUENCE)
+        and tool_evidence["collaboration_call_count"] >= len(EXPECTED_V2_SEQUENCE)
+        and tool_evidence["collaboration_history_identity_preserved"]
+        and tool_evidence["canonical_task_identity_observed"]
+        and tool_evidence["child_result_delivery_observed"]
+        and tool_evidence["wait_result_shape_valid"]
+        and tool_evidence["list_result_shape_valid"]
+        and tool_evidence["interrupt_result_shape_valid"]
         and same_home
         and cross_home_rejected
     )
@@ -577,8 +822,27 @@ def _run_collaboration(
             "exit_code": code,
             "terminal_event": analysis.get("terminal_event"),
             "sentinel_observed": SENTINELS["collaboration"] in stdout,
+            "phase1": {
+                "exit_code": phase1_code,
+                "terminal_event": phase1_analysis.get("terminal_event"),
+                "sentinel_observed": SENTINELS["collaboration_phase1"] in phase1_stdout,
+            },
             "observed_tools": sorted(observed),
-            "child_result_delivery_observed": session_agent_messages >= 1,
+            "ordered_tool_sequence": tool_evidence["collaboration_sequence"],
+            "exact_call_result_history_identity": tool_evidence[
+                "collaboration_history_identity_preserved"
+            ],
+            "canonical_task_identity_observed": tool_evidence[
+                "canonical_task_identity_observed"
+            ],
+            "child_result_delivery_observed": tool_evidence[
+                "child_result_delivery_observed"
+            ],
+            "result_shapes": {
+                "wait": tool_evidence["wait_result_shape_valid"],
+                "list_status": tool_evidence["list_result_shape_valid"],
+                "interrupt": tool_evidence["interrupt_result_shape_valid"],
+            },
             "same_home_restart": {
                 "passed": same_home,
                 "resume_exit_code": resume_code,
@@ -641,10 +905,25 @@ def _run_cell(
             and gateway["protocols"] == [expected_protocol]
         )
         result["identity_bound"] = identity_bound
+        protocol_observations = True
+        if cell.protocol == "chat_completions":
+            protocol_observations = (
+                gateway["streaming"]["progressive_text_stream_count"] >= 1
+                and gateway["streaming"]["text_delta_source_count"] >= 2
+                and gateway["reasoning_policies"] == ["explicit"]
+                and all(failure.get("category") for failure in gateway["failures"])
+            )
+            if "collaboration" in scenarios:
+                protocol_observations = protocol_observations and (
+                    gateway["event_types"].get("runtime_tool_adapter_response", 0)
+                    >= len(EXPECTED_V2_SEQUENCE)
+                )
+        result["protocol_observations_passed"] = protocol_observations
         result["status"] = "passed" if (
             result["provider_probe"].get("status") == "passed"
             and scenarios_pass
             and identity_bound
+            and protocol_observations
             and gateway["fallback_count"] == 0
             and not gateway["has_v1_observation"]
         ) else "failed"
