@@ -302,8 +302,8 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct SettingsDocument {
+#[cfg(any())]
+struct SettingsDocumentRemoved {
     locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
@@ -332,7 +332,8 @@ struct SettingsDocument {
     proxy_port: Option<u16>,
 }
 
-impl SettingsDocument {
+#[cfg(any())]
+impl SettingsDocumentRemoved {
     fn into_settings(self) -> Settings {
         let defaults = Settings::default();
         Settings {
@@ -416,9 +417,6 @@ impl SettingsDocument {
     }
 }
 
-fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
-    value.clamp(1, 30) as u8
-}
 
 #[derive(Debug, Deserialize)]
 struct HealthResponse {
@@ -2615,16 +2613,11 @@ fn split_command_line(command_line: &str) -> Vec<String> {
 }
 
 fn read_settings(paths: &ProxyPaths) -> Result<Settings, String> {
-    let path = paths.settings_path();
-    if !path.exists() {
-        return Ok(Settings::default());
-    }
-
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read settings JSON {}: {error}", path.display()))?;
-    let document: SettingsDocument = serde_json::from_str(&text)
-        .map_err(|error| format!("failed to parse settings JSON {}: {error}", path.display()))?;
-    Ok(document.into_settings())
+    crate::config::get_settings_with_paths(&crate::config::ConfigPaths::new_isolated(
+        paths.codex_dir.clone(),
+        paths.codex_target_dir.clone(),
+        paths.repo_root.clone(),
+    ))
 }
 
 fn read_mode(paths: &ProxyPaths) -> Result<String, String> {

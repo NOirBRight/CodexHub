@@ -598,7 +598,7 @@ fn save_providers_with_paths(
     Ok(providers)
 }
 
-fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {
+pub(crate) fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, String> {
     let path = paths.settings_path();
     if !path.exists() {
         return Ok(Settings::default());
