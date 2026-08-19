@@ -1427,6 +1427,30 @@ def capture(
                         None,
                     )
                     resume_analysis = _analyze_cli_events(resume_lines)
+                    foreign_home = _isolated_home()
+                    try:
+                        foreign_workspace = foreign_home / "workspace"
+                        foreign_workspace.mkdir()
+                        _write_providers_toml(foreign_home, fixture.port)
+                        _sync_catalog(foreign_home)
+                        _write_cli_config(foreign_home, shim.port)
+                        fixture_requests_before_foreign = len(fixture._server.requests)
+                        shim_requests_before_foreign = len(shim._server.raw_requests)
+                        foreign_returncode, _foreign_lines, _foreign_stdout, _foreign_stderr = (
+                            _run_cli_resume(
+                                foreign_home,
+                                root_session_id,
+                                "This foreign Home must not read or mutate the parent task.",
+                                foreign_workspace,
+                            )
+                        )
+                        cross_home_rejected = (
+                            foreign_returncode != 0
+                            and len(fixture._server.requests) == fixture_requests_before_foreign
+                            and len(shim._server.raw_requests) == shim_requests_before_foreign
+                        )
+                    finally:
+                        _remove_home(foreign_home)
                     restart_check = {
                         "requested": True,
                         "passed": (
@@ -1437,6 +1461,7 @@ def capture(
                             and task_after == task_before
                             and _sha256_file(config_path) == config_before
                             and _sha256_file(agents_path) == agents_before
+                            and cross_home_rejected
                         ),
                         "resume_exit_code": resume_returncode,
                         "resume_terminal_event": resume_analysis.get("terminal_event"),
@@ -1444,6 +1469,7 @@ def capture(
                         "task_identity_preserved": task_before is not None and task_after == task_before,
                         "config_preserved": _sha256_file(config_path) == config_before,
                         "agents_configuration_preserved": _sha256_file(agents_path) == agents_before,
+                        "cross_home_rejected_before_fixture_mutation": cross_home_rejected,
                     }
         finally:
             if gateway_process is not None:
