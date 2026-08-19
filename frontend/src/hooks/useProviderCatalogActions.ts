@@ -16,6 +16,7 @@ import {
   shortProviderDiscoveryError,
   upstreamFormatLabel,
 } from "../lib/providerEndpoint";
+import { publishCatalog } from "../lib/catalogPublish";
 import { api, messageFromError } from "../lib/tauri";
 import type {
   CatalogOverrideDiagnostics,
@@ -115,27 +116,34 @@ export function useProviderCatalogActions({
         tone: "loading",
       });
     }
-    if (!catalogAlreadyPublished) {
-      await api.generateCatalog();
-    }
     const syncSettings = activeSettings ?? settingsDraft ?? settings;
-    let syncResult: GatewayClientSyncSummary | null = null;
-    if (syncSettings?.auto_sync_clients) {
-      if (toastId) {
-        updateToast(toastId, {
-          action: null,
-          text: t("providers.syncBoundClients"),
-          tone: "loading",
-        });
-      }
-      syncResult = await api.syncGatewayClients().catch((err) => ({
-        applied: 0,
-        skipped: 0,
-        failed: 1,
-        results: [],
-        message: t("providers.clientSyncFailed", { message: messageFromError(err) }),
-      }));
-    }
+    const published = await publishCatalog(
+      {
+        reason: "provider-catalog",
+        persist: !catalogAlreadyPublished,
+        syncClients: Boolean(syncSettings?.auto_sync_clients),
+      },
+      {
+        generate: () => api.generateCatalog(),
+        sync: async () => {
+          if (toastId) {
+            updateToast(toastId, {
+              action: null,
+              text: t("providers.syncBoundClients"),
+              tone: "loading",
+            });
+          }
+          return api.syncGatewayClients().catch((err) => ({
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            results: [],
+            message: t("providers.clientSyncFailed", { message: messageFromError(err) }),
+          }));
+        },
+      },
+    );
+    const syncResult = published.syncResult;
     await refreshGatewayState();
     const overrideDiagnostics = await api.catalogOverrideDiagnostics().catch(() => null);
     if (syncResult) {
