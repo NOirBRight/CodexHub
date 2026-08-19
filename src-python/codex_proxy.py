@@ -15805,6 +15805,15 @@ def _bind_downstream_stream_commit(
     redact_identity = kwargs.pop("redact_identity", None)
     kwargs.setdefault("usage_line_callback", _offer_official_passthrough_usage_line)
     kwargs.setdefault("diagnostic_observer", _observe_gateway_diagnostic)
+    kwargs.setdefault("terminal_observer", _responses_terminal_observer)
+    kwargs.setdefault(
+        "output_observer",
+        lambda event: _responses_event_commits_downstream_output(event, ""),
+    )
+    kwargs.setdefault(
+        "error_detail_callback",
+        lambda exc: safe_upstream_error_detail(exc, redact_identity=redact_identity),
+    )
     kwargs.setdefault(
         "terminal_drain_timeout_seconds",
         OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
@@ -18722,6 +18731,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_scoped_seam = _handler_downstream_stream_commit(self)
         if request_scoped_seam is not None:
             request_scoped_seam.set_terminal_observer(_responses_terminal_observer)
+            request_scoped_seam.set_output_observer(
+                lambda event: _responses_event_commits_downstream_output(event, "")
+            )
             request_scoped_seam.set_synthetic_terminal_failure_callback(
                 _bind_handler_synthetic_terminal_failure(self, _responses_synthetic_terminal_failure)
             )
@@ -19013,6 +19025,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_scoped_seam.set_terminal_observer(
                 _chat_terminal_observer if chat_mode else _responses_terminal_observer
             )
+            request_scoped_seam.set_output_observer(
+                None
+                if chat_mode
+                else (lambda event: _responses_event_commits_downstream_output(event, ""))
+            )
             request_scoped_seam.set_usage_line_callback(
                 lambda context, line: _offer_usage_observed_sse_line(
                     context, line, upstream_format=upstream_format
@@ -19037,6 +19054,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format=upstream_format,
                 terminal_observer=(
                     _chat_terminal_observer if chat_mode else _responses_terminal_observer
+                ),
+                output_observer=(
+                    None
+                    if chat_mode
+                    else (lambda event: _responses_event_commits_downstream_output(event, ""))
                 ),
                 usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
                     context, line, upstream_format=upstream_format
@@ -19511,6 +19533,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             request_scoped_seam.set_terminal_observer(
                 _chat_terminal_observer if want_chat_output else _responses_terminal_observer
             )
+            request_scoped_seam.set_output_observer(
+                None
+                if want_chat_output
+                else (lambda event: _responses_event_commits_downstream_output(event, ""))
+            )
             request_scoped_seam.set_usage_line_callback(
                 lambda context, line: _offer_usage_observed_sse_line(
                     context, line, upstream_format=upstream_format
@@ -19527,6 +19554,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 upstream_format=upstream_format,
                 terminal_observer=(
                     _chat_terminal_observer if want_chat_output else _responses_terminal_observer
+                ),
+                output_observer=(
+                    None
+                    if want_chat_output
+                    else (lambda event: _responses_event_commits_downstream_output(event, ""))
                 ),
                 usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
                     context, line, upstream_format=upstream_format

@@ -5418,7 +5418,6 @@ class RoutingTests(unittest.TestCase):
             usage_offers.append((context, line))
 
         with (
-            patch("codex_proxy._parse_sse_json_payload", side_effect=AssertionError("official relay parsed SSE")),
             patch("gateway_sse._parse_sse_json_payload", side_effect=AssertionError("official relay parsed SSE")),
             patch("codex_proxy.compatible_sse_line", side_effect=AssertionError("official relay rewrote SSE")),
             patch("codex_proxy._offer_official_passthrough_usage_line", side_effect=record_usage_offer, create=True),
@@ -5494,7 +5493,9 @@ class RoutingTests(unittest.TestCase):
         )
 
     def test_passthrough_semantics_wait_for_a_complete_sse_event(self):
-        stats = codex_proxy.PassthroughSseSemanticStats()
+        stats = codex_proxy.PassthroughSseSemanticStats(
+            terminal_observer=codex_proxy._responses_terminal_observer,
+        )
 
         stats.observe_bytes(
             b"event: response.completed\r\n"
@@ -5513,7 +5514,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(stats.response_id, "resp_complete")
 
     def test_passthrough_semantics_report_and_discard_incomplete_eof(self):
-        stats = codex_proxy.PassthroughSseSemanticStats()
+        stats = codex_proxy.PassthroughSseSemanticStats(
+            terminal_observer=codex_proxy._responses_terminal_observer,
+        )
         stats.observe_bytes(b'data: {"type":"response.completed"}\r\n')
 
         stats.finalize_pending()
@@ -5527,7 +5530,10 @@ class RoutingTests(unittest.TestCase):
 
     def test_passthrough_semantics_record_bounded_stream_timing_and_unobserved_connect_phases(self):
         now = [100.0]
-        stats = codex_proxy.PassthroughSseSemanticStats(clock=lambda: now[0])
+        stats = codex_proxy.PassthroughSseSemanticStats(
+            terminal_observer=codex_proxy._responses_terminal_observer,
+            clock=lambda: now[0],
+        )
 
         stats.observe_bytes(
             b'data: {"type":"response.created","response":{"id":"redacted"}}\n\n'
@@ -5547,7 +5553,10 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(fields["upstream_tls_timing"], "not_observed")
 
     def test_passthrough_semantics_releases_size_limit_exception_traceback(self):
-        stats = codex_proxy.PassthroughSseSemanticStats(max_frame_bytes=8)
+        stats = codex_proxy.PassthroughSseSemanticStats(
+            terminal_observer=codex_proxy._responses_terminal_observer,
+            max_frame_bytes=8,
+        )
 
         def capture_failure():
             try:

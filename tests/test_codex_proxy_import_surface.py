@@ -333,6 +333,11 @@ def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
     assert "class _GatewayDownstreamStreamCommit" not in facade_source
     assert "class DownstreamStreamCommit" not in facade_source
     assert "import codex_proxy" not in sse_source
+    assert "_payload_exposes_downstream_output" not in sse_source
+    assert "_DEFAULT_TERMINAL_EVENT_TYPES" not in sse_source
+    assert "_default_terminal_observer" not in sse_source
+    assert "RESPONSES_TERMINAL_EVENT_TYPES" not in sse_source
+    assert "safe_upstream_error_detail" not in sse_source
 
 
 def _sample_retry_execution_plan() -> route_plan.RetryExecutionPlan:

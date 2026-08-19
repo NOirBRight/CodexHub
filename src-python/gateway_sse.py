@@ -83,64 +83,10 @@ def _parse_sse_json_payloads(blob: bytes) -> list[dict[str, Any]]:
 
 SSE_EVENT_TYPE_TELEMETRY_LIMIT = 64
 
-_DEFAULT_TERMINAL_EVENT_TYPES = frozenset(
-    {
-        "response.completed",
-        "response.failed",
-        "response.incomplete",
-        "error",
-    }
-)
 
-
-def _default_terminal_observer(
-    event_name: str | None,
-    data: bytes,
-    payload: Any,
-) -> bool:
-    """Default terminal predicate used before a protocol observer is injected."""
-    if data == b"[DONE]":
-        return True
-    event_type = event_name
-    if isinstance(payload, Mapping):
-        payload_type = payload.get("type")
-        if isinstance(payload_type, str) and payload_type:
-            event_type = payload_type
-    return event_type in _DEFAULT_TERMINAL_EVENT_TYPES
-
-
-def _payload_exposes_downstream_output(event: Mapping[str, Any]) -> bool:
-    """Record semantic downstream exposure from a Responses-shaped payload."""
-    event_type = event.get("type")
-    if event_type in {"response.output_text.delta", "response.refusal.delta"}:
-        delta = event.get("delta")
-        return isinstance(delta, str) and bool(delta)
-    if event_type == "response.output_text.done":
-        text = event.get("text")
-        return isinstance(text, str) and bool(text)
-    if event_type == "response.refusal.done":
-        refusal = event.get("refusal")
-        return isinstance(refusal, str) and bool(refusal)
-    if event_type == "response.reasoning_summary_text.delta":
-        delta = event.get("delta")
-        return isinstance(delta, str) and bool(delta)
-    if event_type == "response.reasoning_summary_text.done":
-        text = event.get("text")
-        return isinstance(text, str) and bool(text)
-    if event_type == "response.output_item.done":
-        item = event.get("item")
-        return isinstance(item, Mapping) and item.get("type") == "reasoning"
-    return False
-
-
-def _safe_error_detail(exc: BaseException) -> str:
-    reason = getattr(exc, "reason", None)
-    source = reason if reason is not None else exc
-    detail = f"{type(source).__name__}: {source}"
-    detail = detail.replace("\r", " ").replace("\n", " ")
-    if "Bearer " in detail:
-        detail = detail.split("Bearer ", 1)[0] + "Bearer [redacted]"
-    return detail[:300]
+def _neutral_error_detail(exc: BaseException) -> str:
+    """Fallback OSError summary used until a facade sanitizer is injected."""
+    return f"{type(exc).__name__}: {exc}".replace("\r", " ").replace("\n", " ")[:300]
 
 
 def _noop_usage_line(_context: Mapping[str, Any], _line: bytes) -> None:
@@ -164,6 +110,7 @@ class PassthroughSseSemanticStats:
         self,
         *,
         terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
+        output_observer: Callable[[Mapping[str, Any]], bool] | None = None,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -178,9 +125,8 @@ class PassthroughSseSemanticStats:
         self.response_id: str | None = None
         self.event_type_counts: dict[str, int] = {}
         self.event_types_truncated = False
-        self._terminal_observer = (
-            terminal_observer if terminal_observer is not None else _default_terminal_observer
-        )
+        self._terminal_observer = terminal_observer
+        self._output_observer = output_observer
         self._clock = clock
         self._started_at = self._clock()
         self._first_byte_elapsed_ms: int | None = None
@@ -285,7 +231,7 @@ class PassthroughSseSemanticStats:
                 payload_type = payload.get("type")
                 if isinstance(payload_type, str) and payload_type:
                     event_type = payload_type
-                if _payload_exposes_downstream_output(payload):
+                if self._output_observer is not None and self._output_observer(payload):
                     self.downstream_output_seen = True
                 response = payload.get("response")
                 if isinstance(response, Mapping):
@@ -301,7 +247,7 @@ class PassthroughSseSemanticStats:
             self.response_event_seen = True
         if event_type == "response.completed":
             self.completed_event_seen = True
-        if self._terminal_observer(event_name, data, payload):
+        if self._terminal_observer is not None and self._terminal_observer(event_name, data, payload):
             self.terminal_event_seen = True
             if self._terminal_elapsed_ms is None:
                 self._terminal_elapsed_ms = self._elapsed_ms(observed_at - self._started_at)
@@ -334,8 +280,9 @@ class DownstreamStreamCommit:
     upstream response so that no later write, retry, fallback, or duplicate
     terminal can occur on this stream.
 
-    Protocol-specific observers (terminal detection, usage extraction, and
-    synthetic terminal formatting) are injected by the caller; the seam itself
+    Protocol-specific observers (terminal detection, downstream-output
+    classification, usage extraction, synthetic terminal formatting, and
+    error-detail sanitizing) are injected by the caller; the seam itself
     owns only the lifecycle ledger and byte commitment.
 
     Downstream is a write/flush/close adapter. Upstream is attached later via
@@ -355,10 +302,12 @@ class DownstreamStreamCommit:
         inbound_format: str = "responses",
         upstream_format: str = "responses",
         terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
+        output_observer: Callable[[Mapping[str, Any]], bool] | None = None,
         usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None = None,
         synthetic_terminal_failure_callback: Callable[..., tuple[bool, str | None, str | None]]
         | None = None,
         diagnostic_observer: Callable[..., None] | None = None,
+        error_detail_callback: Callable[[BaseException], str] | None = None,
         terminal_drain_timeout_seconds: float | None = None,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
     ) -> None:
@@ -374,10 +323,16 @@ class DownstreamStreamCommit:
         )
         self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
         self._diagnostic_observer = diagnostic_observer
+        self._error_detail_callback = (
+            error_detail_callback if error_detail_callback is not None else _neutral_error_detail
+        )
         self._terminal_drain_timeout_seconds = terminal_drain_timeout_seconds
         self._max_frame_bytes = max_frame_bytes
+        self._terminal_observer = terminal_observer
+        self._output_observer = output_observer
         self._sse_stats = PassthroughSseSemanticStats(
             terminal_observer=terminal_observer,
+            output_observer=output_observer,
             max_frame_bytes=max_frame_bytes,
         )
         self._terminal_observed = False
@@ -439,8 +394,18 @@ class DownstreamStreamCommit:
         self._downstream_content_exposed = True
 
     def set_terminal_observer(self, terminal_observer: Callable[[str | None, bytes, Any], bool] | None) -> None:
+        self._terminal_observer = terminal_observer
         self._sse_stats = PassthroughSseSemanticStats(
             terminal_observer=terminal_observer,
+            output_observer=self._output_observer,
+            max_frame_bytes=self._max_frame_bytes,
+        )
+
+    def set_output_observer(self, output_observer: Callable[[Mapping[str, Any]], bool] | None) -> None:
+        self._output_observer = output_observer
+        self._sse_stats = PassthroughSseSemanticStats(
+            terminal_observer=self._terminal_observer,
+            output_observer=output_observer,
             max_frame_bytes=self._max_frame_bytes,
         )
 
@@ -697,7 +662,7 @@ class DownstreamStreamCommit:
         except OSError as write_exc:
             self._last_write_error = write_exc
             self.close()
-            return False, type(write_exc).__name__, _safe_error_detail(write_exc)
+            return False, type(write_exc).__name__, self._error_detail_callback(write_exc)
         response_id = self._sse_stats.response_id
         try:
             (
@@ -714,7 +679,7 @@ class DownstreamStreamCommit:
         except OSError as write_exc:
             self._last_write_error = write_exc
             self.close()
-            return False, type(write_exc).__name__, _safe_error_detail(write_exc)
+            return False, type(write_exc).__name__, self._error_detail_callback(write_exc)
         if synthetic_terminal_event_sent:
             self._terminal_committed = True
             self._downstream_closed = True
