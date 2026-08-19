@@ -12,6 +12,7 @@ __pycache__/
 test-results/
 diagnostics/
 .e2e-private/
+.evidence-homes/
 .pytest-results/
 docs/superpowers/
 .superpowers/

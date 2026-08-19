@@ -50,6 +50,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_linux_gui_clients.py",
     "scripts/generate_wayfinder_final_audit.py",
     "scripts/issue_278_fixture_mcp.py",
+    "scripts/qualify_authenticated_provider_cli.py",
     "scripts/qualify_beta3_protocol_cli.py",
     "scripts/replay_official_transport.py",
     "scripts/report_quality_gates.py",
