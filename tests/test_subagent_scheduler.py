@@ -4,7 +4,6 @@ from subagent_protocol import ProtocolEvent, reduce_protocol_events
 from subagent_scheduler import (
     WorkflowNode,
     WorkflowState,
-    append_node,
     compute_allowed_actions,
     node_complete,
     workflow_complete,
@@ -76,43 +75,6 @@ class SubagentSchedulerTests(unittest.TestCase):
         self.assertEqual(actions[0].tool_name, "spawn_agent")
         self.assertEqual(actions[0].arguments["message"], "Return B")
 
-    def test_role_sequence_releases_spec_reviewer_after_implementer_closed(self):
-        from subagent_scheduler import workflow_from_role_sequence
-
-        workflow = workflow_from_role_sequence(
-            tasks=["task-1"],
-            roles=["implementer", "spec_reviewer", "code_quality_reviewer"],
-            assigned={"task-1:implementer": "impl-1"},
-        )
-        protocol = reduce_protocol_events(
-            [
-                ProtocolEvent.spawn("call_impl", "impl-1", "implement task-1"),
-                ProtocolEvent.wait("call_wait", ("impl-1",), {"impl-1": "DONE"}),
-                ProtocolEvent.close("call_close", "impl-1"),
-            ]
-        )
-
-        actions = compute_allowed_actions(workflow, protocol)
-
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0].tool_name, "spawn_agent")
-        self.assertIn("spec_reviewer", actions[0].arguments["message"])
-
-    def test_append_node_rejects_duplicate_node_id(self):
-        workflow = WorkflowState(nodes={"task-a": WorkflowNode(node_id="task-a", prompt="do A")})
-
-        with self.assertRaisesRegex(ValueError, "duplicate workflow node: task-a"):
-            append_node(workflow, WorkflowNode(node_id="task-a", prompt="do A again"))
-
-    def test_append_node_rejects_missing_dependency(self):
-        workflow = WorkflowState()
-
-        with self.assertRaisesRegex(ValueError, "missing workflow dependency: task-a"):
-            append_node(
-                workflow,
-                WorkflowNode(node_id="review-a", prompt="review A", dependencies=("task-a",)),
-            )
-
     def test_closed_dependency_releases_multiple_ready_nodes(self):
         workflow = WorkflowState(
             nodes={
@@ -120,11 +82,11 @@ class SubagentSchedulerTests(unittest.TestCase):
                     node_id="task-a",
                     prompt="do A",
                     assigned_agent_id="agent-a",
-                )
+                ),
+                "review-a": WorkflowNode(node_id="review-a", prompt="review A", dependencies=("task-a",)),
+                "task-b": WorkflowNode(node_id="task-b", prompt="do B", dependencies=("task-a",)),
             }
         )
-        workflow = append_node(workflow, WorkflowNode(node_id="review-a", prompt="review A", dependencies=("task-a",)))
-        workflow = append_node(workflow, WorkflowNode(node_id="task-b", prompt="do B", dependencies=("task-a",)))
         protocol = reduce_protocol_events(
             [
                 ProtocolEvent.spawn("call_spawn", "agent-a", "do A", "task-a"),

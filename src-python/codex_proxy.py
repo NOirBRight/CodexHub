@@ -147,8 +147,7 @@ from subagent_policy import (
     semantic_repair_enabled as _subagent_policy_semantic_repair_enabled,
     subagent_assist_mode as _subagent_policy_assist_mode,
 )
-from subagent_dynamic_dag import build_dynamic_dag_workflow, dynamic_dag_guidance_message, is_dynamic_dag_request
-from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions, workflow_complete
+from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions
 from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 from websocket_transport import (
     WebSocketProtocolError,
@@ -10968,8 +10967,7 @@ def _guard_duplicate_multi_agent_spawn_calls(
 
     spawn_allowed = bool((event_context or {}).get("subagent_spawn_allowed"))
     subagent_state = (event_context or {}).get("_subagent_state")
-    dynamic_dag_active = bool((event_context or {}).get("subagent_dynamic_dag_active"))
-    if spawn_allowed and subagent_state is None and not dynamic_dag_active:
+    if spawn_allowed and subagent_state is None:
         return value, False
 
     lifecycle_complete = bool((event_context or {}).get("subagent_lifecycle_complete"))
@@ -11025,23 +11023,6 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
 
     if _is_multi_agent_spawn_function_call(value):
         blocked_by_state = False
-        if bool((event_context or {}).get("subagent_dynamic_dag_active")):
-            arguments = _json_object_from_arguments(value.get("arguments")) or {}
-            nickname = str(arguments.get("nickname") or "")
-            assigned_nodes = {
-                node_id
-                for node_id in (event_context or {}).get("subagent_assigned_dynamic_nodes", [])
-                if isinstance(node_id, str)
-            }
-            if nickname in assigned_nodes:
-                return {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": (
-                        "dynamic_dag_spawn_suppressed: node already assigned; "
-                        "wait or close existing work before repeating it."
-                    ),
-                }, True
         if subagent_state is not None:
             arguments = _json_object_from_arguments(value.get("arguments")) or {}
             try:
@@ -12444,7 +12425,6 @@ def compatible_request_body(
         and subagent_state_active
         and subagent_state is not None
         and bool(getattr(subagent_state, "workflow_intent", False))
-        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
         and _has_node_repl_subagent_plan_read_context(input_items)
     )
     subagent_workflow_plan_read_required = (
@@ -12452,7 +12432,6 @@ def compatible_request_body(
         and subagent_state_active
         and subagent_state is not None
         and bool(getattr(subagent_state, "workflow_intent", False))
-        and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
         and not subagent_workflow_plan_read_complete
         and not bool(getattr(subagent_state, "agents", {}))
     )
@@ -12585,41 +12564,6 @@ def compatible_request_body(
                 event_context["subagent_exact_spawn_offset"] = (
                     len(getattr(protocol_state, "agents", {}) or {}) if protocol_state is not None else 0
                 )
-            if (
-                protocol_state is not None
-                and bool(getattr(subagent_state, "dynamic_dag_intent", False))
-                and is_dynamic_dag_request(input_items)
-            ):
-                workflow = build_dynamic_dag_workflow(input_items, protocol_state)
-                legal_actions = compute_allowed_actions(workflow, protocol_state)
-                event_context["subagent_dynamic_dag_active"] = True
-                event_context["subagent_dynamic_dag_ready_nodes"] = [
-                    action.node_id for action in legal_actions if action.tool_name == "spawn_agent" and action.node_id
-                ]
-                event_context["subagent_assigned_dynamic_nodes"] = [
-                    node.node_id for node in workflow.nodes.values() if node.assigned_agent_id
-                ]
-                event_context["subagent_legal_actions"] = [
-                    {
-                        "kind": action.kind,
-                        "tool_name": action.tool_name,
-                        "arguments": dict(action.arguments),
-                        "agent_ids": list(action.agent_ids),
-                        "node_id": action.node_id,
-                    }
-                    for action in legal_actions
-                ]
-                include_spawn_agent = any(action.tool_name == "spawn_agent" for action in legal_actions)
-                include_wait_agent = any(action.tool_name == "wait_agent" for action in legal_actions)
-                include_close_agent = any(action.tool_name == "close_agent" for action in legal_actions)
-                include_send_input = any(action.tool_name == "send_input" for action in legal_actions)
-                include_resume_agent = include_send_input
-                lifecycle_complete = workflow_complete(workflow, protocol_state)
-                if guidance_enabled and isinstance(input_items, list):
-                    input_items.append(dynamic_dag_guidance_message(workflow, protocol_state))
-                    changed = True
-                if len(legal_actions) != 1:
-                    event_context.pop("subagent_required_spawn_arguments", None)
             if exact_prompts and protocol_state is not None:
                 workflow = bounded_workflow_from_exact_prompts(
                     exact_prompts,
@@ -12776,7 +12720,6 @@ def compatible_request_body(
                 restrict_to_subagent_coordinator_tools
                 and not node_repl_single_step_complete
                 and not subagent_workflow_plan_read_complete
-                and not bool(getattr(subagent_state, "dynamic_dag_intent", False))
                 and not bool(subagent_state.agents if subagent_state is not None else {})
             )
             if (

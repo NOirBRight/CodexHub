@@ -7,7 +7,6 @@ from subagent_state import (
     is_worker_subagent_request,
     state_guidance_message,
 )
-from subagent_dynamic_dag import LEVEL3_DYNAMIC_DAG_MARKER
 
 
 def message(content):
@@ -114,30 +113,6 @@ class SubagentStateTests(unittest.TestCase):
         self.assertFalse(state.should_allow_spawn)
         self.assertEqual(state.next_action, "wait")
         self.assertEqual(state.wait_agent_ids, ["agent-a", "agent-b"])
-
-    def test_dynamic_dag_request_sets_workflow_without_plan_read_requirement(self):
-        state = build_subagent_state([message(f"Run {LEVEL3_DYNAMIC_DAG_MARKER} with native subagents.")])
-
-        self.assertTrue(state.dynamic_dag_intent)
-        self.assertTrue(state.workflow_intent)
-        self.assertFalse(state.workflow_plan_read)
-        self.assertEqual(state.next_action, "spawn")
-        self.assertIsNone(state.next_expected_role)
-        self.assertIsNone(state.next_expected_task)
-        self.assertIsNone(state_guidance_message(state))
-
-    def test_dynamic_dag_waited_node_requires_close(self):
-        state = build_subagent_state(
-            [
-                message(f"Run {LEVEL3_DYNAMIC_DAG_MARKER} with native subagents."),
-                *spawn("call_a", "agent-a", "Node: task-a-implementer", "task-a-implementer"),
-                *wait("wait_a", ["agent-a"], "A_DONE"),
-            ]
-        )
-
-        self.assertTrue(state.dynamic_dag_intent)
-        self.assertEqual(state.next_action, "close")
-        self.assertEqual(state.close_agent_ids, ["agent-a"])
 
     def test_workflow_rejects_reviewer_spawn_before_implementer(self):
         state = build_subagent_state(

@@ -70,45 +70,6 @@ def bounded_workflow_from_exact_prompts(
     return WorkflowState(nodes=nodes)
 
 
-def workflow_from_role_sequence(
-    tasks: list[str],
-    roles: list[str],
-    assigned: Mapping[str, str] | None = None,
-) -> WorkflowState:
-    assigned = assigned or {}
-    nodes: dict[str, WorkflowNode] = {}
-    previous_node_id: str | None = None
-    for task in tasks:
-        for role in roles:
-            node_id = f"{task}:{role}"
-            nodes[node_id] = WorkflowNode(
-                node_id=node_id,
-                prompt=f"You are the {role} subagent for {task}. Return DONE when complete.",
-                dependencies=(previous_node_id,) if previous_node_id else (),
-                assigned_agent_id=assigned.get(node_id),
-                metadata={"task": task, "role": role, "adapter": "role_sequence"},
-            )
-            previous_node_id = node_id
-    return WorkflowState(nodes=nodes)
-
-
-def append_node(
-    workflow: WorkflowState,
-    node: WorkflowNode,
-    *,
-    allow_external_dependencies: bool = False,
-) -> WorkflowState:
-    if node.node_id in workflow.nodes:
-        raise ValueError(f"duplicate workflow node: {node.node_id}")
-    if not allow_external_dependencies:
-        for dependency in node.dependencies:
-            if dependency not in workflow.nodes:
-                raise ValueError(f"missing workflow dependency: {dependency}")
-    nodes = dict(workflow.nodes)
-    nodes[node.node_id] = node
-    return WorkflowState(nodes=nodes)
-
-
 def node_complete(node: WorkflowNode, protocol: ProtocolState) -> bool:
     return bool(node.assigned_agent_id and node.assigned_agent_id in protocol.closed_agent_ids)
 
