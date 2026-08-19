@@ -2594,16 +2594,19 @@ fn ensure_route_owner_mutation_allowed(
     current_target_owner: RoutingOwner,
     force_takeover: bool,
 ) -> Result<(), String> {
-    if current_target_owner == RoutingOwner::Official || current_target_owner == current_app_owner {
-        return Ok(());
-    }
-    if force_takeover {
-        return Ok(());
-    }
-    Err(format!(
-        "Managed by {}; explicit takeover is required before changing this target.",
-        owner_label(current_target_owner)
-    ))
+    crate::routing_owner::permit(
+        current_app_owner,
+        Some(current_target_owner),
+        crate::routing_owner::MutationKind::ManagedClient,
+        force_takeover,
+    )
+    .map_err(|error| {
+        format!(
+            "{}: Managed by {}; explicit takeover is required before changing this target.",
+            error.code(),
+            owner_label(current_target_owner)
+        )
+    })
 }
 
 fn provider_entry_base_url(entry: &Value) -> Option<&str> {
@@ -13631,31 +13634,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_safe_disconnect_rejects_other_channel_without_takeover() {
-        let current = crate::app_flavor::RoutingOwner::Release;
-        let target = crate::app_flavor::RoutingOwner::Beta;
-        let error = super::ensure_route_owner_mutation_allowed(
-            current,
-            target,
-            false,
-        )
-        .expect_err("release must not disconnect beta-owned config");
-        assert!(error.contains("Managed by Beta"));
-    }
-
-    #[test]
-    fn owner_safe_apply_rejects_other_channel_without_takeover() {
-        let error = super::ensure_route_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Release,
-            crate::app_flavor::RoutingOwner::Beta,
-            false,
-        )
-        .expect_err("release must not apply over beta-owned config");
-
-        assert!(error.contains("Managed by Beta"));
-    }
-
-    #[test]
     fn public_apply_rejects_other_channel_managed_config_without_takeover() {
         let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
@@ -13688,16 +13666,6 @@ mod tests {
 
         restore_env("CODEXHUB_OPENCODE_CONFIG", previous);
         assert!(error.contains("Managed by Beta"));
-    }
-
-    #[test]
-    fn takeover_allows_cross_channel_owner_change_when_explicit() {
-        super::ensure_route_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Release,
-            crate::app_flavor::RoutingOwner::Beta,
-            true,
-        )
-        .expect("explicit takeover should be allowed");
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use crate::app_flavor::RoutingOwner;
 use crate::config::{self, CommandRunner, ConfigPaths};
 use crate::runtime_paths;
 use crate::safe_file;
@@ -354,7 +353,13 @@ pub fn preflight_unified_history(
         .as_deref()
         .and_then(config::codex_overlay_owner);
     let mutation_blocked = apply_repairs
-        && !history_mutation_allowed_for_owner(current_app_owner, target_owner);
+        && crate::routing_owner::permit(
+            current_app_owner,
+            target_owner,
+            crate::routing_owner::MutationKind::HistoryRepair,
+            false,
+        )
+        .is_err();
     let effective_apply_repairs = apply_repairs && !mutation_blocked;
     let _repair_guard = match acquire_history_repair(
         effective_apply_repairs,
@@ -401,17 +406,6 @@ fn preflight_target(
         PreflightTarget::Explicit(target)
     } else {
         PreflightTarget::Startup(target)
-    }
-}
-
-fn history_mutation_allowed_for_owner(
-    current_app_owner: RoutingOwner,
-    target_owner: Option<RoutingOwner>,
-) -> bool {
-    match current_app_owner {
-        RoutingOwner::Release => target_owner != Some(RoutingOwner::Beta),
-        RoutingOwner::Beta => target_owner == Some(RoutingOwner::Beta),
-        RoutingOwner::Official | RoutingOwner::UnknownExternal => false,
     }
 }
 
@@ -992,14 +986,13 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_history_repair, history_mutation_allowed_for_owner, preflight_target,
+        acquire_history_repair, preflight_target,
         DeadlineCommandRunner,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, HistoryBucketTarget, PreflightRequest, PreflightTarget,
         UnifiedHistoryStatus,
     };
-    use crate::app_flavor::RoutingOwner;
     use crate::config::{CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -1098,30 +1091,6 @@ mod tests {
         assert_eq!(result.reason.as_deref(), Some("repair_required"));
         assert_eq!(runner.commands.borrow().len(), 2);
         assert!(!paths.proxy_dir().exists());
-    }
-
-    #[test]
-    fn beta_history_mutation_requires_beta_routing_ownership() {
-        assert!(!history_mutation_allowed_for_owner(
-            RoutingOwner::Beta,
-            None,
-        ));
-        assert!(!history_mutation_allowed_for_owner(
-            RoutingOwner::Beta,
-            Some(RoutingOwner::Release),
-        ));
-        assert!(history_mutation_allowed_for_owner(
-            RoutingOwner::Beta,
-            Some(RoutingOwner::Beta),
-        ));
-        assert!(history_mutation_allowed_for_owner(
-            RoutingOwner::Release,
-            None,
-        ));
-        assert!(!history_mutation_allowed_for_owner(
-            RoutingOwner::Release,
-            Some(RoutingOwner::Beta),
-        ));
     }
 
     #[test]

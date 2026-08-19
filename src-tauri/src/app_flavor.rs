@@ -117,12 +117,15 @@ impl RuntimeFlavor {
     }
 
     pub fn codex_takeover_required(self, target_owner: Option<RoutingOwner>) -> bool {
-        match self {
-            Self::Beta => target_owner != Some(RoutingOwner::Beta),
-            Self::Stable => target_owner.is_some_and(|owner| {
-                owner != RoutingOwner::Official && owner != RoutingOwner::Release
-            }),
-        }
+        crate::routing_owner::permit(
+            self.routing_owner(),
+            target_owner,
+            crate::routing_owner::MutationKind::CodexOverlay {
+                mode: crate::routing_owner::OverlayMode::Hub,
+            },
+            false,
+        )
+        .is_err()
     }
 
     pub fn autostart_task_name(self) -> &'static str {
@@ -196,14 +199,5 @@ mod tests {
             flavor.runtime_home_suffix(),
             flavor.codex_target_home_suffix()
         );
-    }
-
-    #[test]
-    fn legacy_beta_frontend_takeover_state_includes_unowned_and_official_targets() {
-        assert!(RuntimeFlavor::Beta.codex_takeover_required(None));
-        assert!(RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Official)));
-        assert!(!RuntimeFlavor::Beta.codex_takeover_required(Some(RoutingOwner::Beta)));
-        assert!(!RuntimeFlavor::Stable.codex_takeover_required(None));
-        assert!(!RuntimeFlavor::Stable.codex_takeover_required(Some(RoutingOwner::Official)));
     }
 }

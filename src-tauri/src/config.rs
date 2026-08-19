@@ -5,7 +5,6 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{error::Error, fmt};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
@@ -973,10 +972,17 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
         .ok()
         .as_deref()
         .and_then(codex_overlay_owner);
-    ensure_codex_owner_mutation_allowed(
+    let overlay_kind = crate::routing_owner::MutationKind::CodexOverlay {
+        mode: if mode == "custom" {
+            crate::routing_owner::OverlayMode::Hub
+        } else {
+            crate::routing_owner::OverlayMode::Official
+        },
+    };
+    crate::routing_owner::permit(
         current_app_owner,
         target_owner,
-        mode,
+        overlay_kind,
         force_takeover,
     )
     .map_err(|error| error.to_string())?;
@@ -1084,95 +1090,6 @@ pub(crate) fn codex_overlay_owner(text: &str) -> Option<crate::app_flavor::Routi
             "beta" => Some(crate::app_flavor::RoutingOwner::Beta),
             _ => None,
         }
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CodexOwnerMutationError {
-    TakeoverRequired {
-        current_app_owner: crate::app_flavor::RoutingOwner,
-        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
-    },
-    OwnerMismatch {
-        current_app_owner: crate::app_flavor::RoutingOwner,
-        current_target_owner: Option<crate::app_flavor::RoutingOwner>,
-    },
-}
-
-impl CodexOwnerMutationError {
-    fn code(self) -> &'static str {
-        match self {
-            Self::TakeoverRequired { .. } => "route.takeover_required",
-            Self::OwnerMismatch { .. } => "route.owner_mismatch",
-        }
-    }
-}
-
-impl fmt::Display for CodexOwnerMutationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (current_app_owner, current_target_owner) = match self {
-            Self::TakeoverRequired {
-                current_app_owner,
-                current_target_owner,
-            }
-            | Self::OwnerMismatch {
-                current_app_owner,
-                current_target_owner,
-            } => (current_app_owner, current_target_owner),
-        };
-        write!(
-            formatter,
-            "{}: Codex target owner is {:?}; current channel owner is {:?}",
-            self.code(),
-            current_target_owner,
-            current_app_owner
-        )
-    }
-}
-
-impl Error for CodexOwnerMutationError {}
-
-fn ensure_codex_owner_mutation_allowed(
-    current_app_owner: crate::app_flavor::RoutingOwner,
-    current_target_owner: Option<crate::app_flavor::RoutingOwner>,
-    mode: &str,
-    force_takeover: bool,
-) -> Result<(), CodexOwnerMutationError> {
-    if current_target_owner == Some(current_app_owner) {
-        return Ok(());
-    }
-    if force_takeover {
-        return Ok(());
-    }
-
-    if mode == "custom" {
-        let stable_backward_compatible_target = current_app_owner
-            == crate::app_flavor::RoutingOwner::Release
-            && matches!(
-                current_target_owner,
-                None | Some(crate::app_flavor::RoutingOwner::Official)
-            );
-        if stable_backward_compatible_target {
-            return Ok(());
-        }
-        return Err(CodexOwnerMutationError::TakeoverRequired {
-            current_app_owner,
-            current_target_owner,
-        });
-    }
-
-    let stable_backward_compatible_disconnect = current_app_owner
-        == crate::app_flavor::RoutingOwner::Release
-        && matches!(
-            current_target_owner,
-            None | Some(crate::app_flavor::RoutingOwner::Official)
-        );
-    if stable_backward_compatible_disconnect {
-        return Ok(());
-    }
-    Err(CodexOwnerMutationError::OwnerMismatch {
-        current_app_owner,
-        current_target_owner,
     })
 }
 
@@ -1558,8 +1475,7 @@ fn build_codex_overlay_args_relative(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_overlay_owner, ensure_codex_owner_mutation_allowed,
-        get_codex_context_guard_status_with_paths, get_providers_with_paths,
+        codex_overlay_owner, get_codex_context_guard_status_with_paths, get_providers_with_paths,
         get_settings_with_paths, migrate_legacy_context_guard_with_paths,
         republish_managed_codex_context_budget_with_paths,
         save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
@@ -2257,31 +2173,6 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
     }
 
     #[test]
-    fn codex_cross_channel_change_requires_explicit_takeover() {
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Release),
-            "custom",
-            false,
-        )
-        .is_err());
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Release),
-            "custom",
-            true,
-        )
-        .is_ok());
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Release),
-            "official",
-            true,
-        )
-        .is_ok());
-    }
-
-    #[test]
     fn beta_can_explicitly_switch_stable_owned_codex_to_unified_official() {
         let root = temp_root("beta-force-stable-to-official");
         let target = root.join(".codex");
@@ -2354,41 +2245,6 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert!(restored.contains("model_reasoning_effort = \"high\""));
         assert!(!restored.contains("# owner = release"));
         assert!(!restored.contains("base_url"));
-    }
-
-    #[test]
-    fn beta_requires_explicit_takeover_for_unowned_and_official_codex() {
-        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
-            let error = ensure_codex_owner_mutation_allowed(
-                crate::app_flavor::RoutingOwner::Beta,
-                owner,
-                "custom",
-                false,
-            )
-            .expect_err("Beta must never silently claim real Codex");
-            assert_eq!(error.code(), "route.takeover_required");
-
-            assert!(ensure_codex_owner_mutation_allowed(
-                crate::app_flavor::RoutingOwner::Beta,
-                owner,
-                "custom",
-                true,
-            )
-            .is_ok());
-        }
-    }
-
-    #[test]
-    fn stable_keeps_backward_compatible_unowned_and_official_connect() {
-        for owner in [None, Some(crate::app_flavor::RoutingOwner::Official)] {
-            assert!(ensure_codex_owner_mutation_allowed(
-                crate::app_flavor::RoutingOwner::Release,
-                owner,
-                "custom",
-                false,
-            )
-            .is_ok());
-        }
     }
 
     #[test]
@@ -2581,31 +2437,6 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
         assert!(restored.contains("name = \"OpenAI\""));
         assert!(!restored.contains("name = \"Codex Proxy\""));
         assert!(!restored.contains("base_url"));
-    }
-
-    #[test]
-    fn codex_foreign_disconnect_requires_explicit_takeover() {
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Release),
-            "official",
-            false,
-        )
-        .is_err());
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Release),
-            "official",
-            true,
-        )
-        .is_ok());
-        assert!(ensure_codex_owner_mutation_allowed(
-            crate::app_flavor::RoutingOwner::Beta,
-            Some(crate::app_flavor::RoutingOwner::Beta),
-            "official",
-            false,
-        )
-        .is_ok());
     }
 
     #[test]

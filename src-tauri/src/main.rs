@@ -19,6 +19,7 @@ mod models;
 mod official_refresh;
 mod openai_usage;
 mod proxy;
+mod routing_owner;
 mod runtime_paths;
 mod safe_file;
 mod web_bridge;
