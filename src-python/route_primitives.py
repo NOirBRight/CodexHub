@@ -68,6 +68,7 @@ class RouteProtocol(str, Enum):
 class AttemptRequestBodyMode(str, Enum):
     PREPARED_DIRECT = "prepared_direct"
     CONVERT_RESPONSES_TO_CHAT = "convert_responses_to_chat"
+    CONVERT_CHAT_TO_RESPONSES = "convert_chat_to_responses"
 
 
 class CallerRequestBodyMode(str, Enum):

@@ -31,6 +31,7 @@ from collaboration_runtime_contract import (
     V1_NAMESPACE,
     V2_NAMESPACE,
 )
+from protocol_translation import prepare_exchange as _real_prepare_exchange
 from sse_events import DEFAULT_MAX_FRAME_BYTES, SseEventAssembler, SseFrameTooLargeError
 from subagent_state import build_subagent_state
 from codex_proxy import (
@@ -64,6 +65,16 @@ def _load_glm_apply_patch_retry_fixture():
 def _load_glm_apply_patch_history_native_ids_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "glm_apply_patch_history_native_ids.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _identity_prepare_exchange(request_body, *, inbound_format, outbound_format):
+    if inbound_format != outbound_format:
+        raise AssertionError(f"converted {inbound_format} -> {outbound_format}")
+    return _real_prepare_exchange(
+        request_body,
+        inbound_format=inbound_format,
+        outbound_format=outbound_format,
+    )
 
 
 def _load_issue_370_reasoning_fixture():
@@ -2707,7 +2718,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(
             plan.caller_request_body_mode,
-            codex_proxy.CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES,
+            codex_proxy.CallerRequestBodyMode.PRESERVE_CALLER,
         )
         self.assertEqual(
             [attempt.wire_format_adapter for attempt in plan.attempts],
@@ -2717,18 +2728,23 @@ class RoutingTests(unittest.TestCase):
             [attempt.request_conversion_steps for attempt in plan.attempts],
             [
                 (codex_proxy.WIRE_CHAT_TO_RESPONSES,),
-                (
-                    codex_proxy.WIRE_CHAT_TO_RESPONSES,
-                    codex_proxy.WIRE_RESPONSES_TO_CHAT,
-                ),
+                (),
             ],
         )
-        self.assertTrue(
-            all(
-                codex_proxy.RouteMutation.WIRE_CONVERSION
-                in attempt.named_mutations
-                for attempt in plan.attempts
-            )
+        self.assertEqual(
+            [attempt.request_body_mode for attempt in plan.attempts],
+            [
+                codex_proxy.AttemptRequestBodyMode.CONVERT_CHAT_TO_RESPONSES,
+                codex_proxy.AttemptRequestBodyMode.PREPARED_DIRECT,
+            ],
+        )
+        self.assertIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION,
+            plan.attempts[0].named_mutations,
+        )
+        self.assertNotIn(
+            codex_proxy.RouteMutation.WIRE_CONVERSION,
+            plan.attempts[1].named_mutations,
         )
         self.assertTrue(
             all(
@@ -3955,8 +3971,12 @@ class RoutingTests(unittest.TestCase):
 
         with (
             patch(
+                "route_plan.prepare_exchange",
+                side_effect=_identity_prepare_exchange,
+            ),
+            patch(
                 "codex_proxy._chat_completions_request_to_responses_body",
-                side_effect=AssertionError("converted to Responses"),
+                side_effect=AssertionError("handler converted Chat to Responses"),
             ),
             patch(
                 "codex_proxy._responses_request_to_chat_completion_body",
@@ -4411,7 +4431,7 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(
             request_start["caller_request_body_mode"],
-            codex_proxy.CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES.value,
+            codex_proxy.CallerRequestBodyMode.PRESERVE_CALLER.value,
         )
         self.assertEqual(
             request_start["route_attempt_wire_format_adapter"],
@@ -4438,7 +4458,7 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.RouteMutation.WIRE_CONVERSION.value,
             fallback["failed_route_attempt_mutation_summary"],
         )
-        self.assertIn(
+        self.assertNotIn(
             codex_proxy.RouteMutation.WIRE_CONVERSION.value,
             fallback["next_route_attempt_mutation_summary"],
         )
@@ -4448,10 +4468,7 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             fallback["next_route_attempt_request_conversion_steps"],
-            [
-                codex_proxy.WIRE_CHAT_TO_RESPONSES,
-                codex_proxy.WIRE_RESPONSES_TO_CHAT,
-            ],
+            [],
         )
         self.assertEqual(request_complete["route_attempt_index"], 1)
         self.assertEqual(
@@ -4476,12 +4493,9 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             request_complete["route_attempt_request_conversion_steps"],
-            [
-                codex_proxy.WIRE_CHAT_TO_RESPONSES,
-                codex_proxy.WIRE_RESPONSES_TO_CHAT,
-            ],
+            [],
         )
-        self.assertIn(
+        self.assertNotIn(
             codex_proxy.RouteMutation.WIRE_CONVERSION.value,
             request_complete["route_attempt_mutation_summary"],
         )

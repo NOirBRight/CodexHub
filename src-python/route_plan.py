@@ -28,7 +28,11 @@ from gateway_settings import (
     official_upstream_open_attempts,
     upstream_timeout_seconds,
 )
-from protocol_translation import UnsupportedProtocolTranslationError, prepare_exchange
+from protocol_translation import (
+    PreparedExchange,
+    UnsupportedProtocolTranslationError,
+    prepare_exchange,
+)
 from providers_config import (
     NATIVE_RESPONSES_TOOL_CODECS,
     TOOL_PROTOCOLS,
@@ -498,23 +502,40 @@ class RouteAttemptPlan:
             ],
         }
 
-    def request_body(self, prepared_body: bytes) -> bytes:
-        if self.request_body_mode == AttemptRequestBodyMode.PREPARED_DIRECT:
-            return prepared_body
+    def _exchange_formats(self) -> tuple[str, str]:
         if (
             self.request_body_mode
             == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
         ):
-            exchange = prepare_exchange(
-                prepared_body,
-                inbound_format="responses",
-                outbound_format="chat_completions",
-                route_attempt={"index": self.index, "endpoint_url": self.endpoint_url},
+            return (
+                RouteProtocol.RESPONSES.value,
+                RouteProtocol.CHAT_COMPLETIONS.value,
             )
-            return exchange.upstream_body
+        if (
+            self.request_body_mode
+            == AttemptRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
+        ):
+            return (
+                RouteProtocol.CHAT_COMPLETIONS.value,
+                RouteProtocol.RESPONSES.value,
+            )
+        if self.request_body_mode == AttemptRequestBodyMode.PREPARED_DIRECT:
+            protocol = self.upstream_protocol.value
+            return protocol, protocol
         raise UnsupportedRouteProtocolError(
             f"unsupported planned request body mode: {self.request_body_mode}"
         )
+
+    def prepare_body(self, request_body: bytes) -> PreparedExchange:
+        inbound_format, outbound_format = self._exchange_formats()
+        return prepare_exchange(
+            request_body,
+            inbound_format=inbound_format,
+            outbound_format=outbound_format,
+        )
+
+    def request_body(self, prepared_body: bytes) -> bytes:
+        return self.prepare_body(prepared_body).upstream_body
 
 
 @dataclass(frozen=True)
@@ -1526,14 +1547,7 @@ def route_plan_for_request(
         if upstream_name == "official"
         else TransportPolicy.STANDARD
     )
-    caller_request_body_mode = (
-        CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
-        if (
-            inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
-            and not transparent_same_format
-        )
-        else CallerRequestBodyMode.PRESERVE_CALLER
-    )
+    caller_request_body_mode = CallerRequestBodyMode.PRESERVE_CALLER
     base_named_mutations = {RouteMutation.MODEL_ALIAS}
     if tool_exposure.gateway_schema_injection:
         base_named_mutations.add(RouteMutation.HARD_CODED_SCHEMA_INJECTION)
@@ -1560,29 +1574,32 @@ def route_plan_for_request(
             inbound_format,
             attempt_protocol.value,
         )
-        request_body_mode = (
-            AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
-            if (
-                attempt_protocol == RouteProtocol.CHAT_COMPLETIONS
-                and not (
-                    transparent_same_format
-                    and inbound_format
-                    == RouteProtocol.CHAT_COMPLETIONS.value
-                )
-            )
-            else AttemptRequestBodyMode.PREPARED_DIRECT
-        )
-        request_conversion_steps: list[str] = []
-        if (
-            caller_request_body_mode
-            == CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
+        if attempt_protocol.value == inbound_format:
+            request_body_mode = AttemptRequestBodyMode.PREPARED_DIRECT
+        elif (
+            inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
+            and attempt_protocol == RouteProtocol.RESPONSES
         ):
-            request_conversion_steps.append(WIRE_CHAT_TO_RESPONSES)
+            request_body_mode = AttemptRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
+        elif (
+            inbound_format == RouteProtocol.RESPONSES.value
+            and attempt_protocol == RouteProtocol.CHAT_COMPLETIONS
+        ):
+            request_body_mode = AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
+        else:
+            request_body_mode = AttemptRequestBodyMode.PREPARED_DIRECT
         if (
+            request_body_mode
+            == AttemptRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
+        ):
+            request_conversion_steps: tuple[str, ...] = (WIRE_CHAT_TO_RESPONSES,)
+        elif (
             request_body_mode
             == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
         ):
-            request_conversion_steps.append(WIRE_RESPONSES_TO_CHAT)
+            request_conversion_steps = (WIRE_RESPONSES_TO_CHAT,)
+        else:
+            request_conversion_steps = ()
         attempt_mutations = set(base_named_mutations)
         if request_conversion_steps:
             attempt_mutations.add(RouteMutation.WIRE_CONVERSION)
@@ -1654,7 +1671,7 @@ def route_plan_for_request(
                 selected_upstream_format=attempt_protocol.value,
                 endpoint_url=_route_endpoint_url(upstream, attempt_protocol),
                 wire_format_adapter=attempt_wire_adapter,
-                request_conversion_steps=tuple(request_conversion_steps),
+                request_conversion_steps=request_conversion_steps,
                 request_body_mode=request_body_mode,
                 authentication_strategy=authentication_strategy,
                 request_headers=request_headers,
@@ -1767,14 +1784,7 @@ def route_plan_for_request(
         capability_binding=capability_binding,
         behavior_profile=behavior_profile,
         caller_request_body_mode=caller_request_body_mode,
-        prepared_request_protocol=(
-            RouteProtocol.RESPONSES
-            if (
-                caller_request_body_mode
-                == CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
-            )
-            else _route_protocol(inbound_format)
-        ),
+        prepared_request_protocol=_route_protocol(inbound_format),
         codex_semantic_adapter=codex_semantic_adapter,
         raw_provider_probe=raw_provider_probe,
         request_kind_policy=request_kind_policy,

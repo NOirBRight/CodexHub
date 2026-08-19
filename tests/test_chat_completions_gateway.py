@@ -10,10 +10,28 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 import route_plan
+from protocol_translation import prepare_exchange as _real_prepare_exchange
+
+
+def prepare_exchange(request_body, *, inbound_format, outbound_format):
+    return _real_prepare_exchange(
+        request_body,
+        inbound_format=inbound_format,
+        outbound_format=outbound_format,
+    )
+
+
+def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_format):
+    if inbound_format != outbound_format:
+        raise AssertionError(f"converted {inbound_format} -> {outbound_format}")
+    return _real_prepare_exchange(
+        request_body,
+        inbound_format=inbound_format,
+        outbound_format=outbound_format,
+    )
 from codex_proxy import (
     CodexProxyHandler,
     UpstreamStreamIncompleteError,
-    _chat_completions_request_to_responses_body,
     _chat_stream_chunks_have_terminal,
     _chat_messages_to_responses_input,
     _chat_tool_choice_to_responses_tool_choice,
@@ -24,10 +42,25 @@ from codex_proxy import (
     _response_body_to_chat_completion_body,
     _response_events_to_chat_stream_chunks,
     _request_kind_from_headers_and_payload,
-    _responses_request_to_chat_completion_body,
     _responses_events_have_terminal,
     _strip_tools_for_compact_payload,
 )
+
+
+def _prepare_request(body: bytes, *, inbound: str, outbound: str) -> bytes:
+    return prepare_exchange(
+        body,
+        inbound_format=inbound,
+        outbound_format=outbound,
+    ).upstream_body
+
+
+def _chat_to_responses_request(body: bytes) -> bytes:
+    return _prepare_request(body, inbound="chat_completions", outbound="responses")
+
+
+def _responses_to_chat_request(body: bytes) -> bytes:
+    return _prepare_request(body, inbound="responses", outbound="chat_completions")
 
 
 def _exact_external_model_resolver(*models):
@@ -111,7 +144,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             ],
         }).encode("utf-8")
 
-        result = _chat_completions_request_to_responses_body(body)
+        result = _chat_to_responses_request(body)
         payload = json.loads(result)
 
         self.assertEqual(payload["model"], "gpt-5.5")
@@ -131,7 +164,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             "stream": True,
         }).encode("utf-8")
 
-        payload = json.loads(_chat_completions_request_to_responses_body(body))
+        payload = json.loads(_chat_to_responses_request(body))
 
         self.assertEqual(payload["max_output_tokens"], 4096)
         self.assertEqual(payload["temperature"], 0.5)
@@ -144,7 +177,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             "stream": True,
         }).encode("utf-8")
 
-        payload = json.loads(_responses_request_to_chat_completion_body(body))
+        payload = json.loads(_responses_to_chat_request(body))
 
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
@@ -176,7 +209,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        payload = json.loads(_responses_request_to_chat_completion_body(body))
+        payload = json.loads(_responses_to_chat_request(body))
 
         self.assertEqual(payload["messages"][0]["role"], "user")
         self.assertEqual(payload["messages"][1]["role"], "assistant")
@@ -201,7 +234,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
         }).encode("utf-8")
 
-        payload = json.loads(_chat_completions_request_to_responses_body(body))
+        payload = json.loads(_chat_to_responses_request(body))
 
         self.assertEqual(payload["tools"], [{
             "type": "function",
@@ -229,7 +262,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             ],
         }).encode("utf-8")
 
-        payload = json.loads(_chat_completions_request_to_responses_body(body))
+        payload = json.loads(_chat_to_responses_request(body))
 
         # user message + function_call + function_call_output
         self.assertEqual(len(payload["input"]), 3)
@@ -242,7 +275,7 @@ class ChatRequestToResponsesTests(unittest.TestCase):
 
     def test_empty_messages_get_default_input(self):
         body = json.dumps({"model": "gpt-5.5", "messages": []}).encode("utf-8")
-        payload = json.loads(_chat_completions_request_to_responses_body(body))
+        payload = json.loads(_chat_to_responses_request(body))
         self.assertEqual(len(payload["input"]), 1)
         self.assertEqual(payload["input"][0]["role"], "user")
 
@@ -1197,8 +1230,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch(
-                "codex_proxy._chat_completions_request_to_responses_body",
-                side_effect=AssertionError("chat request converted to responses"),
+                "route_plan.prepare_exchange",
+                side_effect=_assert_identity_prepare_exchange,
             ),
             patch(
                 "codex_proxy._responses_request_to_chat_completion_body",
@@ -1783,8 +1816,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch(
-                "codex_proxy._chat_completions_request_to_responses_body",
-                side_effect=AssertionError("standard transparent chat route converted to responses"),
+                "route_plan.prepare_exchange",
+                side_effect=_assert_identity_prepare_exchange,
             ),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,

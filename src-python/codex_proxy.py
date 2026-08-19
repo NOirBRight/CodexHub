@@ -16667,14 +16667,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_start_written = True
 
             write_request_start_once = emit_request_start_once
-            # Convert inbound Chat Completions request to Responses format before routing
-            # only for Gateway compatibility paths. Same-format transparent traffic
-            # must stay in the caller's wire format.
-            if (
-                route_plan.caller_request_body_mode
-                == CallerRequestBodyMode.CONVERT_CHAT_TO_RESPONSES
-            ):
-                body = _chat_completions_request_to_responses_body(body)
             adapter_event_context = {
                 "request_id": request_id,
                 "model": model_canonical,
@@ -16696,89 +16688,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
 
             usage_capture: dict[str, Any] = {}
-            if (
-                route_plan.request_mutation_policy
-                == MutationPolicy.OFFICIAL_PASSTHROUGH
-            ):
-                body = official_passthrough_request_body(
-                    body,
-                    inbound_payload,
-                    upstream,
-                    model_id=model,
-                )
-            elif (
-                route_plan.request_mutation_policy
-                == MutationPolicy.TRANSPARENT
-            ):
-                body = transparent_request_body(
-                    body,
-                    _safe_json_mapping(body),
-                    upstream,
-                    model_id=model,
-                )
-                body, developer_role_rewrites = _rewrite_transparent_developer_role_messages(body, upstream)
-                if developer_role_rewrites:
-                    write_proxy_event(
-                        "developer_role_rewrite_applied",
-                        request_id=request_id,
-                        model=model_canonical,
-                        upstream=upstream_name,
-                        inbound_format=inbound_format,
-                        messages_rewritten=developer_role_rewrites,
-                        **proxy_request_context,
-                    )
-                # Unconditional by design: rewriting boolean JSON Schemas to
-                # their equivalent object forms is semantics-preserving for
-                # every upstream, and intolerant validators (e.g. Moonshot)
-                # fail closed without it. No provider capability gate.
-                body, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(body)
-                if tool_schema_rewrites:
-                    write_proxy_event(
-                        "tool_schema_boolean_normalized",
-                        request_id=request_id,
-                        model=model_canonical,
-                        upstream=upstream_name,
-                        inbound_format=inbound_format,
-                        schemas_rewritten=tool_schema_rewrites,
-                        **proxy_request_context,
-                    )
-                if route_plan.transparent_tool_loop_guard:
-                    transparent_payload = _safe_json_mapping(body) or {}
-                    repeated_count = (
-                        _excessive_transparent_responses_tool_loop_count(transparent_payload)
-                        if inbound_format == "responses"
-                        else _excessive_transparent_chat_tool_loop_count(transparent_payload)
-                        if inbound_format == "chat_completions"
-                        else None
-                    )
-                    if repeated_count is not None:
-                        raise UpstreamProtocolTranslationError(
-                            UnsupportedProtocolTranslationError(
-                                EXCESSIVE_TOOL_LOOP_ERROR_CODE,
-                                f"Repeated successful function calls exceeded the bound of {EXCESSIVE_TOOL_LOOP_BOUND}.",
-                            )
-                        )
-            else:
-                compatibility_upstream = {
-                    **upstream,
-                    "upstream_format": primary_route_attempt.selected_upstream_format,
-                }
-                body = compatible_request_body(
-                    body,
-                    compatibility_upstream,
-                    model_id=model,
-                    event_context=adapter_event_context,
-                    inject_codex_tools=route_plan.tool_exposure.gateway_schema_injection,
-                    tool_protocol_override=(
-                        primary_route_attempt.tool_protocol
-                    ),
-                    tool_surface_strategy_override=(
-                        primary_route_attempt.tool_surface_strategy
-                    ),
-                    native_responses_tool_codec_override=(
-                        primary_route_attempt.native_responses_tool_codec
-                    ),
-                )
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value
             )
@@ -16816,15 +16725,101 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_exc=seam.last_write_error() or OSError("downstream closed")
                 )
                 return
-            responses_body = body
+            prepared_caller_body = body
+            mutated_attempt_bodies: dict[int, bytes] = {}
+
             def upstream_body_for_attempt(
                 attempt: RouteAttemptPlan,
-                prepared_body: bytes = responses_body,
+                prepared_body: bytes = prepared_caller_body,
             ) -> bytes:
+                cached_body = mutated_attempt_bodies.get(attempt.index)
+                if cached_body is not None:
+                    return cached_body
                 try:
-                    return attempt.request_body(prepared_body)
+                    attempt_body = attempt.prepare_body(prepared_body).upstream_body
                 except UnsupportedProtocolTranslationError as exc:
                     raise UpstreamProtocolTranslationError(exc) from exc
+                compatibility_upstream = dict(upstream)
+                compatibility_upstream["upstream_format"] = attempt.selected_upstream_format
+                mutation_policy = route_plan.request_mutation_policy
+                if mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH:
+                    official_payload = (
+                        inbound_payload
+                        if attempt.selected_upstream_format == inbound_format
+                        else _safe_json_mapping(attempt_body)
+                    )
+                    mutated_attempt_bodies[attempt.index] = official_passthrough_request_body(
+                        attempt_body,
+                        official_payload,
+                        compatibility_upstream,
+                        model_id=model,
+                    )
+                    return mutated_attempt_bodies[attempt.index]
+                if mutation_policy == MutationPolicy.TRANSPARENT:
+                    mutated = transparent_request_body(
+                        attempt_body,
+                        _safe_json_mapping(attempt_body),
+                        compatibility_upstream,
+                        model_id=model,
+                    )
+                    mutated, developer_role_rewrites = _rewrite_transparent_developer_role_messages(
+                        mutated,
+                        compatibility_upstream,
+                    )
+                    if developer_role_rewrites:
+                        write_proxy_event(
+                            "developer_role_rewrite_applied",
+                            request_id=request_id,
+                            model=model_canonical,
+                            upstream=upstream_name,
+                            inbound_format=inbound_format,
+                            messages_rewritten=developer_role_rewrites,
+                            **proxy_request_context,
+                        )
+                    mutated, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(mutated)
+                    if tool_schema_rewrites:
+                        write_proxy_event(
+                            "tool_schema_boolean_normalized",
+                            request_id=request_id,
+                            model=model_canonical,
+                            upstream=upstream_name,
+                            inbound_format=inbound_format,
+                            schemas_rewritten=tool_schema_rewrites,
+                            **proxy_request_context,
+                        )
+                    if route_plan.transparent_tool_loop_guard:
+                        transparent_payload = _safe_json_mapping(mutated) or {}
+                        attempt_format = attempt.selected_upstream_format
+                        repeated_count = (
+                            _excessive_transparent_responses_tool_loop_count(transparent_payload)
+                            if attempt_format == "responses"
+                            else _excessive_transparent_chat_tool_loop_count(transparent_payload)
+                            if attempt_format == "chat_completions"
+                            else None
+                        )
+                        if repeated_count is not None:
+                            raise UpstreamProtocolTranslationError(
+                                UnsupportedProtocolTranslationError(
+                                    EXCESSIVE_TOOL_LOOP_ERROR_CODE,
+                                    f"Repeated successful function calls exceeded the bound of {EXCESSIVE_TOOL_LOOP_BOUND}.",
+                                )
+                            )
+                    mutated_attempt_bodies[attempt.index] = mutated
+                    return mutated
+                if mutation_policy != MutationPolicy.GATEWAY_COMPATIBILITY:
+                    mutated_attempt_bodies[attempt.index] = attempt_body
+                    return attempt_body
+                mutated_attempt_bodies[attempt.index] = compatible_request_body(
+                    attempt_body,
+                    compatibility_upstream,
+                    model_id=model,
+                    event_context=adapter_event_context,
+                    inject_codex_tools=route_plan.tool_exposure.gateway_schema_injection,
+                    tool_protocol_override=attempt.tool_protocol,
+                    tool_surface_strategy_override=attempt.tool_surface_strategy,
+                    native_responses_tool_codec_override=attempt.native_responses_tool_codec,
+                )
+                return mutated_attempt_bodies[attempt.index]
 
             def request_observability_for_attempt(
                 attempt: RouteAttemptPlan,
@@ -16876,10 +16871,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 attempt: RouteAttemptPlan,
                 lifecycle_final_retry_reason: str | None = None,
             ) -> tuple[Request, dict[str, Any]]:
-                request_body = responses_body
-                if lifecycle_final_retry_reason:
-                    request_body = _responses_body_with_lifecycle_final_retry_guidance(
-                        responses_body,
+                attempt_body = upstream_body_for_attempt(
+                    attempt,
+                    prepared_caller_body,
+                )
+                if (
+                    lifecycle_final_retry_reason
+                    and attempt.upstream_protocol == RouteProtocol.RESPONSES
+                ):
+                    attempt_body = _responses_body_with_lifecycle_final_retry_guidance(
+                        attempt_body,
                         lifecycle_final_retry_reason,
                     )
                     _write_adapter_event(
@@ -16889,10 +16890,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         upstream_format=attempt.selected_upstream_format,
                         reason=lifecycle_final_retry_reason,
                     )
-                attempt_body = upstream_body_for_attempt(
-                    attempt,
-                    request_body,
-                )
                 return (
                     Request(
                         attempt.endpoint_url,

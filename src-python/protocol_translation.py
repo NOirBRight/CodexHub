@@ -3303,6 +3303,9 @@ class PreparedExchange:
     stream: bool
 
     def stream_decoder(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
+        return self.decode_stream()
+
+    def decode_stream(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
         if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
             return ChatToResponsesStreamConverter()
         if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
@@ -3310,6 +3313,26 @@ class PreparedExchange:
         raise NonForwardable(
             "unsupported_protocol_semantics",
             "No stream decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
+        )
+
+    def decode_response(self, body: bytes) -> bytes:
+        if self.inbound_format == self.outbound_format:
+            return body
+        try:
+            if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
+                return response_body_to_chat_completion_body(body)
+            if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
+                return chat_completion_to_response_body(body)
+        except UnsupportedProtocolTranslationError as error:
+            raise NonForwardable(error.code, str(error)) from error
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise NonForwardable(
+                "unsupported_protocol_semantics",
+                "Cannot decode the upstream response as JSON.",
+            ) from error
+        raise NonForwardable(
+            "unsupported_protocol_semantics",
+            "No response decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
         )
 
 
@@ -3322,10 +3345,7 @@ def prepare_exchange(
     *,
     inbound_format: str,
     outbound_format: str,
-    route_attempt: Mapping[str, Any] | None = None,
-    tool_plan: Any = None,
 ) -> PreparedExchange:
-    del route_attempt, tool_plan
     inbound = str(inbound_format or "").strip().lower()
     outbound = str(outbound_format or "").strip().lower()
     try:
@@ -3352,9 +3372,7 @@ def prepare_exchange(
             stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
             return PreparedExchange(inbound, outbound, upstream, stream)
         if inbound == outbound:
-            payload = json.loads(request_body.decode("utf-8-sig"))
-            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
-            return PreparedExchange(inbound, outbound, request_body, stream)
+            return PreparedExchange(inbound, outbound, request_body, False)
     except UnsupportedProtocolTranslationError as error:
         raise NonForwardable(error.code, str(error)) from error
     except (UnicodeError, json.JSONDecodeError) as error:

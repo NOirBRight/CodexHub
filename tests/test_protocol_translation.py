@@ -4,6 +4,16 @@ import unittest
 import protocol_translation
 
 
+def _exchange_payload(body: bytes, *, inbound: str, outbound: str) -> dict:
+    return json.loads(
+        protocol_translation.prepare_exchange(
+            body,
+            inbound_format=inbound,
+            outbound_format=outbound,
+        ).upstream_body
+    )
+
+
 class ProtocolTranslationTests(unittest.TestCase):
     def test_responses_client_tool_search_output_loads_chat_tools(self):
         body = {
@@ -33,10 +43,10 @@ class ProtocolTranslationTests(unittest.TestCase):
             ],
         }
 
-        translated = json.loads(
-            protocol_translation.responses_request_to_chat_completion_body(
-                json.dumps(body).encode("utf-8")
-            )
+        translated = _exchange_payload(
+            json.dumps(body).encode("utf-8"),
+            inbound="responses",
+            outbound="chat_completions",
         )
 
         self.assertNotIn("tool_search_call", json.dumps(translated))
@@ -826,7 +836,7 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        translated = json.loads(protocol_translation.chat_completions_request_to_responses_body(body))
+        translated = _exchange_payload(body, inbound="chat_completions", outbound="responses")
 
         self.assertEqual(translated["model"], "example-model")
         self.assertEqual(translated["instructions"], "Be concise.")
@@ -850,11 +860,17 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        chat_payload = json.loads(protocol_translation.responses_request_to_chat_completion_body(responses_body))
+        chat_payload = _exchange_payload(
+            responses_body,
+            inbound="responses",
+            outbound="chat_completions",
+        )
         self.assertTrue(chat_payload["tools"][0]["function"]["strict"])
 
-        round_tripped = json.loads(
-            protocol_translation.chat_completions_request_to_responses_body(json.dumps(chat_payload).encode("utf-8"))
+        round_tripped = _exchange_payload(
+            json.dumps(chat_payload).encode("utf-8"),
+            inbound="chat_completions",
+            outbound="responses",
         )
         self.assertTrue(round_tripped["tools"][0]["strict"])
 
@@ -875,12 +891,18 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        chat_payload = json.loads(protocol_translation.responses_request_to_chat_completion_body(responses_body))
+        chat_payload = _exchange_payload(
+            responses_body,
+            inbound="responses",
+            outbound="chat_completions",
+        )
         image_part = chat_payload["messages"][0]["content"][1]
         self.assertEqual(image_part, {"type": "image_url", "image_url": {"url": "https://example.test/image.png", "detail": "high"}})
 
-        round_tripped = json.loads(
-            protocol_translation.chat_completions_request_to_responses_body(json.dumps(chat_payload).encode("utf-8"))
+        round_tripped = _exchange_payload(
+            json.dumps(chat_payload).encode("utf-8"),
+            inbound="chat_completions",
+            outbound="responses",
         )
         self.assertEqual(
             round_tripped["input"][0]["content"][1],
@@ -971,7 +993,7 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        translated = json.loads(protocol_translation.responses_request_to_chat_completion_body(body))
+        translated = _exchange_payload(body, inbound="responses", outbound="chat_completions")
         self.assertEqual(
             translated,
             {
