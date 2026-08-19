@@ -21,7 +21,11 @@ export type PersistentActionDeps = {
   }) => string;
   updateToast: (id: string, patch: ToastPatch) => void;
   disconnected?: "start-gateway";
+  disconnectedText?: string;
+  formatRestart?: (target: RestartTarget) => string;
+  isDisconnected?: (error: unknown) => boolean;
   onStartGateway?: () => Promise<void> | void;
+  startGatewayLabel?: string;
 };
 
 export function formatRestartDisclosure(target: RestartTarget): string {
@@ -61,21 +65,25 @@ export async function runPersistentAction<T>(
   try {
     const result = await spec.work();
     const completed = spec.success(result);
+    const restartText = (spec.formatRestart ?? formatRestartDisclosure)(completed.restart);
     spec.updateToast(toastId, {
       tone: "success",
-      text: `${completed.text} ${formatRestartDisclosure(completed.restart)}`.trim(),
+      text: (completed.text + " " + restartText).trim(),
       action: null,
     });
     return result;
   } catch (error) {
-    const disconnected = spec.disconnected === "start-gateway" && isBackendDisconnected(error);
+    const disconnected =
+      spec.disconnected === "start-gateway" &&
+      (spec.isDisconnected ?? isBackendDisconnected)(error);
+    const errorText = error instanceof Error ? error.message : String(error);
     spec.updateToast(toastId, {
       tone: "error",
-      text: error instanceof Error ? error.message : String(error),
+      text: disconnected ? spec.disconnectedText ?? errorText : errorText,
       action:
         disconnected && spec.onStartGateway
           ? {
-              label: "Start Gateway",
+              label: spec.startGatewayLabel ?? "Start Gateway",
               onClick: () => {
                 void spec.onStartGateway?.();
               },

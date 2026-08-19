@@ -9,6 +9,7 @@ import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { cx } from "../lib/format";
+import { runPersistentAction } from "../lib/persistentAction";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppFlavorInfo,
@@ -389,28 +390,39 @@ function GatewayPageImpl({
     const name = info?.name ?? clients.find((client) => client.id === "dsh")?.name ?? "DeepSeek Harness";
     const repairing = connect && info?.route_mode === "stale";
     setClientBusy(connect ? "dsh:connect" : "dsh:disconnect");
-    const toastId = showToast(
-      t(repairing ? "gateway.repairClient" : connect ? "gateway.connectClient" : "gateway.disconnectClient", { name }),
-      "loading",
-    );
     try {
-      if (connect) {
-        await api.dshClientConnect();
-      } else {
-        await api.dshClientDisconnect();
-      }
-      await onRefreshClients();
-      updateToast(toastId, {
-        action: null,
-        text: t(
-          repairing ? "gateway.repairClientDone" : connect ? "gateway.connectClientDone" : "gateway.disconnectClientDone",
+      await runPersistentAction({
+        showToast: (input) => showToast(input),
+        updateToast,
+        loading: t(
+          repairing ? "gateway.repairClient" : connect ? "gateway.connectClient" : "gateway.disconnectClient",
           { name },
         ),
-        tone: "success",
+        work: async () => {
+          if (connect) {
+            await api.dshClientConnect();
+          } else {
+            await api.dshClientDisconnect();
+          }
+          await onRefreshClients();
+        },
+        success: () => ({
+          text: t(
+            repairing ? "gateway.repairClientDone" : connect ? "gateway.connectClientDone" : "gateway.disconnectClientDone",
+            { name },
+          ),
+          restart: { kind: "none" },
+        }),
+        formatRestart: () => t("gateway.restartNone"),
+        disconnected: "start-gateway",
+        disconnectedText: t("gateway.backendNotConnected"),
+        startGatewayLabel: t("gateway.startBackend"),
+        isDisconnected: (error) => isBackendDisconnectedMessage(messageFromError(error)),
+        onStartGateway: () => startBackendFromToast(),
       });
       setError(null);
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     } finally {
       setClientBusy(null);
     }
