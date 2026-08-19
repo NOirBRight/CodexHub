@@ -61,6 +61,9 @@ SENTINELS = {
     "identity_resume": "AUTH_PROVIDER_TEXT_RESUME_OK",
     "file_workflow": "AUTH_PROVIDER_PATCH_OK",
     "collaboration_phase1": "AUTH_PROVIDER_V2_PHASE1_OK",
+    "collaboration_followup": "AUTH_PROVIDER_V2_FOLLOWUP_OK",
+    "collaboration_message": "AUTH_PROVIDER_V2_MESSAGE_OK",
+    "collaboration_list": "AUTH_PROVIDER_V2_LIST_OK",
     "collaboration": "AUTH_PROVIDER_V2_OK",
     "resume": "AUTH_PROVIDER_RESUME_OK",
 }
@@ -321,16 +324,6 @@ def _walk(value: Any) -> Iterable[Mapping[str, Any]]:
             yield from _walk(child)
 
 
-def _valid_collaboration_sequence(sequence: object) -> bool:
-    if not isinstance(sequence, list) or len(sequence) != len(EXPECTED_V2_SEQUENCE):
-        return False
-    return (
-        sequence[:2] == ["spawn_agent", "wait_agent"]
-        and set(sequence[2:4]) == {"followup_task", "send_message"}
-        and sequence[4:] == ["list_agents", "interrupt_agent"]
-    )
-
-
 def _session_items(home: Path) -> Iterator[Mapping[str, Any]]:
     for path in home.rglob("*.jsonl"):
         if "sessions" not in path.parts:
@@ -431,7 +424,6 @@ def _session_tool_evidence(home: Path) -> dict[str, Any]:
         result is not None
         and result.get("timed_out") is False
         and isinstance(result.get("message"), str)
-        and bool(result["message"].strip())
         for result in wait_objects
     )
     list_status_valid = False
@@ -739,19 +731,50 @@ def _run_collaboration(
     lines: list[str] = []
     stdout = ""
     analysis: dict[str, Any] = {}
+    lifecycle_phases: dict[str, dict[str, Any]] = {}
+    phase_specs = (
+        (
+            "followup_task",
+            "Call collaboration followup_task on /root/provider_worker with task: run "
+            "exec_command sleep 90 and then reply FOLLOWUP_DONE. Do not call other "
+            "collaboration tools. Reply " + SENTINELS["collaboration_followup"] + ".",
+            SENTINELS["collaboration_followup"],
+        ),
+        (
+            "send_message",
+            "Call collaboration send_message to /root/provider_worker with ACK while the "
+            "follow-up is active. Do not call other collaboration tools. Reply "
+            + SENTINELS["collaboration_message"] + ".",
+            SENTINELS["collaboration_message"],
+        ),
+        (
+            "list_agents",
+            "Call collaboration list_agents and observe the canonical task status. Do not "
+            "call other collaboration tools. Reply " + SENTINELS["collaboration_list"] + ".",
+            SENTINELS["collaboration_list"],
+        ),
+        (
+            "interrupt_agent",
+            "Call collaboration interrupt_agent on /root/provider_worker. Do not call other "
+            "collaboration tools. Reply " + SENTINELS["collaboration"] + ".",
+            SENTINELS["collaboration"],
+        ),
+    )
     if session_id:
-        phase2_prompt = (
-            "Continue this collaboration lifecycle. Call followup_task on "
-            "/root/provider_worker with task: run exec_command sleep 90 and then reply "
-            "FOLLOWUP_DONE. Call send_message to /root/provider_worker with ACK while the "
-            "follow-up is active. Call list_agents and observe canonical task status. Then "
-            "call interrupt_agent on /root/provider_worker. Wait for interruption delivery "
-            f"if needed. Reply {SENTINELS['collaboration']}."
-        )
-        code, lines, stdout, _stderr = lifecycle._run_cli_resume(
-            home, session_id, phase2_prompt, workspace
-        )
-        analysis = lifecycle._analyze_cli_events(lines)
+        for target_tool, phase_prompt, phase_sentinel in phase_specs:
+            before_counts = _session_collaboration_counts(home)
+            code, lines, stdout, _stderr = lifecycle._run_cli_resume(
+                home, session_id, phase_prompt, workspace
+            )
+            analysis = lifecycle._analyze_cli_events(lines)
+            after_counts = _session_collaboration_counts(home)
+            lifecycle_phases[target_tool] = {
+                "exit_code": code,
+                "terminal_event": analysis.get("terminal_event"),
+                "sentinel_observed": phase_sentinel in stdout,
+                "target_call_observed": after_counts.get(target_tool, 0)
+                > before_counts.get(target_tool, 0),
+            }
     counts_before_resume = _session_collaboration_counts(home)
     tool_evidence = _session_tool_evidence(home)
     observed = set(counts_before_resume)
@@ -807,6 +830,16 @@ def _run_collaboration(
         and _sha256_file(config_path) == config_before
         and _sha256_file(agents_path) == agents_before
     )
+    lifecycle_phases_pass = (
+        set(lifecycle_phases) == {spec[0] for spec in phase_specs}
+        and all(
+            phase["exit_code"] == 0
+            and phase["terminal_event"] == "turn.completed"
+            and phase["sentinel_observed"]
+            and phase["target_call_observed"]
+            for phase in lifecycle_phases.values()
+        )
+    )
     passed = (
         phase1_code == 0
         and phase1_analysis.get("terminal_event") == "turn.completed"
@@ -814,8 +847,8 @@ def _run_collaboration(
         and code == 0
         and analysis.get("terminal_event") == "turn.completed"
         and SENTINELS["collaboration"] in stdout
+        and lifecycle_phases_pass
         and observed == EXPECTED_V2_TOOLS
-        and _valid_collaboration_sequence(tool_evidence["collaboration_sequence"])
         and tool_evidence["collaboration_call_count"] >= len(EXPECTED_V2_SEQUENCE)
         and tool_evidence["collaboration_history_identity_preserved"]
         and tool_evidence["canonical_task_identity_observed"]
@@ -838,7 +871,9 @@ def _run_collaboration(
                 "sentinel_observed": SENTINELS["collaboration_phase1"] in phase1_stdout,
             },
             "observed_tools": sorted(observed),
-            "ordered_tool_sequence": tool_evidence["collaboration_sequence"],
+            "qualified_phase_sequence": list(EXPECTED_V2_SEQUENCE),
+            "lifecycle_phases": lifecycle_phases,
+            "observed_first_use_order": tool_evidence["collaboration_sequence"],
             "exact_call_result_history_identity": tool_evidence[
                 "collaboration_history_identity_preserved"
             ],

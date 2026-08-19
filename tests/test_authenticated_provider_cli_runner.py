@@ -178,30 +178,6 @@ def test_session_structural_evidence_keeps_names_not_identities(tmp_path: Path) 
 
 
 
-def test_collaboration_sequence_preserves_required_dependencies() -> None:
-    assert runner._valid_collaboration_sequence(list(runner.EXPECTED_V2_SEQUENCE))
-    assert runner._valid_collaboration_sequence(
-        [
-            "spawn_agent",
-            "wait_agent",
-            "send_message",
-            "followup_task",
-            "list_agents",
-            "interrupt_agent",
-        ]
-    )
-    assert not runner._valid_collaboration_sequence(
-        [
-            "spawn_agent",
-            "send_message",
-            "wait_agent",
-            "followup_task",
-            "list_agents",
-            "interrupt_agent",
-        ]
-    )
-
-
 def test_session_tool_evidence_requires_exact_call_result_and_task_identity(tmp_path: Path) -> None:
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
