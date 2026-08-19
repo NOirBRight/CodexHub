@@ -24,7 +24,7 @@ from gateway_settings import (
     official_upstream_open_attempts,
     upstream_timeout_seconds,
 )
-from protocol_translation import responses_request_to_chat_completion_body
+from protocol_translation import prepare_exchange
 from route_primitives import (
     AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES,
     AttemptRequestBodyMode,
@@ -451,11 +451,13 @@ class RouteAttemptPlan:
             self.request_body_mode
             == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
         ):
-            return responses_request_to_chat_completion_body(
+            exchange = prepare_exchange(
                 prepared_body,
-                drop_client_transport_fields=True,
-                drop_reasoning=True,
+                inbound_format="responses",
+                outbound_format="chat_completions",
+                route_attempt={"index": self.index, "endpoint_url": self.endpoint_url},
             )
+            return exchange.upstream_body
         raise UnsupportedRouteProtocolError(
             f"unsupported planned request body mode: {self.request_body_mode}"
         )

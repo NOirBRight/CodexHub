@@ -76,6 +76,7 @@ from protocol_translation import (
     chat_tool_choice_to_responses_tool_choice,
     chat_tools_to_responses_tools,
     events_to_responses_body,
+    prepare_exchange,
     response_body_to_chat_completion_body,
     response_body_to_response_sse_events,
     response_events_to_chat_stream_chunks,
@@ -14265,7 +14266,11 @@ def _call_vision_model_for_image_description(
             body = json.dumps(vision_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         upstream_url = _responses_url(vision_upstream, "/v1/responses")
         if upstream_format == "chat_completions":
-            body = _responses_request_to_chat_completion_body(body)
+            body = prepare_exchange(
+                body,
+                inbound_format="responses",
+                outbound_format="chat_completions",
+            ).upstream_body
             upstream_url = _chat_completions_url(vision_upstream)
         headers = upstream_headers({"Content-Type": "application/json"}, vision_upstream)
     except ValueError as exc:
@@ -17381,7 +17386,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 attempt: RouteAttemptPlan,
                 prepared_body: bytes = responses_body,
             ) -> bytes:
-                return attempt.request_body(prepared_body)
+                try:
+                    return attempt.request_body(prepared_body)
+                except UnsupportedProtocolTranslationError as exc:
+                    raise UpstreamProtocolTranslationError(exc) from exc
 
             def request_observability_for_attempt(
                 attempt: RouteAttemptPlan,
