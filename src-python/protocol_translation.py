@@ -16,6 +16,7 @@ dropped or rewritten.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -3372,7 +3373,10 @@ def prepare_exchange(
             stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
             return PreparedExchange(inbound, outbound, upstream, stream)
         if inbound == outbound:
-            return PreparedExchange(inbound, outbound, request_body, False)
+            stream = bool(
+                re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)
+            )
+            return PreparedExchange(inbound, outbound, request_body, stream)
     except UnsupportedProtocolTranslationError as error:
         raise NonForwardable(error.code, str(error)) from error
     except (UnicodeError, json.JSONDecodeError) as error:

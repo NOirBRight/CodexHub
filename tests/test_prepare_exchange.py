@@ -133,7 +133,19 @@ def test_prepare_exchange_passthrough_same_protocol() -> None:
         outbound_format="chat_completions",
     )
     assert exchange.upstream_body is body
+    assert exchange.stream is False
     assert exchange.decode_response(b'{"object":"chat.completion"}') == b'{"object":"chat.completion"}'
+
+
+def test_prepare_exchange_identity_reads_stream_true() -> None:
+    body = json.dumps({"model": "placeholder", "stream": True, "input": "hi"}).encode()
+    exchange = prepare_exchange(
+        body,
+        inbound_format="responses",
+        outbound_format="responses",
+    )
+    assert exchange.upstream_body is body
+    assert exchange.stream is True
 
 
 def test_prepare_exchange_responses_identity_does_not_hop() -> None:
