@@ -1,0 +1,161 @@
+{
+  "candidate_sha": "6aedd33e6b57433b16e42db1fafc48aa42161194",
+  "chat_wire_summary": {
+    "child_request_count": 1,
+    "progressive_two_chunk_responses": 9,
+    "raw_aliases_retained": false,
+    "raw_messages_retained": false,
+    "request_count": 9,
+    "root_request_count": 8,
+    "six_alias_requests": 8,
+    "tool_call_responses": 6
+  },
+  "cli_analysis": {
+    "agent_messages": [
+      {
+        "author": null,
+        "recipient": null
+      }
+    ],
+    "collab_tool_calls": [
+      {
+        "status": "in_progress",
+        "tool": "wait"
+      },
+      {
+        "status": "completed",
+        "tool": "wait"
+      }
+    ],
+    "errors": [],
+    "event_count": 6,
+    "event_types": {
+      "item.completed": 2,
+      "item.started": 1,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    },
+    "function_call_outputs": [],
+    "function_calls": [],
+    "shapes": [
+      {
+        "type": "thread.started"
+      },
+      {
+        "type": "turn.started"
+      },
+      {
+        "item_name": null,
+        "item_namespace": null,
+        "item_status": "in_progress",
+        "item_type": "collab_tool_call",
+        "type": "item.started"
+      },
+      {
+        "item_name": null,
+        "item_namespace": null,
+        "item_status": "completed",
+        "item_type": "collab_tool_call",
+        "type": "item.completed"
+      },
+      {
+        "item_name": null,
+        "item_namespace": null,
+        "item_status": null,
+        "item_type": "agent_message",
+        "type": "item.completed"
+      },
+      {
+        "type": "turn.completed"
+      }
+    ],
+    "terminal_event": "turn.completed"
+  },
+  "cli_exit_code": 0,
+  "cli_terminal_message": null,
+  "cli_version": "codex-cli 0.147.0",
+  "gateway_log_summary": {
+    "error_details": [],
+    "errors": [],
+    "event_count": 90,
+    "event_types": {
+      "chat_stream_shape_summary": 9,
+      "chat_to_responses_event_summary": 36,
+      "request_complete": 9,
+      "request_start": 10,
+      "runtime_tool_adapter_request": 10,
+      "runtime_tool_adapter_response": 6,
+      "runtime_tool_compatibility_planned": 10
+    },
+    "fallback_count": 0,
+    "has_v1_observation": false,
+    "has_v2_observation": true
+  },
+  "isolated_home_sha256": "b224387208516c3a1a0786fcc8323bbe85e0f22958fafaaff4fbb70a95a55d2c",
+  "phase_observations": {
+    "errors": [],
+    "fallback_count": 0,
+    "observed_namespaces": [
+      "collaboration"
+    ],
+    "observed_tools": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
+      "send_message",
+      "spawn_agent",
+      "wait_agent"
+    ],
+    "phases": {
+      "child_result_delivery": true,
+      "followup_task": true,
+      "interrupt_agent": true,
+      "list_agents": true,
+      "parent_completion": true,
+      "send_message": true,
+      "spawn_agent": true,
+      "wait_agent": true
+    },
+    "v1_namespace_seen": false,
+    "v1_tools_seen": []
+  },
+  "qualification_status": "passed",
+  "root_cause_details": {
+    "agent_message": "Plaintext request-bound envelopes identify child NEW_TASK handoff; the fixture never emits envelopes.",
+    "alias_mapping": "Six request-scoped aliases are mapped by the frozen V2 declaration order; unknown aliases fail closed.",
+    "child_execution": "The fixture holds the child HTTP turn open; the Codex client owns agent creation, messaging, and interruption.",
+    "fixture_boundary": "Codex CLI -> Gateway Responses; Gateway -> fixture Chat Completions"
+  },
+  "root_cause_verdict": "chat_v2_lifecycle_verified",
+  "route": {
+    "gateway_port": 34807,
+    "selected_model": "custom/fixture-v2",
+    "selected_provider": "custom",
+    "shim_port": 46697,
+    "upstream_fixture_port": 35557,
+    "upstream_format": "chat_completions",
+    "upstream_provider_id": "custom"
+  },
+  "same_home_restart_check": {
+    "agents_configuration_preserved": true,
+    "config_preserved": true,
+    "passed": true,
+    "requested": true,
+    "resume_exit_code": 0,
+    "resume_terminal_event": "turn.completed",
+    "resumed_request_count": 1,
+    "task_identity_preserved": true
+  },
+  "sanitization": {
+    "absolute_paths_retained": false,
+    "credentials_retained": false,
+    "opaque_ids_retained": false,
+    "raw_prompts_retained": false
+  },
+  "schema": "codexhub.issue395.cli-chat-v2-lifecycle.v1",
+  "shim_notes": [
+    "The CLI-facing shim only supplies /v1/models and the accepted optional agent_type declaration field.",
+    "The upstream fixture accepts only /v1/chat/completions and emits split Chat tool-call argument chunks."
+  ]
+}
