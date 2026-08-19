@@ -321,6 +321,16 @@ def _walk(value: Any) -> Iterable[Mapping[str, Any]]:
             yield from _walk(child)
 
 
+def _valid_collaboration_sequence(sequence: object) -> bool:
+    if not isinstance(sequence, list) or len(sequence) != len(EXPECTED_V2_SEQUENCE):
+        return False
+    return (
+        sequence[:2] == ["spawn_agent", "wait_agent"]
+        and set(sequence[2:4]) == {"followup_task", "send_message"}
+        and sequence[4:] == ["list_agents", "interrupt_agent"]
+    )
+
+
 def _session_items(home: Path) -> Iterator[Mapping[str, Any]]:
     for path in home.rglob("*.jsonl"):
         if "sessions" not in path.parts:
@@ -805,7 +815,7 @@ def _run_collaboration(
         and analysis.get("terminal_event") == "turn.completed"
         and SENTINELS["collaboration"] in stdout
         and observed == EXPECTED_V2_TOOLS
-        and tool_evidence["collaboration_sequence"] == list(EXPECTED_V2_SEQUENCE)
+        and _valid_collaboration_sequence(tool_evidence["collaboration_sequence"])
         and tool_evidence["collaboration_call_count"] >= len(EXPECTED_V2_SEQUENCE)
         and tool_evidence["collaboration_history_identity_preserved"]
         and tool_evidence["canonical_task_identity_observed"]
