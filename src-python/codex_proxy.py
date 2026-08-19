@@ -3195,6 +3195,14 @@ class UpstreamSseSemanticError(ValueError):
         super().__init__(message)
 
 
+class _RuntimeToolInverseStreamError(ValueError):
+    """A runtime-tool inverse failed after converted streaming began."""
+
+    def __init__(self, translation_error: UpstreamProtocolTranslationError) -> None:
+        self.translation_error = translation_error
+        super().__init__(str(translation_error))
+
+
 def _verified_converted_sse_semantic_error(
     source_format: str,
 ) -> UpstreamSseSemanticError:
@@ -20280,6 +20288,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             exc: UpstreamSseSemanticError | SseFrameTooLargeError,
             *,
             response_id: str | None = None,
+            standard_responses_failure: bool = False,
         ) -> int:
             if seam.terminal_committed:
                 self.close_connection = True
@@ -20306,7 +20315,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            if inbound_format == "responses":
+            if inbound_format == "responses" and standard_responses_failure:
                 failed_event = _responses_failed_event_for_stream_error(
                     upstream_name=upstream_name,
                     model=model,
@@ -20926,12 +20935,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
                 def write_converted_response_event(event: Mapping[str, Any]) -> bool:
                     line = _sse_json_line(event, line_ending) + line_ending
-                    compatible_line = compatible_sse_line(
-                        line,
-                        upstream_name,
-                        event_context=compatibility_event_context,
-                        runtime_tool_inverse_only=True,
-                    )
+                    try:
+                        compatible_line = compatible_sse_line(
+                            line,
+                            upstream_name,
+                            event_context=compatibility_event_context,
+                            runtime_tool_inverse_only=True,
+                        )
+                    except UpstreamProtocolTranslationError as exc:
+                        raise _RuntimeToolInverseStreamError(exc) from exc
                     if not compatible_line:
                         return True
                     return self._write_sse_bytes(compatible_line)
@@ -21000,11 +21012,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         exc,
                         response_id=converter.response_id,
                     )
-                except UpstreamProtocolTranslationError as exc:
+                except _RuntimeToolInverseStreamError as exc:
                     return finish_converted_sse_semantic_error(
                         UpstreamSseSemanticError(
-                            str(exc),
-                            classification=exc.classification,
+                            str(exc.translation_error),
+                            classification=exc.translation_error.classification,
+                        ),
+                        response_id=converter.response_id,
+                        standard_responses_failure=True,
+                    )
+                except UpstreamProtocolTranslationError:
+                    return finish_converted_sse_semantic_error(
+                        _verified_converted_sse_semantic_error(
+                            "chat_completions"
                         ),
                         response_id=converter.response_id,
                     )
