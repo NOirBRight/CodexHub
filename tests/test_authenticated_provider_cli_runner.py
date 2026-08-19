@@ -13,15 +13,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import qualify_authenticated_provider_cli as runner
 
 
-def test_cell_matrix_is_generic_and_complete() -> None:
-    assert {cell.protocol for cell in runner.CELLS} == {"responses", "chat_completions"}
+def test_chat_cell_matrix_is_generic_and_complete() -> None:
+    assert {cell.protocol for cell in runner.CELLS} == {"chat_completions"}
     assert {cell.model.model for cell in runner.CELLS} == {
         "glm-5.2",
         "kimi-k2.7-code",
         "deepseek-v4-flash:0731",
     }
-    assert len(runner.CELLS) == 6
-    assert len({cell.key for cell in runner.CELLS}) == 6
+    assert len(runner.CELLS) == 3
+    assert len({cell.key for cell in runner.CELLS}) == 3
 
 
 def test_chat_provider_config_uses_only_secret_placeholder_and_generic_adapters() -> None:
@@ -35,18 +35,6 @@ def test_chat_provider_config_uses_only_secret_placeholder_and_generic_adapters(
     assert "accepts_namespace_adapter = true" in value
     assert "accepts_custom_adapter = true" in value
     assert 'id = "glm-5.2"' in value
-
-
-def test_responses_glm_config_preserves_maintained_codec() -> None:
-    value = runner._provider_config(
-        runner.CELL_BY_KEY["responses:glm-5.2"],
-        "https://ollama.example/v1",
-    )
-
-    assert 'upstream_format = "responses"' in value
-    assert 'native_responses_tool_codec = "strict_apply_patch"' in value
-    assert 'tool_surface_strategy = "deferred_core"' in value
-    assert "namespace_lifecycle = true" in value
 
 
 def test_credential_resolution_never_accepts_placeholder(tmp_path: Path) -> None:
