@@ -3178,6 +3178,8 @@ def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
 
 
 from gateway_sse import (
+    DownstreamStreamCommit,
+    PassthroughSseSemanticStats,
     _sse_line_ending,
     _sse_event_separator_after_line,
     _is_sse_blank_line,
@@ -3186,6 +3188,8 @@ from gateway_sse import (
     _parse_sse_json_payload,
     _parse_sse_json_payloads,
 )
+
+_GatewayDownstreamStreamCommit = DownstreamStreamCommit
 
 class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
@@ -3478,175 +3482,6 @@ def _chat_sse_event_resets_idle_timeout(event: SseEvent) -> bool:
     except UpstreamSseSemanticError:
         return False
     return payload == "[DONE]" or isinstance(payload, Mapping)
-
-
-SSE_EVENT_TYPE_TELEMETRY_LIMIT = 64
-
-
-class PassthroughSseSemanticStats:
-    def __init__(
-        self,
-        *,
-        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
-        max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.events_streamed = 0
-        self.json_events_streamed = 0
-        self.terminal_event_seen = False
-        self.completed_event_seen = False
-        self.done_sentinel_seen = False
-        self.response_event_seen = False
-        self.downstream_output_seen = False
-        self.last_event_type: str | None = None
-        self.response_id: str | None = None
-        self.event_type_counts: dict[str, int] = {}
-        self.event_types_truncated = False
-        self._terminal_observer = (
-            terminal_observer if terminal_observer is not None else _responses_terminal_observer
-        )
-        self._clock = clock
-        self._started_at = self._clock()
-        self._first_byte_elapsed_ms: int | None = None
-        self._first_event_elapsed_ms: int | None = None
-        self._last_event_at: float | None = None
-        self._max_inter_event_gap_ms: int | None = None
-        self._last_inter_event_gap_ms: int | None = None
-        self._terminal_elapsed_ms: int | None = None
-        self._assembler = SseEventAssembler(max_frame_bytes=max_frame_bytes)
-        self._eof_disposition: str | None = None
-        self._incomplete_bytes_discarded = 0
-
-    def observe_bytes(self, chunk: bytes) -> None:
-        if self._eof_disposition == "size_limit":
-            return
-        if chunk and self._first_byte_elapsed_ms is None:
-            self._first_byte_elapsed_ms = self._elapsed_ms(self._clock() - self._started_at)
-        try:
-            self._assembler.feed(chunk, on_event=self._observe_event)
-        except SseFrameTooLargeError:
-            self._eof_disposition = "size_limit"
-            raise
-
-    def finalize_pending(self) -> None:
-        if self._eof_disposition is not None:
-            return
-        termination = self._assembler.finish()
-        for event in termination.events:
-            self._observe_event(event)
-        self._eof_disposition = termination.disposition
-        self._incomplete_bytes_discarded = termination.discarded_bytes
-
-    def pending_completion_bytes(self) -> bytes:
-        if self._eof_disposition == "size_limit":
-            return b""
-        return self._assembler.completion_bytes()
-
-    def fields(self) -> dict[str, Any]:
-        event_types = sorted(self.event_type_counts)
-        fields: dict[str, Any] = {
-            "sse_events_streamed": self.events_streamed,
-            "sse_json_events_streamed": self.json_events_streamed,
-            "sse_terminal_event_seen": self.terminal_event_seen,
-            "sse_completed_event_seen": self.completed_event_seen,
-            "sse_done_sentinel_seen": self.done_sentinel_seen,
-            "sse_response_event_seen": self.response_event_seen,
-            "sse_downstream_output_seen": self.downstream_output_seen,
-            "sse_event_types": event_types,
-            "sse_event_type_counts": {key: self.event_type_counts[key] for key in event_types},
-            # The Gateway observes the stream after the response has already
-            # been opened.  Successful DNS/TCP/TLS phase duration is therefore
-            # intentionally explicit as not observed here; transport failures
-            # carry their concrete phase from the upstream-open boundary.
-            "upstream_connect_timing": "not_observed",
-            "upstream_tls_timing": "not_observed",
-            "sse_first_byte_elapsed_ms": self._first_byte_elapsed_ms,
-            "sse_first_event_elapsed_ms": self._first_event_elapsed_ms,
-            "sse_last_inter_event_gap_ms": self._last_inter_event_gap_ms,
-            "sse_max_inter_event_gap_ms": self._max_inter_event_gap_ms,
-            "sse_terminal_elapsed_ms": self._terminal_elapsed_ms,
-        }
-        if self.last_event_type is not None:
-            fields["sse_last_event_type"] = self.last_event_type
-        if self.event_types_truncated:
-            fields["sse_event_types_truncated"] = True
-        if self._eof_disposition == "incomplete":
-            fields["sse_eof_disposition"] = "incomplete"
-            fields["sse_incomplete_bytes_discarded"] = self._incomplete_bytes_discarded
-        return fields
-
-    def _observe_event(self, event: SseEvent) -> None:
-        observed_at = self._clock()
-        if self._first_event_elapsed_ms is None:
-            self._first_event_elapsed_ms = self._elapsed_ms(observed_at - self._started_at)
-        if self._last_event_at is not None:
-            gap_ms = self._elapsed_ms(observed_at - self._last_event_at)
-            self._last_inter_event_gap_ms = gap_ms
-            if self._max_inter_event_gap_ms is None or gap_ms > self._max_inter_event_gap_ms:
-                self._max_inter_event_gap_ms = gap_ms
-        self._last_event_at = observed_at
-        event_name: str | None = None
-        if event.event is not None:
-            event_name = event.event.decode("utf-8", errors="replace").strip() or None
-        has_data_field = any(line.name == b"data" for line in event.lines)
-        if event_name is None and not has_data_field:
-            return
-        data = event.data
-
-        self.events_streamed += 1
-        event_type = event_name
-        payload: Any = None
-        if data == b"[DONE]":
-            self.done_sentinel_seen = True
-            event_type = event_type or "[DONE]"
-        elif data:
-            try:
-                payload = json.loads(data.decode("utf-8-sig"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                payload = None
-            if isinstance(payload, Mapping):
-                self.json_events_streamed += 1
-                payload_type = payload.get("type")
-                if isinstance(payload_type, str) and payload_type:
-                    event_type = payload_type
-                if self._terminal_observer is _responses_terminal_observer:
-                    if _responses_event_commits_downstream_output(payload, "official"):
-                        self.downstream_output_seen = True
-                    response = payload.get("response")
-                    if isinstance(response, Mapping):
-                        response_id = response.get("id")
-                        if isinstance(response_id, str) and response_id:
-                            self.response_id = response_id
-
-        if event_type is None:
-            return
-        self.last_event_type = event_type
-        self._record_event_type(event_type)
-        if self._terminal_observer is _responses_terminal_observer:
-            if event_type.startswith("response."):
-                self.response_event_seen = True
-            if event_type == "response.completed":
-                self.completed_event_seen = True
-        if self._terminal_observer(event_name, data, payload):
-            self.terminal_event_seen = True
-            if self._terminal_elapsed_ms is None:
-                self._terminal_elapsed_ms = self._elapsed_ms(observed_at - self._started_at)
-
-    def _elapsed_ms(self, value: float) -> int:
-        """Convert a monotonic interval to a bounded non-negative integer."""
-
-        if value <= 0:
-            return 0
-        return min(7 * 24 * 60 * 60 * 1000, int(value * 1000))
-
-    def _record_event_type(self, event_type: str) -> None:
-        if event_type in self.event_type_counts:
-            self.event_type_counts[event_type] += 1
-            return
-        if len(self.event_type_counts) >= SSE_EVENT_TYPE_TELEMETRY_LIMIT:
-            self.event_types_truncated = True
-            return
-        self.event_type_counts[event_type] = 1
 
 
 RESPONSES_TERMINAL_EVENT_TYPES = {
@@ -15879,413 +15714,94 @@ DOWNSTREAM_STREAM_COMMIT_ALLOWLIST: frozenset[str] = frozenset({
 # Low-level seam methods that are the only legitimate direct ``self.wfile.write``
 # callers inside the stream-commit seam. They are kept separate from the allowlist
 # because they participate in (rather than bypass) the seam.
+# ``write`` is _HandlerDownstreamIO.write, the handler-bound byte sink.
 DOWNSTREAM_STREAM_COMMIT_SEAM_METHODS: frozenset[str] = frozenset({
     "commit_data",
     "commit_sse_bytes",
     "commit_terminal_failure",
+    "write",
 })
 
 
-def _handler_downstream_stream_commit(handler: Any) -> _GatewayDownstreamStreamCommit | None:
+def _handler_downstream_stream_commit(handler: Any) -> DownstreamStreamCommit | None:
     """Return the request-scoped stream-commit seam bound to ``handler`` if active."""
     seam = getattr(handler, "_downstream_stream_commit", None)
-    return seam if isinstance(seam, _GatewayDownstreamStreamCommit) else None
+    return seam if isinstance(seam, DownstreamStreamCommit) else None
 
 
-class _GatewayDownstreamStreamCommit:
-    """Owns downstream writes and terminal commitment for an SSE stream.
+class _HandlerDownstreamIO:
+    """Adapter from CodexProxyHandler to DownstreamStreamCommit write/flush/close."""
 
-    The seam is the single owner of all bytes written to the downstream client for
-    a passthrough SSE stream: data events, terminal events, and sanitized error
-    events. It tracks whether a terminal event has been committed to the
-    downstream, classifies the close phase (before output, during an event, or
-    after terminal commitment), and hands off cancellation/closure to the owned
-    upstream response so that no later write, retry, fallback, or duplicate
-    terminal can occur on this stream.
-
-    Protocol-specific observers (terminal detection, usage extraction, and
-    synthetic terminal formatting) are injected by the caller; the seam itself
-    owns only the lifecycle ledger and byte commitment.
-
-    When promoted to request scope the seam may be created before the upstream
-    response is opened. The upstream response is attached later via
-    ``attach_upstream_response`` so cancellation or a downstream write failure
-    can still close the owned upstream work.
-    """
-
-    def __init__(
-        self,
-        handler: CodexProxyHandler,
-        upstream_response: Any | None,
-        upstream_name: str,
-        *,
-        model: str | None = None,
-        request_id: str | None = None,
-        inbound_format: str = "responses",
-        upstream_format: str = "responses",
-        terminal_observer: Callable[[str | None, bytes, Any], bool] | None = None,
-        usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None = None,
-        synthetic_terminal_failure_callback: Callable[
-            [CodexProxyHandler, BaseException, int, str | None, str, str | None],
-            tuple[bool, str | None, str | None],
-        ]
-        | None = None,
-        max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
-    ) -> None:
+    def __init__(self, handler: Any) -> None:
         self._handler = handler
-        self._upstream_response = upstream_response
-        self._upstream_name = upstream_name
-        self._model = model
-        self._request_id = request_id
-        self._inbound_format = inbound_format
-        self._upstream_format = upstream_format
-        self._usage_line_callback = (
-            usage_line_callback
-            if usage_line_callback is not None
-            else _offer_official_passthrough_usage_line
-        )
-        self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
-        self._max_frame_bytes = max_frame_bytes
-        self._sse_stats = PassthroughSseSemanticStats(
-            terminal_observer=terminal_observer,
-            max_frame_bytes=max_frame_bytes,
-        )
-        self._terminal_observed = False
-        self._terminal_committed = False
-        self._downstream_closed = False
-        self._downstream_output_started = False
-        self._downstream_content_exposed = False
-        self._terminal_drain_timeout_shortened = False
-        self._lines_streamed = 0
-        self._bytes_streamed = 0
-        self._last_upstream_byte_at: float | None = None
-        self._last_write_error: OSError | None = None
-        self._last_successful_completion_bytes = b""
-        self._headers_committed = False
-        self._ensure_headers_committed_callback: Callable[[], bool] | None = None
 
-    @property
-    def terminal_committed(self) -> bool:
-        return self._terminal_committed
+    def write(self, data: bytes) -> None:
+        self._handler.wfile.write(data)
 
-    @property
-    def downstream_closed(self) -> bool:
-        return self._downstream_closed
-
-    @property
-    def close_phase(self) -> str:
-        if self._terminal_committed:
-            return "after_terminal"
-        if self._downstream_output_started:
-            return "during_event"
-        return "before_output"
-
-    def stats(self) -> dict[str, Any]:
-        self._sse_stats.finalize_pending()
-        return self._sse_stats.fields()
-
-    def attach_upstream_response(self, response: Any) -> None:
-        """Bind the upstream response after the seam has been created."""
-        if self._downstream_closed:
-            self._close_upstream_response(response)
-            return
-        self._upstream_response = response
-
-    def set_upstream_format(self, upstream_format: str) -> None:
-        """Update the active protocol before a planned fallback is opened."""
-        if self._downstream_output_started or self._terminal_committed:
-            return
-        self._upstream_format = upstream_format
-
-    def mark_downstream_content_exposed(self) -> None:
-        """Record that upstream response content has been produced for the client.
-
-        This is semantic exposure: it is set when the upstream emits visible or
-        tool output that would be relayed downstream, even if the bytes are still
-        buffered in the relay layer and have not yet been written to the socket.
-        """
-        self._downstream_content_exposed = True
-
-    def set_terminal_observer(self, terminal_observer: Callable[[str | None, bytes, Any], bool] | None) -> None:
-        self._sse_stats = PassthroughSseSemanticStats(
-            terminal_observer=terminal_observer,
-            max_frame_bytes=self._max_frame_bytes,
-        )
-
-    def set_usage_line_callback(self, usage_line_callback: Callable[[Mapping[str, Any], bytes], None] | None) -> None:
-        self._usage_line_callback = (
-            usage_line_callback
-            if usage_line_callback is not None
-            else _offer_official_passthrough_usage_line
-        )
-
-    def set_synthetic_terminal_failure_callback(
-        self,
-        synthetic_terminal_failure_callback: Callable[
-            [CodexProxyHandler, BaseException, int, str | None, str, str | None],
-            tuple[bool, str | None, str | None],
-        ]
-        | None,
-    ) -> None:
-        self._synthetic_terminal_failure_callback = synthetic_terminal_failure_callback
-
-    def set_ensure_headers_committed_callback(
-        self,
-        callback: Callable[[], bool] | None,
-    ) -> None:
-        self._ensure_headers_committed_callback = (
-            None if self._headers_committed else callback
-        )
-
-    def _ensure_headers_committed_before_write(self) -> bool:
-        if self._headers_committed:
-            self._ensure_headers_committed_callback = None
-            return True
-        callback = self._ensure_headers_committed_callback
-        if callback is None:
-            return True
-        if not callback():
-            return False
-        self._ensure_headers_committed_callback = None
-        return True
-
-    def _close_upstream_response(self, response: Any) -> None:
-        close = getattr(response, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass
-
-    def _close_upstream(self) -> None:
-        response = self._upstream_response
-        if response is None:
-            return
-        self._close_upstream_response(response)
+    def flush(self) -> None:
+        self._handler.wfile.flush()
 
     def close(self) -> None:
-        """Close the downstream and upstream sides; idempotent."""
-        if self._downstream_closed:
-            return
-        self._downstream_closed = True
         self._handler.close_connection = True
-        self._close_upstream()
 
-    def cancel(self) -> None:
-        """Hand off cancellation: close downstream and upstream once."""
-        self.close()
 
-    def _record_terminal(self) -> None:
-        if self._terminal_drain_timeout_shortened:
-            return
-        shorten = getattr(self._upstream_response, "shorten_terminal_drain_timeout", None)
-        if callable(shorten):
-            try:
-                shorten(OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS)
-            except Exception:
-                pass
-        self._terminal_drain_timeout_shortened = True
+def _bind_handler_synthetic_terminal_failure(
+    handler: Any,
+    callback: Callable[..., tuple[bool, str | None, str | None]] | None,
+    *,
+    redact_identity: str | None = None,
+) -> Callable[..., tuple[bool, str | None, str | None]] | None:
+    if callback is None:
+        return None
 
-    def _observe_line(self, line: bytes) -> bool:
-        """Observe one raw SSE line and return True if it contains a terminal event."""
-        self._last_upstream_byte_at = time.monotonic()
-        self._sse_stats.observe_bytes(line)
-        if self._sse_stats.terminal_event_seen and not self._terminal_observed:
-            self._terminal_observed = True
-            return True
-        return False
-
-    def commit_data(self, line: bytes) -> bool:
-        """Commit one upstream SSE line to the downstream stream.
-
-        Returns True if the line was written (or was empty). Returns False if the
-        downstream stream is closed or a terminal event has already been committed,
-        in which case the caller must stop writing.
-        """
-        if self._downstream_closed:
-            return False
-        if not line:
-            return True
-        if self._terminal_committed:
-            return False
-        if not self._ensure_headers_committed_before_write():
-            return False
-        terminal_observed_now = self._observe_line(line)
-        if terminal_observed_now:
-            _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=False)
-        try:
-            self._handler.wfile.write(line)
-            self._handler.wfile.flush()
-        except OSError as write_exc:
-            self._last_write_error = write_exc
-            self.close()
-            return False
-        self._downstream_output_started = True
-        self._lines_streamed += 1
-        self._bytes_streamed += len(line)
-        self._last_successful_completion_bytes = self._sse_stats.pending_completion_bytes()
-        if terminal_observed_now:
-            self._terminal_committed = True
-            _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
-            self._record_terminal()
-            # Terminal ledger is sealed: close the downstream side deterministically
-            # so no later upstream byte can be written or mislabeled as a disconnect.
-            # Upstream is left open so the caller can drain to the natural EOF.
-            self._downstream_closed = True
-            self._handler.close_connection = True
-        self._usage_line_callback(
-            {
-                "request_id": self._request_id,
-                "model": self._model,
-                "upstream": self._upstream_name,
-                "upstream_format": self._upstream_format,
-                "inbound_format": self._inbound_format,
-            },
-            line,
-        )
-        return True
-
-    def commit_headers(self, status: int, send_headers: Callable[[], None]) -> bool:
-        """Authorize and record the sending of HTTP response headers.
-
-        ``send_headers`` is called only when the stream is still open and no
-        terminal has been committed. A successful commit owns the one allowed
-        header block and disarms any deferred header callback. Later header
-        requests are successful no-ops. Any OSError is captured, closes the
-        owned upstream work, and seals the downstream side.
-        """
-        if self._headers_committed:
-            self._ensure_headers_committed_callback = None
-            return True
-        if self._downstream_closed or self._terminal_committed:
-            return False
-        try:
-            send_headers()
-        except OSError as write_exc:
-            self._last_write_error = write_exc
-            self.close()
-            return False
-        self._headers_committed = True
-        self._ensure_headers_committed_callback = None
-        return True
-
-    def commit_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
-        """Commit constructed SSE bytes to the downstream stream.
-
-        This is used for retry diagnostics, converted-route events, keepalives,
-        and error events that are produced above the raw upstream line layer.
-        When ``observe`` is True the bytes are inspected for terminal events.
-        """
-        if self._downstream_closed:
-            return False
-        if not data:
-            return True
-        if self._terminal_committed:
-            return False
-        if not self._ensure_headers_committed_before_write():
-            return False
-        terminal_observed_now = False
-        if observe:
-            terminal_observed_now = self._observe_line(data)
-            if terminal_observed_now:
-                _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=False)
-        try:
-            self._handler.wfile.write(data)
-            self._handler.wfile.flush()
-        except OSError as write_exc:
-            self._last_write_error = write_exc
-            self.close()
-            return False
-        self._downstream_output_started = True
-        self._lines_streamed += 1
-        self._bytes_streamed += len(data)
-        if observe:
-            self._last_successful_completion_bytes = self._sse_stats.pending_completion_bytes()
-        if terminal_observed_now:
-            self._terminal_committed = True
-            _observe_gateway_diagnostic("observe_terminal", self._request_id, forwarded=True)
-            self._record_terminal()
-            self._downstream_closed = True
-            self._handler.close_connection = True
-        return True
-
-    def commit_terminal_failure(
-        self,
+    def bound(
         exc: BaseException,
         *,
-        status: int = 502,
+        status: int,
+        response_id: str | None,
+        upstream_name: str,
+        model: str | None,
     ) -> tuple[bool, str | None, str | None]:
-        """Commit a synthetic terminal failure event if terminal is not committed.
-
-        The pending upstream SSE event is first finalized with a blank-line
-        boundary so that the synthetic terminal failure is a distinct, valid
-        SSE frame. The response ID is taken from the finalized event stream if
-        available.
-
-        Returns (sent, write_error_name, write_error_detail). No event is written
-        if the stream is already closed, a terminal has already been committed,
-        or no synthetic terminal failure callback is configured, which prevents
-        duplicate terminals and fallback writes.
-        """
-        if self._downstream_closed or self._terminal_committed:
-            return False, None, None
-        if self._synthetic_terminal_failure_callback is None:
-            return False, None, None
-        if not self._ensure_headers_committed_before_write():
-            return False, None, None
-        try:
-            size_limit_exceeded = isinstance(exc, SseFrameTooLargeError)
-            completion = (
-                self._last_successful_completion_bytes
-                if size_limit_exceeded
-                else self._sse_stats.pending_completion_bytes()
-            )
-            if completion:
-                self._handler.wfile.write(completion)
-                self._handler.wfile.flush()
-                if not size_limit_exceeded:
-                    self._sse_stats.observe_bytes(completion)
-        except OSError as write_exc:
-            self._last_write_error = write_exc
-            self.close()
-            return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
-        response_id = self._sse_stats.response_id
-        try:
-            (
-                synthetic_terminal_event_sent,
-                synthetic_terminal_write_error,
-                synthetic_terminal_write_detail,
-            ) = self._synthetic_terminal_failure_callback(
-                self._handler,
-                exc,
-                status=status,
-                response_id=response_id,
-                upstream_name=self._upstream_name,
-                model=self._model,
-            )
-        except OSError as write_exc:
-            self._last_write_error = write_exc
-            self.close()
-            return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc)
-        if synthetic_terminal_event_sent:
-            self._terminal_committed = True
-            self._downstream_closed = True
-            self._handler.close_connection = True
-        return (
-            synthetic_terminal_event_sent,
-            synthetic_terminal_write_error,
-            synthetic_terminal_write_detail,
+        return callback(
+            handler,
+            exc,
+            status=status,
+            response_id=response_id,
+            upstream_name=upstream_name,
+            model=model,
+            redact_identity=redact_identity,
         )
 
-    def last_write_error(self) -> OSError | None:
-        return self._last_write_error
+    return bound
 
-    def counters(self) -> dict[str, Any]:
-        return {
-            "lines_streamed": self._lines_streamed,
-            "bytes_streamed": self._bytes_streamed,
-            "last_upstream_byte_at": self._last_upstream_byte_at,
-        }
+
+def _bind_downstream_stream_commit(
+    handler: Any,
+    upstream: Any | None,
+    upstream_name: str,
+    **kwargs: Any,
+) -> DownstreamStreamCommit:
+    redact_identity = kwargs.pop("redact_identity", None)
+    kwargs.setdefault("usage_line_callback", _offer_official_passthrough_usage_line)
+    kwargs.setdefault("diagnostic_observer", _observe_gateway_diagnostic)
+    kwargs.setdefault(
+        "terminal_drain_timeout_seconds",
+        OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
+    )
+    if "synthetic_terminal_failure_callback" in kwargs:
+        kwargs["synthetic_terminal_failure_callback"] = (
+            _bind_handler_synthetic_terminal_failure(
+                handler,
+                kwargs["synthetic_terminal_failure_callback"],
+                redact_identity=redact_identity,
+            )
+        )
+    return DownstreamStreamCommit(
+        _HandlerDownstreamIO(handler),
+        upstream,
+        upstream_name,
+        **kwargs,
+    )
 
 
 class _UpstreamSseReaderLifecycle:
@@ -17044,7 +16560,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             # every production SSE header/body (status, retry, keepalive, converted
             # output, error, terminal) is authorized by the same lifecycle owner.
             # The upstream response is attached once it is opened.
-            self._downstream_stream_commit = _GatewayDownstreamStreamCommit(
+            self._downstream_stream_commit = _bind_downstream_stream_commit(
                 self,
                 None,
                 upstream_name or "unknown",
@@ -17467,7 +16983,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             ) as response:
                                 seam = _handler_downstream_stream_commit(self)
                                 if seam is not None:
-                                    seam.attach_upstream_response(response)
+                                    seam.attach_upstream(response)
                                 status = self._relay_upstream_response(
                                     response,
                                     upstream_name,
@@ -18893,7 +18409,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         )
         request_scoped_seam = _handler_downstream_stream_commit(self)
         if request_scoped_seam is not None:
-            request_scoped_seam.attach_upstream_response(lifecycle)
+            request_scoped_seam.attach_upstream(lifecycle)
         lifecycle.start()
         try:
             stream_started_at = time.monotonic()
@@ -19185,11 +18701,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         request_scoped_seam = _handler_downstream_stream_commit(self)
         if request_scoped_seam is not None:
             request_scoped_seam.set_terminal_observer(_responses_terminal_observer)
-            request_scoped_seam.set_synthetic_terminal_failure_callback(_responses_synthetic_terminal_failure)
+            request_scoped_seam.set_synthetic_terminal_failure_callback(
+                _bind_handler_synthetic_terminal_failure(self, _responses_synthetic_terminal_failure)
+            )
             request_scoped_seam.set_usage_line_callback(_offer_official_passthrough_usage_line)
             seam = request_scoped_seam
         else:
-            seam = _GatewayDownstreamStreamCommit(
+            seam = _bind_downstream_stream_commit(
                 self,
                 response,
                 upstream_name,
@@ -19257,7 +18775,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 status_code=499,
                 error=type(exc).__name__,
                 detail=safe_upstream_error_detail(exc),
-                failure_phase=seam.close_phase or "before_output",
+                failure_phase=seam.close_phase,
                 failure_side="downstream_write",
                 failure_class="client_disconnected",
                 client_disconnected=True,
@@ -19324,7 +18842,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             response,
             admission=admission,
         )
-        seam.attach_upstream_response(lifecycle)
+        seam.attach_upstream(lifecycle)
         try:
             while True:
                 result = _observed_cancellation()
@@ -19464,25 +18982,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         headers_sent = bool(headers_already_sent)
         chat_mode = inbound_format == "chat_completions"
 
-        def _synthetic_terminal_failure_callback(
-            handler: CodexProxyHandler,
-            exc: BaseException,
-            status: int,
-            response_id: str | None,
-            upstream_name: str,
-            model: str | None,
-        ) -> tuple[bool, str | None, str | None]:
-            return _responses_synthetic_terminal_failure(
-                handler,
-                exc,
-                status=status,
-                response_id=response_id,
-                upstream_name=upstream_name,
-                model=model,
-                redact_identity=relay_redact_identity,
-            )
-
         request_scoped_seam = _handler_downstream_stream_commit(self)
+        synthetic_terminal_failure_callback = (
+            None
+            if chat_mode
+            else _responses_synthetic_terminal_failure
+        )
         if request_scoped_seam is not None:
             request_scoped_seam.set_terminal_observer(
                 _chat_terminal_observer if chat_mode else _responses_terminal_observer
@@ -19493,11 +18998,15 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
             )
             request_scoped_seam.set_synthetic_terminal_failure_callback(
-                _synthetic_terminal_failure_callback if not chat_mode else None
+                _bind_handler_synthetic_terminal_failure(
+                    self,
+                    synthetic_terminal_failure_callback,
+                    redact_identity=relay_redact_identity,
+                )
             )
             seam = request_scoped_seam
         else:
-            seam = _GatewayDownstreamStreamCommit(
+            seam = _bind_downstream_stream_commit(
                 self,
                 response,
                 upstream_name,
@@ -19511,9 +19020,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
                     context, line, upstream_format=upstream_format
                 ),
-                synthetic_terminal_failure_callback=(
-                    _synthetic_terminal_failure_callback if not chat_mode else None
-                ),
+                synthetic_terminal_failure_callback=synthetic_terminal_failure_callback,
+                redact_identity=relay_redact_identity,
             )
         _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
 
@@ -19873,7 +19381,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             response,
             admission=admission,
         )
-        seam.attach_upstream_response(lifecycle)
+        seam.attach_upstream(lifecycle)
         try:
             while True:
                 result = _observed_cancellation()
@@ -19977,7 +19485,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         # back to Chat Completions format regardless of the upstream wire format.
         want_chat_output = inbound_format == "chat_completions"
         request_scoped_seam = _handler_downstream_stream_commit(self)
-        seam: _GatewayDownstreamStreamCommit | None = request_scoped_seam
+        seam: DownstreamStreamCommit | None = request_scoped_seam
         if request_scoped_seam is not None:
             request_scoped_seam.set_terminal_observer(
                 _chat_terminal_observer if want_chat_output else _responses_terminal_observer
@@ -19988,7 +19496,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 )
             )
         else:
-            seam = _GatewayDownstreamStreamCommit(
+            seam = _bind_downstream_stream_commit(
                 self,
                 response,
                 upstream_name,

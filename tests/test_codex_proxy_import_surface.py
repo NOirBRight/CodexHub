@@ -281,6 +281,8 @@ REEXPORT_IDENTITY = {
     "behavior_profile_for_request": route_plan.behavior_profile_for_request,
     "_sse_payload_bytes": gateway_sse._sse_payload_bytes,
     "_parse_sse_json_payload": gateway_sse._parse_sse_json_payload,
+    "_GatewayDownstreamStreamCommit": gateway_sse.DownstreamStreamCommit,
+    "PassthroughSseSemanticStats": gateway_sse.PassthroughSseSemanticStats,
     "_identity_failure": gateway_errors._identity_failure,
     "UpstreamProtocolTranslationError": gateway_errors.UpstreamProtocolTranslationError,
     "_responses_url": route_plan._responses_url,
@@ -313,3 +315,15 @@ def test_route_plan_source_does_not_import_facade() -> None:
         source = handle.read()
     assert "_proxy_attr" not in source
     assert "import codex_proxy" not in source
+
+
+def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
+    assert gateway_sse.DownstreamStreamCommit is codex_proxy._GatewayDownstreamStreamCommit
+    with open(gateway_sse.__file__, encoding="utf-8") as handle:
+        sse_source = handle.read()
+    with open(codex_proxy.__file__, encoding="utf-8") as handle:
+        facade_source = handle.read()
+    assert "class DownstreamStreamCommit" in sse_source
+    assert "class _GatewayDownstreamStreamCommit" not in facade_source
+    assert "class DownstreamStreamCommit" not in facade_source
+    assert "import codex_proxy" not in sse_source

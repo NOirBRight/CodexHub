@@ -23,6 +23,7 @@ from urllib.error import HTTPError, URLError
 import catalog_sync
 import codex_proxy
 import gateway_settings
+import gateway_sse
 from collaboration_runtime_contract import (
     COLLABORATION_V1,
     COLLABORATION_V2,
@@ -156,6 +157,22 @@ class FakeWFile:
 
     def flush(self):
         self.flush_count += 1
+
+
+class FakeDownstream:
+    """write/flush/close adapter over FakeHandler for DownstreamStreamCommit."""
+
+    def __init__(self, handler):
+        self._handler = handler
+
+    def write(self, data):
+        self._handler.wfile.write(data)
+
+    def flush(self):
+        self._handler.wfile.flush()
+
+    def close(self):
+        self._handler.close_connection = True
 
 
 class FakeHandler:
@@ -5402,6 +5419,7 @@ class RoutingTests(unittest.TestCase):
 
         with (
             patch("codex_proxy._parse_sse_json_payload", side_effect=AssertionError("official relay parsed SSE")),
+            patch("gateway_sse._parse_sse_json_payload", side_effect=AssertionError("official relay parsed SSE")),
             patch("codex_proxy.compatible_sse_line", side_effect=AssertionError("official relay rewrote SSE")),
             patch("codex_proxy._offer_official_passthrough_usage_line", side_effect=record_usage_offer, create=True),
         ):
@@ -7600,8 +7618,8 @@ class RoutingTests(unittest.TestCase):
         handler.send_response = record_send_response
         handler.send_header = record_send_header
         handler.end_headers = record_end_headers
-        seam = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        seam = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "ollama_cloud",
             request_id="req-lifecycle-retry-headers",
@@ -18003,8 +18021,8 @@ class RoutingTests(unittest.TestCase):
 
     def test_transparent_responses_size_limit_writes_typed_synthetic_terminal(self):
         handler = FakeHandler()
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "volcengine",
             model="volc/glm-5.2",
@@ -18055,8 +18073,8 @@ class RoutingTests(unittest.TestCase):
 
     def test_transparent_responses_size_limit_preserves_completed_cr_event_sequence(self):
         handler = FakeHandler()
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "volcengine",
             model="volc/glm-5.2",
@@ -18094,8 +18112,8 @@ class RoutingTests(unittest.TestCase):
     def test_transparent_responses_size_crossing_cr_preserves_response_id(self):
         handler = FakeHandler()
         response_id = "resp_size_crossing_cr"
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "volcengine",
             model="volc/glm-5.2",
@@ -18270,8 +18288,8 @@ class RoutingTests(unittest.TestCase):
 
     def test_transparent_chat_size_limit_closes_without_synthetic_terminal(self):
         handler = FakeHandler()
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "ollama_cloud",
             model="ollama-cloud/glm-5.2",
@@ -30025,8 +30043,8 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
             return b"user_requested_shutdown" in data
 
         handler.wfile = FakeWFile(fail_on_write=fail_on_shutdown)
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "official",
             request_id="req_shutdown_write",
@@ -30064,8 +30082,8 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
 
     def test_streaming_responses_shutdown_outcome_success_closes_connection(self):
         handler = FakeHandler()
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "official",
             request_id="req_shutdown_ok",
@@ -30085,8 +30103,8 @@ Use an implementer subagent, then a spec reviewer, then a code quality reviewer.
 
     def test_streaming_chat_shutdown_outcome_success_closes_connection(self):
         handler = FakeHandler()
-        handler._downstream_stream_commit = codex_proxy._GatewayDownstreamStreamCommit(
-            handler,
+        handler._downstream_stream_commit = gateway_sse.DownstreamStreamCommit(
+            FakeDownstream(handler),
             None,
             "official",
             request_id="req_shutdown_chat_ok",
