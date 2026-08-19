@@ -64,7 +64,8 @@ def test_matrix_covers_required_chat_and_v2_surface() -> None:
     for name in V2_TOOLS:
         assert rows[f"v2.tool.{name}"]["disposition"] == "reversibly_adapted"
         assert rows[f"v2.tool.{name}"]["fail_closed"] is True
-    assert rows["request.tools.custom"]["disposition"] == "unavailable"
+    assert rows["request.tools.custom"]["disposition"] == "reversibly_adapted"
+    assert rows["request.tools.custom.unavailable"]["disposition"] == "unavailable"
     assert rows["request.tools.hosted"]["disposition"] == "unavailable"
     assert rows["v2.encrypted_fields"]["disposition"] == "unavailable"
     assert payload["invariants"]["fail_closed_unknown"] is True

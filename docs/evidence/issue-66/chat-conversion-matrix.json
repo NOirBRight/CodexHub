@@ -105,16 +105,29 @@
     },
     {
       "category": "tool_declaration",
+      "chat": "function tool with injective alias and exact input/output envelopes",
+      "disposition": "reversibly_adapted",
+      "execution_owner": "codex_client",
+      "fail_closed": true,
+      "id": "request.tools.custom",
+      "implementation": "runtime_tool_compatibility",
+      "key": "tools[type=custom|freeform]",
+      "notes": "Request-scoped and not implied by Collaboration V2 support.",
+      "responses": "custom/freeform tool",
+      "when": "exact text-format declaration and accepts_custom_adapter capability"
+    },
+    {
+      "category": "tool_declaration",
       "chat": "none",
       "disposition": "unavailable",
       "execution_owner": "codex_client",
       "fail_closed": true,
-      "id": "request.tools.custom",
-      "implementation": "protocol_translation",
-      "key": "tools[type=custom|freeform]",
-      "notes": "Not implied by V2 support.",
+      "id": "request.tools.custom.unavailable",
+      "implementation": "runtime_tool_compatibility",
+      "key": "tools[type=custom|freeform] without an approved adapter",
+      "notes": "Required custom semantics reject before sampling; optional declarations may be omitted.",
       "responses": "custom/freeform tool",
-      "when": "any custom/freeform/code-mode declaration"
+      "when": "adapter capability absent or declaration/envelope is malformed"
     },
     {
       "category": "tool_declaration",
