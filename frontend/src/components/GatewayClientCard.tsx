@@ -32,7 +32,6 @@ export function GatewayClientCard({
   const state = connectionStateFromInfo(info, busy);
   const installed = Boolean(info?.installed);
   const configPath = info?.config_path ?? client.config_path;
-  const currentVersion = info?.current_version?.trim() || null;
   const kindLabel = info?.kind ?? t("gateway.clientKind." + client.id);
   const name = info?.name ?? client.name;
   const checked = state === "connected" || state === "busy";
@@ -68,14 +67,7 @@ export function GatewayClientCard({
           <ClientLogo id={client.id} name={name} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h3 className="truncate text-sm font-semibold text-ink">{name}</h3>
-            {currentVersion && (
-              <span className="rounded-control bg-panel px-1.5 py-0.5 text-[9px] font-medium text-muted">
-                {currentVersion}
-              </span>
-            )}
-          </div>
+          <h3 className="text-sm font-semibold leading-5 text-ink">{name}</h3>
           <p className="mt-0.5 truncate text-[11px] text-muted">{kindLabel}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">

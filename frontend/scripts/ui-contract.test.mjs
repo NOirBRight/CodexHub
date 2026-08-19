@@ -1869,7 +1869,8 @@ test("settings save restarts running gateway when retry or image proxy runtime s
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
-  assert.match(cardSource, /currentVersion &&/);
+  assert.doesNotMatch(cardSource, /currentVersion &&/);
+  assert.doesNotMatch(cardSource, /truncate text-sm font-semibold text-ink/);
   assert.doesNotMatch(cardSource, /min-h-\[136px\]/);
   assert.doesNotMatch(cardSource, /manualUpdateAvailable/);
   assert.doesNotMatch(cardSource, /noUpdateAction/);
