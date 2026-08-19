@@ -539,7 +539,7 @@ test("linux maximize toggle restores a saved size instead of trusting GTK is_max
   assert.match(mainSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
 });
 
-test("linux window forces a full GTK input region so WebKitGTK alpha cannot punch through", async () => {
+test("linux window stays rounded, on the dock, and uses a real tray png", async () => {
   const [mainSource, linuxWindowSource] = await Promise.all([
     readFile(tauriMainPath, "utf8"),
     readFile(new URL("../../src-tauri/src/linux_window.rs", import.meta.url), "utf8"),
@@ -551,12 +551,12 @@ test("linux window forces a full GTK input region so WebKitGTK alpha cannot punc
   assert.match(mainSource, /fn setup_tray/);
   assert.match(mainSource, /\.title\("CodexHub"\)/);
   assert.match(mainSource, /show_menu_on_left_click\(false\)/);
-  assert.match(linuxWindowSource, /fn apply_full_input_region/);
-  assert.match(linuxWindowSource, /input_shape_combine_region/);
-  assert.match(linuxWindowSource, /set_opaque_region/);
+  assert.match(mainSource, /include_bytes!\("\.\.\/icons\/128x128\.png"\)/);
   assert.match(linuxWindowSource, /com\.codexhub\.app\.desktop/);
   assert.match(linuxWindowSource, /set_skip_taskbar_hint\(false\)/);
   assert.match(linuxWindowSource, /WindowTypeHint::Normal/);
+  assert.match(linuxWindowSource, /install_hicolor_icon/);
+  assert.doesNotMatch(linuxWindowSource, /set_opaque_region/);
 });
 
 test("main desktop window opens at the release candidate height", async () => {
@@ -1909,9 +1909,10 @@ test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
   assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
   assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
-  assert.match(cssSource, /html,\s*body,\s*#root \{[\s\S]*?background: #f8f8f7;/);
-  assert.equal(tauriConfig.app.windows[0].transparent, false);
-  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#f8f8f7");
+  assert.match(cssSource, /#root \{[\s\S]*?background: #f8f8f7;/);
+  assert.match(cssSource, /#root \{[\s\S]*?border-radius: 16px;/);
+  assert.equal(tauriConfig.app.windows[0].transparent, true);
+  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
   assert.equal(tauriConfig.app.windows[0].skipTaskbar, false);
 });
 

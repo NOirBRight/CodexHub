@@ -30,7 +30,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Window, WindowEvent,
+    image::Image, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Window,
+    WindowEvent,
 };
 
 #[cfg(desktop)]
@@ -1162,9 +1163,11 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .text(TRAY_EXIT, "Exit")
         .build()?;
 
-    let mut tray = TrayIconBuilder::with_id("codexhub")
+    let icon = Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
+    let tray = TrayIconBuilder::with_id("codexhub")
         .tooltip("CodexHub")
         .title("CodexHub")
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| run_tray_action(app, event.id().as_ref()))
@@ -1180,10 +1183,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             } => show_main_window(tray.app_handle()),
             _ => {}
         });
-
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
 
     tray.build(app)?;
     Ok(())

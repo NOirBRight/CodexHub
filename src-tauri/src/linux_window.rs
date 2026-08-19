@@ -1,22 +1,25 @@
-//! Linux window shell: keep pointer events, stay on the taskbar, and register
-//! a desktop entry so GNOME can show CodexHub in the dock and the top-bar tray.
+//! Linux window shell: stay on the taskbar, register a desktop entry, and
+//! keep the window visually rounded. Do not stamp a square opaque region —
+//! that turns the rounded app into a hard rectangle.
 
 use gtk::gdk::WindowTypeHint;
 use gtk::prelude::*;
 use std::io::Write;
 use tauri::{Manager, WebviewWindow};
 
+const APP_ICON_PNG: &[u8] = include_bytes!("../icons/128x128.png");
+
 pub fn install(app: &tauri::App) {
+    glib::set_prgname(Some("codexhub"));
+    glib::set_application_name("CodexHub");
     install_desktop_entry();
+    install_hicolor_icon();
     let Some(window) = app.get_webview_window("main") else {
         log::warn!("Linux window shell skipped: main window missing");
         return;
     };
     if let Err(error) = configure_shell(&window) {
         log::warn!("Linux taskbar hint failed: {error}");
-    }
-    if let Err(error) = hook_input_region(&window) {
-        log::warn!("Linux input-region guard failed: {error}");
     }
 }
 
@@ -41,36 +44,22 @@ fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-fn hook_input_region(window: &WebviewWindow) -> Result<(), String> {
-    let gtk_window = window
-        .gtk_window()
-        .map_err(|error| format!("gtk window: {error}"))?;
-    let widget: gtk::Widget = gtk_window.upcast();
-    apply_full_input_region(&widget);
-    widget.connect_realize(|widget| apply_full_input_region(widget));
-    widget.connect_size_allocate(|widget, _| apply_full_input_region(widget));
-    widget.connect_draw(|widget, _| {
-        let widget = widget.clone();
-        glib::idle_add_local_once(move || {
-            apply_full_input_region(&widget);
-        });
-        glib::Propagation::Proceed
-    });
-    Ok(())
-}
-
-fn apply_full_input_region(widget: &gtk::Widget) {
-    if let Some(gdk_window) = widget.window() {
-        let width = gdk_window.width().max(1);
-        let height = gdk_window.height().max(1);
-        let region = cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, width, height));
-        widget.input_shape_combine_region(Some(&region));
-        gdk_window.input_shape_combine_region(&region, 0, 0);
-        gdk_window.set_opaque_region(Some(&region));
+fn install_hicolor_icon() {
+    let Some(icon_dir) = dirs::data_local_dir().map(|dir| dir.join("icons/hicolor/128x128/apps"))
+    else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&icon_dir) {
+        log::warn!("failed to create hicolor icon dir: {error}");
+        return;
     }
-    if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
-        for child in container.children() {
-            apply_full_input_region(&child);
+    for name in ["codexhub.png", "com.codexhub.app.png"] {
+        let path = icon_dir.join(name);
+        if path.is_file() && path.metadata().map(|meta| meta.len()).unwrap_or(0) == APP_ICON_PNG.len() as u64 {
+            continue;
+        }
+        if let Err(error) = std::fs::write(&path, APP_ICON_PNG) {
+            log::warn!("failed to write {name}: {error}");
         }
     }
 }
