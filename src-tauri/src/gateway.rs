@@ -6792,28 +6792,17 @@ pub fn isolated_client_apply_targets(
 ) -> Result<IsolatedClientApplyTargets, String> {
     let root = isolated.root();
     let backup_path = root.join("backups");
-    match client_id {
-        "opencode" | "pi" | "omp" | "zcode" | "codex" => {}
-        other => return Err(format!("unknown managed client id: {other}")),
-    }
-    let writable_paths = match client_id {
-        "opencode" => vec![root.join("opencode").join("opencode.json")],
-        "pi" => vec![
-            root.join("pi").join("settings.json"),
-            root.join("pi").join("models.json"),
-        ],
-        "omp" => vec![
-            root.join("omp").join("config.yml"),
-            root.join("omp").join("models.yml"),
-        ],
-        "zcode" => vec![
-            root.join("zcode").join("codexhub.json"),
-            root.join("zcode").join("config.json"),
-            root.join("zcode").join("bots-model-cache.v2.json"),
-        ],
-        "codex" => vec![root.join("codex-target").join("config.toml")],
-        _ => unreachable!(),
-    };
+    let layout = crate::injection::isolated_managed_client(client_id)
+        .ok_or_else(|| format!("unknown managed client id: {client_id}"))?;
+    let writable_paths = layout
+        .files
+        .iter()
+        .map(|relative| {
+            relative
+                .split('/')
+                .fold(root.to_path_buf(), |path, segment| path.join(segment))
+        })
+        .collect();
     Ok(IsolatedClientApplyTargets {
         writable_paths,
         backup_path,

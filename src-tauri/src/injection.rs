@@ -35,6 +35,62 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Fixed route key of the Injected Block in every client configuration.
 pub(crate) const ROUTE_KEY: &str = "codexhub";
 
+/// How the Injected Block is projected into a client's files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InjectionShape {
+    /// One provider entry in one config file (DSH, OpenCode).
+    SingleBlock,
+    /// Provider entries split across per-upstream files (Pi, OMP).
+    PerUpstreamProvider,
+}
+
+/// Isolated-root file layout for a managed client. Paths are relative to the
+/// isolated root and use forward slashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IsolatedManagedClient {
+    pub id: &'static str,
+    pub shape: InjectionShape,
+    pub files: &'static [&'static str],
+}
+
+pub(crate) const ISOLATED_MANAGED_CLIENTS: &[IsolatedManagedClient] = &[
+    IsolatedManagedClient {
+        id: "opencode",
+        shape: InjectionShape::SingleBlock,
+        files: &["opencode/opencode.json"],
+    },
+    IsolatedManagedClient {
+        id: "pi",
+        shape: InjectionShape::PerUpstreamProvider,
+        files: &["pi/settings.json", "pi/models.json"],
+    },
+    IsolatedManagedClient {
+        id: "omp",
+        shape: InjectionShape::PerUpstreamProvider,
+        files: &["omp/config.yml", "omp/models.yml"],
+    },
+    IsolatedManagedClient {
+        id: "zcode",
+        shape: InjectionShape::SingleBlock,
+        files: &[
+            "zcode/codexhub.json",
+            "zcode/config.json",
+            "zcode/bots-model-cache.v2.json",
+        ],
+    },
+    IsolatedManagedClient {
+        id: "codex",
+        shape: InjectionShape::SingleBlock,
+        files: &["codex-target/config.toml"],
+    },
+];
+
+pub(crate) fn isolated_managed_client(client_id: &str) -> Option<&'static IsolatedManagedClient> {
+    ISOLATED_MANAGED_CLIENTS
+        .iter()
+        .find(|client| client.id == client_id)
+}
+
 /// Serde format of a client configuration file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigFormat {
@@ -995,6 +1051,20 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         text
+    }
+
+    #[test]
+    fn pi_isolated_layout_is_per_upstream_provider() {
+        let pi = isolated_managed_client("pi").expect("pi layout");
+        assert_eq!(pi.shape, InjectionShape::PerUpstreamProvider);
+        assert_eq!(pi.files, &["pi/settings.json", "pi/models.json"]);
+    }
+
+    #[test]
+    fn opencode_isolated_layout_is_single_block() {
+        let opencode = isolated_managed_client("opencode").expect("opencode layout");
+        assert_eq!(opencode.shape, InjectionShape::SingleBlock);
+        assert_eq!(opencode.files, &["opencode/opencode.json"]);
     }
 
     /// serde_yaml has no JSON-pointer; walk "/a/b/c" path segments instead.
