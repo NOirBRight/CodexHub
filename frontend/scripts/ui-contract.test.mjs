@@ -1370,12 +1370,13 @@ test("gateway client route switching reports completion", async () => {
   ]);
 
   assert.match(gatewaySource, /t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
-  assert.match(gatewaySource, /showToast\(t\("gateway\.switchClient", \{ clientName, routeName \}\), "loading"\)/);
+  assert.match(gatewaySource, /runPersistentAction\(/);
+  assert.match(gatewaySource, /loading: t\("gateway\.switchClient", \{ clientName, routeName \}\)/);
   assert.match(gatewaySource, /const shouldForceTakeover = forceTakeover \|\| takeoverRequired;/);
   assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, owner, defaultModel, shouldForceTakeover\)/);
-  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.switchClientDoneRestart", \{ clientName, routeName \}\),[\s\S]*tone: "success"/);
-  assert.match(enSource, /switchClientDoneRestart: "Switched to \{\{routeName\}\}; restart \{\{clientName\}\} to apply"/);
-  assert.match(zhSource, /switchClientDoneRestart: "已切换到 \{\{routeName\}\}；请重启 \{\{clientName\}\} 使其生效"/);
+  assert.match(gatewaySource, /restart: \{ kind: "client", name: clientName \}/);
+  assert.match(enSource, /switchClientDone: "Switched to \{\{routeName\}\}\."/);
+  assert.match(zhSource, /switchClientDone: "已切换到 \{\{routeName\}\}。"/);
   assert.match(cardSource, /onToggle: \(connect: boolean\) => void/);
   assert.match(cardSource, /<SwitchControl/);
   assert.doesNotMatch(cardSource, /SegmentedSwitch/);
@@ -1480,9 +1481,10 @@ test("gateway stopped proxy state stays out of warning banners and toasts", asyn
 test("gateway client version refresh uses a persistent loading toast", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
-  assert.match(gatewaySource, /showToast\(t\("gateway\.refreshingClients"\), "loading"\)/);
+  assert.match(gatewaySource, /loading: t\("gateway\.refreshingClients"\)/);
   assert.match(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)/);
-  assert.match(gatewaySource, /updateToast\(toastId,[\s\S]*text: t\("gateway\.clientsRefreshed"\),[\s\S]*tone: "success"/);
+  assert.match(gatewaySource, /text: t\("gateway\.clientsRefreshed"\)/);
+  assert.match(gatewaySource, /restart: \{ kind: "none" \}/);
 });
 
 test("settings drawer hides non-functional route and endpoint toggles", async () => {

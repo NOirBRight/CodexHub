@@ -9,7 +9,7 @@ import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { cx } from "../lib/format";
-import { runPersistentAction } from "../lib/persistentAction";
+import { formatRestartDisclosure, runPersistentAction, type RestartTarget } from "../lib/persistentAction";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppFlavorInfo,
@@ -91,6 +91,27 @@ function GatewayPageImpl({
   const lastUsageErrorToast = useRef<string | null>(null);
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled);
+
+  function persistentActionBase() {
+    return {
+      showToast: (input: { text: string; tone: "loading"; timeoutMs: null; dedupeKey?: string }) => showToast(input),
+      updateToast,
+      disconnected: "start-gateway" as const,
+      disconnectedText: t("gateway.backendNotConnected"),
+      startGatewayLabel: t("gateway.startBackend"),
+      isDisconnected: (error: unknown) => isBackendDisconnectedMessage(messageFromError(error)),
+      onStartGateway: () => startBackendFromToast(),
+      formatRestart: (target: RestartTarget) => {
+        if (target.kind === "none") {
+          return t("gateway.restartNone");
+        }
+        if (target.kind === "client") {
+          return t("gateway.restartClient", { name: target.name });
+        }
+        return formatRestartDisclosure(target);
+      },
+    };
+  }
 
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
@@ -302,18 +323,22 @@ function GatewayPageImpl({
     }
     const shouldForceTakeover = forceTakeover || takeoverRequired;
     const routeName = ownerDisplayName(owner, t);
-    const toastId = showToast(t("gateway.switchClient", { clientName, routeName }), "loading");
     try {
-      await api.switchGatewayClientRoute(clientId, owner, defaultModel, shouldForceTakeover);
-      await onRefreshClients();
-      updateToast(toastId, {
-        action: null,
-        text: t("gateway.switchClientDoneRestart", { clientName, routeName }),
-        tone: "success",
+      await runPersistentAction({
+        ...persistentActionBase(),
+        loading: t("gateway.switchClient", { clientName, routeName }),
+        work: async () => {
+          await api.switchGatewayClientRoute(clientId, owner, defaultModel, shouldForceTakeover);
+          await onRefreshClients();
+        },
+        success: () => ({
+          text: t("gateway.switchClientDone", { routeName }),
+          restart: { kind: "client", name: clientName },
+        }),
       });
       setError(null);
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     } finally {
       setClientBusy(null);
     }
@@ -321,18 +346,22 @@ function GatewayPageImpl({
 
   async function refreshGatewayClients() {
     setClientRefreshBusy(true);
-    const toastId = showToast(t("gateway.refreshingClients"), "loading");
     try {
-      await onRefreshClients({ includeClientVersions: true });
-      setClientBusy(null);
-      updateToast(toastId, {
-        action: null,
-        text: t("gateway.clientsRefreshed"),
-        tone: "success",
+      await runPersistentAction({
+        ...persistentActionBase(),
+        loading: t("gateway.refreshingClients"),
+        work: async () => {
+          await onRefreshClients({ includeClientVersions: true });
+          setClientBusy(null);
+        },
+        success: () => ({
+          text: t("gateway.clientsRefreshed"),
+          restart: { kind: "none" },
+        }),
       });
       setError(null);
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     } finally {
       setClientRefreshBusy(false);
     }
