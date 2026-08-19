@@ -622,7 +622,7 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
                     "content": [{"type": "output_text", "text": "wrong variant"}],
                 }
             ),
-            "tool_compatibility_boundary",
+            codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
         ),
     ],
     ids=[

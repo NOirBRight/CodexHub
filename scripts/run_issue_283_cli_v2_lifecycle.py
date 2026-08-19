@@ -1053,6 +1053,49 @@ def _run_cli(home: Path, gateway_port: int, prompt: str, workspace: Path) -> tup
     return completed.returncode, stdout_lines, completed.stdout, completed.stderr
 
 
+def _run_cli_resume(
+    home: Path,
+    session_id: str,
+    prompt: str,
+    workspace: Path,
+) -> tuple[int, list[str], str, str]:
+    """Resume one persisted parent session from the same isolated Home."""
+
+    codex_executable = shutil.which("codex")
+    if codex_executable is None:
+        raise CaptureFailure("codex_executable_not_found")
+    command = [
+        str(Path(codex_executable).resolve()),
+        "exec",
+        "resume",
+        session_id,
+        "--json",
+        "--skip-git-repo-check",
+        "--strict-config",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    for feature in DISABLED_FEATURES:
+        command.extend(("--disable", feature))
+    command.extend(("-m", CLI_MODEL, "-"))
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            cwd=workspace,
+            env=_cli_environment(home),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=CLI_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CaptureFailure("cli_resume_failed") from error
+    stdout_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    return completed.returncode, stdout_lines, completed.stdout, completed.stderr
+
+
 # ---------------------------------------------------------------------------
 # Sanitized analysis
 # ---------------------------------------------------------------------------
@@ -1087,6 +1130,22 @@ def _sanitized_terminal_message(lines: list[str]) -> str | None:
             # Strip UUIDs and thread-specific tokens.
             message = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<id>", message)
             return message[:500] if message else None
+    return None
+
+
+def _thread_id_from_cli_lines(lines: list[str]) -> str | None:
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(value, Mapping)
+            and value.get("type") == "thread.started"
+            and isinstance(value.get("thread_id"), str)
+            and value["thread_id"]
+        ):
+            return str(value["thread_id"])
     return None
 
 
@@ -1285,10 +1344,18 @@ def capture(
     candidate_sha: str,
     cli_version: str,
     debug_capture_path: Path | None = None,
+    same_home_restart: bool = False,
 ) -> dict[str, Any]:
     home = _isolated_home()
     workspace = home / "workspace"
     workspace.mkdir()
+    agents_path = workspace / "AGENTS.md"
+    if same_home_restart:
+        agents_path.write_text(
+            "# User-owned agent instructions\n\nPreserve this file across restart.\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
     gateway_port = _free_port()
     fixture: FixtureServer | None = None
@@ -1298,6 +1365,13 @@ def capture(
         _write_providers_toml(home, fixture.port)
         _sync_catalog(home)
         gateway_process = _start_gateway(home, gateway_port)
+        restart_check: dict[str, Any] = {
+            "requested": same_home_restart,
+            "passed": not same_home_restart,
+        }
+        resume_lines: list[str] = []
+        resume_stdout = ""
+        resume_stderr = ""
         try:
             with GatewayShimServer(gateway_port, CLI_MODEL) as shim:
                 _write_cli_config(home, shim.port)
@@ -1311,8 +1385,69 @@ def capture(
                     ),
                     workspace=workspace,
                 )
+                if same_home_restart:
+                    config_path = home / "config.toml"
+                    config_before = _sha256_file(config_path)
+                    agents_before = _sha256_file(agents_path)
+                    first_request_count = len(fixture._server.requests)
+                    task_before = next(
+                        (
+                            _extract_child_task_name(request)
+                            for request in reversed(fixture._server.requests)
+                            if _extract_child_task_name(request)
+                        ),
+                        None,
+                    )
+                    _stop_gateway(gateway_process)
+                    gateway_process = None
+                    gateway_process = _start_gateway(home, gateway_port)
+                    root_session_id = _thread_id_from_cli_lines(cli_lines)
+                    _require(
+                        isinstance(root_session_id, str) and bool(root_session_id),
+                        "parent_session_identity_missing",
+                    )
+                    (
+                        resume_returncode,
+                        resume_lines,
+                        resume_stdout,
+                        resume_stderr,
+                    ) = _run_cli_resume(
+                        home,
+                        root_session_id,
+                        "Read back the existing collaboration task and complete without creating another agent.",
+                        workspace,
+                    )
+                    resumed_requests = fixture._server.requests[first_request_count:]
+                    task_after = next(
+                        (
+                            _extract_child_task_name(request)
+                            for request in reversed(resumed_requests)
+                            if _extract_child_task_name(request)
+                        ),
+                        None,
+                    )
+                    resume_analysis = _analyze_cli_events(resume_lines)
+                    restart_check = {
+                        "requested": True,
+                        "passed": (
+                            resume_returncode == 0
+                            and resume_analysis.get("terminal_event") == "turn.completed"
+                            and bool(resumed_requests)
+                            and task_before is not None
+                            and task_after == task_before
+                            and _sha256_file(config_path) == config_before
+                            and _sha256_file(agents_path) == agents_before
+                        ),
+                        "resume_exit_code": resume_returncode,
+                        "resume_terminal_event": resume_analysis.get("terminal_event"),
+                        "resumed_request_count": len(resumed_requests),
+                        "task_identity_preserved": task_before is not None and task_after == task_before,
+                        "config_preserved": _sha256_file(config_path) == config_before,
+                        "agents_configuration_preserved": _sha256_file(agents_path) == agents_before,
+                    }
         finally:
-            _stop_gateway(gateway_process)
+            if gateway_process is not None:
+                _stop_gateway(gateway_process)
 
         gateway_log_path = home / "proxy" / "codex-proxy-events.jsonl"
         cli_analysis = _analyze_cli_events(cli_lines)
@@ -1348,6 +1483,8 @@ def capture(
                         ],
                         "cli_stdout": cli_stdout,
                         "cli_stderr": cli_stderr,
+                        "resume_cli_stdout": resume_stdout,
+                        "resume_cli_stderr": resume_stderr,
                         "gateway_log_path": str(gateway_log_path),
                         "gateway_log_lines": gateway_log_lines,
                     },
@@ -1374,6 +1511,7 @@ def capture(
             and not phase_observations["v1_tools_seen"]
             and not phase_observations["errors"]
             and phase_observations["fallback_count"] == 0
+            and restart_check["passed"] is True
         )
 
         result: dict[str, Any] = {
@@ -1394,6 +1532,7 @@ def capture(
             "cli_analysis": cli_analysis,
             "gateway_log_summary": gateway_log,
             "isolated_home_sha256": config_sha256,
+            "same_home_restart_check": restart_check,
             "sanitization": {
                 "raw_prompts_retained": False,
                 "credentials_retained": False,
