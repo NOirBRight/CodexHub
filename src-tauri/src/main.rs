@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_flavor;
+mod app_server;
 mod app_updates;
 mod autostart;
 mod build_info;

@@ -1,4 +1,5 @@
 use crate::{
+    app_server::{AppServerCall, AppServerSession},
     config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
     Settings, UpstreamFormat,
 };
@@ -8,10 +9,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{mpsc, OnceLock};
+use std::process::Command;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -738,7 +738,7 @@ fn read_codex_app_server_model_list_with_cache_path(
 }
 
 fn read_codex_app_server_model_list_with_cache_grace(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
     cache_path: Option<&Path>,
     cache_grace: Duration,
@@ -749,98 +749,36 @@ fn read_codex_app_server_model_list_with_cache_grace(
     // for the current Official context evidence.
     let initial_cache = cache_path.and_then(readable_native_model_cache);
     let deadline = Instant::now() + timeout;
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    configure_no_window(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start codex app-server for model list: {error}"))?;
-
-    let mut stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => {
-            kill_child(&mut child);
-            return Err("failed to open codex app-server stdin".to_string());
-        }
-    };
-    if let Err(error) = write_app_server_json_line(
-        &mut stdin,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "codexhub",
-                    "title": "CodexHub",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                    "requestAttestation": false,
-                    "optOutNotificationMethods": []
-                }
-            }
-        }),
-    ) {
-        kill_child(&mut child);
-        return Err(error);
-    }
-    if let Err(error) =
-        write_app_server_json_line(&mut stdin, &json!({ "method": "initialized" }))
-    {
-        kill_child(&mut child);
-        return Err(error);
-    }
-    if let Err(error) = write_app_server_json_line(
-        &mut stdin,
-        &json!({
-            "id": 2,
-            "method": "model/list",
-            "params": {}
-        }),
-    ) {
-        kill_child(&mut child);
-        return Err(error);
-    }
-    if let Err(error) = stdin.flush() {
-        kill_child(&mut child);
-        return Err(format!(
-            "failed to flush codex app-server model list request: {error}"
-        ));
-    }
-
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            kill_child(&mut child);
-            return Err("failed to open codex app-server stdout".to_string());
-        }
-    };
-    let message = read_codex_app_server_value_response(
-        &mut child,
-        stdout,
-        json!(2),
+    let mut session = AppServerSession::start(command, "model list")?;
+    session.initialize()?;
+    let messages = session.request(
+        &[AppServerCall {
+            id: json!(2),
+            method: "model/list",
+            params: Some(json!({})),
+        }],
         deadline.saturating_duration_since(Instant::now()),
+        "model list",
     )?;
+    let message = messages
+        .into_iter()
+        .next()
+        .ok_or_else(|| "codex app-server model list did not return a response".to_string())?;
     if let Some(error) = message.get("error") {
         let message = error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("request failed");
-        kill_child(&mut child);
+        session.kill();
         return Err(format!("codex app-server model list failed: {message}"));
     }
-    let result = message
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "codex app-server model list response did not include a result".to_string());
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            kill_child(&mut child);
-            return Err(error);
+    let result = match message.get("result").cloned() {
+        Some(result) => result,
+        None => {
+            session.kill();
+            return Err(
+                "codex app-server model list response did not include a result".to_string(),
+            );
         }
     };
     if let Some(cache_path) = cache_path {
@@ -851,14 +789,14 @@ fn read_codex_app_server_model_list_with_cache_grace(
                 initial_cache.as_deref(),
             )
         {
-            kill_child(&mut child);
+            session.kill();
             return Err(
                 "codex app-server model list did not publish a readable native models cache before the refresh deadline (context metadata absent)"
                     .to_string(),
             );
         }
     }
-    kill_child(&mut child);
+    session.kill();
     Ok(result)
 }
 
@@ -935,99 +873,6 @@ fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn read_codex_app_server_value_response(
-    child: &mut Child,
-    stdout: ChildStdout,
-    expected_id: Value,
-    timeout: Duration,
-) -> Result<Value, String> {
-    let receiver = spawn_app_server_line_reader(stdout);
-    let deadline = Instant::now() + timeout;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            kill_child(child);
-            return Err(format!(
-                "codex app-server model list timed out after {} seconds",
-                timeout.as_secs()
-            ));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        match receiver.recv_timeout(remaining) {
-            Ok(Ok(Some(line))) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let message: Value = match serde_json::from_str(trimmed) {
-                    Ok(message) => message,
-                    Err(_) => continue,
-                };
-                if message.get("id") == Some(&expected_id) {
-                    return Ok(message);
-                }
-            }
-            Ok(Ok(None)) => {
-                let _ = child.wait();
-                return Err("codex app-server model list did not return a response".to_string());
-            }
-            Ok(Err(error)) => {
-                kill_child(child);
-                return Err(format!(
-                    "failed to read codex app-server model list response: {error}"
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                kill_child(child);
-                return Err(format!(
-                    "codex app-server model list timed out after {} seconds",
-                    timeout.as_secs()
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.wait();
-                return Err(
-                    "codex app-server model list reader stopped before a response".to_string(),
-                );
-            }
-        }
-    }
-}
-
-fn spawn_app_server_line_reader(
-    stdout: ChildStdout,
-) -> mpsc::Receiver<Result<Option<String>, String>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    let _ = sender.send(Ok(None));
-                    break;
-                }
-                Ok(_) => {
-                    if sender.send(Ok(Some(line.clone()))).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(error.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-    receiver
-}
-
-fn kill_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 fn configure_no_window(command: &mut Command) {
     #[cfg(target_os = "windows")]
     {
@@ -1039,14 +884,6 @@ fn configure_no_window(command: &mut Command) {
     {
         let _ = command;
     }
-}
-
-fn write_app_server_json_line(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
-    serde_json::to_writer(&mut *stdin, value)
-        .map_err(|error| format!("failed to encode codex app-server request: {error}"))?;
-    stdin
-        .write_all(b"\n")
-        .map_err(|error| format!("failed to write codex app-server request: {error}"))
 }
 
 #[derive(Debug, Clone)]
