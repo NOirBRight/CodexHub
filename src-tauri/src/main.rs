@@ -1166,7 +1166,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let icon = Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
     let tray = TrayIconBuilder::with_id("codexhub")
         .tooltip("CodexHub")
-        .title("CodexHub")
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)

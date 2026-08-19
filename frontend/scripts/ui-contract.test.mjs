@@ -510,7 +510,9 @@ test("undecorated window exposes edge resize handles", async () => {
   assert.match(appSource, /<WindowResizeHandles \/?>/);
   assert.match(handleSource, /startResizeDragging\(direction\)/);
   assert.match(handleSource, /data-window-control/);
-  assert.match(handleSource, /bg-canvas/);
+  assert.match(handleSource, /bg-transparent/);
+  assert.doesNotMatch(handleSource, /bg-canvas/);
+  assert.match(handleSource, /top-4 left-4 h-3 w-3/);
   assert.ok(capability.permissions.includes("core:window:allow-start-resize-dragging"));
   assert.match(enSource, /resizeWindow: "Resize window"/);
   assert.match(zhSource, /resizeWindow: "调整窗口大小"/);
@@ -549,13 +551,14 @@ test("linux window stays rounded, on the dock, and uses a real tray png", async 
   assert.match(mainSource, /linux_window::install\(app\)/);
   assert.match(mainSource, /linux_window::reveal_on_taskbar/);
   assert.match(mainSource, /fn setup_tray/);
-  assert.match(mainSource, /\.title\("CodexHub"\)/);
+  assert.doesNotMatch(mainSource, /\.title\("CodexHub"\)/);
   assert.match(mainSource, /show_menu_on_left_click\(false\)/);
   assert.match(mainSource, /include_bytes!\("\.\.\/icons\/128x128\.png"\)/);
   assert.match(linuxWindowSource, /com\.codexhub\.app\.desktop/);
   assert.match(linuxWindowSource, /set_skip_taskbar_hint\(false\)/);
   assert.match(linuxWindowSource, /WindowTypeHint::Normal/);
   assert.match(linuxWindowSource, /install_hicolor_icon/);
+  assert.match(linuxWindowSource, /apply_transparent_rounded_css/);
   assert.doesNotMatch(linuxWindowSource, /set_opaque_region/);
 });
 

@@ -41,7 +41,28 @@ fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
     gtk_window.set_type_hint(WindowTypeHint::Normal);
     gtk_window.set_accept_focus(true);
     let _ = window.set_skip_taskbar(false);
+    apply_transparent_rounded_css(&gtk_window);
     Ok(())
+}
+
+fn apply_transparent_rounded_css(gtk_window: &gtk::ApplicationWindow) {
+    let provider = gtk::CssProvider::new();
+    if provider
+        .load_from_data(
+            b"window { background-color: transparent; border-radius: 16px; box-shadow: none; }",
+        )
+        .is_err()
+    {
+        return;
+    }
+    let Some(screen) = gtk::prelude::WidgetExt::screen(gtk_window) else {
+        return;
+    };
+    gtk::StyleContext::add_provider_for_screen(
+        &screen,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 fn install_hicolor_icon() {
