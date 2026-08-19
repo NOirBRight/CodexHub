@@ -1,6 +1,6 @@
 # Issue #395 — real CLI Collaboration V2 over Chat
 
-This evidence qualifies candidate `6aedd33e6b57433b16e42db1fafc48aa42161194` with real
+This evidence qualifies candidate `549104696d9a86f308a9f5cc7d884237c1dc45bc` with real
 `codex-cli 0.147.0`.
 
 The client sends Responses requests to the Gateway. The protocol-controlled
@@ -23,7 +23,9 @@ See `cli-chat/summary.json` (schema
   request carrying a plaintext request-bound `agent_message` envelope;
 - zero fallback, no V1 namespace/tool observation, and no Gateway error;
 - same-Home Gateway restart followed by explicit parent-session resume, with
-  task identity, `config.toml`, and user-owned `AGENTS.md` preserved.
+  task identity, `config.toml`, and user-owned `AGENTS.md` preserved;
+- a second isolated Home cannot resume the parent session and produces zero
+  Gateway/fixture requests or mutations.
 
 ## Identity and failure coverage
 
@@ -58,5 +60,5 @@ during development stayed under `/tmp` and are not evidence inputs.
 ```powershell
 .\scripts\codexhub-python.cmd scripts/run_issue_395_cli_chat_v2_lifecycle.py `
   --output-dir docs/evidence/issue-395/cli-chat `
-  --candidate-sha 6aedd33e6b57433b16e42db1fafc48aa42161194
+  --candidate-sha 549104696d9a86f308a9f5cc7d884237c1dc45bc
 ```

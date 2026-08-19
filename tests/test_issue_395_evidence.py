@@ -69,6 +69,7 @@ def test_issue_395_evidence_records_progressive_chat_and_same_home_readback() ->
     assert restart == {
         "agents_configuration_preserved": True,
         "config_preserved": True,
+        "cross_home_rejected_before_fixture_mutation": True,
         "passed": True,
         "requested": True,
         "resume_exit_code": 0,

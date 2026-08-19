@@ -1,5 +1,5 @@
 {
-  "candidate_sha": "6aedd33e6b57433b16e42db1fafc48aa42161194",
+  "candidate_sha": "549104696d9a86f308a9f5cc7d884237c1dc45bc",
   "chat_wire_summary": {
     "child_request_count": 1,
     "progressive_two_chunk_responses": 9,
@@ -92,7 +92,7 @@
     "has_v1_observation": false,
     "has_v2_observation": true
   },
-  "isolated_home_sha256": "b224387208516c3a1a0786fcc8323bbe85e0f22958fafaaff4fbb70a95a55d2c",
+  "isolated_home_sha256": "5fd163b99075fbbb678d6e8b946c3d50a9e4a06b0dc151e524b1525a1085cd1f",
   "phase_observations": {
     "errors": [],
     "fallback_count": 0,
@@ -129,17 +129,18 @@
   },
   "root_cause_verdict": "chat_v2_lifecycle_verified",
   "route": {
-    "gateway_port": 34807,
+    "gateway_port": 43909,
     "selected_model": "custom/fixture-v2",
     "selected_provider": "custom",
-    "shim_port": 46697,
-    "upstream_fixture_port": 35557,
+    "shim_port": 35559,
+    "upstream_fixture_port": 45875,
     "upstream_format": "chat_completions",
     "upstream_provider_id": "custom"
   },
   "same_home_restart_check": {
     "agents_configuration_preserved": true,
     "config_preserved": true,
+    "cross_home_rejected_before_fixture_mutation": true,
     "passed": true,
     "requested": true,
     "resume_exit_code": 0,
