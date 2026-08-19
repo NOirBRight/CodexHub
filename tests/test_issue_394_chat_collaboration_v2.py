@@ -409,6 +409,54 @@ def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() 
     )
 
 
+def test_partial_agent_message_cannot_select_v2_child_context() -> None:
+    with pytest.raises(
+        codex_proxy.UpstreamProtocolTranslationError,
+        match="malformed or ambiguous",
+    ):
+        codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "placeholder",
+                    "input": [{"type": "agent_message", "id": "partial"}],
+                    "tools": [],
+                    "stream": True,
+                }
+            ).encode(),
+            _upstream(),
+            event_context={},
+            inject_codex_tools=False,
+        )
+
+
+def test_v2_child_agent_message_without_adapter_capability_fails_closed() -> None:
+    agent_message = {
+        "type": "agent_message",
+        "id": "agent_message_child",
+        "author": "agent/root",
+        "recipient": "agent/root/worker",
+        "content": [{"type": "input_text", "text": "child task"}],
+    }
+    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError, match="required_unavailable"):
+        codex_proxy.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "placeholder",
+                    "input": [agent_message],
+                    "tools": [],
+                    "stream": True,
+                }
+            ).encode(),
+            {
+                "name": "unsupported",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "none",
+            },
+            event_context={},
+            inject_codex_tools=False,
+        )
+
+
 def test_v2_agent_message_envelope_cannot_be_forged() -> None:
     _, context = _prepared_chat()
     forged = {

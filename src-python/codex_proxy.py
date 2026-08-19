@@ -3185,6 +3185,15 @@ from gateway_sse import (
 class UpstreamSseSemanticError(ValueError):
     """A complete converted SSE frame is not valid source-protocol JSON."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        classification: str = "upstream_protocol_error",
+    ) -> None:
+        self.classification = classification
+        super().__init__(message)
+
 
 def _verified_converted_sse_semantic_error(
     source_format: str,
@@ -4175,8 +4184,14 @@ def _incomplete_stream_json_error_body(upstream_name: str) -> bytes:
 class UpstreamProtocolTranslationError(ValueError):
     """Marks an unsupported upstream wire shape for the downstream error mapper."""
 
-    def __init__(self, cause: UnsupportedProtocolTranslationError):
+    def __init__(
+        self,
+        cause: UnsupportedProtocolTranslationError,
+        *,
+        classification: str | None = None,
+    ) -> None:
         self.cause = cause
+        self.classification = classification or cause.code
         super().__init__(str(cause))
 
 
@@ -5619,7 +5634,8 @@ def _runtime_tool_protocol_capabilities(
 
 def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError) -> NoReturn:
     raise UpstreamProtocolTranslationError(
-        UnsupportedProtocolTranslationError(error.code, str(error))
+        UnsupportedProtocolTranslationError(error.code, str(error)),
+        classification=error.classification,
     ) from error
 
 
@@ -12780,7 +12796,7 @@ def compatible_sse_line(
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
     *,
-    runtime_tool_only: bool = False,
+    runtime_tool_inverse_only: bool = False,
 ) -> bytes:
     if upstream_name == "official" or _is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
         return line
@@ -12805,13 +12821,14 @@ def compatible_sse_line(
         if selected_protocol in {_COLLABORATION_V1, _COLLABORATION_V2}:
             collaboration_protocol = selected_protocol
     event_context = _collaboration_context_with_protocol(event_context, collaboration_protocol)
-    if collaboration_protocol != _COLLABORATION_V2:
-        _remember_worker_stream_event(payload, event_context)
-    _raise_on_invalid_worker_stream_event(
-        payload,
-        event_context,
-        surface="sse",
-    )
+    if not runtime_tool_inverse_only:
+        if collaboration_protocol != _COLLABORATION_V2:
+            _remember_worker_stream_event(payload, event_context)
+        _raise_on_invalid_worker_stream_event(
+            payload,
+            event_context,
+            surface="sse",
+        )
 
     runtime_tool_plan, stream_state = _runtime_tool_compatibility_stream_for_attempt(
         event_context
@@ -12842,7 +12859,7 @@ def compatible_sse_line(
     else:
         runtime_tool_changed = False
 
-    if runtime_tool_only:
+    if runtime_tool_inverse_only:
         if not runtime_tool_changed:
             return line
         return _sse_json_line(payload, line_ending) + line_ending
@@ -20261,6 +20278,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
         def finish_converted_sse_semantic_error(
             exc: UpstreamSseSemanticError | SseFrameTooLargeError,
+            *,
+            response_id: str | None = None,
         ) -> int:
             if seam.terminal_committed:
                 self.close_connection = True
@@ -20287,14 +20306,29 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            if not self._write_downstream_sse_error(
-                inbound_format=inbound_format,
-                upstream_name=upstream_name,
-                status=502,
-                error=error_code,
-                detail=str(exc),
-                redact_identity=relay_redact_identity,
-            ):
+            if inbound_format == "responses":
+                failed_event = _responses_failed_event_for_stream_error(
+                    upstream_name=upstream_name,
+                    model=model,
+                    status=502,
+                    error=error_code,
+                    detail=str(exc),
+                    response_id=response_id,
+                    redact_identity=relay_redact_identity,
+                )
+                wrote_error = self._write_sse_bytes(
+                    _sse_json_line(failed_event, b"\n") + b"\n"
+                )
+            else:
+                wrote_error = self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error=error_code,
+                    detail=str(exc),
+                    redact_identity=relay_redact_identity,
+                )
+            if not wrote_error:
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
@@ -20896,7 +20930,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         line,
                         upstream_name,
                         event_context=compatibility_event_context,
-                        runtime_tool_only=True,
+                        runtime_tool_inverse_only=True,
                     )
                     if not compatible_line:
                         return True
@@ -20962,12 +20996,17 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             except OSError as exc:
                                 return finish_downstream_stream_closed(exc)
                 except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
-                    return finish_converted_sse_semantic_error(exc)
-                except UpstreamProtocolTranslationError:
                     return finish_converted_sse_semantic_error(
-                        _verified_converted_sse_semantic_error(
-                            "chat_completions"
-                        )
+                        exc,
+                        response_id=converter.response_id,
+                    )
+                except UpstreamProtocolTranslationError as exc:
+                    return finish_converted_sse_semantic_error(
+                        UpstreamSseSemanticError(
+                            str(exc),
+                            classification=exc.classification,
+                        ),
+                        response_id=converter.response_id,
                     )
                 except UpstreamStreamIncompleteError:
                     incomplete_frame = True

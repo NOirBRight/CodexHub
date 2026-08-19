@@ -16355,7 +16355,7 @@ class RoutingTests(unittest.TestCase):
             handler,
             response,
             "generic-chat",
-            relay_fixture=RELAY_GATEWAY,
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
             upstream_format="chat_completions",
             event_context=context,
         )
@@ -16389,6 +16389,85 @@ class RoutingTests(unittest.TestCase):
             in {"response.completed", "response.failed", "response.incomplete"}
         ]
         self.assertEqual(terminals, ["response.completed"])
+
+
+    def test_chat_completions_sse_v2_unknown_alias_emits_one_response_failed(self):
+        context: dict = {}
+        compatible_request_body(
+            json.dumps(
+                {
+                    "model": "generic-chat-model",
+                    "input": "use collaboration",
+                    "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                    "tool_choice": "auto",
+                    "stream": True,
+                }
+            ).encode(),
+            {
+                "name": "generic-chat",
+                "upstream_format": "chat_completions",
+                "tool_protocol": "chat_tools",
+            },
+            event_context=context,
+            inject_codex_tools=False,
+        )
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_unknown",
+                                "type": "function",
+                                "function": {
+                                    "name": "__codexhub_ns_unknown_0",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode(), b"data: [DONE]\n\n", b""]
+        )
+        handler = FakeHandler()
+
+        status = relay_upstream_response(
+            handler,
+            response,
+            "generic-chat",
+            relay_fixture=RELAY_TRANSPARENT_CONVERTED,
+            upstream_format="chat_completions",
+            event_context=context,
+        )
+
+        payloads = [
+            json.loads(write.decode().removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        self.assertEqual(status, 502)
+        self.assertEqual(payloads[0]["type"], "response.created")
+        terminals = [
+            payload
+            for payload in payloads
+            if payload.get("type")
+            in {"response.completed", "response.failed", "response.incomplete"}
+        ]
+        self.assertEqual([payload["type"] for payload in terminals], ["response.failed"])
+        self.assertEqual(
+            terminals[0]["response"]["id"],
+            payloads[0]["response"]["id"],
+        )
+        self.assertEqual(
+            terminals[0]["response"]["error"]["code"],
+            "unknown_alias",
+        )
+        self.assertNotIn(b"event: error", b"".join(handler.wfile.writes))
 
     def test_chat_completions_sse_relay_converts_message_tool_call_stream_to_responses_events(self):
         handler = FakeHandler()

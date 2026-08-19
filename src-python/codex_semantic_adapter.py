@@ -18,6 +18,7 @@ from collaboration_runtime_contract import (
     CollaborationContractError,
     classify_collaboration_request,
     classify_collaboration_tools,
+    validate_agent_message,
 )
 
 MULTI_AGENT_TOOL_NAMES = {
@@ -76,9 +77,13 @@ def _classify_collaboration_item(
     tool_name = value.get("tool_name")
     item_type = value.get("type")
     if item_type == "agent_message":
-        # Codex child turns may carry only V2 handoff history and omit the
-        # parent namespace declaration. This item type is itself an exact V2
-        # protocol marker; its shape is validated at the compatibility seam.
+        # Current Codex child continuations may omit the parent's namespace
+        # declaration. Only the complete frozen handoff item is a V2 marker;
+        # a bare or malformed type tag must not select a protocol.
+        try:
+            validate_agent_message(value)
+        except CollaborationContractError as exc:
+            raise CollaborationBoundaryError(exc.classification) from exc
         return COLLABORATION_V2
     if "name" in value and "tool_name" in value and name != tool_name:
         raise CollaborationBoundaryError("discriminator_conflict")

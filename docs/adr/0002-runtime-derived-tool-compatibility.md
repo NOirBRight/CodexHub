@@ -84,6 +84,16 @@ name such as `spawn_agent` or `wait_agent`, or a partial/direct-function shape,
 cannot select a version. Missing, unknown, duplicate, mixed, or conflicting
 signals fail closed before repair, state, or scheduler behavior.
 
+Issue #395 adds one continuation-only discriminator observed in Codex CLI
+0.147.0: after the client has created a child, that child's next request may
+omit the parent namespace declaration and carry only a complete Responses
+`agent_message` item. The exact frozen item shape (all identity fields plus
+valid plaintext or encrypted content parts) selects V2 for that continuation;
+a bare type tag, partial item, ordinary message, or metadata does not. Parent
+request selection remains the complete namespace contract above, and this
+continuation marker does not authorize the Gateway to create or schedule an
+agent.
+
 Several uses of the word `collaboration` remain separate protocol layers:
 
 - the Codex client dispatch recipient group;

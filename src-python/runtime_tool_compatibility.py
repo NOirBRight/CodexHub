@@ -901,7 +901,7 @@ def build_tool_compatibility_plan(
     )
     capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
     if (
-        effective_collaboration_protocol == COLLABORATION_V2
+        declared_collaboration_protocol == COLLABORATION_V2
         and selected_protocol != "responses_structured"
         and not (
             capabilities.function_lifecycle
@@ -2165,7 +2165,13 @@ class ToolCompatibilityPlan:
             )
         )
         if not should_adapt:
-            return item, False
+            if self.capabilities.namespace_lifecycle:
+                return item, False
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "required_unavailable",
+                surface="history",
+            )
 
         try:
             validate_agent_message(item)
