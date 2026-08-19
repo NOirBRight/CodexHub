@@ -35,7 +35,8 @@ stay `unavailable` on third-party Chat.
 The real Codex transport defaults are classified by exact value before Chat
 sampling: lifecycle `client_metadata`, cache identity, the encrypted-reasoning
 include request, bounded verbosity, and bounded reasoning effort are consumed
-locally. Unknown keys, types, or values still fail closed.
+locally. Opaque `client_metadata` objects remain local; unknown top-level
+transport fields and unapproved include/text/reasoning shapes still fail closed.
 
 ## Regenerate
 

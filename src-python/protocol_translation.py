@@ -219,7 +219,10 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
                 "Cannot consume unknown Responses text semantics.",
             )
         verbosity = text.get("verbosity")
-        if verbosity is not None and verbosity not in {"low", "medium", "high"}:
+        if verbosity is not None and (
+            not isinstance(verbosity, str)
+            or verbosity not in {"low", "medium", "high"}
+        ):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses text verbosity.",
@@ -234,7 +237,10 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
                 "Cannot consume unknown Responses reasoning semantics.",
             )
         effort = reasoning.get("effort")
-        if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+        if effort is not None and (
+            not isinstance(effort, str)
+            or effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}
+        ):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning effort.",

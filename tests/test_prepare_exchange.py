@@ -79,8 +79,10 @@ def test_prepare_exchange_consumes_real_codex_transport_defaults() -> None:
         ("prompt_cache_key", {"not": "a string"}),
         ("text", {"format": {"type": "json_schema"}}),
         ("text", {"verbosity": "maximum"}),
+        ("text", {"verbosity": {"invalid": True}}),
         ("reasoning", {"summary": "auto"}),
         ("reasoning", {"effort": "extreme"}),
+        ("reasoning", {"effort": {"invalid": True}}),
     ],
 )
 def test_prepare_exchange_rejects_unknown_codex_transport_values(
