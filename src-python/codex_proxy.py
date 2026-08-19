@@ -5693,12 +5693,17 @@ def _prepare_runtime_tool_compatibility(
 ) -> bool:
     tools = payload.get("tools")
     declarations = tools if isinstance(tools, list) else []
-    codec = (
+    configured_codec = (
         native_responses_tool_codec
         if native_responses_tool_codec is not None
         else _external_native_responses_tool_codec(upstream)
     )
-    if tool_protocol == "responses_structured" and codec == "strict_apply_patch":
+    # A native Responses codec is not a declaration filter for Chat.  When a
+    # maintained model is reachable over both protocols, the Chat compatibility
+    # plan must still see the custom declaration and apply its reversible
+    # function adapter instead of leaking the Responses-only setting (#285).
+    codec = configured_codec if tool_protocol == "responses_structured" else "none"
+    if codec == "strict_apply_patch":
         apply_patch_tools = [
             tool
             for tool in declarations

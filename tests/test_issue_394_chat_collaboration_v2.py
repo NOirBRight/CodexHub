@@ -114,6 +114,49 @@ def _aliases(chat_request: dict) -> dict[str, str]:
     }
 
 
+
+
+def test_native_responses_codec_is_inert_on_chat_custom_adapter() -> None:
+    upstream = {
+        **_upstream(),
+        "native_responses_tool_codec": "strict_apply_patch",
+    }
+    body = json.dumps(
+        {
+            "model": "placeholder",
+            "input": "edit",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch.",
+                    "format": {"type": "text"},
+                }
+            ],
+            "tool_choice": "auto",
+        }
+    ).encode()
+    context: dict = {}
+
+    prepared = codex_proxy.compatible_request_body(
+        body,
+        upstream,
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    exchange = prepare_exchange(
+        prepared,
+        inbound_format="responses",
+        outbound_format="chat_completions",
+    )
+    chat = json.loads(exchange.upstream_body)
+
+    assert len(chat["tools"]) == 1
+    function = chat["tools"][0]["function"]
+    assert function["name"].startswith("__codexhub_custom_")
+    assert function["parameters"]["required"] == ["__codexhub_custom_input"]
+
+
 def test_v2_declarations_flatten_to_six_deterministic_chat_functions() -> None:
     first, _ = _prepared_chat()
     second, _ = _prepared_chat()
