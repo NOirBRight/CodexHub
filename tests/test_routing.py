@@ -22,7 +22,6 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
-import gateway_settings
 import gateway_sse
 from collaboration_runtime_contract import (
     COLLABORATION_V1,
@@ -1840,10 +1839,6 @@ class RoutingTests(unittest.TestCase):
             patch(
                 "route_plan.upstream_timeout_seconds",
                 side_effect=AssertionError("planner read request timeout"),
-            ),
-            patch(
-                "route_plan._upstream_retry_attempts",
-                side_effect=AssertionError("planner read retry attempts"),
             ),
             patch(
                 "route_plan.gateway_auto_retry_max_attempts",
@@ -9015,27 +9010,6 @@ class RoutingTests(unittest.TestCase):
             ),
             7,
         )
-
-    def test_retry_attempts_are_bounded_by_request_kind(self):
-        with patch.dict(
-            os.environ,
-            {
-                "CODEX_PROXY_AUTO_RETRY_ENABLED": "1",
-                "CODEX_PROXY_AUTO_RETRY_MAX_ATTEMPTS": "30",
-                "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS": "3",
-                "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS": "2",
-            },
-            clear=False,
-        ):
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 2)
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
-
-    def test_default_retry_attempts_by_request_kind(self):
-        with patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1"}, clear=False):
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 5)
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
-            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
 
     def test_open_upstream_response_retries_pre_write_dns_tcp_refused_tls_cert_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
