@@ -7,6 +7,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
+pub enum AppServerPoll {
+    Message(Value),
+    Timeout,
+    Closed,
+}
+
 pub struct AppServerCall {
     pub id: Value,
     pub method: &'static str,
@@ -18,6 +24,8 @@ pub struct AppServerSession {
     stdin: Option<ChildStdin>,
     receiver: mpsc::Receiver<Result<Option<String>, String>>,
     killed: bool,
+    #[cfg(windows)]
+    _job: AppServerJob,
 }
 
 impl AppServerSession {
@@ -30,6 +38,15 @@ impl AppServerSession {
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start codex app-server for {purpose}: {error}"))?;
+        #[cfg(windows)]
+        let job = match AppServerJob::assign_to(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let stdin = child
             .stdin
             .take()
@@ -48,6 +65,8 @@ impl AppServerSession {
             stdin: Some(stdin),
             receiver: spawn_line_reader(stdout),
             killed: false,
+            #[cfg(windows)]
+            _job: job,
         })
     }
 
@@ -71,12 +90,7 @@ impl AppServerSession {
         self.write(&json!({ "method": "initialized" }))
     }
 
-    pub fn request(
-        &mut self,
-        calls: &[AppServerCall],
-        timeout: Duration,
-        purpose: &str,
-    ) -> Result<Vec<Value>, String> {
+    pub fn send_calls(&mut self, calls: &[AppServerCall], purpose: &str) -> Result<(), String> {
         for call in calls {
             let mut payload = json!({
                 "id": call.id,
@@ -87,7 +101,37 @@ impl AppServerSession {
             }
             self.write(&payload)?;
         }
-        self.flush(purpose)?;
+        self.flush(purpose)
+    }
+
+    pub fn poll_message(&mut self, remaining: Duration) -> Result<AppServerPoll, String> {
+        loop {
+        match self.receiver.recv_timeout(remaining) {
+            Ok(Ok(Some(line))) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(message) => return Ok(AppServerPoll::Message(message)),
+                    Err(_) => continue,
+                }
+            }
+            Ok(Ok(None)) => return Ok(AppServerPoll::Closed),
+            Ok(Err(error)) => return Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(AppServerPoll::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(AppServerPoll::Closed),
+        }
+        }
+    }
+
+    pub fn request(
+        &mut self,
+        calls: &[AppServerCall],
+        timeout: Duration,
+        purpose: &str,
+    ) -> Result<Vec<Value>, String> {
+        self.send_calls(calls, purpose)?;
         let mut pending: HashMap<String, Value> = calls
             .iter()
             .map(|call| (call.id.to_string(), call.id.clone()))
@@ -237,5 +281,51 @@ fn configure_no_window(command: &mut Command) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = command;
+    }
+}
+
+#[cfg(windows)]
+struct AppServerJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl AppServerJob {
+    fn assign_to(child: &Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err("Failed to prepare codex app-server cleanup job.".to_string());
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err("Failed to prepare codex app-server cleanup job.".to_string());
+        }
+        let assigned = unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as _) };
+        if assigned == 0 {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err("Failed to bind codex app-server cleanup job.".to_string());
+        }
+        Ok(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AppServerJob {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
     }
 }

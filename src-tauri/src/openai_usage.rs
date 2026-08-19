@@ -1,3 +1,4 @@
+use crate::app_server::{AppServerCall, AppServerPoll, AppServerSession};
 use crate::{config, safe_file};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
@@ -630,70 +631,31 @@ impl Drop for AppServerJob {
 fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
     let codex = find_codex_executable()?;
     let mut command = Command::new(&codex);
-    command
-        .args(["app-server", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    configure_no_window(&mut command);
-    let mut child = AppServerChild::spawn(&mut command)?;
-
-    let mut stdin = child
-        .child_mut()
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open codex app-server stdin.".to_string())?;
-    write_json_line(
-        &mut stdin,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "codexhub",
-                    "title": "CodexHub",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                    "requestAttestation": false,
-                    "optOutNotificationMethods": []
-                }
-            }
-        }),
-    )?;
-    write_json_line(&mut stdin, &json!({ "method": "initialized" }))?;
+    command.args(["app-server", "--stdio"]);
+    let mut session = AppServerSession::start(command, "Codex account usage")?;
+    session.initialize()?;
     // Send both token-usage and rate-limits requests in a single app-server
     // session.  The rate-limits response carries real-time usedPercent values
     // that match the Codex desktop app; account/usage/read alone returns only
     // token-activity summary and daily buckets — no rate limits.
-    write_json_line(
-        &mut stdin,
-        &json!({
-            "id": 2,
-            "method": CODEX_ACCOUNT_USAGE_METHOD
-        }),
+    session.send_calls(
+        &[
+            AppServerCall {
+                id: json!(2),
+                method: CODEX_ACCOUNT_USAGE_METHOD,
+                params: None,
+            },
+            AppServerCall {
+                id: json!(3),
+                method: CODEX_RATE_LIMITS_METHOD,
+                params: None,
+            },
+        ],
+        "Codex account usage",
     )?;
-    write_json_line(
-        &mut stdin,
-        &json!({
-            "id": 3,
-            "method": CODEX_RATE_LIMITS_METHOD
-        }),
-    )?;
-    stdin
-        .flush()
-        .map_err(|error| format!("Failed to flush codex app-server requests: {error}"))?;
-
-    let stdout = child
-        .child_mut()
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to open codex app-server stdout.".to_string())?;
-    let receiver = spawn_app_server_line_reader(stdout);
     let collected =
-        collect_codex_usage_and_rate_limit_results(receiver, CODEX_APP_SERVER_RESPONSE_TIMEOUT);
-    drop(child);
+        collect_codex_usage_and_rate_limit_results(&mut session, CODEX_APP_SERVER_RESPONSE_TIMEOUT);
+    session.kill();
     let collected = collected?;
 
     let mut usage: CodexAccountUsageResponse = collected
@@ -718,7 +680,7 @@ struct CodexAccountAppServerResults {
 }
 
 fn collect_codex_usage_and_rate_limit_results(
-    receiver: mpsc::Receiver<Result<Option<String>, String>>,
+    session: &mut AppServerSession,
     timeout: Duration,
 ) -> Result<CodexAccountAppServerResults, String> {
     let deadline = Instant::now() + timeout;
@@ -735,43 +697,23 @@ fn collect_codex_usage_and_rate_limit_results(
             break;
         }
         let remaining = deadline.saturating_duration_since(now);
-        match receiver.recv_timeout(remaining) {
-            Ok(Ok(Some(line))) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let message: CodexAppServerResponse = match serde_json::from_str(trimmed) {
-                    Ok(message) => message,
-                    Err(_) => continue,
-                };
-                match message.id.as_ref().and_then(|id| id.as_u64()) {
-                    Some(2) => {
-                        if let Some(error) = message.error {
-                            return Err(codex_app_server_error_message(
-                                error.message.as_deref().unwrap_or("request failed"),
-                            ));
-                        }
-                        usage_result = message.result;
-                    }
-                    Some(3) => {
-                        rate_limits_done = true;
-                        if message.error.is_none() {
-                            rate_limits_result = message.result;
-                        }
-                    }
-                    _ => continue,
-                }
+        match session.poll_message(remaining) {
+            Ok(AppServerPoll::Message(value)) => {
+                ingest_account_app_server_message(
+                    &mut usage_result,
+                    &mut rate_limits_result,
+                    &mut rate_limits_done,
+                    value,
+                )?;
             }
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => {
+            Ok(AppServerPoll::Timeout) => break,
+            Ok(AppServerPoll::Closed) => break,
+            Err(error) => {
                 if usage_result.is_some() {
                     break;
                 }
                 return Err(format!("Failed to read codex app-server response: {error}"));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => break,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -779,6 +721,36 @@ fn collect_codex_usage_and_rate_limit_results(
         usage_result,
         rate_limits_result,
     })
+}
+
+fn ingest_account_app_server_message(
+    usage_result: &mut Option<Value>,
+    rate_limits_result: &mut Option<Value>,
+    rate_limits_done: &mut bool,
+    value: Value,
+) -> Result<(), String> {
+    let message: CodexAppServerResponse = match serde_json::from_value(value) {
+        Ok(message) => message,
+        Err(_) => return Ok(()),
+    };
+    match message.id.as_ref().and_then(|id| id.as_u64()) {
+        Some(2) => {
+            if let Some(error) = message.error {
+                return Err(codex_app_server_error_message(
+                    error.message.as_deref().unwrap_or("request failed"),
+                ));
+            }
+            *usage_result = message.result;
+        }
+        Some(3) => {
+            *rate_limits_done = true;
+            if message.error.is_none() {
+                *rate_limits_result = message.result;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn merge_rate_limits_into_usage(usage: &mut CodexAccountUsageResponse, result: Value) {
@@ -1622,36 +1594,38 @@ mod tests {
 
     #[test]
     fn account_usage_reader_finishes_when_rate_limits_request_errors() {
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(Ok(Some(
-                json!({
-                    "id": 2,
-                    "result": {
-                        "summary": { "lifetimeTokens": 41 },
-                        "dailyUsageBuckets": []
-                    }
-                })
-                .to_string(),
-            )))
-            .unwrap();
-        sender
-            .send(Ok(Some(
-                json!({
-                    "id": 3,
-                    "error": { "message": "method not found" }
-                })
-                .to_string(),
-            )))
-            .unwrap();
-        drop(sender);
+        let mut usage_result = None;
+        let mut rate_limits_result = None;
+        let mut rate_limits_done = false;
+        ingest_account_app_server_message(
+            &mut usage_result,
+            &mut rate_limits_result,
+            &mut rate_limits_done,
+            json!({
+                "id": 2,
+                "result": {
+                    "summary": { "lifetimeTokens": 41 },
+                    "dailyUsageBuckets": []
+                }
+            }),
+        )
+        .expect("usage result is accepted");
+        ingest_account_app_server_message(
+            &mut usage_result,
+            &mut rate_limits_result,
+            &mut rate_limits_done,
+            json!({
+                "id": 3,
+                "error": { "message": "method not found" }
+            }),
+        )
+        .expect("rate limit errors are best-effort");
+        let collected = CodexAccountAppServerResults {
+            usage_result,
+            rate_limits_result,
+        };
 
-        let started = Instant::now();
-        let collected =
-            collect_codex_usage_and_rate_limit_results(receiver, Duration::from_secs(30))
-                .expect("usage result survives best-effort rate limit errors");
-
-        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(rate_limits_done);
         assert!(collected.rate_limits_result.is_none());
         assert_eq!(
             collected.usage_result.and_then(|result| {
@@ -1959,13 +1933,9 @@ mod tests {
         command
             .arg("-c")
             .arg("import pathlib, sys, time; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('alive')")
-            .arg(&marker)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        configure_no_window(&mut command);
+            .arg(&marker);
         {
-            let _guard = AppServerChild::spawn(&mut command).expect("spawn probe child");
+            let _guard = AppServerSession::start(command, "probe").expect("spawn probe child");
             // Dropped here: the child must be killed before it can write.
         }
         thread::sleep(Duration::from_secs(3));
