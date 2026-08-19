@@ -6,6 +6,13 @@ from python_runtime_contract import require_python_313
 
 require_python_313(__file__)
 
+# RoutePlan/settings retain late compatibility bindings to the public
+# ``codex_proxy`` import surface. When this file is launched as a script,
+# publish the running module under that name before those bindings can import a
+# second copy (and create a second event writer for the same sink).
+if __name__ == "__main__":
+    sys.modules.setdefault("codex_proxy", sys.modules[__name__])
+
 import argparse
 from copy import deepcopy
 from collections.abc import Iterable as IterableABC
@@ -5720,6 +5727,7 @@ def _prepare_runtime_tool_compatibility(
                 protocol_capabilities=protocol_capabilities,
                 provider_hosted_capabilities=provider_hosted_capabilities,
             ),
+            collaboration_protocol=event_context.get("collaboration_protocol"),
         )
     except RuntimeToolCompatibilityError as exc:
         write_proxy_event(
@@ -12771,6 +12779,8 @@ def compatible_sse_line(
     line: bytes,
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
+    *,
+    runtime_tool_only: bool = False,
 ) -> bytes:
     if upstream_name == "official" or _is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
         return line
@@ -12831,6 +12841,11 @@ def compatible_sse_line(
         payload = decoded_payload
     else:
         runtime_tool_changed = False
+
+    if runtime_tool_only:
+        if not runtime_tool_changed:
+            return line
+        return _sse_json_line(payload, line_ending) + line_ending
 
     if _is_raw_reasoning_stream_event(payload):
         return b""
@@ -20874,6 +20889,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 line_ending = b"\n"
                 converter = _ChatToResponsesStreamConverter()
                 incomplete_frame = False
+
+                def write_converted_response_event(event: Mapping[str, Any]) -> bool:
+                    line = _sse_json_line(event, line_ending) + line_ending
+                    compatible_line = compatible_sse_line(
+                        line,
+                        upstream_name,
+                        event_context=compatibility_event_context,
+                        runtime_tool_only=True,
+                    )
+                    if not compatible_line:
+                        return True
+                    return self._write_sse_bytes(compatible_line)
+
                 try:
                     for frame in self._iter_upstream_sse_events(
                         response,
@@ -20927,9 +20955,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             events = converter.events_for_chunk(payload)
                         for event in events:
                             try:
-                                if not self._write_sse_bytes(
-                                    _sse_json_line(event, line_ending) + line_ending
-                                ):
+                                if not write_converted_response_event(event):
                                     return finish_downstream_stream_closed(
                                         seam.last_write_error() or OSError("downstream closed")
                                     )
@@ -21009,9 +21035,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 ):
                     for event in converter.events_for_done():
                         try:
-                            if not self._write_sse_bytes(
-                                _sse_json_line(event, line_ending) + line_ending
-                            ):
+                            if not write_converted_response_event(event):
                                 return finish_downstream_stream_closed(
                                     seam.last_write_error() or OSError("downstream closed")
                                 )

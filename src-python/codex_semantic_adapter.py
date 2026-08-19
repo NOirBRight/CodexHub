@@ -75,6 +75,11 @@ def _classify_collaboration_item(
     name = value.get("name")
     tool_name = value.get("tool_name")
     item_type = value.get("type")
+    if item_type == "agent_message":
+        # Codex child turns may carry only V2 handoff history and omit the
+        # parent namespace declaration. This item type is itself an exact V2
+        # protocol marker; its shape is validated at the compatibility seam.
+        return COLLABORATION_V2
     if "name" in value and "tool_name" in value and name != tool_name:
         raise CollaborationBoundaryError("discriminator_conflict")
     if name is None:

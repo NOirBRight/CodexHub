@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from collaboration_runtime_contract import (
+    COLLABORATION_V1,
     COLLABORATION_V2,
     CollaborationContractError,
     classify_collaboration_request,
@@ -856,6 +857,7 @@ def build_tool_compatibility_plan(
     protocol_capabilities: ProtocolCapabilities | Mapping[str, Any] | None = None,
     request_token: str = "request",
     native_names: Iterable[str] = (),
+    collaboration_protocol: str | None = None,
 ) -> "ToolCompatibilityPlan":
     if isinstance(runtime_declarations, Mapping):
         candidate = runtime_declarations.get("tools", ())
@@ -869,7 +871,7 @@ def build_tool_compatibility_plan(
             raise _MalformedDeclaration()
         declarations.append(item)
     try:
-        collaboration_version = classify_collaboration_request(
+        declared_collaboration_protocol = classify_collaboration_request(
             {"tools": declarations, "tool_choice": tool_choice}
         )
     except CollaborationContractError as exc:
@@ -878,9 +880,28 @@ def build_tool_compatibility_plan(
             exc.classification,
             surface="request",
         ) from exc
+    if collaboration_protocol not in {None, COLLABORATION_V1, COLLABORATION_V2}:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "unknown_state",
+            surface="request",
+        )
+    if (
+        declared_collaboration_protocol is not None
+        and collaboration_protocol is not None
+        and declared_collaboration_protocol != collaboration_protocol
+    ):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "conflicting_selection",
+            surface="request",
+        )
+    effective_collaboration_protocol = (
+        declared_collaboration_protocol or collaboration_protocol
+    )
     capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
     if (
-        collaboration_version == COLLABORATION_V2
+        effective_collaboration_protocol == COLLABORATION_V2
         and selected_protocol != "responses_structured"
         and not (
             capabilities.function_lifecycle
@@ -924,7 +945,7 @@ def build_tool_compatibility_plan(
             raise _MalformedDeclaration()
         namespace, children, version, namespace_valid = _namespace_details(declaration)
         if (
-            collaboration_version == COLLABORATION_V2
+            effective_collaboration_protocol == COLLABORATION_V2
             and family == NAMESPACE
             and namespace == "collaboration"
         ):
@@ -1035,6 +1056,7 @@ def build_tool_compatibility_plan(
         entries=tuple(preliminary),
         registry=registry,
         diagnostics=diagnostics,
+        collaboration_protocol=effective_collaboration_protocol,
         tool_choice=_freeze(tool_choice),
         provider_hosted_kinds=hosted.supported_kinds,
     )
@@ -1245,6 +1267,7 @@ class ToolCompatibilityPlan:
     entries: tuple[ToolCompatibilityEntry, ...]
     registry: RequestScopedToolAliasRegistry = field(repr=False, compare=False)
     diagnostics: CompatibilityDiagnostics
+    collaboration_protocol: str | None = None
     tool_choice: Any = None
     provider_hosted_kinds: frozenset[str] = frozenset()
 
@@ -1270,6 +1293,7 @@ class ToolCompatibilityPlan:
             entries=self.entries,
             registry=self.registry.new_attempt(),
             diagnostics=self.diagnostics,
+            collaboration_protocol=self.collaboration_protocol,
             tool_choice=self.tool_choice,
             provider_hosted_kinds=self.provider_hosted_kinds,
         )
@@ -1283,6 +1307,12 @@ class ToolCompatibilityPlan:
             and entry.namespace == "collaboration"
         ]
         return matches[0] if len(matches) == 1 else None
+
+    def _collaboration_v2_active(self) -> bool:
+        return (
+            self.collaboration_protocol == COLLABORATION_V2
+            or self._collaboration_v2_entry() is not None
+        )
 
     @staticmethod
     def _raise_collaboration_contract(
@@ -1387,7 +1417,7 @@ class ToolCompatibilityPlan:
     ) -> None:
         if not isinstance(items, list):
             return
-        if self._collaboration_v2_entry() is None:
+        if not self._collaboration_v2_active():
             if any(
                 isinstance(item, Mapping) and item.get("type") == "agent_message"
                 for item in items
@@ -1681,6 +1711,7 @@ class ToolCompatibilityPlan:
             entries=tuple(entries),
             registry=self.registry,
             diagnostics=CompatibilityDiagnostics.from_entries(entries),
+            collaboration_protocol=self.collaboration_protocol,
             tool_choice=self.tool_choice,
             provider_hosted_kinds=self.provider_hosted_kinds,
         )
@@ -2121,8 +2152,19 @@ class ToolCompatibilityPlan:
         It cannot decrypt Official encrypted content, so that boundary rejects.
         """
 
+        if not self._collaboration_v2_active():
+            return item, False
         entry = self._collaboration_v2_entry()
-        if entry is None or entry.disposition != ADAPT:
+        should_adapt = (
+            entry.disposition == ADAPT
+            if entry is not None
+            else (
+                not self.capabilities.namespace_lifecycle
+                and self.capabilities.function_lifecycle
+                and self.capabilities.accepts_namespace_adapter
+            )
+        )
+        if not should_adapt:
             return item, False
 
         try:

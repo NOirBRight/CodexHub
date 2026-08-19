@@ -16278,6 +16278,118 @@ class RoutingTests(unittest.TestCase):
         self.assertIs(done_arguments["fork_context"], False)
         self.assertEqual(completed["response"]["output"][0]["call_id"], "call_spawn")
 
+    def test_chat_completions_sse_relay_reverse_maps_v2_namespace_aliases(self):
+        context: dict = {}
+        transformed = json.loads(
+            compatible_request_body(
+                json.dumps(
+                    {
+                        "model": "generic-chat-model",
+                        "input": "use collaboration",
+                        "tools": [_model_switch_tool_surface(COLLABORATION_V2)],
+                        "tool_choice": "auto",
+                        "stream": True,
+                    }
+                ).encode(),
+                {
+                    "name": "generic-chat",
+                    "upstream_format": "chat_completions",
+                    "tool_protocol": "chat_tools",
+                },
+                event_context=context,
+                inject_codex_tools=False,
+            )
+        )
+        entry = context["_runtime_tool_compatibility_plan"].entries[0]
+        child_index = entry.child_names.index("send_message")
+        alias = entry.aliases[child_index]
+        self.assertIn(alias, {tool["name"] for tool in transformed["tools"]})
+        arguments = json.dumps(
+            {"target": "agent/root/worker", "message": "status"},
+            separators=(",", ":"),
+        )
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_send_message",
+                                    "type": "function",
+                                    "function": {
+                                        "name": alias,
+                                        "arguments": arguments[:2],
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": arguments[2:]},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        response = FakeSseResponse(
+            [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks]
+            + [b"data: [DONE]\n\n", b""]
+        )
+        handler = FakeHandler()
+
+        relay_upstream_response(
+            handler,
+            response,
+            "generic-chat",
+            relay_fixture=RELAY_GATEWAY,
+            upstream_format="chat_completions",
+            event_context=context,
+        )
+
+        payloads = [
+            json.loads(write.decode().removeprefix("data: "))
+            for write in handler.wfile.writes
+            if write.startswith(b"data: {")
+        ]
+        added = next(
+            payload
+            for payload in payloads
+            if payload["type"] == "response.output_item.added"
+        )
+        done = next(
+            payload
+            for payload in payloads
+            if payload["type"] == "response.output_item.done"
+        )
+        self.assertEqual(added["item"]["namespace"], "collaboration")
+        self.assertEqual(added["item"]["name"], "send_message")
+        self.assertEqual(done["item"]["namespace"], "collaboration")
+        self.assertEqual(done["item"]["name"], "send_message")
+        self.assertEqual(done["item"]["call_id"], "call_send_message")
+        self.assertEqual(done["item"]["encrypted_function_args"], [])
+        self.assertNotIn(alias, b"".join(handler.wfile.writes).decode())
+        terminals = [
+            payload["type"]
+            for payload in payloads
+            if payload["type"]
+            in {"response.completed", "response.failed", "response.incomplete"}
+        ]
+        self.assertEqual(terminals, ["response.completed"])
+
     def test_chat_completions_sse_relay_converts_message_tool_call_stream_to_responses_events(self):
         handler = FakeHandler()
         chunks = [

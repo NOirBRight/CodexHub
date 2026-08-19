@@ -367,6 +367,48 @@ def test_v2_encrypted_agent_message_fails_before_chat_sampling() -> None:
     assert caught.value.cause.code == "tool_compatibility_boundary"
 
 
+def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() -> None:
+    agent_message = {
+        "type": "agent_message",
+        "id": "agent_message_child",
+        "author": "agent/root",
+        "recipient": "agent/root/worker",
+        "content": [{"type": "input_text", "text": "child task"}],
+    }
+    context: dict = {}
+    prepared = codex_proxy.compatible_request_body(
+        json.dumps(
+            {
+                "model": "placeholder",
+                "input": [agent_message],
+                "tools": [],
+                "stream": True,
+            }
+        ).encode(),
+        _upstream(),
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    payload = json.loads(prepared)
+    assert context["collaboration_protocol"] == COLLABORATION_V2
+    assert context["_runtime_tool_compatibility_plan"].collaboration_protocol == COLLABORATION_V2
+    assert payload["input"][0]["type"] == "message"
+    assert payload["input"][0]["content"][0]["text"].startswith(
+        "__codexhub_agent_message_v2__:"
+    )
+    chat = json.loads(
+        prepare_exchange(
+            prepared,
+            inbound_format="responses",
+            outbound_format="chat_completions",
+        ).upstream_body
+    )
+    assert chat["messages"][0]["role"] == "user"
+    assert chat["messages"][0]["content"].startswith(
+        "__codexhub_agent_message_v2__:"
+    )
+
+
 def test_v2_agent_message_envelope_cannot_be_forged() -> None:
     _, context = _prepared_chat()
     forged = {
