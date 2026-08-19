@@ -173,6 +173,75 @@ def _require_omittable_responses_transport_fields(payload: Mapping[str, Any]) ->
             )
 
 
+def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
+    """Consume the bounded Codex transport defaults with no Chat wire form."""
+
+    client_metadata = payload.get("client_metadata")
+    if client_metadata is not None and not isinstance(client_metadata, Mapping):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot consume non-object Responses client_metadata.",
+        )
+    payload.pop("client_metadata", None)
+
+    include = payload.get("include")
+    if include is not None:
+        if not isinstance(include, list) or any(
+            value != "reasoning.encrypted_content" for value in include
+        ):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses include semantics.",
+            )
+    payload.pop("include", None)
+
+    prompt_cache_key = payload.get("prompt_cache_key")
+    if prompt_cache_key is not None and not isinstance(prompt_cache_key, str):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot consume non-string Responses prompt_cache_key.",
+        )
+    payload.pop("prompt_cache_key", None)
+
+    store = payload.get("store")
+    if store is not None and store is not False:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot consume Responses store=true on a Chat route.",
+        )
+    payload.pop("store", None)
+
+    text = payload.get("text")
+    if text is not None:
+        if not isinstance(text, Mapping) or set(text) - {"verbosity"}:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses text semantics.",
+            )
+        verbosity = text.get("verbosity")
+        if verbosity is not None and verbosity not in {"low", "medium", "high"}:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses text verbosity.",
+            )
+    payload.pop("text", None)
+
+    reasoning = payload.get("reasoning")
+    if reasoning is not None:
+        if not isinstance(reasoning, Mapping) or set(reasoning) - {"effort"}:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning semantics.",
+            )
+        effort = reasoning.get("effort")
+        if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning effort.",
+            )
+    payload.pop("reasoning", None)
+
+
 def _function_arguments(value: Mapping[str, Any], label: str) -> str:
     if "arguments" not in value:
         return ""
@@ -3255,7 +3324,19 @@ def prepare_exchange(
     outbound = str(outbound_format or "").strip().lower()
     try:
         if inbound == "responses" and outbound == "chat_completions":
-            upstream = responses_request_to_chat_completion_body(request_body)
+            request_payload = json.loads(request_body.decode("utf-8-sig"))
+            if not isinstance(request_payload, dict):
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot prepare a non-object Responses request.",
+                )
+            _consume_codex_chat_transport_fields(request_payload)
+            prepared_request_body = json.dumps(
+                request_payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            upstream = responses_request_to_chat_completion_body(prepared_request_body)
             payload = json.loads(upstream.decode("utf-8"))
             stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
             return PreparedExchange(inbound, outbound, upstream, stream)

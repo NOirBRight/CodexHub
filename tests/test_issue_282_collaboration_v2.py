@@ -159,11 +159,6 @@ def _v2_provider_neutral_history() -> list[dict[str, object]]:
     for item in history:
         if item.get("type") == "function_call":
             item["encrypted_function_args"] = []
-    history[-1] = {
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_text", "text": "done"}],
-    }
     return history
 
 
@@ -546,7 +541,7 @@ def test_v2_provider_adapter_removes_official_encryption_schema_annotations() ->
     assert "encrypted" not in json.dumps(transformed["tools"], sort_keys=True)
 
 
-def test_v2_chat_surface_fails_before_sampling_instead_of_downgrading() -> None:
+def test_v2_chat_surface_uses_capability_driven_namespace_adapter() -> None:
     body = _request(COLLABORATION_V2)
     upstream = {
         "name": "chat_endpoint",
@@ -555,16 +550,21 @@ def test_v2_chat_surface_fails_before_sampling_instead_of_downgrading() -> None:
         "tool_protocol": "chat_tools",
         "tool_surface_strategy": "eager",
     }
+    context: dict = {}
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+    transformed = json.loads(
         codex_proxy.compatible_request_body(
             json.dumps(body).encode(),
             upstream,
-            event_context={},
+            event_context=context,
             inject_codex_tools=False,
         )
+    )
 
-    assert caught.value.cause.code == "tool_compatibility_required_unavailable"
+    assert len(transformed["tools"]) == 6
+    assert all(tool["type"] == "function" for tool in transformed["tools"])
+    assert all(tool["name"].startswith("__codexhub_ns_") for tool in transformed["tools"])
+    assert context["_runtime_tool_compatibility_plan"].capabilities.accepts_namespace_adapter is True
 
 
 def test_v2_unrepresentable_responses_surface_fails_instead_of_omitting_lifecycle() -> None:
@@ -622,7 +622,7 @@ def test_v2_adapted_history_and_restart_replay_use_the_same_inverse() -> None:
     assert plan.decode_payload({"input": first["input"]})["input"] == _v2_provider_neutral_history()
 
 
-def test_v2_external_plaintext_agent_message_becomes_provider_neutral_message() -> None:
+def test_v2_external_plaintext_agent_message_uses_reversible_provider_envelope() -> None:
     plan = _v2_plan()
     item = _v2_plaintext_agent_message()
 
@@ -633,13 +633,13 @@ def test_v2_external_plaintext_agent_message_becomes_provider_neutral_message() 
         }
     )
 
-    assert encoded["input"] == [
-        {
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "done"}],
-        }
-    ]
+    message = encoded["input"][0]
+    assert message["type"] == "message"
+    assert message["role"] == "user"
+    assert message["content"][0]["text"].startswith(
+        "__codexhub_agent_message_v2__:"
+    )
+    assert plan.decode_payload({"input": [message]})["input"] == [item]
 
 
 def test_v2_adapted_response_marks_message_arguments_as_plaintext() -> None:
@@ -827,11 +827,6 @@ def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
         for item in expected:
             if item.get("type") == "function_call":
                 item["encrypted_function_args"] = []
-        expected[-1] = {
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "done"}],
-        }
     assert decoded["input"] == expected
 
 

@@ -28,8 +28,14 @@ Unknown fields/items cannot disappear. There is no hidden fallback to
 Responses, Official, another model, or another Provider.
 
 Collaboration V2 namespace tools have no Chat native form. Their Chat path is
-the Gateway adapter required by #394 (injective function aliases). Encrypted
-Official payloads stay `unavailable` on third-party Chat.
+the Gateway adapter implemented by #394 (injective function aliases plus
+request-bound plaintext `agent_message` envelopes). Encrypted Official payloads
+stay `unavailable` on third-party Chat.
+
+The real Codex transport defaults are classified by exact value before Chat
+sampling: lifecycle `client_metadata`, cache identity, the encrypted-reasoning
+include request, bounded verbosity, and bounded reasoning effort are consumed
+locally. Unknown keys, types, or values still fail closed.
 
 ## Regenerate
 

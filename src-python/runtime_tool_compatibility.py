@@ -41,6 +41,7 @@ CUSTOM_INPUT_KEY = "__codexhub_custom_input"
 CUSTOM_OUTPUT_KEY = "__codexhub_custom_output"
 TOOL_SEARCH_INPUT_KEY = "__codexhub_tool_search_input"
 TOOL_SEARCH_OUTPUT_KEY = "__codexhub_tool_search_output"
+_AGENT_MESSAGE_ENVELOPE_PREFIX = "__codexhub_agent_message_v2__:"
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
 _CUSTOM_ALIAS_PREFIX = "__codexhub_custom_"
@@ -334,6 +335,7 @@ class RequestScopedToolAliasRegistry:
         self._remapped_aliases: dict[str, str] = {}
         self._by_declaration: dict[tuple[int, int | None], str] = {}
         self._calls: dict[str, AliasRecord] = {}
+        self._agent_messages: dict[str, dict[str, Any]] = {}
         # ``max_alias_attempts`` bounds collision probing for one allocation;
         # it must not cap the total number of aliases in a request.  Keep the
         # next ordinal per alias family so a request with more than that many
@@ -494,6 +496,30 @@ class RequestScopedToolAliasRegistry:
     def record_for_call(self, call_id: Any) -> AliasRecord | None:
         return self._calls.get(call_id) if isinstance(call_id, str) else None
 
+    def bind_agent_message(self, envelope: str, item: Mapping[str, Any]) -> None:
+        if not envelope.startswith(_AGENT_MESSAGE_ENVELOPE_PREFIX):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "invalid_agent_message_envelope",
+                surface="history",
+            )
+        previous = self._agent_messages.get(envelope)
+        if previous is not None:
+            if previous == item:
+                return
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "duplicate_item_identity",
+                surface="history",
+            )
+        self._agent_messages[envelope] = _copy_mapping(item)
+
+    def agent_message_for_envelope(self, envelope: Any) -> dict[str, Any] | None:
+        if not isinstance(envelope, str):
+            return None
+        item = self._agent_messages.get(envelope)
+        return _copy_mapping(item) if item is not None else None
+
     def new_attempt(self) -> "RequestScopedToolAliasRegistry":
         """Copy immutable alias ownership while starting a fresh call ledger.
 
@@ -512,6 +538,7 @@ class RequestScopedToolAliasRegistry:
         attempt._remapped_aliases = dict(self._remapped_aliases)
         attempt._by_declaration = dict(self._by_declaration)
         attempt._calls = {}
+        attempt._agent_messages = dict(self._agent_messages)
         attempt._next_ordinals = dict(self._next_ordinals)
         return attempt
 
@@ -851,12 +878,16 @@ def build_tool_compatibility_plan(
             exc.classification,
             surface="request",
         ) from exc
+    capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
     if (
         collaboration_version == COLLABORATION_V2
         and selected_protocol != "responses_structured"
+        and not (
+            capabilities.function_lifecycle
+            and capabilities.accepts_namespace_adapter
+        )
     ):
         raise RequiredToolUnavailableError(family=NAMESPACE)
-    capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
     hosted = _provider_hosted(provider_hosted_capabilities)
 
     all_native_names: set[str] = {str(name) for name in native_names if isinstance(name, str)}
@@ -2083,11 +2114,11 @@ class ToolCompatibilityPlan:
     def _encode_agent_message(self, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Adapt plaintext V2 handoff history for an ordinary provider.
 
-        ``agent_message`` is an Official collaboration item.  A third-party
-        Responses endpoint can consume the plaintext meaning as a normal user
-        message, but it cannot consume the native item or decrypt Official
-        encrypted content.  Never discard encrypted content or pretend that it
-        was decoded: rejecting the request is the only lossless boundary.
+        ``agent_message`` is an Official collaboration item. A third-party
+        function-capable endpoint can consume its plaintext meaning only as a
+        request-bound user-message envelope; the registry preserves the exact
+        author, recipient, item id, and content for inverse history conversion.
+        It cannot decrypt Official encrypted content, so that boundary rejects.
         """
 
         entry = self._collaboration_v2_entry()
@@ -2107,14 +2138,43 @@ class ToolCompatibilityPlan:
                 surface="history",
             )
 
+        envelope = _AGENT_MESSAGE_ENVELOPE_PREFIX + json.dumps(
+            item,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.registry.bind_agent_message(envelope, item)
         return {
             "type": "message",
             "role": "user",
-            "content": [
-                {"type": "input_text", "text": part["text"]}
-                for part in content
-            ],
+            "content": [{"type": "input_text", "text": envelope}],
         }, True
+
+    def _decode_agent_message(self, item: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+        if item.get("type") != "message" or item.get("role") != "user":
+            return _copy_mapping(item), False
+        content = item.get("content")
+        if not isinstance(content, list) or len(content) != 1:
+            return _copy_mapping(item), False
+        part = content[0]
+        if not isinstance(part, Mapping) or set(part) != {"type", "text"}:
+            return _copy_mapping(item), False
+        text = part.get("text")
+        if not isinstance(text, str) or not text.startswith(_AGENT_MESSAGE_ENVELOPE_PREFIX):
+            return _copy_mapping(item), False
+        original = self.registry.agent_message_for_envelope(text)
+        if original is None:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_agent_message_envelope",
+                surface="history",
+            )
+        try:
+            validate_agent_message(original)
+        except CollaborationContractError as exc:
+            self._raise_collaboration_contract(exc, surface="history")
+        return original, True
 
     @staticmethod
     def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
@@ -3186,7 +3246,13 @@ class ToolCompatibilityPlan:
             if require_completed and item.get("status") not in {None, "completed"}:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_hosted_lifecycle", surface=surface)
 
-    def _decode_items(self, items: Any, *, reject_omitted_response: bool = False) -> tuple[Any, bool]:
+    def _decode_items(
+        self,
+        items: Any,
+        *,
+        reject_omitted_response: bool = False,
+        decode_agent_messages: bool = True,
+    ) -> tuple[Any, bool]:
         if not isinstance(items, list):
             return items, False
         result: list[Any] = []
@@ -3367,6 +3433,8 @@ class ToolCompatibilityPlan:
                     "unsupported_hosted_lifecycle",
                     surface=surface,
                 )
+            elif decode_agent_messages and item_type == "message":
+                decoded, item_changed = self._decode_agent_message(item)
             else:
                 decoded, item_changed = item, False
                 if self.registry.looks_like_alias(item.get("name")):
@@ -3383,6 +3451,7 @@ class ToolCompatibilityPlan:
                 decoded, item_changed = self._decode_items(
                     result[key],
                     reject_omitted_response=key == "output",
+                    decode_agent_messages=key != "output",
                 )
                 if item_changed:
                     result[key] = decoded
