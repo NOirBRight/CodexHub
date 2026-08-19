@@ -1,7 +1,7 @@
 # Authenticated Ollama Provider qualification
 
-Source candidate: `45e06184f00b5ced9df40069c8fede0423a98840`  
-Client: `codex-cli 0.147.0`  
+Source candidate: `73e4ed3d444414dedcc1a5902fa9f0a9c848d469`
+Client: `codex-cli 0.147.0`
 Provider: `ollama-cloud` (`https://ollama.com/v1`)
 
 This evidence qualifies the maintained GLM-5.2, Kimi K2.7 Code, and DeepSeek
@@ -31,10 +31,22 @@ cells passed:
 
 Each cell remained bound to Provider `ollama-cloud`, its exact upstream model,
 and protocol `chat_completions`. Fallback count is zero and no V1 namespace or
-tool was observed. The file workflow records both `command_execution` and
-`file_change`; the exact target-scoped patch is supplied to remove model prompt
-variance while still exercising the reversible custom-tool call/result/history
-adapter.
+tool was observed. Qualification now requires at least one genuinely progressive
+text stream (three or more Chat chunks and at least two text delta sources), the
+real CLI's explicit default reasoning policy, and a second text turn resumed in
+the same session. The file workflow records both `command_execution` and
+`file_change`, plus exact standard/custom call-to-result identity. The exact
+target-scoped patch is supplied to remove model prompt variance while still
+exercising the reversible custom-tool call/result/history adapter.
+
+Collaboration runs across bounded same-session phases: spawn/wait must first
+deliver a non-timeout child result; follow-up, message, list, and interrupt are
+then each required in their own turn against that canonical task identity. This
+removes model instruction-order variance without weakening the lifecycle oracle:
+every phase must complete, emit its sentinel, and increase the target tool count.
+Evidence also requires exact call/result history identity, frozen
+wait/list-status/interrupt result shapes, parent completion, and another turn
+after Gateway restart without a new spawn.
 
 The lifecycle deliberately interrupts a live child. Corresponding bounded 499
 `downstream_client_closed` observations are retained rather than rewritten as
@@ -71,5 +83,5 @@ Responses codec cannot filter declarations on a Chat attempt.
   --cell chat_completions:kimi-k2.7-code `
   --cell chat_completions:deepseek-v4-flash:0731 `
   --output-dir docs/evidence/authenticated-provider/chat `
-  --candidate-sha 45e06184f00b5ced9df40069c8fede0423a98840
+  --candidate-sha 73e4ed3d444414dedcc1a5902fa9f0a9c848d469
 ```

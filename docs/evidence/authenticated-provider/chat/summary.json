@@ -1,31 +1,49 @@
 {
-  "candidate_sha": "45e06184f00b5ced9df40069c8fede0423a98840",
+  "candidate_sha": "73e4ed3d444414dedcc1a5902fa9f0a9c848d469",
   "cells": [
     {
       "cell": "chat_completions:glm-5.2",
       "gateway": {
         "event_types": {
-          "chat_reasoning_extensions_suppressed": 11,
-          "chat_stream_shape_summary": 19,
-          "chat_to_responses_event_summary": 76,
+          "chat_reasoning_extensions_suppressed": 24,
+          "chat_stream_shape_summary": 36,
+          "chat_to_responses_event_summary": 140,
           "downstream_stream_closed": 1,
-          "external_tool_surface_prepared": 20,
-          "request_complete": 19,
-          "request_start": 20,
-          "runtime_tool_adapter_request": 20,
-          "runtime_tool_adapter_response": 13,
-          "runtime_tool_compatibility_planned": 20,
+          "external_tool_surface_prepared": 36,
+          "request_complete": 35,
+          "request_error": 3,
+          "request_start": 36,
+          "runtime_tool_adapter_request": 36,
+          "runtime_tool_adapter_response": 20,
+          "runtime_tool_compatibility_planned": 38,
           "third_party_apply_patch_freeform_adapter": 1,
           "third_party_apply_patch_freeform_history_adapter": 2
         },
         "failures": [
           {
+            "category": "request_or_semantic_rejection",
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "category": "request_or_semantic_rejection",
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "category": "request_or_semantic_rejection",
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "category": "client_cancellation",
             "event": "downstream_stream_closed",
             "failure_class": "downstream_client_closed",
             "failure_phase": "downstream_write",
             "status": 499
           },
           {
+            "category": "client_cancellation",
             "event": "request_complete",
             "status": 499
           }
@@ -41,14 +59,24 @@
         ],
         "providers": [
           "ollama-cloud"
-        ]
+        ],
+        "reasoning_policies": [
+          "explicit"
+        ],
+        "streaming": {
+          "max_chunk_count": 1199,
+          "progressive_text_stream_count": 21,
+          "summary_count": 36,
+          "text_delta_source_count": 3086
+        }
       },
       "identity_bound": true,
       "model": "glm-5.2",
       "protocol": "chat_completions",
+      "protocol_observations_passed": true,
       "provider_id": "ollama-cloud",
       "provider_probe": {
-        "elapsed_ms": 1211,
+        "elapsed_ms": 1616,
         "endpoint": "chat/completions",
         "has_choices": true,
         "has_output": false,
@@ -60,9 +88,52 @@
       "redacted_provider_config_sha256": "bb7f8d279d6461ff98d217358fdd7d6ef9a470c3c8b656d52b2f7fbe105e954f",
       "scenarios": {
         "collaboration": {
+          "canonical_task_identity_observed": true,
+          "child_delivery_recovery": {
+            "attempt_count": 0,
+            "passed": true,
+            "sentinel_observed": false,
+            "target_call_observed": false,
+            "terminal_event": null
+          },
           "child_result_delivery_observed": true,
           "cross_home_rejected_before_gateway_request": true,
+          "exact_call_result_history_identity": true,
           "exit_code": 0,
+          "lifecycle_phases": {
+            "followup_task": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "interrupt_agent": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "list_agents": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "send_message": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            }
+          },
+          "observed_first_use_order": [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent"
+          ],
           "observed_tools": [
             "followup_task",
             "interrupt_agent",
@@ -71,6 +142,24 @@
             "spawn_agent",
             "wait_agent"
           ],
+          "phase1": {
+            "exit_code": 0,
+            "sentinel_observed": true,
+            "terminal_event": "turn.completed"
+          },
+          "qualified_phase_sequence": [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent"
+          ],
+          "result_shapes": {
+            "interrupt": true,
+            "list_status": true,
+            "wait": true
+          },
           "same_home_restart": {
             "agents_configuration_preserved": true,
             "config_preserved": true,
@@ -85,6 +174,10 @@
           "terminal_event": "turn.completed"
         },
         "file_workflow": {
+          "custom_tool_lifecycle": {
+            "call_count": 1,
+            "exact_call_result_identity": true
+          },
           "exit_code": 0,
           "file_verified": true,
           "item_types": [
@@ -93,6 +186,10 @@
             "file_change"
           ],
           "sentinel_observed": true,
+          "standard_function_lifecycle": {
+            "call_count": 2,
+            "exact_call_result_identity": true
+          },
           "status": "passed",
           "terminal_error": null,
           "terminal_event": "turn.completed"
@@ -102,6 +199,15 @@
           "item_types": [
             "agent_message"
           ],
+          "multi_turn_history": {
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_item_types": [
+              "agent_message"
+            ],
+            "resume_sentinel_observed": true,
+            "resume_terminal_event": "turn.completed"
+          },
           "sentinel_observed": true,
           "status": "passed",
           "terminal_event": "turn.completed"
@@ -113,45 +219,28 @@
       "cell": "chat_completions:kimi-k2.7-code",
       "gateway": {
         "event_types": {
-          "chat_reasoning_extensions_suppressed": 11,
-          "chat_stream_shape_summary": 29,
-          "chat_to_responses_event_summary": 112,
-          "downstream_stream_closed": 2,
-          "request_complete": 29,
-          "request_error": 2,
-          "request_start": 30,
-          "runtime_tool_adapter_request": 30,
-          "runtime_tool_adapter_response": 22,
-          "runtime_tool_compatibility_planned": 31,
+          "chat_reasoning_extensions_suppressed": 12,
+          "chat_stream_shape_summary": 21,
+          "chat_to_responses_event_summary": 84,
+          "downstream_stream_closed": 1,
+          "request_complete": 21,
+          "request_start": 21,
+          "runtime_tool_adapter_request": 21,
+          "runtime_tool_adapter_response": 8,
+          "runtime_tool_compatibility_planned": 21,
           "third_party_apply_patch_freeform_adapter": 1,
           "third_party_apply_patch_freeform_history_adapter": 2
         },
         "failures": [
           {
-            "event": "request_error",
-            "status": 400
-          },
-          {
-            "event": "request_error",
-            "status": 400
-          },
-          {
+            "category": "client_cancellation",
             "event": "downstream_stream_closed",
             "failure_class": "downstream_client_closed",
             "failure_phase": "downstream_write",
             "status": 499
           },
           {
-            "event": "request_complete",
-            "status": 499
-          },
-          {
-            "event": "downstream_stream_closed",
-            "failure_class": "downstream_client_closed",
-            "failure_phase": "downstream_write",
-            "status": 499
-          },
-          {
+            "category": "client_cancellation",
             "event": "request_complete",
             "status": 499
           }
@@ -167,14 +256,24 @@
         ],
         "providers": [
           "ollama-cloud"
-        ]
+        ],
+        "reasoning_policies": [
+          "explicit"
+        ],
+        "streaming": {
+          "max_chunk_count": 546,
+          "progressive_text_stream_count": 10,
+          "summary_count": 21,
+          "text_delta_source_count": 1332
+        }
       },
       "identity_bound": true,
       "model": "kimi-k2.7-code",
       "protocol": "chat_completions",
+      "protocol_observations_passed": true,
       "provider_id": "ollama-cloud",
       "provider_probe": {
-        "elapsed_ms": 1667,
+        "elapsed_ms": 1986,
         "endpoint": "chat/completions",
         "has_choices": true,
         "has_output": false,
@@ -186,9 +285,52 @@
       "redacted_provider_config_sha256": "8b1dab01dfe5b1bb801e98867563c0d72d7d499b3aacf03f52e9f31ba02233c7",
       "scenarios": {
         "collaboration": {
+          "canonical_task_identity_observed": true,
+          "child_delivery_recovery": {
+            "attempt_count": 0,
+            "passed": true,
+            "sentinel_observed": false,
+            "target_call_observed": false,
+            "terminal_event": null
+          },
           "child_result_delivery_observed": true,
           "cross_home_rejected_before_gateway_request": true,
+          "exact_call_result_history_identity": true,
           "exit_code": 0,
+          "lifecycle_phases": {
+            "followup_task": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "interrupt_agent": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "list_agents": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "send_message": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            }
+          },
+          "observed_first_use_order": [
+            "spawn_agent",
+            "wait_agent",
+            "send_message",
+            "followup_task",
+            "list_agents",
+            "interrupt_agent"
+          ],
           "observed_tools": [
             "followup_task",
             "interrupt_agent",
@@ -197,6 +339,24 @@
             "spawn_agent",
             "wait_agent"
           ],
+          "phase1": {
+            "exit_code": 0,
+            "sentinel_observed": true,
+            "terminal_event": "turn.completed"
+          },
+          "qualified_phase_sequence": [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent"
+          ],
+          "result_shapes": {
+            "interrupt": true,
+            "list_status": true,
+            "wait": true
+          },
           "same_home_restart": {
             "agents_configuration_preserved": true,
             "config_preserved": true,
@@ -204,13 +364,17 @@
             "passed": true,
             "resume_exit_code": 0,
             "resume_terminal_event": "turn.completed",
-            "resumed_request_count": 2
+            "resumed_request_count": 1
           },
           "sentinel_observed": true,
           "status": "passed",
           "terminal_event": "turn.completed"
         },
         "file_workflow": {
+          "custom_tool_lifecycle": {
+            "call_count": 1,
+            "exact_call_result_identity": true
+          },
           "exit_code": 0,
           "file_verified": true,
           "item_types": [
@@ -219,6 +383,10 @@
             "file_change"
           ],
           "sentinel_observed": true,
+          "standard_function_lifecycle": {
+            "call_count": 2,
+            "exact_call_result_identity": true
+          },
           "status": "passed",
           "terminal_error": null,
           "terminal_event": "turn.completed"
@@ -228,6 +396,15 @@
           "item_types": [
             "agent_message"
           ],
+          "multi_turn_history": {
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_item_types": [
+              "agent_message"
+            ],
+            "resume_sentinel_observed": true,
+            "resume_terminal_event": "turn.completed"
+          },
           "sentinel_observed": true,
           "status": "passed",
           "terminal_event": "turn.completed"
@@ -239,41 +416,46 @@
       "cell": "chat_completions:deepseek-v4-flash:0731",
       "gateway": {
         "event_types": {
-          "chat_reasoning_extensions_suppressed": 11,
-          "chat_stream_shape_summary": 32,
-          "chat_to_responses_event_summary": 128,
+          "chat_reasoning_extensions_suppressed": 16,
+          "chat_stream_shape_summary": 28,
+          "chat_to_responses_event_summary": 112,
           "downstream_stream_closed": 2,
-          "request_complete": 32,
+          "request_complete": 29,
           "request_error": 1,
-          "request_start": 32,
-          "runtime_tool_adapter_request": 32,
-          "runtime_tool_adapter_response": 24,
-          "runtime_tool_compatibility_planned": 33,
+          "request_start": 29,
+          "runtime_tool_adapter_request": 29,
+          "runtime_tool_adapter_response": 15,
+          "runtime_tool_compatibility_planned": 30,
           "third_party_apply_patch_freeform_adapter": 1,
           "third_party_apply_patch_freeform_history_adapter": 2
         },
         "failures": [
           {
+            "category": "request_or_semantic_rejection",
             "event": "request_error",
             "status": 400
           },
           {
+            "category": "client_cancellation",
             "event": "downstream_stream_closed",
             "failure_class": "downstream_client_closed",
             "failure_phase": "downstream_write",
             "status": 499
           },
           {
+            "category": "client_cancellation",
             "event": "request_complete",
             "status": 499
           },
           {
+            "category": "client_cancellation",
             "event": "downstream_stream_closed",
             "failure_class": "downstream_client_closed",
             "failure_phase": "downstream_write",
             "status": 499
           },
           {
+            "category": "client_cancellation",
             "event": "request_complete",
             "status": 499
           }
@@ -289,14 +471,24 @@
         ],
         "providers": [
           "ollama-cloud"
-        ]
+        ],
+        "reasoning_policies": [
+          "explicit"
+        ],
+        "streaming": {
+          "max_chunk_count": 77,
+          "progressive_text_stream_count": 11,
+          "summary_count": 28,
+          "text_delta_source_count": 442
+        }
       },
       "identity_bound": true,
       "model": "deepseek-v4-flash:0731",
       "protocol": "chat_completions",
+      "protocol_observations_passed": true,
       "provider_id": "ollama-cloud",
       "provider_probe": {
-        "elapsed_ms": 7326,
+        "elapsed_ms": 1563,
         "endpoint": "chat/completions",
         "has_choices": true,
         "has_output": false,
@@ -308,9 +500,52 @@
       "redacted_provider_config_sha256": "ab01536bf089daaaa5c337f50435bb28dac4fdeacc008fce841da172cf64d743",
       "scenarios": {
         "collaboration": {
+          "canonical_task_identity_observed": true,
+          "child_delivery_recovery": {
+            "attempt_count": 0,
+            "passed": true,
+            "sentinel_observed": false,
+            "target_call_observed": false,
+            "terminal_event": null
+          },
           "child_result_delivery_observed": true,
           "cross_home_rejected_before_gateway_request": true,
+          "exact_call_result_history_identity": true,
           "exit_code": 0,
+          "lifecycle_phases": {
+            "followup_task": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "interrupt_agent": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "list_agents": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            },
+            "send_message": {
+              "exit_code": 0,
+              "sentinel_observed": true,
+              "target_call_observed": true,
+              "terminal_event": "turn.completed"
+            }
+          },
+          "observed_first_use_order": [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent"
+          ],
           "observed_tools": [
             "followup_task",
             "interrupt_agent",
@@ -319,6 +554,24 @@
             "spawn_agent",
             "wait_agent"
           ],
+          "phase1": {
+            "exit_code": 0,
+            "sentinel_observed": true,
+            "terminal_event": "turn.completed"
+          },
+          "qualified_phase_sequence": [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent"
+          ],
+          "result_shapes": {
+            "interrupt": true,
+            "list_status": true,
+            "wait": true
+          },
           "same_home_restart": {
             "agents_configuration_preserved": true,
             "config_preserved": true,
@@ -333,6 +586,10 @@
           "terminal_event": "turn.completed"
         },
         "file_workflow": {
+          "custom_tool_lifecycle": {
+            "call_count": 1,
+            "exact_call_result_identity": true
+          },
           "exit_code": 0,
           "file_verified": true,
           "item_types": [
@@ -341,6 +598,10 @@
             "file_change"
           ],
           "sentinel_observed": true,
+          "standard_function_lifecycle": {
+            "call_count": 2,
+            "exact_call_result_identity": true
+          },
           "status": "passed",
           "terminal_error": null,
           "terminal_event": "turn.completed"
@@ -350,6 +611,15 @@
           "item_types": [
             "agent_message"
           ],
+          "multi_turn_history": {
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_item_types": [
+              "agent_message"
+            ],
+            "resume_sentinel_observed": true,
+            "resume_terminal_event": "turn.completed"
+          },
           "sentinel_observed": true,
           "status": "passed",
           "terminal_event": "turn.completed"

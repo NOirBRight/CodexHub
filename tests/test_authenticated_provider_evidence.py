@@ -53,13 +53,60 @@ def test_all_authenticated_chat_cells_cover_text_patch_and_v2() -> None:
         assert all(value["status"] == "passed" for value in scenarios.values())
         assert scenarios["identity_text"]["terminal_event"] == "turn.completed"
         assert scenarios["identity_text"]["sentinel_observed"] is True
+        assert scenarios["identity_text"]["multi_turn_history"]["passed"] is True
+        assert scenarios["identity_text"]["multi_turn_history"]["resume_item_types"] == [
+            "agent_message"
+        ]
         assert scenarios["file_workflow"]["file_verified"] is True
         assert {"command_execution", "file_change"} <= set(
             scenarios["file_workflow"]["item_types"]
         )
+        assert scenarios["file_workflow"]["standard_function_lifecycle"][
+            "exact_call_result_identity"
+        ] is True
+        assert scenarios["file_workflow"]["custom_tool_lifecycle"][
+            "exact_call_result_identity"
+        ] is True
         collaboration = scenarios["collaboration"]
         assert set(collaboration["observed_tools"]) == EXPECTED_TOOLS
+        assert collaboration["qualified_phase_sequence"] == [
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent",
+        ]
+        assert set(collaboration["lifecycle_phases"]) == {
+            "followup_task",
+            "send_message",
+            "list_agents",
+            "interrupt_agent",
+        }
+        for phase in collaboration["lifecycle_phases"].values():
+            assert phase == {
+                "exit_code": 0,
+                "terminal_event": "turn.completed",
+                "sentinel_observed": True,
+                "target_call_observed": True,
+            }
+        assert collaboration["phase1"]["terminal_event"] == "turn.completed"
+        assert collaboration["phase1"]["sentinel_observed"] is True
+        assert collaboration["exact_call_result_history_identity"] is True
+        assert collaboration["canonical_task_identity_observed"] is True
         assert collaboration["child_result_delivery_observed"] is True
+        recovery = collaboration["child_delivery_recovery"]
+        assert recovery["passed"] is True
+        assert recovery["attempt_count"] in {0, 1, 2}
+        if recovery["attempt_count"]:
+            assert recovery["terminal_event"] == "turn.completed"
+            assert recovery["sentinel_observed"] is True
+            assert recovery["target_call_observed"] is True
+        assert collaboration["result_shapes"] == {
+            "wait": True,
+            "list_status": True,
+            "interrupt": True,
+        }
         assert collaboration["same_home_restart"]["passed"] is True
         assert collaboration["same_home_restart"]["config_preserved"] is True
         assert collaboration["same_home_restart"]["agents_configuration_preserved"] is True
@@ -77,13 +124,25 @@ def test_all_authenticated_chat_cells_cover_text_patch_and_v2() -> None:
         assert gateway["event_types"]["chat_to_responses_event_summary"] > 0
         assert gateway["event_types"]["chat_reasoning_extensions_suppressed"] > 0
         assert gateway["event_types"]["runtime_tool_adapter_response"] >= 6
+        assert gateway["reasoning_policies"] == ["explicit"]
+        assert gateway["streaming"]["progressive_text_stream_count"] >= 1
+        assert gateway["streaming"]["text_delta_source_count"] >= 2
+        assert cell["protocol_observations_passed"] is True
         for failure in gateway["failures"]:
+            assert failure["category"] in {
+                "client_cancellation",
+                "request_or_semantic_rejection",
+                "upstream_transport_or_availability",
+                "upstream_or_gateway_failure",
+                "other_non_success",
+            }
             assert set(failure) <= {
                 "event",
                 "status",
                 "failure_class",
                 "failure_phase",
                 "retry_safety",
+                "category",
             }
 
 
