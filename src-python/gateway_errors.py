@@ -100,3 +100,35 @@ class GatewayPreResponseBudgetExhausted(TimeoutError):
         self.budget_seconds = budget_seconds
         super().__init__("Gateway pre-response budget exhausted before a usable upstream response.")
 
+
+
+def _identity_failure(
+    message: str,
+    *,
+    reason: str,
+    provider_id: str | None = None,
+    model_slug: str | None = None,
+) -> ModelIdentityResolutionError:
+    return ModelIdentityResolutionError(
+        message,
+        classification="local_resolution_failure",
+        reason=reason,
+        provider_id=provider_id,
+        model_slug=model_slug,
+    )
+
+
+def _catalog_failure(
+    message: str,
+    *,
+    reason: str,
+    provider_id: str | None = None,
+    model_slug: str | None = None,
+) -> ModelIdentityResolutionError:
+    return ModelIdentityResolutionError(
+        message,
+        classification="catalog_inconsistency",
+        reason=reason,
+        provider_id=provider_id,
+        model_slug=model_slug,
+    )

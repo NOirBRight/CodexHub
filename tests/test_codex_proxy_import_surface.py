@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import codex_proxy
 import gateway_errors
+import gateway_settings
+import gateway_sse
+import route_plan
 import route_primitives
 
 # One-time scan of tests/ imports, attributes, and patch targets.
@@ -271,6 +274,14 @@ REEXPORT_IDENTITY = {
     "UnsupportedRouteProtocolError": gateway_errors.UnsupportedRouteProtocolError,
     "UnqualifiedRouteProtocolError": gateway_errors.UnqualifiedRouteProtocolError,
     "GatewayPreResponseBudgetExhausted": gateway_errors.GatewayPreResponseBudgetExhausted,
+    "upstream_timeout_seconds": gateway_settings.upstream_timeout_seconds,
+    "gateway_client_key": gateway_settings.gateway_client_key,
+    "route_plan_for_request": route_plan.route_plan_for_request,
+    "RoutePlan": route_plan.RoutePlan,
+    "behavior_profile_for_request": route_plan.behavior_profile_for_request,
+    "_sse_payload_bytes": gateway_sse._sse_payload_bytes,
+    "_parse_sse_json_payload": gateway_sse._parse_sse_json_payload,
+    "_identity_failure": gateway_errors._identity_failure,
 }
 
 
