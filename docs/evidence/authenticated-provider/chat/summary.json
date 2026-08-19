@@ -1,0 +1,373 @@
+{
+  "candidate_sha": "45e06184f00b5ced9df40069c8fede0423a98840",
+  "cells": [
+    {
+      "cell": "chat_completions:glm-5.2",
+      "gateway": {
+        "event_types": {
+          "chat_reasoning_extensions_suppressed": 11,
+          "chat_stream_shape_summary": 19,
+          "chat_to_responses_event_summary": 76,
+          "downstream_stream_closed": 1,
+          "external_tool_surface_prepared": 20,
+          "request_complete": 19,
+          "request_start": 20,
+          "runtime_tool_adapter_request": 20,
+          "runtime_tool_adapter_response": 13,
+          "runtime_tool_compatibility_planned": 20,
+          "third_party_apply_patch_freeform_adapter": 1,
+          "third_party_apply_patch_freeform_history_adapter": 2
+        },
+        "failures": [
+          {
+            "event": "downstream_stream_closed",
+            "failure_class": "downstream_client_closed",
+            "failure_phase": "downstream_write",
+            "status": 499
+          },
+          {
+            "event": "request_complete",
+            "status": 499
+          }
+        ],
+        "fallback_count": 0,
+        "has_v1_observation": false,
+        "has_v2_observation": true,
+        "models": [
+          "glm-5.2"
+        ],
+        "protocols": [
+          "chat_completions"
+        ],
+        "providers": [
+          "ollama-cloud"
+        ]
+      },
+      "identity_bound": true,
+      "model": "glm-5.2",
+      "protocol": "chat_completions",
+      "provider_id": "ollama-cloud",
+      "provider_probe": {
+        "elapsed_ms": 1211,
+        "endpoint": "chat/completions",
+        "has_choices": true,
+        "has_output": false,
+        "http_status": 200,
+        "object": "chat.completion",
+        "status": "passed",
+        "stream": false
+      },
+      "redacted_provider_config_sha256": "bb7f8d279d6461ff98d217358fdd7d6ef9a470c3c8b656d52b2f7fbe105e954f",
+      "scenarios": {
+        "collaboration": {
+          "child_result_delivery_observed": true,
+          "cross_home_rejected_before_gateway_request": true,
+          "exit_code": 0,
+          "observed_tools": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "same_home_restart": {
+            "agents_configuration_preserved": true,
+            "config_preserved": true,
+            "no_new_spawn": true,
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_terminal_event": "turn.completed",
+            "resumed_request_count": 2
+          },
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        },
+        "file_workflow": {
+          "exit_code": 0,
+          "file_verified": true,
+          "item_types": [
+            "agent_message",
+            "command_execution",
+            "file_change"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_error": null,
+          "terminal_event": "turn.completed"
+        },
+        "identity_text": {
+          "exit_code": 0,
+          "item_types": [
+            "agent_message"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        }
+      },
+      "status": "passed"
+    },
+    {
+      "cell": "chat_completions:kimi-k2.7-code",
+      "gateway": {
+        "event_types": {
+          "chat_reasoning_extensions_suppressed": 11,
+          "chat_stream_shape_summary": 29,
+          "chat_to_responses_event_summary": 112,
+          "downstream_stream_closed": 2,
+          "request_complete": 29,
+          "request_error": 2,
+          "request_start": 30,
+          "runtime_tool_adapter_request": 30,
+          "runtime_tool_adapter_response": 22,
+          "runtime_tool_compatibility_planned": 31,
+          "third_party_apply_patch_freeform_adapter": 1,
+          "third_party_apply_patch_freeform_history_adapter": 2
+        },
+        "failures": [
+          {
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "event": "downstream_stream_closed",
+            "failure_class": "downstream_client_closed",
+            "failure_phase": "downstream_write",
+            "status": 499
+          },
+          {
+            "event": "request_complete",
+            "status": 499
+          },
+          {
+            "event": "downstream_stream_closed",
+            "failure_class": "downstream_client_closed",
+            "failure_phase": "downstream_write",
+            "status": 499
+          },
+          {
+            "event": "request_complete",
+            "status": 499
+          }
+        ],
+        "fallback_count": 0,
+        "has_v1_observation": false,
+        "has_v2_observation": true,
+        "models": [
+          "kimi-k2.7-code"
+        ],
+        "protocols": [
+          "chat_completions"
+        ],
+        "providers": [
+          "ollama-cloud"
+        ]
+      },
+      "identity_bound": true,
+      "model": "kimi-k2.7-code",
+      "protocol": "chat_completions",
+      "provider_id": "ollama-cloud",
+      "provider_probe": {
+        "elapsed_ms": 1667,
+        "endpoint": "chat/completions",
+        "has_choices": true,
+        "has_output": false,
+        "http_status": 200,
+        "object": "chat.completion",
+        "status": "passed",
+        "stream": false
+      },
+      "redacted_provider_config_sha256": "8b1dab01dfe5b1bb801e98867563c0d72d7d499b3aacf03f52e9f31ba02233c7",
+      "scenarios": {
+        "collaboration": {
+          "child_result_delivery_observed": true,
+          "cross_home_rejected_before_gateway_request": true,
+          "exit_code": 0,
+          "observed_tools": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "same_home_restart": {
+            "agents_configuration_preserved": true,
+            "config_preserved": true,
+            "no_new_spawn": true,
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_terminal_event": "turn.completed",
+            "resumed_request_count": 2
+          },
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        },
+        "file_workflow": {
+          "exit_code": 0,
+          "file_verified": true,
+          "item_types": [
+            "agent_message",
+            "command_execution",
+            "file_change"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_error": null,
+          "terminal_event": "turn.completed"
+        },
+        "identity_text": {
+          "exit_code": 0,
+          "item_types": [
+            "agent_message"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        }
+      },
+      "status": "passed"
+    },
+    {
+      "cell": "chat_completions:deepseek-v4-flash:0731",
+      "gateway": {
+        "event_types": {
+          "chat_reasoning_extensions_suppressed": 11,
+          "chat_stream_shape_summary": 32,
+          "chat_to_responses_event_summary": 128,
+          "downstream_stream_closed": 2,
+          "request_complete": 32,
+          "request_error": 1,
+          "request_start": 32,
+          "runtime_tool_adapter_request": 32,
+          "runtime_tool_adapter_response": 24,
+          "runtime_tool_compatibility_planned": 33,
+          "third_party_apply_patch_freeform_adapter": 1,
+          "third_party_apply_patch_freeform_history_adapter": 2
+        },
+        "failures": [
+          {
+            "event": "request_error",
+            "status": 400
+          },
+          {
+            "event": "downstream_stream_closed",
+            "failure_class": "downstream_client_closed",
+            "failure_phase": "downstream_write",
+            "status": 499
+          },
+          {
+            "event": "request_complete",
+            "status": 499
+          },
+          {
+            "event": "downstream_stream_closed",
+            "failure_class": "downstream_client_closed",
+            "failure_phase": "downstream_write",
+            "status": 499
+          },
+          {
+            "event": "request_complete",
+            "status": 499
+          }
+        ],
+        "fallback_count": 0,
+        "has_v1_observation": false,
+        "has_v2_observation": true,
+        "models": [
+          "deepseek-v4-flash:0731"
+        ],
+        "protocols": [
+          "chat_completions"
+        ],
+        "providers": [
+          "ollama-cloud"
+        ]
+      },
+      "identity_bound": true,
+      "model": "deepseek-v4-flash:0731",
+      "protocol": "chat_completions",
+      "provider_id": "ollama-cloud",
+      "provider_probe": {
+        "elapsed_ms": 7326,
+        "endpoint": "chat/completions",
+        "has_choices": true,
+        "has_output": false,
+        "http_status": 200,
+        "object": "chat.completion",
+        "status": "passed",
+        "stream": false
+      },
+      "redacted_provider_config_sha256": "ab01536bf089daaaa5c337f50435bb28dac4fdeacc008fce841da172cf64d743",
+      "scenarios": {
+        "collaboration": {
+          "child_result_delivery_observed": true,
+          "cross_home_rejected_before_gateway_request": true,
+          "exit_code": 0,
+          "observed_tools": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "same_home_restart": {
+            "agents_configuration_preserved": true,
+            "config_preserved": true,
+            "no_new_spawn": true,
+            "passed": true,
+            "resume_exit_code": 0,
+            "resume_terminal_event": "turn.completed",
+            "resumed_request_count": 2
+          },
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        },
+        "file_workflow": {
+          "exit_code": 0,
+          "file_verified": true,
+          "item_types": [
+            "agent_message",
+            "command_execution",
+            "file_change"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_error": null,
+          "terminal_event": "turn.completed"
+        },
+        "identity_text": {
+          "exit_code": 0,
+          "item_types": [
+            "agent_message"
+          ],
+          "sentinel_observed": true,
+          "status": "passed",
+          "terminal_event": "turn.completed"
+        }
+      },
+      "status": "passed"
+    }
+  ],
+  "cli_version": "codex-cli 0.147.0",
+  "provider_id": "ollama-cloud",
+  "qualification_status": "passed",
+  "sanitization": {
+    "absolute_paths_retained": false,
+    "credentials_retained": false,
+    "opaque_ids_retained": false,
+    "raw_prompts_retained": false,
+    "raw_provider_output_retained": false,
+    "request_bodies_retained": false
+  },
+  "schema": "codexhub.authenticated-provider-cli.v1"
+}
