@@ -61,6 +61,7 @@ SENTINELS = {
     "identity_resume": "AUTH_PROVIDER_TEXT_RESUME_OK",
     "file_workflow": "AUTH_PROVIDER_PATCH_OK",
     "collaboration_phase1": "AUTH_PROVIDER_V2_PHASE1_OK",
+    "collaboration_wait": "AUTH_PROVIDER_V2_WAIT_OK",
     "collaboration_followup": "AUTH_PROVIDER_V2_FOLLOWUP_OK",
     "collaboration_message": "AUTH_PROVIDER_V2_MESSAGE_OK",
     "collaboration_list": "AUTH_PROVIDER_V2_LIST_OK",
@@ -703,6 +704,35 @@ def _run_collaboration(
     )
     phase1_analysis = lifecycle._analyze_cli_events(phase1_lines)
     session_id = lifecycle._thread_id_from_cli_lines(phase1_lines)
+    child_delivery_recovery: dict[str, Any] = {
+        "attempt_count": 0,
+        "passed": _session_tool_evidence(home)["child_result_delivery_observed"],
+        "terminal_event": None,
+        "sentinel_observed": False,
+        "target_call_observed": False,
+    }
+    if session_id and not child_delivery_recovery["passed"]:
+        for attempt in range(1, 3):
+            before_waits = _session_collaboration_counts(home).get("wait_agent", 0)
+            wait_code, wait_lines, wait_stdout, _wait_stderr = lifecycle._run_cli_resume(
+                home,
+                session_id,
+                "Call collaboration wait_agent with timeout_ms 30000 until the existing "
+                "provider_worker child result is delivered. Do not call other collaboration "
+                "tools. Reply " + SENTINELS["collaboration_wait"] + ".",
+                workspace,
+            )
+            wait_analysis = lifecycle._analyze_cli_events(wait_lines)
+            after_waits = _session_collaboration_counts(home).get("wait_agent", 0)
+            child_delivery_recovery = {
+                "attempt_count": attempt,
+                "passed": _session_tool_evidence(home)["child_result_delivery_observed"],
+                "terminal_event": wait_analysis.get("terminal_event"),
+                "sentinel_observed": SENTINELS["collaboration_wait"] in wait_stdout,
+                "target_call_observed": after_waits > before_waits,
+            }
+            if child_delivery_recovery["passed"]:
+                break
     code = -1
     lines: list[str] = []
     stdout = ""
@@ -828,6 +858,7 @@ def _run_collaboration(
         and tool_evidence["collaboration_call_count"] >= len(EXPECTED_V2_SEQUENCE)
         and tool_evidence["collaboration_history_identity_preserved"]
         and tool_evidence["canonical_task_identity_observed"]
+        and child_delivery_recovery["passed"]
         and tool_evidence["child_result_delivery_observed"]
         and tool_evidence["wait_result_shape_valid"]
         and tool_evidence["list_result_shape_valid"]
@@ -859,6 +890,7 @@ def _run_collaboration(
             "child_result_delivery_observed": tool_evidence[
                 "child_result_delivery_observed"
             ],
+            "child_delivery_recovery": child_delivery_recovery,
             "result_shapes": {
                 "wait": tool_evidence["wait_result_shape_valid"],
                 "list_status": tool_evidence["list_result_shape_valid"],
