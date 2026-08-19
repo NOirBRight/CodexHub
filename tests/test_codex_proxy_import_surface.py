@@ -282,6 +282,15 @@ REEXPORT_IDENTITY = {
     "_sse_payload_bytes": gateway_sse._sse_payload_bytes,
     "_parse_sse_json_payload": gateway_sse._parse_sse_json_payload,
     "_identity_failure": gateway_errors._identity_failure,
+    "UpstreamProtocolTranslationError": gateway_errors.UpstreamProtocolTranslationError,
+    "_responses_url": route_plan._responses_url,
+    "_chat_completions_url": route_plan._chat_completions_url,
+    "_external_tool_protocol": route_plan._external_tool_protocol,
+    "_external_tool_surface_strategy": route_plan._external_tool_surface_strategy,
+    "_external_native_responses_tool_codec": route_plan._external_native_responses_tool_codec,
+    "_upstream_retry_attempts": gateway_settings._upstream_retry_attempts,
+    "_default_retry_attempts_for_request_kind": gateway_settings._default_retry_attempts_for_request_kind,
+    "_request_kind_retry_attempts_configured": gateway_settings._request_kind_retry_attempts_configured,
 }
 
 
@@ -297,3 +306,10 @@ def test_extracted_gateway_names_keep_object_identity() -> None:
         if getattr(codex_proxy, name) is not expected
     }
     assert drifted == {}
+
+
+def test_route_plan_source_does_not_import_facade() -> None:
+    with open(route_plan.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "_proxy_attr" not in source
+    assert "import codex_proxy" not in source

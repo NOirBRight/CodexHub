@@ -22,6 +22,7 @@ from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
+import gateway_settings
 from collaboration_runtime_contract import (
     COLLABORATION_V1,
     COLLABORATION_V2,
@@ -1809,23 +1810,23 @@ class RoutingTests(unittest.TestCase):
         )
         with (
             patch(
-                "codex_proxy.upstream_timeout_seconds",
+                "route_plan.upstream_timeout_seconds",
                 side_effect=AssertionError("planner read request timeout"),
             ),
             patch(
-                "codex_proxy._upstream_retry_attempts",
+                "route_plan._upstream_retry_attempts",
                 side_effect=AssertionError("planner read retry attempts"),
             ),
             patch(
-                "codex_proxy.gateway_auto_retry_max_attempts",
+                "route_plan.gateway_auto_retry_max_attempts",
                 side_effect=AssertionError("planner read retry expansion"),
             ),
             patch(
-                "codex_proxy.gateway_capacity_retry_elapsed_limit_seconds",
+                "route_plan.gateway_capacity_retry_elapsed_limit_seconds",
                 side_effect=AssertionError("planner read capacity budget"),
             ),
             patch(
-                "codex_proxy.gateway_stream_retry_elapsed_limit_seconds",
+                "route_plan.gateway_stream_retry_elapsed_limit_seconds",
                 side_effect=AssertionError("planner read stream budget"),
             ),
         ):
@@ -8985,15 +8986,15 @@ class RoutingTests(unittest.TestCase):
             },
             clear=False,
         ):
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 2)
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 2)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
 
     def test_default_retry_attempts_by_request_kind(self):
         with patch.dict(os.environ, {"CODEX_PROXY_AUTO_RETRY_ENABLED": "1"}, clear=False):
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 5)
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
-            self.assertEqual(codex_proxy._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_MAIN_GENERATION), 5)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_COMPACT), 3)
+            self.assertEqual(gateway_settings._upstream_retry_attempts(codex_proxy.RETRY_REQUEST_IMAGE_PROXY_VISION), 3)
 
     def test_open_upstream_response_retries_pre_write_dns_tcp_refused_tls_cert_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")

@@ -36,6 +36,20 @@ class ModelIdentityResolutionError(ValueError):
         super().__init__(message)
 
 
+class UpstreamProtocolTranslationError(ValueError):
+    """Marks an unsupported upstream wire shape for the downstream error mapper."""
+
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        classification: str | None = None,
+    ) -> None:
+        self.cause = cause
+        self.classification = classification or getattr(cause, "code", None)
+        super().__init__(str(cause))
+
+
 class UnsupportedRouteProtocolError(ValueError):
     """Raised when a configured route has no executable protocol attempt."""
 

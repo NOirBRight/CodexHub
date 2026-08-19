@@ -9,6 +9,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
+import route_plan
 from codex_proxy import (
     CodexProxyHandler,
     UpstreamStreamIncompleteError,
@@ -39,11 +40,11 @@ class UpstreamUrlTests(unittest.TestCase):
         upstream = {"base_url": "https://example.test/v1/responses"}
 
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses"),
+            route_plan._responses_url(upstream, "/v1/responses"),
             "https://example.test/v1/responses",
         )
         self.assertEqual(
-            codex_proxy._chat_completions_url(upstream),
+            route_plan._chat_completions_url(upstream),
             "https://example.test/v1/chat/completions",
         )
 
@@ -51,15 +52,15 @@ class UpstreamUrlTests(unittest.TestCase):
         upstream = {"base_url": "https://example.test/v1/response"}
 
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses"),
+            route_plan._responses_url(upstream, "/v1/responses"),
             "https://example.test/v1/response",
         )
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses?cursor=abc"),
+            route_plan._responses_url(upstream, "/v1/responses?cursor=abc"),
             "https://example.test/v1/response?cursor=abc",
         )
         self.assertEqual(
-            codex_proxy._chat_completions_url(upstream),
+            route_plan._chat_completions_url(upstream),
             "https://example.test/v1/chat/completions",
         )
 
@@ -67,11 +68,11 @@ class UpstreamUrlTests(unittest.TestCase):
         upstream = {"base_url": "https://example.test/v1"}
 
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses"),
+            route_plan._responses_url(upstream, "/v1/responses"),
             "https://example.test/v1/responses",
         )
         self.assertEqual(
-            codex_proxy._chat_completions_url({"base_url": "https://example.test/v2"}),
+            route_plan._chat_completions_url({"base_url": "https://example.test/v2"}),
             "https://example.test/v2/chat/completions",
         )
 
@@ -79,11 +80,11 @@ class UpstreamUrlTests(unittest.TestCase):
         upstream = {"base_url": "https://example.test/v2/chat/completions"}
 
         self.assertEqual(
-            codex_proxy._chat_completions_url(upstream),
+            route_plan._chat_completions_url(upstream),
             "https://example.test/v2/chat/completions",
         )
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses"),
+            route_plan._responses_url(upstream, "/v1/responses"),
             "https://example.test/v2/responses",
         )
 
@@ -91,11 +92,11 @@ class UpstreamUrlTests(unittest.TestCase):
         upstream = {"base_url": "https://example.test"}
 
         self.assertEqual(
-            codex_proxy._responses_url(upstream, "/v1/responses"),
+            route_plan._responses_url(upstream, "/v1/responses"),
             "https://example.test/v1/responses",
         )
         self.assertEqual(
-            codex_proxy._chat_completions_url({"base_url": "https://example.test/api/coding/v3"}),
+            route_plan._chat_completions_url({"base_url": "https://example.test/api/coding/v3"}),
             "https://example.test/api/coding/v3/chat/completions",
         )
 

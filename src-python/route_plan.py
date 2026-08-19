@@ -8,13 +8,18 @@ import hmac
 import re
 
 from catalog import canonical_model_id
+from codex_semantic_adapter import COLLABORATION_V2
 from gateway_errors import (
     UnqualifiedRouteProtocolError,
     UnsupportedRouteProtocolError,
+    UpstreamProtocolTranslationError,
     _catalog_failure,
     _identity_failure,
 )
 from gateway_settings import (
+    _default_retry_attempts_for_request_kind,
+    _request_kind_retry_attempts_configured,
+    _upstream_retry_attempts,
     gateway_auto_retry_max_attempts,
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_client_key,
@@ -24,7 +29,12 @@ from gateway_settings import (
     official_upstream_open_attempts,
     upstream_timeout_seconds,
 )
-from protocol_translation import prepare_exchange
+from protocol_translation import UnsupportedProtocolTranslationError, prepare_exchange
+from providers_config import (
+    NATIVE_RESPONSES_TOOL_CODECS,
+    TOOL_PROTOCOLS,
+    TOOL_SURFACE_STRATEGIES,
+)
 from route_primitives import (
     AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES,
     AttemptRequestBodyMode,
@@ -78,50 +88,127 @@ from route_primitives import (
 )
 
 
-def _proxy_attr(name: str):
-    import codex_proxy
+TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
+NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
+RESPONSE_ENDPOINT_SUFFIXES = ("/responses", "/response")
+KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = (
+    "/chat/completions",
+    *RESPONSE_ENDPOINT_SUFFIXES,
+    "/messages",
+    "/models",
+)
 
-    return getattr(codex_proxy, name)
+_planning_event_sink = None
+
+
+def _emit_planning_event(event: str, **fields: Any) -> None:
+    sink = _planning_event_sink
+    if sink is not None:
+        sink(event, **fields)
+
+
+def _request_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
+    wanted = name.lower()
+    items = getattr(headers, "items", None)
+    if items is None:
+        return None
+    for key, value in items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+def _upstream_endpoint_root(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    lowered_path = urlsplit(base).path.rstrip("/").lower()
+    for suffix in KNOWN_UPSTREAM_ENDPOINT_SUFFIXES:
+        if lowered_path.endswith(suffix):
+            return base[: -len(suffix)].rstrip("/")
+    return base
+
+
+def _upstream_base_path_matches(base_url: str, path: str) -> bool:
+    lowered_path = urlsplit(base_url).path.rstrip("/").lower()
+    requested_path = path.lower()
+    if requested_path == "/responses":
+        return any(lowered_path.endswith(suffix) for suffix in RESPONSE_ENDPOINT_SUFFIXES)
+    return lowered_path.endswith(requested_path)
+
+
+def _upstream_base_has_version_suffix(base_url: str) -> bool:
+    path = urlsplit(base_url).path.rstrip("/")
+    if not path:
+        return False
+    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", path.rsplit("/", 1)[-1].lower()))
+
+
+def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
+    base = str(upstream["base_url"]).strip().rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    if _upstream_base_path_matches(base, path):
+        return base
+    root = _upstream_endpoint_root(base)
+    if upstream.get("auth") == "codex_auth":
+        return root + path
+    if _upstream_base_has_version_suffix(root):
+        return root + path
+    return root + "/v1" + path
 
 
 def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:
-    return _proxy_attr("_responses_url")(upstream, request_path)
+    parsed = urlsplit(request_path)
+    path = parsed.path
+    if path.startswith("/v1/"):
+        path = path[3:]
+    elif not path.startswith("/"):
+        path = "/" + path
+    url = _upstream_endpoint_url(upstream, path)
+    if parsed.query:
+        url += "?" + parsed.query
+    return url
 
 
 def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
-    return _proxy_attr("_chat_completions_url")(upstream)
+    return _upstream_endpoint_url(upstream, "/chat/completions")
 
 
 def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
-    return _proxy_attr("_external_tool_protocol")(upstream)
+    configured = str(upstream.get("tool_protocol") or "auto").strip().lower()
+    if configured in TOOL_PROTOCOLS and configured != "auto":
+        return configured
+    upstream_format = str(upstream.get("upstream_format") or "").strip().lower()
+    if upstream_format == "responses":
+        return "responses_structured"
+    if upstream_format == "chat_completions":
+        return "chat_tools"
+    return "text_compat"
 
 
 def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
-    return _proxy_attr("_external_tool_surface_strategy")(upstream)
+    configured = upstream.get("tool_surface_strategy", "eager")
+    if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
+        return configured
+    _emit_planning_event("external_tool_surface_rejected", reason="invalid_tool_surface_strategy")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            TOOL_SURFACE_STRATEGY_ERROR_CODE,
+            "External tool surface strategy is invalid.",
+        )
+    )
 
 
 def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
-    return _proxy_attr("_external_native_responses_tool_codec")(upstream)
-
-
-def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
-    return _proxy_attr("_default_retry_attempts_for_request_kind")(request_kind)
-
-
-def _request_kind_retry_attempts_configured(request_kind: str) -> bool:
-    return _proxy_attr("_request_kind_retry_attempts_configured")(request_kind)
-
-
-def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) -> int:
-    return _proxy_attr("_upstream_retry_attempts")(request_kind)
-
-
-def _get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
-    return _proxy_attr("_get_header")(headers, name)
-
-
-def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
-    return _proxy_attr("_retry_after_delay_seconds")(exc)
+    configured = upstream.get("native_responses_tool_codec", "none")
+    if isinstance(configured, str) and configured in NATIVE_RESPONSES_TOOL_CODECS:
+        return configured
+    _emit_planning_event("native_responses_tool_codec_rejected", reason="invalid_codec")
+    raise UpstreamProtocolTranslationError(
+        UnsupportedProtocolTranslationError(
+            NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
+            "External native Responses tool codec is invalid.",
+        )
+    )
 
 
 OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
@@ -131,7 +218,7 @@ def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
 
 
 def _bearer_token(headers: Mapping[str, str] | Any) -> str | None:
-    auth_header = _get_header(headers, "Authorization")
+    auth_header = _request_header(headers, "Authorization")
     if not auth_header:
         return None
     value = auth_header.strip()
@@ -288,9 +375,10 @@ class RetryExecutionPlan:
         attempt: int,
         *,
         failure_class: str,
-        exc: BaseException | None,
+        retry_after_seconds: int | None = None,
+        exc: BaseException | None = None,
     ) -> int:
-        retry_after_seconds = _retry_after_delay_seconds(exc)
+        del exc
         if retry_after_seconds is not None:
             return retry_after_seconds
         if failure_class == RETRY_FAILURE_PROVIDER_THROTTLE:
@@ -1120,7 +1208,7 @@ def _route_supports_transparent_metering(
     # namespace and no runtime tool adapter can translate calls back.
     if (
         not raw_provider_probe
-        and collaboration_protocol == _proxy_attr("_COLLABORATION_V2")
+        and collaboration_protocol == COLLABORATION_V2
         and upstream_name != "official"
         and provider_hint is not None
     ):

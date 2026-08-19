@@ -19,7 +19,10 @@ from route_primitives import (
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     RETRY_FAILURE_PROVIDER_THROTTLE,
     RETRY_FAILURE_QUICK_TRANSIENT,
+    RETRY_REQUEST_COMPACT,
+    RETRY_REQUEST_IMAGE_PROXY_VISION,
     RETRY_REQUEST_MAIN_GENERATION,
+    RETRY_REQUEST_OFFICIAL_CONTROL,
 )
 from subagent_policy import (
     guidance_enabled as _subagent_policy_guidance_enabled,
@@ -301,6 +304,71 @@ def gateway_auto_retry_max_attempts() -> int:
     except ValueError:
         return DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS
     return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
+
+
+def _request_kind_retry_env_name(request_kind: str) -> str | None:
+    if request_kind == RETRY_REQUEST_COMPACT:
+        return "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS"
+    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
+        return "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS"
+    return None
+
+
+def _request_kind_retry_settings_name(request_kind: str) -> str | None:
+    if request_kind == RETRY_REQUEST_COMPACT:
+        return "gateway_compact_retry_max_attempts"
+    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
+        return "gateway_main_generation_retry_max_attempts"
+    return None
+
+
+def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
+    if request_kind == RETRY_REQUEST_COMPACT:
+        return 3
+    if request_kind == RETRY_REQUEST_IMAGE_PROXY_VISION:
+        return 3
+    if request_kind == RETRY_REQUEST_OFFICIAL_CONTROL:
+        return 1
+    return 5
+
+
+def _bounded_retry_attempts(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return default
+        return max(1, min(parsed, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
+    return default
+
+
+def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) -> int:
+    if not gateway_auto_retry_enabled():
+        return 1
+    default = _default_retry_attempts_for_request_kind(request_kind)
+    settings_name = _request_kind_retry_settings_name(request_kind)
+    if settings_name:
+        settings_value = _runtime_settings_value(settings_name)
+        if settings_value is not None:
+            return _bounded_retry_attempts(settings_value, default)
+    env_name = _request_kind_retry_env_name(request_kind)
+    if env_name:
+        raw_value = os.environ.get(env_name)
+        if raw_value is not None:
+            return _bounded_retry_attempts(raw_value, default)
+    return min(gateway_auto_retry_max_attempts(), default)
+
+
+def _request_kind_retry_attempts_configured(request_kind: str) -> bool:
+    settings_name = _request_kind_retry_settings_name(request_kind)
+    if settings_name and _runtime_settings_value(settings_name) is not None:
+        return True
+    env_name = _request_kind_retry_env_name(request_kind)
+    return bool(env_name and os.environ.get(env_name) is not None)
 
 
 def gateway_capacity_retry_elapsed_limit_seconds() -> float:

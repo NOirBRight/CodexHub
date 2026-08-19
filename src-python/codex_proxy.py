@@ -833,9 +833,7 @@ MULTI_AGENT_DISCOVERY_TOOLS = [
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
-TOOL_SURFACE_STRATEGY_ERROR_CODE = "invalid_external_tool_surface_strategy"
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
-NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE = "invalid_native_responses_tool_codec"
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
 COLLABORATION_BOUNDARY_ERROR_CODE = "invalid_collaboration_boundary"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
@@ -1254,6 +1252,7 @@ from gateway_errors import (
     CompactEmptyResponseError,
     LifecycleEmptyFinalResponseError,
     LifecycleFinalFormatResponseError,
+    UpstreamProtocolTranslationError,
     UpstreamStreamIdleTimeoutError,
     GatewayPreResponseBudgetExhausted,
 )
@@ -1277,6 +1276,12 @@ from gateway_settings import (
     official_upstream_open_attempts,
     _env_flag,
     _runtime_settings_value,
+    _request_kind_retry_env_name,
+    _request_kind_retry_settings_name,
+    _default_retry_attempts_for_request_kind,
+    _bounded_retry_attempts,
+    _upstream_retry_attempts,
+    _request_kind_retry_attempts_configured,
     gateway_client_key,
     max_request_body_bytes,
     _env_or_settings_flag,
@@ -4189,20 +4194,6 @@ def _incomplete_stream_json_error_body(upstream_name: str) -> bytes:
     )
 
 
-class UpstreamProtocolTranslationError(ValueError):
-    """Marks an unsupported upstream wire shape for the downstream error mapper."""
-
-    def __init__(
-        self,
-        cause: UnsupportedProtocolTranslationError,
-        *,
-        classification: str | None = None,
-    ) -> None:
-        self.cause = cause
-        self.classification = classification or cause.code
-        super().__init__(str(cause))
-
-
 _responses_content_to_chat_content = responses_content_to_chat_content
 _responses_input_to_chat_messages = responses_input_to_chat_messages
 _responses_tools_to_chat_tools = responses_tools_to_chat_tools
@@ -5507,44 +5498,6 @@ def _node_repl_function_call_name(item: Mapping[str, Any]) -> str | None:
     if name in {f"{NODE_REPL_NAMESPACE}__js", f"{NODE_REPL_NAMESPACE}.js"}:
         return "js"
     return None
-
-
-def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
-    configured = str(upstream.get("tool_protocol") or "auto").strip().lower()
-    if configured in TOOL_PROTOCOLS and configured != "auto":
-        return configured
-    upstream_format = str(upstream.get("upstream_format") or "").strip().lower()
-    if upstream_format == "responses":
-        return "responses_structured"
-    if upstream_format == "chat_completions":
-        return "chat_tools"
-    return "text_compat"
-
-
-def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
-    configured = upstream.get("tool_surface_strategy", "eager")
-    if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
-        return configured
-    write_proxy_event("external_tool_surface_rejected", reason="invalid_tool_surface_strategy")
-    raise UpstreamProtocolTranslationError(
-        UnsupportedProtocolTranslationError(
-            TOOL_SURFACE_STRATEGY_ERROR_CODE,
-            "External tool surface strategy is invalid.",
-        )
-    )
-
-
-def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
-    configured = upstream.get("native_responses_tool_codec", "none")
-    if isinstance(configured, str) and configured in NATIVE_RESPONSES_TOOL_CODECS:
-        return configured
-    write_proxy_event("native_responses_tool_codec_rejected", reason="invalid_codec")
-    raise UpstreamProtocolTranslationError(
-        UnsupportedProtocolTranslationError(
-            NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
-            "External native Responses tool codec is invalid.",
-        )
-    )
 
 
 _RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
@@ -13386,7 +13339,27 @@ from route_plan import (
     _route_supports_transparent_metering,
     _tool_exposure_policy_for_route,
     _route_attempt_event_fields,
+    TOOL_SURFACE_STRATEGY_ERROR_CODE,
+    NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
+    RESPONSE_ENDPOINT_SUFFIXES,
+    KNOWN_UPSTREAM_ENDPOINT_SUFFIXES,
+    _upstream_endpoint_url,
+    _upstream_endpoint_root,
+    _upstream_base_path_matches,
+    _upstream_base_has_version_suffix,
+    _responses_url,
+    _chat_completions_url,
+    _external_tool_protocol,
+    _external_tool_surface_strategy,
+    _external_native_responses_tool_codec,
 )
+import route_plan as _route_plan_module
+
+def _forward_planning_event(event: str, **fields: Any) -> None:
+    write_proxy_event(event, **fields)
+
+
+_route_plan_module._planning_event_sink = _forward_planning_event
 
 def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     renamed: dict[str, Any] = {}
@@ -13964,70 +13937,6 @@ def canonical_catalog_models(
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=True).encode("utf-8")
-
-
-RESPONSE_ENDPOINT_SUFFIXES = ("/responses", "/response")
-KNOWN_UPSTREAM_ENDPOINT_SUFFIXES = (
-    "/chat/completions",
-    *RESPONSE_ENDPOINT_SUFFIXES,
-    "/messages",
-    "/models",
-)
-
-
-def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
-    base = str(upstream["base_url"]).strip().rstrip("/")
-    if not path.startswith("/"):
-        path = "/" + path
-    if _upstream_base_path_matches(base, path):
-        return base
-    root = _upstream_endpoint_root(base)
-    if upstream.get("auth") == "codex_auth":
-        return root + path
-    if _upstream_base_has_version_suffix(root):
-        return root + path
-    return root + "/v1" + path
-
-
-def _upstream_endpoint_root(base_url: str) -> str:
-    base = base_url.rstrip("/")
-    lowered_path = urlsplit(base).path.rstrip("/").lower()
-    for suffix in KNOWN_UPSTREAM_ENDPOINT_SUFFIXES:
-        if lowered_path.endswith(suffix):
-            return base[: -len(suffix)].rstrip("/")
-    return base
-
-
-def _upstream_base_path_matches(base_url: str, path: str) -> bool:
-    lowered_path = urlsplit(base_url).path.rstrip("/").lower()
-    requested_path = path.lower()
-    if requested_path == "/responses":
-        return any(lowered_path.endswith(suffix) for suffix in RESPONSE_ENDPOINT_SUFFIXES)
-    return lowered_path.endswith(requested_path)
-
-
-def _upstream_base_has_version_suffix(base_url: str) -> bool:
-    path = urlsplit(base_url).path.rstrip("/")
-    if not path:
-        return False
-    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", path.rsplit("/", 1)[-1].lower()))
-
-
-def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:
-    parsed = urlsplit(request_path)
-    path = parsed.path
-    if path.startswith("/v1/"):
-        path = path[3:]
-    elif not path.startswith("/"):
-        path = "/" + path
-    url = _upstream_endpoint_url(upstream, path)
-    if parsed.query:
-        url += "?" + parsed.query
-    return url
-
-
-def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
-    return _upstream_endpoint_url(upstream, "/chat/completions")
 
 
 def _modalities_include_image(value: Any) -> bool:
@@ -14755,71 +14664,6 @@ def enforce_text_only_image_boundary(
 def _upstream_retry_status(exc: BaseException) -> int | None:
     status = getattr(exc, "code", None)
     return status if isinstance(status, int) else None
-
-
-def _request_kind_retry_env_name(request_kind: str) -> str | None:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS"
-    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
-        return "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS"
-    return None
-
-
-def _request_kind_retry_settings_name(request_kind: str) -> str | None:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return "gateway_compact_retry_max_attempts"
-    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
-        return "gateway_main_generation_retry_max_attempts"
-    return None
-
-
-def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return 3
-    if request_kind == RETRY_REQUEST_IMAGE_PROXY_VISION:
-        return 3
-    if request_kind == RETRY_REQUEST_OFFICIAL_CONTROL:
-        return 1
-    return 5
-
-
-def _bounded_retry_attempts(value: Any, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int):
-        return max(1, min(value, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
-    if isinstance(value, str):
-        try:
-            parsed = int(value)
-        except ValueError:
-            return default
-        return max(1, min(parsed, DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS))
-    return default
-
-
-def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) -> int:
-    if not gateway_auto_retry_enabled():
-        return 1
-    default = _default_retry_attempts_for_request_kind(request_kind)
-    settings_name = _request_kind_retry_settings_name(request_kind)
-    if settings_name:
-        settings_value = _runtime_settings_value(settings_name)
-        if settings_value is not None:
-            return _bounded_retry_attempts(settings_value, default)
-    env_name = _request_kind_retry_env_name(request_kind)
-    if env_name:
-        raw_value = os.environ.get(env_name)
-        if raw_value is not None:
-            return _bounded_retry_attempts(raw_value, default)
-    return min(gateway_auto_retry_max_attempts(), default)
-
-
-def _request_kind_retry_attempts_configured(request_kind: str) -> bool:
-    settings_name = _request_kind_retry_settings_name(request_kind)
-    if settings_name and _runtime_settings_value(settings_name) is not None:
-        return True
-    env_name = _request_kind_retry_env_name(request_kind)
-    return bool(env_name and os.environ.get(env_name) is not None)
 
 
 def _retry_attempts_for_failure_class(
@@ -15918,7 +15762,7 @@ def _open_upstream_response(
                 retry_execution.retry_delay_seconds(
                     request_attempt,
                     failure_class=failure_class,
-                    exc=exc,
+                    retry_after_seconds=_retry_after_delay_seconds(exc),
                 )
                 if retry_execution is not None
                 else gateway_retry_delay_seconds(
@@ -17785,7 +17629,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                                 delay_seconds = route_attempt.retry.retry_delay_seconds(
                                     relay_attempt,
                                     failure_class=failure_class,
-                                    exc=retry_exc,
+                                    retry_after_seconds=_retry_after_delay_seconds(retry_exc),
                                 )
                                 retry_elapsed_seconds = max(
                                     0.0,
