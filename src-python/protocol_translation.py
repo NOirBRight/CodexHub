@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 import uuid
 
@@ -3219,10 +3220,73 @@ def response_body_to_response_sse_events(
     return events
 
 
+@dataclass(frozen=True)
+class PreparedExchange:
+    inbound_format: str
+    outbound_format: str
+    upstream_body: bytes
+    stream: bool
+
+    def stream_decoder(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
+        if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
+            return ChatToResponsesStreamConverter()
+        if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
+            return ResponsesToChatStreamConverter()
+        raise NonForwardable(
+            "unsupported_protocol_semantics",
+            "No stream decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
+        )
+
+
+class NonForwardable(UnsupportedProtocolTranslationError):
+    """The request cannot cross the protocol seam without loss."""
+
+
+def prepare_exchange(
+    request_body: bytes,
+    *,
+    inbound_format: str,
+    outbound_format: str,
+    route_attempt: Mapping[str, Any] | None = None,
+    tool_plan: Any = None,
+) -> PreparedExchange:
+    del route_attempt, tool_plan
+    inbound = str(inbound_format or "").strip().lower()
+    outbound = str(outbound_format or "").strip().lower()
+    try:
+        if inbound == "responses" and outbound == "chat_completions":
+            upstream = responses_request_to_chat_completion_body(request_body)
+            payload = json.loads(upstream.decode("utf-8"))
+            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
+            return PreparedExchange(inbound, outbound, upstream, stream)
+        if inbound == "chat_completions" and outbound == "responses":
+            upstream = chat_completions_request_to_responses_body(request_body)
+            payload = json.loads(upstream.decode("utf-8"))
+            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
+            return PreparedExchange(inbound, outbound, upstream, stream)
+        if inbound == outbound:
+            payload = json.loads(request_body.decode("utf-8-sig"))
+            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
+            return PreparedExchange(inbound, outbound, request_body, stream)
+    except UnsupportedProtocolTranslationError as error:
+        raise NonForwardable(error.code, str(error)) from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise NonForwardable(
+            "unsupported_protocol_semantics",
+            "Cannot parse the inbound request as JSON.",
+        ) from error
+    raise NonForwardable(
+        "unsupported_protocol_semantics",
+        "Cannot prepare %s -> %s without a lossless mapping." % (inbound, outbound),
+    )
+
+
 __all__ = [
     entrypoint.__name__
     for entrypoint in (
         ChatToResponsesStreamConverter,
+        NonForwardable,
+        PreparedExchange,
         ResponsesToChatStreamConverter,
         UnsupportedProtocolTranslationError,
         UpstreamStreamIncompleteError,
@@ -3236,6 +3300,7 @@ __all__ = [
         chat_tool_choice_to_responses_tool_choice,
         chat_tools_to_responses_tools,
         events_to_responses_body,
+        prepare_exchange,
         response_body_to_chat_completion_body,
         response_body_to_response_sse_events,
         response_events_to_chat_stream_chunks,
