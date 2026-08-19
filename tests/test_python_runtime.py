@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SELECTOR = ROOT / "scripts" / "Resolve-CodexHubPython.ps1"
 LAUNCHER = ROOT / "scripts" / "codexhub-python.ps1"
 CMD_LAUNCHER = ROOT / "scripts" / "codexhub-python.cmd"
+LINUX_LAUNCHER = ROOT / "scripts" / "codexhub-python.sh"
 ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
 PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
@@ -1029,3 +1030,20 @@ def test_every_direct_fixture_entrypoint_rejects_ambient_python_311_before_work(
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "CodexHub requires Python 3.13 or newer" in combined
+
+
+def test_linux_python_launcher_selects_python_313_or_newer() -> None:
+    if os.name == "nt":
+        pytest.skip("Linux launcher is not the Windows development entrypoint")
+    assert LINUX_LAUNCHER.is_file()
+    result = subprocess.run(
+        ["bash", str(LINUX_LAUNCHER), "-c", "import sys; print(sys.version_info[:2])"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout

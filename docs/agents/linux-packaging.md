@@ -45,9 +45,9 @@ and copied into the artifact. Gateway discovery already looks for that path.
 Linux GUI preflight:
 
 ```bash
-python3 scripts/e2e_linux_gui_clients.py --detect-only
-python3 scripts/e2e_linux_gui_clients.py --skip-launch
-python3 scripts/e2e_linux_gui_clients.py
+./scripts/codexhub-python.sh scripts/e2e_linux_gui_clients.py --detect-only
+./scripts/codexhub-python.sh scripts/e2e_linux_gui_clients.py --skip-launch
+./scripts/codexhub-python.sh scripts/e2e_linux_gui_clients.py
 ```
 
 This host's accepted floors are the same numeric floors as Windows: Codex
