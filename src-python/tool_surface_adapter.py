@@ -1410,6 +1410,7 @@ class ToolSurfaceAdapter:
         rewritten = dict(value)
         node_repl = self.facts.node_repl_namespace
         apply_patch_name = self.facts.apply_patch_function_name
+        discovery_arguments = multi_agent_discovery_arguments(value.get("arguments"))
         if (
             value.get("type") == "function_call"
             and value.get("name") == "tool_search"
@@ -1426,9 +1427,9 @@ class ToolSurfaceAdapter:
         elif (
             value.get("type") == "function_call"
             and value.get("name") in self.facts.multi_agent_namespace_aliases
-            and multi_agent_discovery_arguments(value.get("arguments")) is not None
+            and discovery_arguments is not None
         ):
-            arguments = multi_agent_discovery_arguments(value.get("arguments"))
+            arguments = discovery_arguments
             rewritten["type"] = "tool_search_call"
             rewritten["arguments"] = arguments
             rewritten.pop("name", None)
