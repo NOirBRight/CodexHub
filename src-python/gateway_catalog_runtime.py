@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
 
 from catalog import (
     CatalogPolicy,
@@ -89,7 +89,8 @@ CatalogModelsReader = Callable[[Path], list[dict[str, Any]]]
 PolicyReader = Callable[[Path], CatalogPolicy]
 RoutingConfigReader = Callable[[], Mapping[str, Any]]
 ExternalModelReader = Callable[[str], dict[str, Any] | None]
-OllamaModelReader = Callable[..., tuple[bool, dict[str, Any] | None]]
+class OllamaModelReader(Protocol):
+    def __call__(self, model_id: str, *, refresh: bool = False) -> tuple[bool, dict[str, Any] | None]: ...
 CatalogBySlugReader = Callable[[], dict[str, dict[str, Any]]]
 OllamaRuntimeReader = Callable[[str, Any], UpstreamFacts | None]
 TextReader = Callable[[Path, str], str]
@@ -147,7 +148,7 @@ class CatalogFacts:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class CatalogRuntime:
     """Typed seam for catalog reads, validation, routing, and presentation."""
 
@@ -159,10 +160,11 @@ class CatalogRuntime:
     routing_config_reader: RoutingConfigReader = lambda: {}
     external_model_reader: ExternalModelReader = resolve_external_model_alias
     ollama_model_reader: OllamaModelReader = resolve_ollama_cloud_model
-    image_proxy_enabled_reader: Callable[[], bool] = lambda: False
+    vision_proxy_enabled_reader: Callable[[], bool] = lambda: False
     known_official_ids_reader: Callable[[], set[str]] = known_official_model_ids
     official_display_name_reader: Callable[[str, dict[str, Any], CatalogPolicy], str] = official_short_display_name
     catalog_by_slug_reader: CatalogBySlugReader | None = None
+    generated_catalog_by_slug_reader: Callable[[Path], dict[str, dict[str, Any]]] | None = None
     published_model_reader: Callable[[str], dict[str, Any] | None] | None = None
     generated_official_reader: Callable[[str, Any], str | None] | None = None
     official_alias_reader: Callable[[str, Any], str | None] | None = None
@@ -175,6 +177,12 @@ class CatalogRuntime:
     internal_model_reader: Callable[[Any], bool] = is_internal_model
     official_base_url_reader: Callable[[], str] | None = None
     ollama_base_url_reader: Callable[[], str] | None = None
+    official_fast_projection_reader: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    context_guard_reader: Callable[..., dict[str, Any]] | None = None
+    vision_projection_reader: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    canonical_models_reader: Callable[[list[Any], CatalogPolicy], list[Any]] | None = None
+    modalities_reader: Callable[[Any], bool] | None = None
+    input_modalities_reader: Callable[[str | None, Mapping[str, Any] | None], Any] | None = None
 
     def official_prefixes(self) -> tuple[str, ...]:
         prefixes = self.routing_config_reader().get(
@@ -262,7 +270,8 @@ class CatalogRuntime:
         return models
 
     def generated_catalog_slugs(self, path: Path | None = None) -> set[str]:
-        return set(self.generated_catalog_by_slug(path))
+        reader = self.generated_catalog_by_slug_reader or self.generated_catalog_by_slug
+        return set(reader(path))
 
     def _catalog_by_slug(self) -> dict[str, dict[str, Any]]:
         if self.catalog_by_slug_reader is not None:
@@ -911,9 +920,12 @@ class CatalogRuntime:
             return {"models": []}
         published_budgets = self.published_official_context_budgets(catalog_path)
         catalog = json.loads(self.text_reader(catalog_path, "utf-8-sig"))
-        return self.catalog_with_vision_proxy_capabilities(
-            self.catalog_with_openai_context_guard(
-                self.catalog_with_official_fast_variants(catalog),
+        fast_projection = self.official_fast_projection_reader or self.catalog_with_official_fast_variants
+        context_guard = self.context_guard_reader or self.catalog_with_openai_context_guard
+        vision_projection = self.vision_projection_reader or self.catalog_with_vision_proxy_capabilities
+        return vision_projection(
+            context_guard(
+                fast_projection(catalog),
                 published_budgets,
                 require_published_snapshot=True,
             )
@@ -1056,7 +1068,7 @@ class CatalogRuntime:
     def catalog_with_vision_proxy_capabilities(
         self, catalog: dict[str, Any]
     ) -> dict[str, Any]:
-        if not self.image_proxy_enabled_reader():
+        if not self.vision_proxy_enabled_reader():
             return catalog
         models = catalog.get("models")
         if not isinstance(models, list):
@@ -1133,7 +1145,7 @@ class CatalogRuntime:
         if not isinstance(models, list):
             return catalog
         policy = self.policy_reader(self.facts.policy_path)
-        models = self.canonical_catalog_models(models, policy)
+        models = (self.canonical_models_reader or self.canonical_catalog_models)(models, policy)
         catalog["models"] = models
         by_slug = {
             canonical_model_id(str(model.get("slug", ""))): model
@@ -1168,6 +1180,8 @@ class CatalogRuntime:
     def catalog_input_modalities(
         self, model_id: str | None, upstream: Mapping[str, Any] | None = None
     ) -> Any:
+        if self.input_modalities_reader is not None:
+            return self.input_modalities_reader(model_id, upstream)
         candidates: list[str] = []
         for value in (
             model_id, upstream.get("upstream_model") if upstream else None
@@ -1192,11 +1206,10 @@ class CatalogRuntime:
     def model_supports_image(
         self, model_id: str | None, upstream: Mapping[str, Any] | None = None
     ) -> bool:
-        if upstream and self.modalities_include_image(upstream.get("input_modalities")):
+        image_reader = self.modalities_reader or self.modalities_include_image
+        if upstream and image_reader(upstream.get("input_modalities")):
             return True
-        return self.modalities_include_image(
-            self.catalog_input_modalities(model_id, upstream)
-        )
+        return image_reader(self.catalog_input_modalities(model_id, upstream))
 
 
 __all__ = ["CatalogFacts", "CatalogRuntime", "CatalogUpstream"]

@@ -43,6 +43,14 @@ def test_catalog_runtime_source_is_independent_of_facade_handler_transport_and_p
     assert "class CatalogFacts" in source
 
 
+def test_catalog_runtime_hooks_are_frozen():
+    runtime = CatalogRuntime()
+    with pytest.raises(FrozenInstanceError):
+        runtime.facts = CatalogFacts()  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        runtime.official_base_url_reader = lambda: "https://changed.test"  # type: ignore[misc]
+
+
 def test_catalog_facts_are_deeply_immutable() -> None:
     facts = CatalogFacts(
         official_fast_variant_base_models={"fast": "base"},
@@ -133,6 +141,11 @@ def test_codex_proxy_catalog_factory_keeps_reader_patches_live() -> None:
     row = {"slug": "runtime-model", "max_output_tokens": 321}
     with patch("codex_proxy.generated_catalog_by_slug", return_value={"runtime-model": row}):
         assert codex_proxy.catalog_max_output_tokens("runtime-model") == 321
+
+
+def test_facade_generated_catalog_slug_hook_stays_live():
+    with patch("codex_proxy.generated_catalog_by_slug", return_value={"hook-only": {"slug": "hook-only"}}):
+        assert codex_proxy.generated_catalog_slugs() == {"hook-only"}
 
 
 def test_catalog_types_are_true_facade_aliases() -> None:

@@ -1407,7 +1407,16 @@ def _catalog_runtime() -> CatalogRuntime:
         routing_config_reader=lambda: load_routing_config(),
         external_model_reader=resolve_external_model_alias,
         ollama_model_reader=resolve_ollama_cloud_model,
-        image_proxy_enabled_reader=gateway_image_proxy_enabled,
+        vision_proxy_enabled_reader=gateway_image_proxy_enabled,
+        official_base_url_reader=_catalog_override("official_base_url"),
+        ollama_base_url_reader=_catalog_override("ollama_cloud_base_url"),
+        official_fast_projection_reader=_catalog_override("catalog_with_official_fast_variants"),
+        context_guard_reader=_catalog_override("catalog_with_openai_context_guard"),
+        vision_projection_reader=_catalog_override("catalog_with_vision_proxy_capabilities"),
+        canonical_models_reader=_catalog_override("canonical_catalog_models"),
+        modalities_reader=_catalog_override("_modalities_include_image"),
+        input_modalities_reader=_catalog_override("_catalog_input_modalities"),
+        generated_catalog_by_slug_reader=_catalog_override("generated_catalog_by_slug"),
         known_official_ids_reader=catalog_known_official_model_ids,
         official_display_name_reader=official_short_display_name,
         catalog_by_slug_reader=lambda: generated_catalog_by_slug(),
@@ -9939,6 +9948,27 @@ def model_supports_image(
     upstream: Mapping[str, Any] | None = None,
 ) -> bool:
     return _catalog_runtime().model_supports_image(model_id, upstream)
+
+
+_CATALOG_ORIGINAL_HOOKS = {
+    name: globals()[name]
+    for name in (
+        "official_base_url",
+        "ollama_cloud_base_url",
+        "catalog_with_official_fast_variants",
+        "catalog_with_openai_context_guard",
+        "catalog_with_vision_proxy_capabilities",
+        "canonical_catalog_models",
+        "_modalities_include_image",
+        "_catalog_input_modalities",
+        "generated_catalog_by_slug",
+    )
+}
+
+
+def _catalog_override(name: str) -> Callable[..., Any] | None:
+    candidate = globals()[name]
+    return None if candidate is _CATALOG_ORIGINAL_HOOKS[name] else candidate
 
 
 def _is_image_part(value: Any) -> bool:
