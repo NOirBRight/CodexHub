@@ -11,6 +11,7 @@ import codex_proxy
 import apply_patch_adapter
 import collaboration_adapter
 import tool_surface_adapter
+import gateway_catalog_runtime
 import gateway_errors
 import gateway_settings
 import gateway_sse
@@ -33,6 +34,8 @@ FROZEN_CODEX_PROXY_NAMES = (
     'COLLABORATION_BOUNDARY_ERROR_CODE',
     'CallerRequestBodyMode',
     'CapabilityState',
+    'CatalogFacts',
+    'CatalogRuntime',
     'CodexCompatibilityPolicy',
     'CodexProxyHandler',
     'CollaborationBackend',
@@ -275,6 +278,8 @@ FROZEN_CODEX_PROXY_NAMES = (
 )
 
 REEXPORT_IDENTITY = {
+    "CatalogFacts": gateway_catalog_runtime.CatalogFacts,
+    "CatalogRuntime": gateway_catalog_runtime.CatalogRuntime,
     "RouteProtocol": route_primitives.RouteProtocol,
     "SensitiveValue": route_primitives.SensitiveValue,
     "OperationalAuthentication": route_primitives.OperationalAuthentication,
@@ -397,6 +402,23 @@ def test_gateway_settings_source_does_not_import_facade() -> None:
         source = handle.read()
     assert "import codex_proxy" not in source
     assert "from codex_proxy" not in source
+
+
+def test_gateway_catalog_runtime_does_not_import_facade_handler_transport_or_planning() -> None:
+    with open(gateway_catalog_runtime.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    for marker in (
+        "import codex_proxy",
+        "from codex_proxy",
+        "BaseHTTPRequestHandler",
+        "CodexProxyHandler",
+        "gateway_transport",
+        "gateway_sse",
+        "route_plan",
+        "_proxy_attr",
+        "getattr(",
+    ):
+        assert marker not in source
 
 
 def test_collaboration_adapter_does_not_import_facade_or_transport() -> None:

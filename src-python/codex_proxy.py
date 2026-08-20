@@ -14,7 +14,6 @@ if __name__ == "__main__":
     sys.modules.setdefault("codex_proxy", sys.modules[__name__])
 
 import argparse
-from copy import deepcopy
 from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass, replace
 from datetime import timezone
@@ -61,6 +60,7 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
 
+from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
 import gateway_transport
 from gateway_transport import (
     OFFICIAL_CONNECT_TIMEOUT_SECONDS,
@@ -773,6 +773,8 @@ from gateway_errors import (
     UpstreamProtocolTranslationError,
     UpstreamStreamIdleTimeoutError,
     GatewayPreResponseBudgetExhausted,
+    _catalog_failure,
+    _identity_failure,
 )
 
 logger = logging.getLogger("codex_proxy")
@@ -1380,152 +1382,78 @@ def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
     return routing if isinstance(routing, dict) else {}
 
 
+def _catalog_runtime() -> CatalogRuntime:
+    """Build a request-time catalog seam so facade monkeypatches stay live."""
+
+    return CatalogRuntime(
+        facts=CatalogFacts(
+            generated_catalog_path=GENERATED_CATALOG_PATH,
+            legacy_generated_catalog_path=LEGACY_GENERATED_CATALOG_PATH,
+            policy_path=POLICY_PATH,
+            official_base_url=OFFICIAL_BASE_URL,
+            ollama_cloud_base_url=OLLAMA_CLOUD_BASE_URL,
+            default_official_prefixes=tuple(DEFAULT_OFFICIAL_PREFIXES),
+            official_alias_prefix=OFFICIAL_ALIAS_PREFIX,
+            ollama_cloud_alias_prefix=OLLAMA_CLOUD_ALIAS_PREFIX,
+            official_fast_variant_service_tier=OFFICIAL_FAST_VARIANT_SERVICE_TIER,
+            official_fast_variant_base_models=dict(OFFICIAL_FAST_VARIANT_BASE_MODELS),
+            official_fast_variant_display_names=dict(OFFICIAL_FAST_VARIANT_DISPLAY_NAMES),
+            upstream_max_output_token_caps=dict(UPSTREAM_MAX_OUTPUT_TOKEN_CAPS),
+            official_refresh_state_filename=OFFICIAL_REFRESH_STATE_FILENAME,
+        ),
+        catalog_path_reader=existing_generated_catalog_path,
+        catalog_models_reader=load_catalog_models,
+        policy_reader=load_policy,
+        routing_config_reader=lambda: load_routing_config(),
+        external_model_reader=resolve_external_model_alias,
+        ollama_model_reader=resolve_ollama_cloud_model,
+        image_proxy_enabled_reader=gateway_image_proxy_enabled,
+        known_official_ids_reader=catalog_known_official_model_ids,
+        official_display_name_reader=official_short_display_name,
+        catalog_by_slug_reader=lambda: generated_catalog_by_slug(),
+        published_model_reader=_published_catalog_model,
+        generated_official_reader=generated_official_catalog_upstream_model,
+        official_alias_reader=official_alias_upstream_model,
+        official_fast_variant_reader=official_fast_variant_upstream_model,
+        ollama_runtime_reader=ollama_cloud_runtime_upstream,
+        ollama_alias_reader=ollama_cloud_alias_upstream_model,
+        should_include_model_reader=should_include_model,
+        should_include_external_model_reader=should_include_external_provider_model,
+        model_visibility_reader=model_visibility,
+        internal_model_reader=is_internal_model,
+    )
+
+
 def official_prefixes() -> tuple[str, ...]:
-    prefixes = load_routing_config().get("official_prefixes", DEFAULT_OFFICIAL_PREFIXES)
-    if not isinstance(prefixes, list):
-        return DEFAULT_OFFICIAL_PREFIXES
-    values = tuple(str(prefix) for prefix in prefixes if str(prefix))
-    return values or DEFAULT_OFFICIAL_PREFIXES
+    return _catalog_runtime().official_prefixes()
 
 
 def official_base_url() -> str:
-    value = load_routing_config().get("official_upstream_base_url", OFFICIAL_BASE_URL)
-    return str(value).rstrip("/") if value else OFFICIAL_BASE_URL
+    return _catalog_runtime().official_base_url()
 
 
 def ollama_cloud_base_url() -> str:
-    value = load_routing_config().get("ollama_cloud_base_url", OLLAMA_CLOUD_BASE_URL)
-    return str(value).rstrip("/") if value else OLLAMA_CLOUD_BASE_URL
+    return _catalog_runtime().ollama_cloud_base_url()
 
 
 def generated_catalog_slugs(path: Path = GENERATED_CATALOG_PATH) -> set[str]:
-    return set(generated_catalog_by_slug(path))
+    return _catalog_runtime().generated_catalog_slugs(path)
 
 
 def generated_catalog_by_slug(path: Path = GENERATED_CATALOG_PATH) -> dict[str, dict[str, Any]]:
-    resolved_path = existing_generated_catalog_path(path)
-    try:
-        if resolved_path.exists():
-            document = json.loads(resolved_path.read_text(encoding="utf-8-sig"))
-            if not isinstance(document, Mapping) or not isinstance(document.get("models"), list):
-                raise ValueError("catalog root must contain a models list")
-        catalog_models = load_catalog_models(resolved_path)
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise ModelIdentityResolutionError(
-            "published catalog is malformed and cannot authorize routing",
-            classification="catalog_inconsistency",
-            reason="malformed_catalog",
-        ) from exc
-    models: dict[str, dict[str, Any]] = {}
-    if not isinstance(catalog_models, list):
-        raise ModelIdentityResolutionError(
-            "published catalog models must be a list",
-            classification="catalog_inconsistency",
-            reason="malformed_catalog",
-        )
-    for model in catalog_models:
-        if not isinstance(model, Mapping):
-            raise ModelIdentityResolutionError(
-                "published catalog contains a non-object model row",
-                classification="catalog_inconsistency",
-                reason="malformed_model_row",
-            )
-        raw_slug_value = model.get("slug")
-        if not isinstance(raw_slug_value, str) or not raw_slug_value.strip():
-            raise ModelIdentityResolutionError(
-                "published catalog contains a model without a slug",
-                classification="catalog_inconsistency",
-                reason="missing_catalog_slug",
-            )
-        raw_slug = canonical_model_id(raw_slug_value)
-        slug = _catalog_identity_slug(raw_slug)
-        if slug in models:
-            raise ModelIdentityResolutionError(
-                "published catalog contains duplicate canonical model identity",
-                classification="catalog_inconsistency",
-                reason="duplicate_canonical_slug",
-                model_slug=slug,
-            )
-        models[slug] = dict(model)
-    return models
+    return _catalog_runtime().generated_catalog_by_slug(path)
 
 
 def _catalog_identity_slug(slug: str) -> str:
-    """Return the one route identity key used by the published catalog.
-
-    ``openai/gpt-*`` is a provider-qualified spelling of the same exact
-    Official model slug.  Every other provider namespace remains part of the
-    key; no display name, case-folded alias, or nearest match is introduced.
-    """
-
-    value = canonical_model_id(slug)
-    if value.startswith("openai/gpt-"):
-        return value.removeprefix("openai/")
-    return value
+    return _catalog_runtime().catalog_identity_slug(slug)
 
 
 def _published_catalog_model(slug: str) -> dict[str, Any] | None:
-    """Resolve one exact slug from the current generated catalog.
+    return _catalog_runtime().published_catalog_model(slug)
 
-    The legacy catalog filename is intentionally not an identity authority.
-    It may still be read by presentation-only compatibility code, but routing
-    refuses to bind a request to it when the current publication is absent.
-    """
-
-    resolved_path = existing_generated_catalog_path(GENERATED_CATALOG_PATH)
-    if resolved_path == LEGACY_GENERATED_CATALOG_PATH:
-        raise ModelIdentityResolutionError(
-            "current generated catalog is missing; legacy catalog cannot authorize routing",
-            classification="catalog_inconsistency",
-            reason="stale_legacy_catalog",
-        )
-    catalog = generated_catalog_by_slug(resolved_path)
-    identity_slug = _catalog_identity_slug(slug)
-    model = catalog.get(identity_slug)
-    if model is None and identity_slug.startswith("gpt-"):
-        # Compatibility with in-memory catalog fixtures that still expose the
-        # pre-#273 provider-qualified key.  On-disk catalogs are normalized by
-        # generated_catalog_by_slug before this branch can be reached.
-        model = catalog.get(f"openai/{identity_slug}")
-    return model
-
-
-
-from gateway_errors import (
-    _catalog_failure,
-    _identity_failure,
-)
 
 def _is_internal_route_identity(value: Any) -> bool:
-    """Return whether any route/config identity reserves the internal reviewer slug."""
-
-    values: list[Any]
-    if isinstance(value, Mapping):
-        if is_internal_model(value):
-            return True
-        values = [
-            value.get(key)
-            for key in (
-                "id",
-                "slug",
-                "model",
-                "name",
-                "alias",
-                "matched_alias",
-                "model_id",
-                "upstream_model",
-            )
-        ]
-    else:
-        values = [value]
-
-    for raw_value in values:
-        if not isinstance(raw_value, str):
-            continue
-        identity = canonical_model_id(raw_value).strip().lower()
-        if identity and any(part.strip() == "codex-auto-review" for part in identity.split("/")):
-            return True
-    return False
+    return _catalog_runtime().is_internal_route_identity(value)
 
 
 def _safe_error_identity(value: Any) -> str | None:
@@ -1549,80 +1477,12 @@ def _validate_published_catalog_model_for_provider(
     model_slug: str,
     expected_upstream_model: str | None = None,
 ) -> None:
-    """Reject catalog rows that are internal, unsupported, or cross-provider."""
-
-    if _is_internal_route_identity(model):
-        raise _identity_failure(
-            f"model identity is internal and cannot be routed: {model_slug}",
-            reason="internal_model",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    visibility = model_visibility(model, missing_is_list=True)
-    if visibility is not CatalogVisibility.LIST:
-        raise _catalog_failure(
-            "published catalog model is not explicitly listable",
-            reason="unsupported_visibility",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    if "supported_in_api" in model and not isinstance(model["supported_in_api"], bool):
-        raise _catalog_failure(
-            "published catalog model supported_in_api is malformed",
-            reason="malformed_supported_in_api",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    if model.get("supported_in_api") is False:
-        raise _identity_failure(
-            f"model identity is not supported in the API: {model_slug}",
-            reason="unsupported_model",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    raw_slug = model.get("slug")
-    if isinstance(raw_slug, str) and canonical_model_id(raw_slug) != canonical_model_id(model_slug):
-        raise _catalog_failure(
-            "published catalog row slug contradicts the requested model slug",
-            reason="configured_model_mismatch",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    metadata = model.get("codex_proxy_metadata")
-    if "codex_proxy_metadata" in model and not isinstance(metadata, Mapping):
-        raise _catalog_failure(
-            "published catalog model metadata is malformed",
-            reason="malformed_metadata",
-            provider_id=provider_id,
-            model_slug=model_slug,
-        )
-    if isinstance(metadata, Mapping):
-        catalog_provider = canonical_model_id(str(metadata.get("provider") or ""))
-        allowed_providers = {provider_id, provider_id.replace("-", "_")}
-        if not catalog_provider or catalog_provider not in allowed_providers:
-            raise _catalog_failure(
-                f"model identity belongs to another provider: {model_slug}",
-                reason="provider_mismatch",
-                provider_id=provider_id,
-                model_slug=model_slug,
-            )
-        expected_upstream = canonical_model_id(expected_upstream_model or model_slug)
-        catalog_upstream = metadata.get("upstream_model")
-        if not isinstance(catalog_upstream, str) or canonical_model_id(catalog_upstream) != expected_upstream:
-            raise _catalog_failure(
-                "published catalog row upstream_model contradicts the requested model slug",
-                reason="upstream_model_mismatch",
-                provider_id=provider_id,
-                model_slug=model_slug,
-            )
-        catalog_upstream_name = canonical_model_id(str(metadata.get("upstream_name") or ""))
-        if catalog_upstream_name not in allowed_providers:
-            raise _catalog_failure(
-                "published catalog row upstream_name contradicts the provider identity",
-                reason="upstream_name_mismatch",
-                provider_id=provider_id,
-                model_slug=model_slug,
-            )
+    _catalog_runtime().validate_published_model_for_provider(
+        model,
+        provider_id=provider_id,
+        model_slug=model_slug,
+        expected_upstream_model=expected_upstream_model,
+    )
 
 
 def _provider_catalog_failure(
@@ -1631,29 +1491,15 @@ def _provider_catalog_failure(
     provider_id: str,
     model_slug: str,
 ) -> ModelIdentityResolutionError:
-    """Wrap provider-index parse/collision failures as stable catalog errors."""
-
-    return _catalog_failure(
+    return CatalogRuntime.provider_catalog_failure(
         message,
-        reason="provider_model_index_inconsistency",
         provider_id=provider_id,
         model_slug=model_slug,
     )
 
 
 def _resolve_external_model_alias(slug: str) -> dict[str, Any] | None:
-    """Resolve one configured external model without leaking raw config errors."""
-
-    try:
-        return resolve_external_model_alias(slug)
-    except ModelIdentityResolutionError:
-        raise
-    except ValueError as exc:
-        raise _provider_catalog_failure(
-            "external provider model index is inconsistent",
-            provider_id=slug.partition("/")[0] or "external",
-            model_slug=slug,
-        ) from exc
+    return _catalog_runtime().resolve_external_model(slug)
 
 
 def _resolve_ollama_cloud_model(
@@ -1661,175 +1507,38 @@ def _resolve_ollama_cloud_model(
     *,
     require_api_key: bool,
 ) -> tuple[bool, dict[str, Any] | None]:
-    """Resolve Ollama Cloud configuration with catalog-level diagnostics."""
-
-    try:
-        return resolve_ollama_cloud_model(model_id, require_api_key=require_api_key)
-    except ModelIdentityResolutionError:
-        raise
-    except ValueError as exc:
-        raise _provider_catalog_failure(
-            "Ollama Cloud model index is inconsistent",
-            provider_id="ollama-cloud",
-            model_slug=canonical_model_id(model_id),
-        ) from exc
+    return _catalog_runtime().resolve_ollama_cloud_model(
+        model_id,
+        require_api_key=require_api_key,
+    )
 
 
 def _catalog_output_limit(model_id: str) -> tuple[int | None, bool]:
-    slug = canonical_model_id(model_id)
-    model = generated_catalog_by_slug().get(_catalog_identity_slug(slug))
-    if not model:
-        cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
-        return (cap if isinstance(cap, int) and cap > 0 else None), False
-    value = model.get("max_output_tokens")
-    catalog_value = value if isinstance(value, int) and value > 0 else None
-    cap = UPSTREAM_MAX_OUTPUT_TOKEN_CAPS.get(slug)
-    if isinstance(cap, int) and cap > 0:
-        return (min(catalog_value, cap) if catalog_value is not None else cap), False
-    metadata = model.get("codex_proxy_metadata")
-    context_fallback = (
-        isinstance(metadata, Mapping)
-        and metadata.get("max_output_source") == CONTEXT_WINDOW_OUTPUT_FALLBACK_SOURCE
-    )
-    return catalog_value, context_fallback
+    return _catalog_runtime().catalog_output_limit(model_id)
 
 
 def catalog_max_output_tokens(model_id: str) -> int | None:
-    return _catalog_output_limit(model_id)[0]
+    return _catalog_runtime().catalog_max_output_tokens(model_id)
 
 
 def policy_denies_model(model_id: Any, policy: Any) -> bool:
-    slug = canonical_model_id(str(model_id))
-    if not slug:
-        return False
-    if slug in policy.denied_models or deny_match_model_id(slug) in policy.denied_models:
-        return True
-    lowered = slug.lower()
-    return any(part in lowered for part in policy.denied_substrings)
+    return CatalogRuntime.policy_denies_model(model_id, policy)
 
 
 def policy_denies_any_model(model_ids: tuple[Any, ...], policy: Any) -> bool:
-    return any(model_id is not None and policy_denies_model(model_id, policy) for model_id in model_ids)
+    return _catalog_runtime().policy_denies_any_model(model_ids, policy)
 
 
 def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | None:
-    upstream_model = slug[len(OFFICIAL_ALIAS_PREFIX) :] if slug.startswith(OFFICIAL_ALIAS_PREFIX) else slug
-    if not upstream_model.startswith(official_prefixes()):
-        return None
-
-    alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-    model = _published_catalog_model(upstream_model)
-    if not model:
-        return None
-    if _is_internal_route_identity(model):
-        raise _identity_failure(
-            f"model identity is internal and cannot be routed: {slug}",
-            reason="internal_model",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if model_visibility(model, missing_is_list=True) is not CatalogVisibility.LIST:
-        raise _catalog_failure(
-            "published catalog model is not explicitly listable",
-            reason="unsupported_visibility",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if "supported_in_api" in model and not isinstance(model["supported_in_api"], bool):
-        raise _catalog_failure(
-            "official catalog model supported_in_api is malformed",
-            reason="malformed_supported_in_api",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if model.get("supported_in_api") is False:
-        raise _identity_failure(
-            f"model identity is not supported in the API: {slug}",
-            reason="unsupported_model",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-
-    metadata = model.get("codex_proxy_metadata")
-    if "codex_proxy_metadata" in model and not isinstance(metadata, Mapping):
-        raise _catalog_failure(
-            "official catalog model metadata is malformed",
-            reason="malformed_metadata",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if not isinstance(metadata, Mapping):
-        # The bundled policy is an authoritative identity for the legacy
-        # gpt-5.5 route.  All newly discovered Official rows must carry the
-        # generated metadata binding.
-        if upstream_model == "gpt-5.5" and should_include_model(upstream_model, policy):
-            return upstream_model
-        raise _catalog_failure(
-            "official catalog row is missing its upstream identity binding",
-            reason="missing_catalog_metadata",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    catalog_upstream = canonical_model_id(str(metadata.get("upstream_model", "")))
-    if (
-        metadata.get("provider") != "openai"
-        or metadata.get("upstream_name") != "official"
-        or catalog_upstream != upstream_model
-        or not catalog_upstream.startswith(official_prefixes())
-    ):
-        raise _catalog_failure(
-            "official catalog row has contradictory upstream identity metadata",
-            reason="upstream_model_mismatch",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if policy_denies_any_model((slug, alias, catalog_upstream), policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="denied_model",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    return catalog_upstream
+    return _catalog_runtime().generated_official_upstream_model(slug, policy)
 
 
 def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
-    if not slug.startswith(OFFICIAL_ALIAS_PREFIX):
-        return None
-    upstream_model = slug[len(OFFICIAL_ALIAS_PREFIX) :]
-    if policy_denies_any_model((slug, upstream_model), policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="denied_model",
-            provider_id="openai",
-            model_slug=upstream_model,
-        )
-    if not upstream_model.startswith(official_prefixes()):
-        return None
-    # Provider qualification is presentation-neutral only after the exact
-    # bare Official slug is proven by the current catalog.
-    return generated_official_catalog_upstream_model(slug, policy)
+    return _catalog_runtime().official_alias_upstream_model(slug, policy)
 
 
 def official_fast_variant_upstream_model(slug: str, policy: Any) -> str | None:
-    fast_model = slug[len(OFFICIAL_ALIAS_PREFIX) :] if slug.startswith(OFFICIAL_ALIAS_PREFIX) else slug
-    upstream_model = OFFICIAL_FAST_VARIANT_BASE_MODELS.get(fast_model)
-    if upstream_model is None:
-        return None
-    upstream_alias = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-    if policy_denies_any_model((slug, fast_model, upstream_model, upstream_alias), policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="denied_model",
-            provider_id="openai",
-            model_slug=fast_model,
-        )
-    if not upstream_model.startswith(official_prefixes()):
-        return None
-    resolved = generated_official_catalog_upstream_model(upstream_model, policy)
-    if resolved is None:
-        return None
-    return resolved
+    return _catalog_runtime().official_fast_variant_upstream_model(slug, policy)
 
 
 OLLAMA_CLOUD_ALIAS_PREFIX = "ollama-cloud/"
@@ -1844,9 +1553,7 @@ def provider_scoped_path(path: str, endpoint_suffix: str) -> str | None:
     if not provider_part or "/" in provider_part:
         return None
     provider = unquote(provider_part).strip()
-    if not provider:
-        return None
-    return provider
+    return provider or None
 
 
 def provider_scoped_route_model(model_id: str | None, provider_hint: str | None) -> str | None:
@@ -1856,332 +1563,33 @@ def provider_scoped_route_model(model_id: str | None, provider_hint: str | None)
     if not slug or not provider_hint:
         return slug
     provider = canonical_model_id(str(provider_hint))
-    if not provider:
-        return slug
-    if slug.startswith(f"{provider}/"):
+    if not provider or slug.startswith(f"{provider}/"):
         return slug
     return f"{provider}/{slug}"
 
 
 def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] | None:
-    configured, runtime_model = _resolve_ollama_cloud_model(
-        model_id,
-        require_api_key=False,
-    )
-    if not configured:
-        return None
-    slug = canonical_model_id(model_id)
-    if runtime_model is None:
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="unsupported_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    if _is_internal_route_identity(slug) or _is_internal_route_identity(runtime_model):
-        raise _identity_failure(
-            f"model identity is internal and cannot be routed: {slug}",
-            reason="internal_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    if runtime_model.get("matched_alias"):
-        raise _identity_failure(
-            "model aliases are presentation-only and cannot authorize routing",
-            reason="model_alias_not_routable",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-
-    policy_alias = runtime_model.get("alias", f"{OLLAMA_CLOUD_ALIAS_PREFIX}{slug}")
-    upstream_model = runtime_model.get("upstream_model")
-    if not isinstance(upstream_model, str) or not upstream_model.strip():
-        raise _catalog_failure(
-            "Ollama Cloud configuration is missing upstream_model",
-            reason="missing_upstream_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    upstream_model = upstream_model.strip()
-    configured_id = canonical_model_id(str(runtime_model.get("model_id") or slug))
-    if configured_id != slug and configured_id != f"{OLLAMA_CLOUD_ALIAS_PREFIX}{slug}":
-        raise _catalog_failure(
-            "Ollama Cloud configuration model identity does not match the request",
-            reason="configured_model_mismatch",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    if policy_denies_any_model((slug, policy_alias, upstream_model), policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="denied_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-
-    api_key = runtime_model.get("api_key")
-    upstream: dict[str, Any] = {
-        "name": "ollama_cloud",
-        "provider_id": "ollama-cloud",
-        "model_id": slug,
-        "base_url": runtime_model.get("base_url") or ollama_cloud_base_url(),
-        "auth": "api_key" if api_key else "ollama_api_key",
-        "upstream_model": upstream_model,
-        "upstream_format": runtime_model.get("upstream_format", "responses"),
-        "tool_protocol": runtime_model.get("tool_protocol", "auto"),
-        "tool_surface_strategy": runtime_model.get("tool_surface_strategy", "eager"),
-        "native_responses_tool_codec": runtime_model.get(
-            "native_responses_tool_codec", "none"
-        ),
-        "reports_cached_input_tokens": False,
-        "input_modalities": tuple(runtime_model.get("input_modalities") or ("text",)),
-        **_route_capability_metadata(runtime_model),
-    }
-    if api_key:
-        upstream["api_key"] = api_key
-    return upstream
+    return _catalog_runtime().ollama_cloud_runtime_upstream(model_id, policy)
 
 
 def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] | None:
-    if not slug.startswith(OLLAMA_CLOUD_ALIAS_PREFIX):
-        return None
-    upstream_model = slug[len(OLLAMA_CLOUD_ALIAS_PREFIX) :]
-    if not upstream_model:
-        return None
-    if policy_denies_any_model((slug, upstream_model), policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="denied_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-
-    runtime_upstream = ollama_cloud_runtime_upstream(slug, policy)
-    if runtime_upstream is not None:
-        return runtime_upstream
-
-    if not (should_include_model(slug, policy) or should_include_model(upstream_model, policy)):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="unsupported_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    model = _published_catalog_model(slug)
-    if model is None:
-        raise _identity_failure(
-            f"model is not in the generated cloud catalog: {upstream_model}",
-            reason="missing_catalog_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-    _validate_published_catalog_model_for_provider(
-        model,
-        provider_id="ollama-cloud",
-        model_slug=slug,
-        expected_upstream_model=upstream_model,
-    )
-    return {
-        "name": "ollama_cloud",
-        "provider_id": "ollama-cloud",
-        "model_id": slug,
-        "base_url": ollama_cloud_base_url(),
-        "auth": "ollama_api_key",
-        "upstream_model": upstream_model,
-        "reports_cached_input_tokens": False,
-    }
+    return _catalog_runtime().ollama_cloud_alias_upstream_model(slug, policy)
 
 
 def _route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
-    keys = (
-        "tool_protocol_capabilities",
-        "tool_exposure_mode",
-        "tool_capability_state",
-        "supports_search_tool",
-        "proven_tool_subset",
-        "capability_manifest_version",
-        "capability_manifest_hash",
-        "capability_manifest_state",
-        "capability_binding",
-    )
-    return {key: source[key] for key in keys if key in source}
+    return CatalogRuntime.route_capability_metadata(source)
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
-    slug = canonical_model_id(str(model_id))
-    if not slug:
-        raise ValueError("model is required")
-
-    policy = load_policy(POLICY_PATH)
-    official_fast_variant = official_fast_variant_upstream_model(slug, policy)
-    if official_fast_variant is not None:
-        return {
-            "name": "official",
-            "provider_id": "openai",
-            "model_id": slug,
-            "base_url": official_base_url(),
-            "auth": "codex_auth",
-            "upstream_model": official_fast_variant,
-            "service_tier": OFFICIAL_FAST_VARIANT_SERVICE_TIER,
-            "reports_cached_input_tokens": True,
-        }
-
-    official_alias = official_alias_upstream_model(slug, policy)
-    if official_alias is not None:
-        return {
-            "name": "official",
-            "provider_id": "openai",
-            "model_id": slug,
-            "base_url": official_base_url(),
-            "auth": "codex_auth",
-            "upstream_model": official_alias,
-            "reports_cached_input_tokens": True,
-        }
-
-    discovered_official = generated_official_catalog_upstream_model(slug, policy)
-    if discovered_official is not None:
-        return {
-            "name": "official",
-            "provider_id": "openai",
-            "model_id": slug,
-            "base_url": official_base_url(),
-            "auth": "codex_auth",
-            "upstream_model": discovered_official,
-            "reports_cached_input_tokens": True,
-        }
-
-    ollama_alias = ollama_cloud_alias_upstream_model(slug, policy)
-    if ollama_alias is not None:
-        return ollama_alias
-
-    if slug.startswith(official_prefixes()):
-        raise _identity_failure(
-            f"model is not in the generated Official catalog: {slug}",
-            reason="missing_catalog_model",
-            provider_id="openai",
-            model_slug=slug,
-        )
-
-    external_model = _resolve_external_model_alias(slug)
-    if external_model is not None:
-        if _is_internal_route_identity(slug) or _is_internal_route_identity(external_model):
-            raise _identity_failure(
-                f"model identity is internal and cannot be routed: {slug}",
-                reason="internal_model",
-                provider_id=str(external_model.get("provider_alias") or "") or None,
-                model_slug=slug,
-            )
-        policy_alias = external_model.get("alias", slug)
-        if policy_denies_any_model((slug, policy_alias, external_model.get("matched_alias")), policy):
-            raise _identity_failure(
-                f"model is not allowed: {slug}",
-                reason="denied_model",
-                provider_id=str(external_model.get("provider_alias") or "") or None,
-                model_slug=slug,
-            )
-        if not should_include_external_provider_model(policy_alias, policy):
-            raise _identity_failure(
-                f"model is not allowed: {slug}",
-                reason="unsupported_model",
-                provider_id=str(external_model.get("provider_alias") or "") or None,
-                model_slug=slug,
-            )
-        provider_id = canonical_model_id(str(external_model.get("provider_alias") or ""))
-        configured_model = canonical_model_id(str(external_model.get("alias") or ""))
-        upstream_model_value = external_model.get("upstream_model")
-        if not provider_id or not configured_model or not isinstance(upstream_model_value, str) or not upstream_model_value.strip():
-            raise _catalog_failure(
-                "external provider configuration is missing exact model identity",
-                reason="missing_upstream_model",
-                provider_id=provider_id or None,
-                model_slug=slug,
-            )
-        if configured_model != slug:
-            raise _identity_failure(
-                "model aliases are presentation-only and cannot authorize routing",
-                reason="model_alias_not_routable",
-                provider_id=provider_id,
-                model_slug=slug,
-            )
-        if canonical_model_id(upstream_model_value).lower() == "codex-auto-review":
-            raise _identity_failure(
-                f"model identity is internal and cannot be routed: {slug}",
-                reason="internal_model",
-                provider_id=provider_id,
-                model_slug=slug,
-            )
-        return {
-            "name": external_model["upstream_name"],
-            "provider_id": provider_id,
-            "model_id": slug,
-            "base_url": external_model["base_url"],
-            "auth": "api_key",
-            "api_key": external_model["api_key"],
-            "upstream_model": external_model["upstream_model"],
-            "upstream_format": external_model.get("upstream_format", "responses"),
-            "tool_protocol": external_model.get("tool_protocol", "auto"),
-            "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
-            "native_responses_tool_codec": external_model.get(
-                "native_responses_tool_codec", "none"
-            ),
-            "reports_cached_input_tokens": bool(external_model.get("reports_cached_input_tokens")),
-            "supports_developer_role": bool(external_model.get("supports_developer_role", True)),
-            "supported_reasoning_levels": tuple(external_model.get("supported_reasoning_levels") or ()),
-            "input_modalities": tuple(external_model.get("input_modalities") or ("text",)),
-            **_route_capability_metadata(external_model),
-        }
-
-    if "/" in slug:
-        raise _identity_failure(
-            f"external provider model is not configured: {slug}",
-            reason="unsupported_model",
-            provider_id=slug.partition("/")[0],
-            model_slug=slug,
-        )
-
-    runtime_ollama = ollama_cloud_runtime_upstream(slug, policy)
-    if runtime_ollama is not None:
-        return runtime_ollama
-
-    if not should_include_model(slug, policy):
-        raise _identity_failure(
-            f"model is not allowed: {slug}",
-            reason="unsupported_model",
-            provider_id="ollama-cloud",
-            model_slug=slug,
-        )
-
-    model = _published_catalog_model(slug)
-    if model is not None:
-        _validate_published_catalog_model_for_provider(
-            model,
-            provider_id="ollama-cloud",
-            model_slug=slug,
-            expected_upstream_model=slug,
-        )
-        return {
-            "name": "ollama_cloud",
-            "provider_id": "ollama-cloud",
-            "model_id": slug,
-            "base_url": ollama_cloud_base_url(),
-            "auth": "ollama_api_key",
-            "reports_cached_input_tokens": False,
-            "upstream_model": slug,
-        }
-
-    raise _identity_failure(
-        f"model is not in the generated cloud catalog: {slug}",
-        reason="missing_catalog_model",
-        provider_id="ollama-cloud",
-        model_slug=slug,
-    )
+    return _catalog_runtime().choose_upstream(model_id)
 
 
 def official_upstream() -> dict[str, Any]:
+    runtime = _catalog_runtime()
     return {
         "name": "official",
         "provider_id": "openai",
-        "base_url": official_base_url(),
+        "base_url": runtime.official_base_url(),
         "auth": "codex_auth",
         "reports_cached_input_tokens": True,
     }
@@ -10472,72 +9880,15 @@ def bind_route_plan_operational_authentication(
 
 
 def current_catalog_data() -> dict[str, Any]:
-    """Read the atomically published catalog without launching discovery.
-
-    Tauri owns Official acquisition and catalog refresh.  The Gateway only
-    consumes the published snapshot at request handling time.
-    """
-    catalog_path = existing_generated_catalog_path()
-    if not catalog_path.exists():
-        return {"models": []}
-    published_budgets = published_official_context_budgets(catalog_path)
-    return catalog_with_vision_proxy_capabilities(
-        catalog_with_openai_context_guard(
-            catalog_with_official_fast_variants(json.loads(catalog_path.read_text(encoding="utf-8-sig"))),
-            published_budgets,
-            require_published_snapshot=True,
-        )
-    )
+    return _catalog_runtime().current_catalog_data()
 
 
 def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the internal catalog snapshot into the public OpenAI shape."""
-    models = catalog.get("models")
-    if not isinstance(models, list):
-        models = []
-    data: list[dict[str, str]] = []
-    for model in models:
-        if not isinstance(model, Mapping):
-            continue
-        model_id = model.get("slug")
-        if not isinstance(model_id, str) or not model_id.strip():
-            continue
-        metadata = model.get("codex_proxy_metadata")
-        owner = metadata.get("provider") if isinstance(metadata, Mapping) else None
-        data.append(
-            {
-                "id": model_id,
-                "object": "model",
-                "owned_by": owner if isinstance(owner, str) and owner.strip() else "codexhub",
-            }
-        )
-    return {"object": "list", "data": data}
+    return CatalogRuntime.openai_model_list(catalog)
 
 
 def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
-    """Read the Rust publication fence that commits an Official budget.
-
-    The catalog and Codex runtime overlay are separate atomic files.  The
-    refresh coordinator clears this fence before it begins an update, then
-    commits it only after both files agree.  A missing, interrupted, or
-    mismatched fence is therefore not a safe current Official snapshot.
-    """
-
-    state_path = catalog_path.parent / OFFICIAL_REFRESH_STATE_FILENAME
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, Mapping) or payload.get("publication_ready") is not True:
-        return {}
-    budgets = payload.get("published_context_budgets")
-    if not isinstance(budgets, Mapping):
-        return {}
-    return {
-        str(model_id): budget
-        for model_id, budget in budgets.items()
-        if isinstance(model_id, str) and isinstance(budget, Mapping)
-    }
+    return _catalog_runtime().published_official_context_budgets(catalog_path)
 
 
 def catalog_with_openai_context_guard(
@@ -10546,210 +9897,26 @@ def catalog_with_openai_context_guard(
     *,
     require_published_snapshot: bool = False,
 ) -> dict[str, Any]:
-    # The Direct Official budget is a safety invariant, not an optional
-    # presentation preference.  Gateway request handling only projects the
-    # atomically published resolver result and never refreshes it itself.
-    models = catalog.get("models")
-    if not isinstance(models, list):
-        return catalog
-
-    def positive_int(value: Any) -> int | None:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
-
-    def guarded_model(model: Any) -> Any:
-        def without_context_budget() -> dict[str, Any]:
-            updated = dict(model)
-            updated.pop("context_window", None)
-            updated.pop("max_context_window", None)
-            updated.pop("effective_context_window_percent", None)
-            return updated
-
-        if not isinstance(model, Mapping):
-            return model
-        metadata = model.get("codex_proxy_metadata")
-        if not isinstance(metadata, Mapping):
-            return model
-        if metadata.get("provider") != "openai" or metadata.get("upstream_name") != "official":
-            return model
-        budget = metadata.get("official_context_budget")
-        if not isinstance(budget, Mapping):
-            return without_context_budget()
-        source = budget.get("source")
-        freshness = budget.get("freshness")
-        trusted_budget = (
-            source == CURRENT_DIRECT_OFFICIAL_SOURCE and freshness == "fresh"
-        ) or source == DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE
-        if not trusted_budget:
-            return without_context_budget()
-        guard_window = positive_int(budget.get("model_context_window"))
-        if guard_window is None:
-            guard_window = positive_int(budget.get("context_window"))
-        effective_percent = positive_int(budget.get("effective_context_window_percent"))
-        effective_window = positive_int(budget.get("effective_context_window"))
-        auto_compact_limit = positive_int(budget.get("model_auto_compact_token_limit"))
-        if (
-            guard_window is None
-            or effective_percent is None
-            or effective_percent > 100
-            or effective_window is None
-            or effective_window > guard_window
-            or auto_compact_limit is None
-            or auto_compact_limit > effective_window
-        ):
-            # An incomplete or interrupted resolved snapshot must not keep a
-            # larger stale catalog value visible to an Official caller.
-            return without_context_budget()
-        if require_published_snapshot:
-            if not isinstance(published_budgets, Mapping):
-                return without_context_budget()
-            model_id = str(model.get("slug", "")).removeprefix("openai/")
-            upstream_model = metadata.get("upstream_model")
-            expected = published_budgets.get(model_id)
-            if expected is None and isinstance(upstream_model, str):
-                expected = published_budgets.get(upstream_model.removeprefix("openai/"))
-            if not isinstance(expected, Mapping) or any(
-                expected.get(key) != budget.get(key)
-                for key in (
-                    "model_context_window",
-                    "effective_context_window_percent",
-                    "effective_context_window",
-                    "model_auto_compact_token_limit",
-                )
-            ):
-                return without_context_budget()
-        reported_windows = [
-            value
-            for value in (
-                positive_int(model.get("context_window")),
-                positive_int(model.get("max_context_window")),
-            )
-            if value is not None
-        ]
-        guarded_window = min(guard_window, *reported_windows) if reported_windows else guard_window
-        return {
-            **model,
-            "context_window": guarded_window,
-            "max_context_window": guarded_window,
-            "effective_context_window_percent": effective_percent,
-        }
-
-    updated = dict(catalog)
-    updated["models"] = [guarded_model(model) for model in models]
-    return updated
+    return _catalog_runtime().catalog_with_openai_context_guard(
+        catalog,
+        published_budgets,
+        require_published_snapshot=require_published_snapshot,
+    )
 
 
 def catalog_with_vision_proxy_capabilities(catalog: dict[str, Any]) -> dict[str, Any]:
-    if not gateway_image_proxy_enabled():
-        return catalog
-
-    models = catalog.get("models")
-    if not isinstance(models, list):
-        return catalog
-
-    updated = dict(catalog)
-    updated["models"] = [
-        {
-            **model,
-            "input_modalities": list(
-                dict.fromkeys([*(model.get("input_modalities") or ["text"]), "image"])
-            ),
-        }
-        if isinstance(model, Mapping)
-        else model
-        for model in models
-    ]
-    return updated
+    return _catalog_runtime().catalog_with_vision_proxy_capabilities(catalog)
 
 
 def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, Any]:
-    models = catalog.get("models")
-    if not isinstance(models, list):
-        return catalog
-
-    policy = load_policy(POLICY_PATH)
-    models = canonical_catalog_models(models, policy)
-    catalog["models"] = models
-
-    by_slug = {
-        canonical_model_id(str(model.get("slug", ""))): model
-        for model in models
-        if isinstance(model, Mapping)
-    }
-    for fast_model, upstream_model in OFFICIAL_FAST_VARIANT_BASE_MODELS.items():
-        legacy_base_slug = f"{OFFICIAL_ALIAS_PREFIX}{upstream_model}"
-        fast_slug = fast_model
-        base_model = by_slug.get(upstream_model) or by_slug.get(legacy_base_slug)
-        if not isinstance(base_model, Mapping) or fast_slug in by_slug:
-            continue
-        fast_entry = deepcopy(dict(base_model))
-        fast_entry["slug"] = fast_slug
-        fast_entry["display_name"] = OFFICIAL_FAST_VARIANT_DISPLAY_NAMES.get(
-            fast_model,
-            f"{base_model.get('display_name', upstream_model)} Fast",
-        )
-        metadata = dict(fast_entry.get("codex_proxy_metadata", {}))
-        metadata.update(
-            {
-                "provider": "openai",
-                "upstream_model": upstream_model,
-                "service_tier": OFFICIAL_FAST_VARIANT_SERVICE_TIER,
-            }
-        )
-        fast_entry["codex_proxy_metadata"] = metadata
-        models.append(fast_entry)
-        by_slug[fast_slug] = fast_entry
-    return catalog
+    return _catalog_runtime().catalog_with_official_fast_variants(catalog)
 
 
 def canonical_catalog_models(
     models: list[Any],
     policy: CatalogPolicy,
 ) -> list[Any]:
-    known_official_ids = catalog_known_official_model_ids()
-    for model in models:
-        if not isinstance(model, Mapping):
-            continue
-        slug = canonical_model_id(str(model.get("slug", "")))
-        if slug.startswith("gpt-"):
-            known_official_ids.add(slug)
-
-    output: list[Any] = []
-    official_positions: dict[str, int] = {}
-    official_bare_sources: dict[str, bool] = {}
-    for model in models:
-        if not isinstance(model, Mapping):
-            output.append(model)
-            continue
-        raw_slug = canonical_model_id(str(model.get("slug", "")))
-        is_legacy_alias = raw_slug.startswith(OFFICIAL_ALIAS_PREFIX + "gpt-")
-        if is_legacy_alias:
-            canonical_slug = raw_slug[len(OFFICIAL_ALIAS_PREFIX) :]
-            if canonical_slug not in known_official_ids:
-                continue
-        elif raw_slug.startswith("gpt-"):
-            canonical_slug = raw_slug
-        else:
-            output.append(model)
-            continue
-
-        candidate = deepcopy(dict(model))
-        candidate["slug"] = canonical_slug
-        candidate["display_name"] = official_short_display_name(canonical_slug, candidate, policy)
-        position = official_positions.get(canonical_slug)
-        if position is None:
-            official_positions[canonical_slug] = len(output)
-            official_bare_sources[canonical_slug] = not is_legacy_alias
-            output.append(candidate)
-            continue
-
-        existing = output[position]
-        existing_is_bare = official_bare_sources.get(canonical_slug, False)
-        fresh = candidate if not is_legacy_alias or not existing_is_bare else deepcopy(dict(existing))
-        if "enabled" in existing or "enabled" in candidate:
-            fresh["enabled"] = bool(existing.get("enabled", True) or candidate.get("enabled", True))
-        output[position] = fresh
-        official_bare_sources[canonical_slug] = existing_is_bare or not is_legacy_alias
-    return output
+    return _catalog_runtime().canonical_catalog_models(models, policy)
 
 
 def _json_response_bytes(payload: dict[str, Any]) -> bytes:
@@ -10757,37 +9924,21 @@ def _json_response_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def _modalities_include_image(value: Any) -> bool:
-    if not isinstance(value, (list, tuple, set)):
-        return False
-    return any(str(item).lower() == "image" for item in value)
+    return CatalogRuntime.modalities_include_image(value)
 
 
-def _catalog_input_modalities(model_id: str | None, upstream: Mapping[str, Any] | None = None) -> Any:
-    candidates: list[str] = []
-    for value in (model_id, upstream.get("upstream_model") if upstream else None):
-        if not isinstance(value, str) or not value.strip():
-            continue
-        slug = canonical_model_id(value)
-        if not slug:
-            continue
-        candidates.append(slug)
-        if slug.startswith(OFFICIAL_ALIAS_PREFIX):
-            candidates.append(slug[len(OFFICIAL_ALIAS_PREFIX) :])
-        else:
-            candidates.append(f"{OFFICIAL_ALIAS_PREFIX}{slug}")
-
-    catalog = generated_catalog_by_slug()
-    for candidate in dict.fromkeys(candidates):
-        model = catalog.get(_catalog_identity_slug(candidate))
-        if isinstance(model, Mapping) and "input_modalities" in model:
-            return model.get("input_modalities")
-    return None
+def _catalog_input_modalities(
+    model_id: str | None,
+    upstream: Mapping[str, Any] | None = None,
+) -> Any:
+    return _catalog_runtime().catalog_input_modalities(model_id, upstream)
 
 
-def model_supports_image(model_id: str | None, upstream: Mapping[str, Any] | None = None) -> bool:
-    if upstream and _modalities_include_image(upstream.get("input_modalities")):
-        return True
-    return _modalities_include_image(_catalog_input_modalities(model_id, upstream))
+def model_supports_image(
+    model_id: str | None,
+    upstream: Mapping[str, Any] | None = None,
+) -> bool:
+    return _catalog_runtime().model_supports_image(model_id, upstream)
 
 
 def _is_image_part(value: Any) -> bool:
