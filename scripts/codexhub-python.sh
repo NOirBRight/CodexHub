@@ -31,11 +31,12 @@ supports_python() {
   return 0
 }
 
-candidates=()
+explicit=""
 for env_name in CODEXHUB_E2E_PYTHON CODEXHUB_PYTHON CODEXHUB_PROXY_PYTHON; do
   value="${!env_name-}"
   if [[ -n "$value" ]]; then
-    candidates+=("$value")
+    explicit="$value"
+    break
   fi
 done
 

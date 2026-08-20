@@ -375,23 +375,26 @@ function GatewayPageImpl({
       return;
     }
     setAutoRetryBusy(true);
-    const toastId = showToast(
-      enabled ? t("gateway.enablingAutoRetry") : t("gateway.disablingAutoRetry"),
-      "loading",
-    );
     try {
-      await onApplySettings({
-        ...settings,
-        gateway_auto_retry_enabled: enabled,
-      });
-      updateToast(toastId, {
-        action: null,
-        text: enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
-        tone: "success",
+      await runPersistentAction({
+        ...persistentActionBase(),
+        loading: enabled ? t("gateway.enablingAutoRetry") : t("gateway.disablingAutoRetry"),
+        work: () => onApplySettings({
+          ...settings,
+          gateway_auto_retry_enabled: enabled,
+        }),
+        success: (message) => ({
+          text: message === t("runtime.gatewayRetirementCancelled")
+            ? message
+            : enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
+          tone: message === t("runtime.gatewayRetirementCancelled") ? "info" : "success",
+          restart: { kind: "none" },
+        }),
+        formatRestart: () => "",
       });
       setError(null);
-    } catch (err) {
-      updateToastWithError(toastId, err);
+    } catch {
+      // Toast already updated by runPersistentAction.
     } finally {
       setAutoRetryBusy(false);
     }
