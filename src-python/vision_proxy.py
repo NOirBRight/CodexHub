@@ -10,7 +10,8 @@ the Gateway facade and HTTP handler.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -23,8 +24,7 @@ import time
 from typing import Any, Protocol
 from urllib.request import Request
 
-from gateway_errors import ImageProxyError
-from protocol_translation import UpstreamStreamIncompleteError
+from gateway_errors import ImageProxyError, UpstreamStreamIncompleteError
 from route_primitives import (
     IMAGE_PROXY_PROMPT,
     IMAGE_PROXY_PROMPT_VERSION,
@@ -36,7 +36,6 @@ from route_primitives import (
     VisionAction,
     VisionNetworkAction,
 )
-from sse_events import SseEvent, SseEventAssembler
 
 
 logger = logging.getLogger("vision_proxy")
@@ -80,6 +79,26 @@ class RequestCompatibilityHook(Protocol):
     ) -> bytes: ...
 
 
+class ResponseEventPayloadHook(Protocol):
+    def __call__(self, event: SseFrameLike) -> Mapping[str, Any] | str | None: ...
+
+
+class BoundaryOverrideHook(Protocol):
+    def __call__(
+        self,
+        payload: dict[str, Any],
+        *,
+        inbound_format: str,
+        target_model: str | None,
+        target_upstream: Mapping[str, Any],
+        vision_proxy_policy: str,
+        image_proxy_enabled: bool | None,
+        target_accepts_images: bool | None,
+        event_context: Mapping[str, Any] | None,
+        progress_callback: Callable[[Mapping[str, Any]], bool] | None,
+    ) -> bool: ...
+
+
 class ToolStripHook(Protocol):
     def __call__(
         self,
@@ -91,6 +110,33 @@ class ToolStripHook(Protocol):
     ) -> bool: ...
 
 
+class PreparedExchangeLike(Protocol):
+    upstream_body: bytes
+
+
+class UpstreamResponseLike(Protocol):
+    headers: Mapping[str, str]
+    status: int | None
+
+    def read(self, size: int = -1) -> bytes: ...
+    def readline(self) -> bytes: ...
+
+
+class SseFrameLike(Protocol):
+    data: bytes
+    lines: Iterable[Any]
+
+
+class SseTerminationLike(Protocol):
+    disposition: str
+    events: Iterable[SseFrameLike]
+
+
+class SseAssemblerLike(Protocol):
+    def feed(self, chunk: bytes) -> Iterable[SseFrameLike]: ...
+    def finish(self) -> SseTerminationLike: ...
+
+
 class PrepareExchangeHook(Protocol):
     def __call__(
         self,
@@ -98,7 +144,7 @@ class PrepareExchangeHook(Protocol):
         *,
         inbound_format: str,
         outbound_format: str,
-    ) -> Any: ...
+    ) -> PreparedExchangeLike: ...
 
 
 class OpenUpstreamHook(Protocol):
@@ -112,7 +158,7 @@ class OpenUpstreamHook(Protocol):
         event_context: Mapping[str, Any] | None,
         request_kind: str,
         max_attempts: int,
-    ) -> Any: ...
+    ) -> AbstractContextManager[UpstreamResponseLike]: ...
 
 
 def _false() -> bool:
@@ -245,6 +291,9 @@ class VisionProxyHooks:
     vision_upstream_override: Callable[[], tuple[str, Mapping[str, Any]]] | None = None
     apply_responses_override: Callable[..., bool] | None = None
     apply_chat_override: Callable[..., bool] | None = None
+    sse_assembler_factory: Callable[[], SseAssemblerLike] | None = None
+    response_event_payload: ResponseEventPayloadHook | None = None
+    boundary_override: BoundaryOverrideHook | None = None
 
 
 @dataclass(frozen=True)
@@ -439,7 +488,7 @@ class VisionProxyAdapter:
         return "\n".join(part.strip() for part in text_parts if part.strip()).strip()
 
     @staticmethod
-    def _event_payload(event: SseEvent) -> Mapping[str, Any] | None:
+    def _event_payload(event: SseFrameLike) -> Mapping[str, Any] | str | None:
         if not any(line.name == b"data" for line in event.lines) or not event.data:
             return None
         if event.data == b"[DONE]":
@@ -457,14 +506,17 @@ class VisionProxyAdapter:
             return self.hooks.response_body_override(response)
         if self.hooks.response_is_event_stream(response.headers):
             events: list[Mapping[str, Any]] = []
-            assembler = SseEventAssembler()
+            if self.hooks.sse_assembler_factory is None:
+                raise ImageProxyError("Vision Proxy SSE parser is not configured")
+            assembler = self.hooks.sse_assembler_factory()
+            event_payload = self.hooks.response_event_payload or self._event_payload
             while True:
                 chunk = response.readline()
                 if not chunk:
                     break
                 for frame in assembler.feed(chunk):
-                    payload = self._event_payload(frame)
-                    if payload is not None:
+                    payload = event_payload(frame)
+                    if payload is not None and payload != "[DONE]":
                         events.append(payload)
             termination = assembler.finish()
             if termination.disposition == "incomplete":
@@ -472,8 +524,8 @@ class VisionProxyAdapter:
                     "Vision Proxy SSE stream ended with an incomplete pending frame"
                 )
             for frame in termination.events:
-                payload = self._event_payload(frame)
-                if payload is not None:
+                payload = event_payload(frame)
+                if payload is not None and payload != "[DONE]":
                     events.append(payload)
             return self.hooks.events_to_responses_body(events)
 
@@ -979,9 +1031,15 @@ class VisionProxyAdapter:
         event_context: Mapping[str, Any] | None = None,
         progress_callback: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> bool:
+        root_key = "messages" if inbound_protocol is RouteProtocol.CHAT_COMPLETIONS else "input"
+        contains_image = self.value_contains_image(payload.get(root_key))
         if vision_plan.action is VisionAction.PASS_THROUGH:
+            if contains_image and not vision_plan.target_accepts_images:
+                raise ImageProxyError("Vision Proxy pass-through plan contradicts target image capability.")
             return False
         if vision_plan.action is VisionAction.REJECT:
+            if not contains_image:
+                return False
             model_label = (
                 self.hooks.canonical_model_id(target_model)
                 if target_model
@@ -989,6 +1047,18 @@ class VisionProxyAdapter:
             )
             raise ImageProxyError(
                 f"{model_label} does not support image input and Vision Proxy is disabled."
+            )
+        if self.hooks.boundary_override is not None:
+            return self.hooks.boundary_override(
+                payload,
+                inbound_format=inbound_protocol.value,
+                target_model=target_model,
+                target_upstream=target_upstream,
+                vision_proxy_policy=vision_plan.policy,
+                image_proxy_enabled=vision_plan.image_proxy_enabled,
+                target_accepts_images=vision_plan.target_accepts_images,
+                event_context=event_context,
+                progress_callback=progress_callback,
             )
         if vision_plan.network_action is not VisionNetworkAction.IMAGE_PROXY:
             raise ImageProxyError(

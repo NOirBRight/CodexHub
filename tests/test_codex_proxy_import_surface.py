@@ -484,6 +484,8 @@ def test_vision_proxy_does_not_import_facade_handler_sse_transport_or_catalog() 
         "gateway_sse",
         "gateway_transport",
         "gateway_catalog_runtime",
+        "protocol_translation",
+        "sse_events",
     ):
         assert marker not in source
     assert "class VisionProxyAdapter" in source

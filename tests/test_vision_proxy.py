@@ -73,6 +73,52 @@ def test_text_only_image_rejection_is_fail_closed_before_hooks() -> None:
     assert payload["input"][0]["content"][0]["type"] == "input_image"
 
 
+def test_pass_through_rejects_contradictory_text_only_plan() -> None:
+    adapter = VisionProxyAdapter()
+    plan = VisionPlan(
+        policy=VISION_PROXY_CODEX_APP_ADAPTER,
+        action=VisionAction.PASS_THROUGH,
+        network_action=VisionNetworkAction.NONE,
+        input_has_image=True,
+        target_accepts_images=False,
+        image_proxy_enabled=False,
+    )
+    with pytest.raises(ImageProxyError, match="contradicts"):
+        adapter.enforce_text_only_boundary(
+            {"input": [{"type": "input_image", "image_url": _IMAGE_URL}]},
+            inbound_protocol=RouteProtocol.RESPONSES,
+            target_model="text-only",
+            target_upstream={"name": "target"},
+            vision_plan=plan,
+        )
+
+
+def test_boundary_override_remains_live_at_adapter_seam() -> None:
+    calls = []
+    adapter = VisionProxyAdapter(
+        hooks=VisionProxyHooks(
+            boundary_override=lambda payload, **kwargs: calls.append((payload, kwargs)) or True,
+        )
+    )
+    plan = VisionPlan(
+        policy=VISION_PROXY_CODEX_APP_ADAPTER,
+        action=VisionAction.PROXY,
+        network_action=VisionNetworkAction.IMAGE_PROXY,
+        input_has_image=True,
+        target_accepts_images=False,
+        image_proxy_enabled=True,
+    )
+    payload = {"input": [{"type": "input_image", "image_url": _IMAGE_URL}]}
+    assert adapter.enforce_text_only_boundary(
+        payload,
+        inbound_protocol=RouteProtocol.RESPONSES,
+        target_model="text-only",
+        target_upstream={"name": "target"},
+        vision_plan=plan,
+    ) is True
+    assert calls and calls[0][0] is payload
+
+
 def test_chat_url_image_is_replaced_through_typed_seam(tmp_path: Path) -> None:
     adapter = VisionProxyAdapter(
         facts=VisionFacts(cache_path=tmp_path / "cache.sqlite"),

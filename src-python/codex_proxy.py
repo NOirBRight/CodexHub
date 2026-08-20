@@ -1360,20 +1360,17 @@ def _vision_proxy_adapter() -> VisionProxyAdapter:
             usage_from_payload=_usage_from_payload,
             normalize_usage=_normalize_usage_for_event,
             safe_upstream_error_detail=safe_upstream_error_detail,
-            cache_lookup_override=_vision_proxy_override("_image_proxy_cache_lookup"),
-            cache_store_override=_vision_proxy_override("_image_proxy_cache_store"),
-            response_body_override=_vision_proxy_override("_image_proxy_response_body"),
-            describe_image_override=_vision_proxy_override(
-                "_call_vision_model_for_image_description"
-            ),
-            description_for_part_override=_vision_proxy_override(
-                "_image_proxy_description_for_part"
-            ),
-            vision_upstream_override=_vision_proxy_override("_image_proxy_vision_upstream"),
-            apply_responses_override=_vision_proxy_override(
-                "apply_image_proxy_to_responses_payload"
-            ),
-            apply_chat_override=_vision_proxy_override("apply_image_proxy_to_chat_payload"),
+            cache_lookup_override=_vision_proxy_override(_image_proxy_cache_lookup, _VISION_ORIGINAL_CACHE_LOOKUP),
+            cache_store_override=_vision_proxy_override(_image_proxy_cache_store, _VISION_ORIGINAL_CACHE_STORE),
+            response_body_override=_vision_proxy_override(_image_proxy_response_body, _VISION_ORIGINAL_RESPONSE_BODY),
+            describe_image_override=_vision_proxy_override(_call_vision_model_for_image_description, _VISION_ORIGINAL_DESCRIBE_IMAGE),
+            description_for_part_override=_vision_proxy_override(_image_proxy_description_for_part, _VISION_ORIGINAL_DESCRIPTION_FOR_PART),
+            vision_upstream_override=_vision_proxy_override(_image_proxy_vision_upstream, _VISION_ORIGINAL_UPSTREAM),
+            apply_responses_override=_vision_proxy_override(apply_image_proxy_to_responses_payload, _VISION_ORIGINAL_APPLY_RESPONSES),
+            apply_chat_override=_vision_proxy_override(apply_image_proxy_to_chat_payload, _VISION_ORIGINAL_APPLY_CHAT),
+            sse_assembler_factory=SseEventAssembler,
+            response_event_payload=_converted_sse_payload,
+            boundary_override=_vision_proxy_override(apply_vision_proxy_adapter, _VISION_ORIGINAL_BOUNDARY),
         ),
     )
 
@@ -10201,24 +10198,19 @@ def enforce_text_only_image_boundary(
     )
 
 
-_VISION_PROXY_ORIGINAL_HOOKS = {
-    name: globals()[name]
-    for name in (
-        "_image_proxy_cache_lookup",
-        "_image_proxy_cache_store",
-        "_image_proxy_response_body",
-        "_call_vision_model_for_image_description",
-        "_image_proxy_description_for_part",
-        "_image_proxy_vision_upstream",
-        "apply_image_proxy_to_responses_payload",
-        "apply_image_proxy_to_chat_payload",
-    )
-}
+_VISION_ORIGINAL_CACHE_LOOKUP = _image_proxy_cache_lookup
+_VISION_ORIGINAL_CACHE_STORE = _image_proxy_cache_store
+_VISION_ORIGINAL_RESPONSE_BODY = _image_proxy_response_body
+_VISION_ORIGINAL_DESCRIBE_IMAGE = _call_vision_model_for_image_description
+_VISION_ORIGINAL_DESCRIPTION_FOR_PART = _image_proxy_description_for_part
+_VISION_ORIGINAL_UPSTREAM = _image_proxy_vision_upstream
+_VISION_ORIGINAL_APPLY_RESPONSES = apply_image_proxy_to_responses_payload
+_VISION_ORIGINAL_APPLY_CHAT = apply_image_proxy_to_chat_payload
+_VISION_ORIGINAL_BOUNDARY = apply_vision_proxy_adapter
 
 
-def _vision_proxy_override(name: str) -> Callable[..., Any] | None:
-    candidate = globals()[name]
-    return None if candidate is _VISION_PROXY_ORIGINAL_HOOKS[name] else candidate
+def _vision_proxy_override(candidate: Callable[..., Any], original: Callable[..., Any]) -> Callable[..., Any] | None:
+    return None if candidate is original else candidate
 
 
 def _emit_upstream_retry_event(
@@ -11611,11 +11603,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     route_plan.protocol_failure_reason
                     or "configured upstream protocol is not executable"
                 )
-            if route_plan.vision.action == VisionAction.REJECT:
-                model_label = canonical_model_id(model) if model else "the target model"
-                raise ImageProxyError(
-                    f"{model_label} does not support image input and Vision Proxy is disabled."
-                )
             operational_authentication = (
                 materialize_operational_authentication(
                     self.headers,
@@ -11737,7 +11724,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 route_plan.prepared_request_protocol.value
             )
             image_proxy_payload: dict[str, Any] | None = None
-            if route_plan.vision.action == VisionAction.PROXY:
+            if route_plan.vision.action in {VisionAction.PROXY, VisionAction.REJECT}:
                 try:
                     parsed_image_proxy_payload = json.loads(body.decode("utf-8-sig"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -11745,7 +11732,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if isinstance(parsed_image_proxy_payload, dict):
                     image_proxy_payload = parsed_image_proxy_payload
             try:
-                if route_plan.vision.action == VisionAction.PROXY:
+                if route_plan.vision.action in {VisionAction.PROXY, VisionAction.REJECT}:
                     if image_proxy_payload is None:
                         raise ImageProxyError(
                             "Vision Proxy could not inspect the planned image payload."
