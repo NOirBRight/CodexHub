@@ -183,6 +183,13 @@ class CatalogRuntime:
     canonical_models_reader: Callable[[list[Any], CatalogPolicy], list[Any]] | None = None
     modalities_reader: Callable[[Any], bool] | None = None
     input_modalities_reader: Callable[[str | None, Mapping[str, Any] | None], Any] | None = None
+    published_budget_reader: Callable[[Path], dict[str, Mapping[str, Any]]] | None = None
+
+    def _resolved_catalog_path(self, path: Path) -> Path:
+        try:
+            return self.catalog_path_reader(path)
+        except TypeError:
+            return self.catalog_path_reader()  # type: ignore[call-arg]
 
     def official_prefixes(self) -> tuple[str, ...]:
         prefixes = self.routing_config_reader().get(
@@ -221,7 +228,7 @@ class CatalogRuntime:
         self, path: Path | None = None
     ) -> dict[str, dict[str, Any]]:
         selected_path = path or self.facts.generated_catalog_path
-        resolved_path = self.catalog_path_reader(selected_path)
+        resolved_path = self._resolved_catalog_path(selected_path)
         try:
             if resolved_path.exists():
                 document = json.loads(self.text_reader(resolved_path, "utf-8-sig"))
@@ -279,7 +286,7 @@ class CatalogRuntime:
         return self.generated_catalog_by_slug()
 
     def published_catalog_model(self, slug: str) -> dict[str, Any] | None:
-        resolved_path = self.catalog_path_reader(self.facts.generated_catalog_path)
+        resolved_path = self._resolved_catalog_path(self.facts.generated_catalog_path)
         if resolved_path == self.facts.legacy_generated_catalog_path:
             raise ModelIdentityResolutionError(
                 "current generated catalog is missing; legacy catalog cannot authorize routing",
@@ -915,10 +922,10 @@ class CatalogRuntime:
         }
 
     def current_catalog_data(self) -> CatalogDocument:
-        catalog_path = self.catalog_path_reader(self.facts.generated_catalog_path)
+        catalog_path = self._resolved_catalog_path(self.facts.generated_catalog_path)
         if not catalog_path.exists():
             return {"models": []}
-        published_budgets = self.published_official_context_budgets(catalog_path)
+        published_budgets = (self.published_budget_reader or self.published_official_context_budgets)(catalog_path)
         catalog = json.loads(self.text_reader(catalog_path, "utf-8-sig"))
         fast_projection = self.official_fast_projection_reader or self.catalog_with_official_fast_variants
         context_guard = self.context_guard_reader or self.catalog_with_openai_context_guard

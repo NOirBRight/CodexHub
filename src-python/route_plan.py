@@ -42,6 +42,7 @@ from route_primitives import (
     AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES,
     AttemptRequestBodyMode,
     AuthenticationStrategy,
+    authentication_strategy as _authentication_strategy,
     BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
     BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
@@ -840,14 +841,6 @@ def _validate_route_identity(
             model_slug=requested_model_id,
         )
     return provider_id, upstream_model
-
-
-def _authentication_strategy(value: Any) -> AuthenticationStrategy:
-    try:
-        return AuthenticationStrategy(str(value))
-    except ValueError:
-        return AuthenticationStrategy.UNKNOWN
-
 
 def _route_endpoint_url(
     upstream: Mapping[str, Any],

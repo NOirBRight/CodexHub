@@ -62,7 +62,8 @@ from gateway_settings import (
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
 )
-from route_plan import RetryExecutionPlan, _authentication_strategy
+from route_plan import RetryExecutionPlan
+from route_primitives import authentication_strategy as _authentication_strategy
 from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     CAPACITY_RETRY_FAILURE_CLASSES,

@@ -274,10 +274,14 @@ class TerminalExchangeResult:
 def terminal_result(result: object) -> TerminalExchangeResult:
     """Map the closed result union; unknown values fail closed."""
     if isinstance(result, ExchangeResult):
-        if result.disposition is ExchangeDisposition.COMPLETED and isinstance(result.status, int):
+        if (
+            result.disposition is ExchangeDisposition.COMPLETED
+            and isinstance(result.status, int)
+            and result.stop_reason is None
+        ):
             return TerminalExchangeResult(True, True, result.status)
         if result.disposition is ExchangeDisposition.STOPPED:
-            if result.stop_reason not in {"downstream_closed", "empty_completed_response"}:
+            if result.status is not None or result.stop_reason not in {"downstream_closed", "empty_completed_response"}:
                 return TerminalExchangeResult(False, False, 500, "invalid_exchange_result")
             status = 499 if result.stop_reason == "downstream_closed" else 502
             return TerminalExchangeResult(False, True, status, result.stop_reason)
@@ -474,7 +478,7 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                         lifecycle_reason = "empty" if isinstance(exc, hooks.failure_types.lifecycle_empty_final) else "format"
                         retry_limit, delay = max_relay_attempts, 0
                     else:
-                        stream_failure = isinstance(exc, (hooks.failure_types.incomplete_read, hooks.failure_types.stream_interrupted, hooks.failure_types.stream_idle_timeout, hooks.failure_types.stream_incomplete))
+                        stream_failure = isinstance(exc, (hooks.failure_types.stream_interrupted, hooks.failure_types.stream_idle_timeout, hooks.failure_types.stream_incomplete, hooks.failure_types.stream_error_event))
                         retry_exc = getattr(exc, "cause", exc) if isinstance(exc, hooks.failure_types.stream_interrupted) else exc
                         failure_class = hooks.failure_class(retry_exc)
                         relay_attempts = attempt.retry.relay_attempts_for_failure_class(failure_class=failure_class, stream_failure=stream_failure)

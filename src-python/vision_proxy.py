@@ -286,6 +286,7 @@ class VisionProxyHooks:
     cache_lookup_override: Callable[[str], str | None] | None = None
     cache_store_override: Callable[[str, str, str], None] | None = None
     response_body_override: Callable[[Any], bytes] | None = None
+    response_text_override: Callable[[Any], str] | None = None
     describe_image_override: Callable[..., str] | None = None
     description_for_part_override: Callable[..., str] | None = None
     vision_upstream_override: Callable[[], tuple[str, Mapping[str, Any]]] | None = None
@@ -670,7 +671,11 @@ class VisionProxyAdapter:
                 detail="Vision model returned an invalid response",
             )
             raise ImageProxyError("Vision model returned an invalid response") from exc
-        description = self.extract_response_text(response_payload)
+        description = (
+            self.hooks.response_text_override(response_payload)
+            if self.hooks.response_text_override is not None
+            else self.extract_response_text(response_payload)
+        )
         if not description:
             self.hooks.write_event(
                 event_context,

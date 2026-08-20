@@ -84,6 +84,13 @@ class AuthenticationStrategy(str, Enum):
     UNKNOWN = "unknown"
 
 
+def authentication_strategy(value: Any) -> AuthenticationStrategy:
+    try:
+        return AuthenticationStrategy(str(value))
+    except ValueError:
+        return AuthenticationStrategy.UNKNOWN
+
+
 class SensitiveValue:
     """An immutable secret whose representation and equality never expose value."""
 

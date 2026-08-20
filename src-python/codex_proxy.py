@@ -1377,6 +1377,7 @@ def _vision_proxy_adapter() -> VisionProxyAdapter:
             cache_lookup_override=_vision_proxy_override(_image_proxy_cache_lookup, _VISION_ORIGINAL_CACHE_LOOKUP),
             cache_store_override=_vision_proxy_override(_image_proxy_cache_store, _VISION_ORIGINAL_CACHE_STORE),
             response_body_override=_vision_proxy_override(_image_proxy_response_body, _VISION_ORIGINAL_RESPONSE_BODY),
+            response_text_override=_vision_proxy_override(_extract_model_response_text, _VISION_ORIGINAL_EXTRACT_TEXT),
             describe_image_override=_vision_proxy_override(_call_vision_model_for_image_description, _VISION_ORIGINAL_DESCRIBE_IMAGE),
             description_for_part_override=_vision_proxy_override(_image_proxy_description_for_part, _VISION_ORIGINAL_DESCRIPTION_FOR_PART),
             vision_upstream_override=_vision_proxy_override(_image_proxy_vision_upstream, _VISION_ORIGINAL_UPSTREAM),
@@ -1473,15 +1474,16 @@ def _catalog_runtime() -> CatalogRuntime:
         external_model_reader=resolve_external_model_alias,
         ollama_model_reader=resolve_ollama_cloud_model,
         vision_proxy_enabled_reader=gateway_image_proxy_enabled,
-        official_base_url_reader=_catalog_override("official_base_url"),
-        ollama_base_url_reader=_catalog_override("ollama_cloud_base_url"),
-        official_fast_projection_reader=_catalog_override("catalog_with_official_fast_variants"),
-        context_guard_reader=_catalog_override("catalog_with_openai_context_guard"),
-        vision_projection_reader=_catalog_override("catalog_with_vision_proxy_capabilities"),
-        canonical_models_reader=_catalog_override("canonical_catalog_models"),
-        modalities_reader=_catalog_override("_modalities_include_image"),
-        input_modalities_reader=_catalog_override("_catalog_input_modalities"),
-        generated_catalog_by_slug_reader=_catalog_override("generated_catalog_by_slug"),
+        official_base_url_reader=_catalog_override(official_base_url, _CATALOG_ORIGINAL_OFFICIAL_BASE_URL),
+        ollama_base_url_reader=_catalog_override(ollama_cloud_base_url, _CATALOG_ORIGINAL_OLLAMA_BASE_URL),
+        official_fast_projection_reader=_catalog_override(catalog_with_official_fast_variants, _CATALOG_ORIGINAL_FAST_VARIANTS),
+        context_guard_reader=_catalog_override(catalog_with_openai_context_guard, _CATALOG_ORIGINAL_CONTEXT_GUARD),
+        vision_projection_reader=_catalog_override(catalog_with_vision_proxy_capabilities, _CATALOG_ORIGINAL_VISION_PROJECTION),
+        canonical_models_reader=_catalog_override(canonical_catalog_models, _CATALOG_ORIGINAL_CANONICAL_MODELS),
+        modalities_reader=_catalog_override(_modalities_include_image, _CATALOG_ORIGINAL_MODALITIES),
+        input_modalities_reader=_catalog_override(_catalog_input_modalities, _CATALOG_ORIGINAL_INPUT_MODALITIES),
+        generated_catalog_by_slug_reader=_catalog_override(generated_catalog_by_slug, _CATALOG_ORIGINAL_BY_SLUG),
+        published_budget_reader=_catalog_override(published_official_context_budgets, _CATALOG_ORIGINAL_PUBLISHED_BUDGETS),
         known_official_ids_reader=catalog_known_official_model_ids,
         official_display_name_reader=official_short_display_name,
         catalog_by_slug_reader=lambda: generated_catalog_by_slug(),
@@ -5220,6 +5222,7 @@ def _validate_worker_binding_history(
 def _normalize_third_party_tool_call(
     value: Any,
     event_context: Mapping[str, Any] | None = None,
+    compatibility_plan: Any = None,
 ) -> tuple[Any, bool]:
     return _tool_surface_adapter().normalize_third_party_tool_call(value, event_context)
 
@@ -6571,7 +6574,7 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
     return changed
 
 
-def _downgrade_invalid_third_party_tool_calls(value: Any) -> tuple[Any, bool]:
+def _downgrade_invalid_third_party_tool_calls(value: Any, compatibility_plan: Any = None) -> tuple[Any, bool]:
     return _tool_surface_adapter().downgrade_invalid_third_party_tool_calls(value)
 
 
@@ -9132,7 +9135,7 @@ def compatible_response_body(
         surface="body",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -9152,7 +9155,7 @@ def compatible_response_body(
     changed = changed or worker_multi_agent_changed
     payload, coordinator_forbidden_changed = _suppress_coordinator_forbidden_tool_calls(payload, event_context)
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
+    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
     payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
@@ -9261,7 +9264,7 @@ def compatible_sse_line(
         surface="sse",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context)
+    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -9289,7 +9292,7 @@ def compatible_sse_line(
     if payload is None:
         return b""
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload)
+    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
     payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
@@ -10015,25 +10018,21 @@ def model_supports_image(
     return _catalog_runtime().model_supports_image(model_id, upstream)
 
 
-_CATALOG_ORIGINAL_HOOKS = {
-    name: globals()[name]
-    for name in (
-        "official_base_url",
-        "ollama_cloud_base_url",
-        "catalog_with_official_fast_variants",
-        "catalog_with_openai_context_guard",
-        "catalog_with_vision_proxy_capabilities",
-        "canonical_catalog_models",
-        "_modalities_include_image",
-        "_catalog_input_modalities",
-        "generated_catalog_by_slug",
-    )
-}
+_CATALOG_ORIGINAL_OFFICIAL_BASE_URL = official_base_url
+_CATALOG_ORIGINAL_OLLAMA_BASE_URL = ollama_cloud_base_url
+_CATALOG_ORIGINAL_FAST_VARIANTS = catalog_with_official_fast_variants
+_CATALOG_ORIGINAL_CONTEXT_GUARD = catalog_with_openai_context_guard
+_CATALOG_ORIGINAL_VISION_PROJECTION = catalog_with_vision_proxy_capabilities
+_CATALOG_ORIGINAL_CANONICAL_MODELS = canonical_catalog_models
+_CATALOG_ORIGINAL_MODALITIES = _modalities_include_image
+_CATALOG_ORIGINAL_INPUT_MODALITIES = _catalog_input_modalities
+_CATALOG_ORIGINAL_BY_SLUG = generated_catalog_by_slug
+_CATALOG_ORIGINAL_PUBLISHED_BUDGETS = published_official_context_budgets
 
 
-def _catalog_override(name: str) -> Callable[..., Any] | None:
-    candidate = globals()[name]
-    return None if candidate is _CATALOG_ORIGINAL_HOOKS[name] else candidate
+def _catalog_override(candidate: Callable[..., Any], original: Callable[..., Any]) -> Callable[..., Any] | None:
+    wrapped = getattr(candidate, "__wrapped__", None)
+    return None if candidate is original or wrapped is original else candidate
 
 
 def _is_image_part(value: Any) -> bool:
@@ -10215,6 +10214,7 @@ def enforce_text_only_image_boundary(
 _VISION_ORIGINAL_CACHE_LOOKUP = _image_proxy_cache_lookup
 _VISION_ORIGINAL_CACHE_STORE = _image_proxy_cache_store
 _VISION_ORIGINAL_RESPONSE_BODY = _image_proxy_response_body
+_VISION_ORIGINAL_EXTRACT_TEXT = _extract_model_response_text
 _VISION_ORIGINAL_DESCRIBE_IMAGE = _call_vision_model_for_image_description
 _VISION_ORIGINAL_DESCRIPTION_FOR_PART = _image_proxy_description_for_part
 _VISION_ORIGINAL_UPSTREAM = _image_proxy_vision_upstream
@@ -13045,8 +13045,10 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 content_length=0,
                 **proxy_request_context,
             )
-            request = _gateway_transport().build_request_url(
-                _responses_url(upstream, self.path),
+            control_path = self.path[3:] if self.path.startswith("/v1/") else self.path
+            request = _gateway_transport().build_request(
+                upstream,
+                control_path,
                 headers=headers,
                 method=method,
             )

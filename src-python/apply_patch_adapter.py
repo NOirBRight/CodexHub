@@ -350,7 +350,6 @@ class ApplyPatchAdapter:
                     rewritten_items.append(
                         {
                             "type": "function_call_output",
-                            **({"id": raw_item["id"]} if isinstance(raw_item.get("id"), str) else {}),
                             "call_id": call_id,
                             "output": raw_item["output"],
                         }
