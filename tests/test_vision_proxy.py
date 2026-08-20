@@ -109,13 +109,14 @@ def test_boundary_override_remains_live_at_adapter_seam() -> None:
         image_proxy_enabled=True,
     )
     payload = {"input": [{"type": "input_image", "image_url": _IMAGE_URL}]}
-    assert adapter.enforce_text_only_boundary(
-        payload,
-        inbound_protocol=RouteProtocol.RESPONSES,
-        target_model="text-only",
-        target_upstream={"name": "target"},
-        vision_plan=plan,
-    ) is True
+    with pytest.raises(ImageProxyError, match="could not replace"):
+        adapter.enforce_text_only_boundary(
+            payload,
+            inbound_protocol=RouteProtocol.RESPONSES,
+            target_model="text-only",
+            target_upstream={"name": "target"},
+            vision_plan=plan,
+        )
     assert calls and calls[0][0] is payload
 
 

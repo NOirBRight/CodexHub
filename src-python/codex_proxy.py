@@ -13036,9 +13036,8 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 content_length=0,
                 **proxy_request_context,
             )
-            request = _gateway_transport().build_request(
-                upstream,
-                self.path,
+            request = _gateway_transport().build_request_url(
+                _responses_url(upstream, self.path),
                 headers=headers,
                 method=method,
             )

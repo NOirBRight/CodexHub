@@ -1048,8 +1048,17 @@ class VisionProxyAdapter:
             raise ImageProxyError(
                 f"{model_label} does not support image input and Vision Proxy is disabled."
             )
+        if vision_plan.network_action is not VisionNetworkAction.IMAGE_PROXY:
+            raise ImageProxyError(
+                "The planned Vision action has no executable network action."
+            )
+        try:
+            policy = VisionProxyPolicy(vision_plan.policy)
+        except ValueError as exc:
+            raise ImageProxyError("The planned Vision Proxy policy is unsupported.") from exc
+
         if self.hooks.boundary_override is not None:
-            return self.hooks.boundary_override(
+            changed = self.hooks.boundary_override(
                 payload,
                 inbound_format=inbound_protocol.value,
                 target_model=target_model,
@@ -1060,26 +1069,18 @@ class VisionProxyAdapter:
                 event_context=event_context,
                 progress_callback=progress_callback,
             )
-        if vision_plan.network_action is not VisionNetworkAction.IMAGE_PROXY:
-            raise ImageProxyError(
-                "The planned Vision action has no executable network action."
+        else:
+            changed = self.apply(
+                payload,
+                inbound_protocol=inbound_protocol,
+                target_model=target_model,
+                target_upstream=target_upstream,
+                policy=policy,
+                image_proxy_enabled=vision_plan.image_proxy_enabled,
+                target_accepts_images=vision_plan.target_accepts_images,
+                event_context=event_context,
+                progress_callback=progress_callback,
             )
-        try:
-            policy = VisionProxyPolicy(vision_plan.policy)
-        except ValueError as exc:
-            raise ImageProxyError("The planned Vision Proxy policy is unsupported.") from exc
-
-        changed = self.apply(
-            payload,
-            inbound_protocol=inbound_protocol,
-            target_model=target_model,
-            target_upstream=target_upstream,
-            policy=policy,
-            image_proxy_enabled=vision_plan.image_proxy_enabled,
-            target_accepts_images=vision_plan.target_accepts_images,
-            event_context=event_context,
-            progress_callback=progress_callback,
-        )
         root_key = (
             "messages"
             if inbound_protocol is RouteProtocol.CHAT_COMPLETIONS

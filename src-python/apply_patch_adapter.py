@@ -20,9 +20,9 @@ from typing import Any, NoReturn, Protocol
 
 from gateway_errors import UpstreamProtocolTranslationError
 from protocol_translation import UnsupportedProtocolTranslationError
-from tool_surface_adapter import APPLY_PATCH_FUNCTION_NAME
 
 
+APPLY_PATCH_FUNCTION_NAME = "apply_patch"
 APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
 APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
 APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
@@ -84,6 +84,8 @@ def _require_exact_apply_patch_function_call_fields(
 ) -> None:
     if set(item) != required_fields:
         raise _ApplyPatchAdapterFailure("function_call_fields_not_exact")
+    if "status" in item and item.get("status") not in {"in_progress", "completed"}:
+        raise _ApplyPatchAdapterFailure("function_call_status_not_supported")
 
 
 def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
@@ -313,6 +315,7 @@ class ApplyPatchAdapter:
                 rewritten_items.append(
                     {
                         "type": "function_call",
+                        **({"id": raw_item["id"]} if isinstance(raw_item.get("id"), str) else {}),
                         "call_id": call_id,
                         "name": self.facts.function_name,
                         "arguments": json.dumps(

@@ -34,6 +34,7 @@ from codex_semantic_adapter import (
     normalize_multi_agent_arguments,
     normalize_tool_search_arguments,
 )
+from apply_patch_adapter import APPLY_PATCH_FUNCTION_NAME
 from collaboration_adapter import WORKER_REQUESTED_BINDING_FIELD
 
 

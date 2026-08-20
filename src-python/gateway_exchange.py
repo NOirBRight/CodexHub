@@ -277,8 +277,10 @@ def terminal_result(result: object) -> TerminalExchangeResult:
         if result.disposition is ExchangeDisposition.COMPLETED and isinstance(result.status, int):
             return TerminalExchangeResult(True, True, result.status)
         if result.disposition is ExchangeDisposition.STOPPED:
+            if result.stop_reason not in {"downstream_closed", "empty_completed_response"}:
+                return TerminalExchangeResult(False, False, 500, "invalid_exchange_result")
             status = 499 if result.stop_reason == "downstream_closed" else 502
-            return TerminalExchangeResult(False, True, status, result.stop_reason or "exchange_stopped")
+            return TerminalExchangeResult(False, True, status, result.stop_reason)
     return TerminalExchangeResult(False, False, 500, "invalid_exchange_result")
 
 @dataclass(frozen=True)
