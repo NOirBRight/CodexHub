@@ -3,6 +3,10 @@ from __future__ import annotations
 from route_primitives import DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS
 
 
+class UpstreamStreamIncompleteError(RuntimeError):
+    """Raised when an upstream stream ends without a terminal event."""
+
+
 class ImageProxyError(Exception):
     """Raised when a Vision Proxy request cannot be prepared safely."""
 

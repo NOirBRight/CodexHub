@@ -200,7 +200,7 @@ def test_header_and_auth_materialization_uses_injected_tokens() -> None:
     assert headers["Authorization"] == "Bearer injected-token"
     assert headers["Chatgpt-account-id"] == "acct-injected"
     assert headers["Session-id"] == "fixed-id"
-    assert "x-openai-internal-codex-responses-lite".title() not in {
+    assert "x-openai-internal-codex-responses-lite" not in {
         key.lower() for key in headers
     }
 
@@ -239,6 +239,21 @@ def test_upstream_sse_reader_lifecycle_with_scripted_response() -> None:
     joined, outcome = lifecycle.join()
     assert joined is True
     assert outcome == "upstream_sse_reader_thread_terminated"
+
+
+def test_transport_build_request_materializes_endpoint_url():
+    transport = GatewayTransport(
+        endpoint_url_hook=lambda upstream, path: "https://example.test" + path,
+    )
+    request = transport.build_request(
+        {"name": "third_party"},
+        "/v1/responses",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+    )
+    assert request.full_url == "https://example.test/v1/responses"
+    assert request.data == b"{}"
+    assert request.get_header("Content-type") == "application/json"
 
 
 def test_open_once_hook_is_used_by_open_response() -> None:

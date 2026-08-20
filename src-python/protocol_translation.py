@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 import uuid
 
+from gateway_errors import UpstreamStreamIncompleteError
+
 
 ChatContentText = Callable[[Any], str]
 CollectTextFragments = Callable[[Any], list[str]]
@@ -30,10 +32,6 @@ NormalizeChatFunctionName = Callable[[str], str]
 XmlishToolOutputs = Callable[[str], list[dict[str, Any]]]
 ResponseRepair = Callable[[dict[str, Any]], dict[str, Any]]
 UsageFromResponse = Callable[[Mapping[str, Any]], Mapping[str, Any] | None]
-
-class UpstreamStreamIncompleteError(RuntimeError):
-    """Raised when an upstream stream ends without a terminal event."""
-
 
 class UnsupportedProtocolTranslationError(ValueError):
     """Raised when a wire shape cannot cross the protocol seam losslessly."""

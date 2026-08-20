@@ -53,6 +53,7 @@ from gateway_errors import (
     CompactEmptyResponseError,
     GatewayPreResponseBudgetExhausted,
     UpstreamStreamIdleTimeoutError,
+    UpstreamStreamIncompleteError,
 )
 from gateway_settings import (
     _request_kind_retry_attempts_configured,
@@ -61,7 +62,6 @@ from gateway_settings import (
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
 )
-from protocol_translation import UpstreamStreamIncompleteError
 from route_plan import RetryExecutionPlan, _authentication_strategy
 from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
@@ -89,7 +89,7 @@ from route_primitives import (
     TransportPolicy,
 )
 
-logger = logging.getLogger("codex_proxy")
+logger = logging.getLogger("gateway_transport")
 
 HOP_BY_HOP_REQUEST_HEADERS = {
     "connection",
@@ -188,6 +188,13 @@ def _diagnostic_phase_name(failure_phase: str | None) -> str | None:
 
 
 @dataclass(frozen=True)
+class DiagnosticRecorder(Protocol):
+    def observe_upstream_phase(self, request_key: str | None, **fields: Any) -> None: ...
+    def observe_upstream_attempt(self, request_key: str | None, **fields: Any) -> None: ...
+    def observe_upstream_headers(self, request_key: str | None, **fields: Any) -> None: ...
+
+
+@dataclass(frozen=True)
 class TransportFacts:
     """Immutable transport constants and exception types."""
 
@@ -218,13 +225,13 @@ class GatewayTransport:
     official_open: Callable[..., Any] | None = None
     standard_open: Callable[..., Any] | None = None
     open_once_hook: Callable[..., Any] | None = None
-    sleep: Callable[[float], None] = time.sleep
+    sleep: Callable[[float], None] | None = None
     active_request: Callable[[], Any | None] | None = None
     access_token: Callable[[], str] | None = None
     account_id: Callable[[], str | None] | None = None
     ollama_api_key: Callable[[], str | None] | None = None
     new_id: Callable[[], str] = field(default_factory=lambda: (lambda: str(uuid.uuid4())))
-    observe_diagnostic: Callable[..., None] = _noop
+    diagnostic_recorder: DiagnosticRecorder | None = None
     diagnostic_context_value: Callable[..., Any] | None = None
     diagnostic_connection_disposition: Callable[..., str] | None = None
     diagnostic_error_connection_disposition: Callable[..., str] | None = None
@@ -232,7 +239,9 @@ class GatewayTransport:
     diagnostic_transport_phase: Callable[..., str | None] | None = None
     emit_retry: Callable[..., None] = _noop
     emit_retry_suppressed: Callable[..., None] = _noop
-    retry_delay_seconds: Callable[..., int] = gateway_retry_delay_seconds
+    retry_delay_seconds: Callable[..., int] | None = None
+    failure_class_hook: Callable[[BaseException], str] | None = None
+    retry_after_hook: Callable[[BaseException | None], int | None] | None = None
     retry_attempts_for_failure_class: Callable[..., int] | None = None
     capacity_elapsed_allows: Callable[..., bool] | None = None
     retry_safety_class: Callable[..., str] | None = None
@@ -245,15 +254,33 @@ class GatewayTransport:
     downstream_retry_payload: Callable[..., Any] | None = None
     get_header: Callable[..., str | None] | None = None
     header_items: Callable[..., list[tuple[str, str]]] | None = None
-    upstream_retry_attempts: Callable[[str], int] = _upstream_retry_attempts
-    getproxies: Callable[[], Mapping[str, str]] = getproxies
-    getproxies_registry: Callable[[], Mapping[str, str]] | None = getproxies_registry
-    proxy_bypass: Callable[[str], bool] = proxy_bypass
+    upstream_retry_attempts: Callable[[str], int] | None = None
+    getproxies: Callable[[], Mapping[str, str]] | None = None
+    getproxies_registry: Callable[[], Mapping[str, str]] | None = None
+    proxy_bypass: Callable[[str], bool] | None = None
     platform: str | None = None
     official_pools: dict[str, Any] | None = None
     official_pools_lock: threading.Lock | None = None
     pool_manager_hook: Callable[[str], Any] | None = None
     proxy_url_hook: Callable[[str], str | None] | None = None
+    endpoint_url_hook: Callable[[Mapping[str, Any], str], str] | None = None
+
+    def _observe(self, callback: Callable[..., None], request_key: str | None, **fields: Any) -> None:
+        recorder = self.diagnostic_recorder
+        if recorder is not None:
+            try:
+                callback(recorder, request_key, **fields)
+            except Exception:
+                pass
+
+    def observe_upstream_phase(self, request_key: str | None, **fields: Any) -> None:
+        self._observe(lambda recorder, key, **values: recorder.observe_upstream_phase(key, **values), request_key, **fields)
+
+    def observe_upstream_attempt(self, request_key: str | None, **fields: Any) -> None:
+        self._observe(lambda recorder, key, **values: recorder.observe_upstream_attempt(key, **values), request_key, **fields)
+
+    def observe_upstream_headers(self, request_key: str | None, **fields: Any) -> None:
+        self._observe(lambda recorder, key, **values: recorder.observe_upstream_headers(key, **values), request_key, **fields)
 
     def current_admission(self) -> Any | None:
         if self.active_request is None:
@@ -392,19 +419,47 @@ class GatewayTransport:
             else TransportPolicy.STANDARD
         )
         if selected_transport == TransportPolicy.OFFICIAL_KEEPALIVE:
-            opener = self.official_open or _official_urlopen
+            opener = self.official_open or self.official_urlopen
             return opener(request, timeout=timeout)
         opener = self.standard_open or urlopen
         return opener(request, timeout=timeout)
+
+    def build_request_url(
+        self,
+        url: str,
+        *,
+        data: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        method: str = "POST",
+    ) -> Request:
+        return Request(url, data=data, headers=dict(headers or {}), method=method)
+
+    def build_request(
+        self,
+        upstream: Mapping[str, Any],
+        path: str,
+        *,
+        data: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        method: str = "POST",
+    ) -> Request:
+        if self.endpoint_url_hook is None:
+            raise RuntimeError("Gateway transport endpoint URL hook is not configured")
+        return self.build_request_url(
+            self.endpoint_url_hook(upstream, path),
+            data=data,
+            headers=headers,
+            method=method,
+        )
 
     def proxy_url(self, url: str) -> str | None:
         if self.proxy_url_hook is not None:
             return self.proxy_url_hook(url)
         return official_proxy_url(
             url,
-            getproxies_fn=self.getproxies,
-            getproxies_registry_fn=self.getproxies_registry,
-            proxy_bypass_fn=self.proxy_bypass,
+            getproxies_fn=self.getproxies or getproxies,
+            getproxies_registry_fn=self.getproxies_registry or getproxies_registry,
+            proxy_bypass_fn=self.proxy_bypass or proxy_bypass,
             platform=self.platform,
         )
 
@@ -470,10 +525,10 @@ class GatewayTransport:
         )
 
     def failure_class(self, exc: BaseException) -> str:
-        return _upstream_failure_class(exc)
+        return (self.failure_class_hook or _upstream_failure_class)(exc)
 
     def retry_after_seconds(self, exc: BaseException | None) -> int | None:
-        return _retry_after_delay_seconds(exc)
+        return (self.retry_after_hook or _retry_after_delay_seconds)(exc)
 
     def open_response(self, request: Request, **kwargs: Any) -> Any:
         return _open_upstream_response(request, transport=self, **kwargs)
@@ -1539,23 +1594,6 @@ def _require_retry_delay_within_pre_response_budget(
 
 
 
-def _open_upstream_once(
-    request: Request,
-    *,
-    upstream_name: str,
-    timeout: int | float,
-    transport_policy: TransportPolicy | None = None,
-) -> Any:
-    selected_transport = transport_policy or (
-        TransportPolicy.OFFICIAL_KEEPALIVE
-        if upstream_name == "official"
-        else TransportPolicy.STANDARD
-    )
-    if selected_transport == TransportPolicy.OFFICIAL_KEEPALIVE:
-        return _official_urlopen(request, timeout=timeout)
-    return urlopen(request, timeout=timeout)
-
-
 
 def _open_upstream_response(
     request: Request,
@@ -1591,7 +1629,7 @@ def _open_upstream_response(
     else:
         explicit_max_attempts = max_attempts is not None
         base_retry_attempts = (
-            transport.upstream_retry_attempts(request_kind)
+            (transport.upstream_retry_attempts or _upstream_retry_attempts)(request_kind)
             if max_attempts is None
             else max(1, max_attempts)
         )
@@ -1669,8 +1707,7 @@ def _open_upstream_response(
             # or TLS occurred for this attempt (especially on a reused lease),
             # so those success phases remain absent unless a lower-level seam
             # later exposes them.
-            transport.observe_diagnostic(
-                "observe_upstream_phase",
+            transport.observe_upstream_phase(
                 diagnostic_request_key,
                 phase="upstream_request_write",
                 attempt=request_attempt,
@@ -1680,8 +1717,7 @@ def _open_upstream_response(
                 provider=upstream_name,
                 model=diagnostic_model,
             )
-            transport.observe_diagnostic(
-                "observe_upstream_attempt",
+            transport.observe_upstream_attempt(
                 diagnostic_request_key,
                 attempt=request_attempt,
                 retry_budget=request_retry_budget,
@@ -1692,8 +1728,7 @@ def _open_upstream_response(
                 model=diagnostic_model,
             )
             diagnostic_status, diagnostic_headers = transport._observe_response_metadata(response)
-            transport.observe_diagnostic(
-                "observe_upstream_headers",
+            transport.observe_upstream_headers(
                 diagnostic_request_key,
                 status=diagnostic_status,
                 headers=diagnostic_headers,
@@ -1724,8 +1759,7 @@ def _open_upstream_response(
             telemetry_failure_phase = retry_safety_failure_phase if apply_retry_safety else transport_phase
             diagnostic_phase = transport._observe_transport_phase(transport_phase)
             if diagnostic_phase is not None:
-                transport.observe_diagnostic(
-                    "observe_upstream_phase",
+                transport.observe_upstream_phase(
                     diagnostic_request_key,
                     phase=diagnostic_phase,
                     attempt=request_attempt,
@@ -1737,8 +1771,7 @@ def _open_upstream_response(
                     model=diagnostic_model,
                 )
             if isinstance(exc, HTTPError) and not retry_http_errors:
-                transport.observe_diagnostic(
-                    "observe_upstream_attempt",
+                transport.observe_upstream_attempt(
                     diagnostic_request_key,
                     attempt=request_attempt,
                     retry_budget=request_attempt,
@@ -1750,7 +1783,7 @@ def _open_upstream_response(
                     model=diagnostic_model,
                 )
                 raise
-            failure_class = _upstream_failure_class(exc)
+            failure_class = transport.failure_class(exc)
             downstream_exposed_now = bool(downstream_exposed is not None and downstream_exposed())
             retry_safety_class = transport._retry_safety(
                 exc,
@@ -1788,8 +1821,7 @@ def _open_upstream_response(
                 else retry_attempts
             )
             if retry_safety_class in transport.facts.suppressed_retry_safety_classes:
-                transport.observe_diagnostic(
-                    "observe_upstream_attempt",
+                transport.observe_upstream_attempt(
                     diagnostic_request_key,
                     attempt=request_attempt,
                     retry_budget=error_retry_budget,
@@ -1819,8 +1851,7 @@ def _open_upstream_response(
                     retry_safety_class=retry_safety_class,
                 )
                 raise
-            transport.observe_diagnostic(
-                "observe_upstream_attempt",
+            transport.observe_upstream_attempt(
                 diagnostic_request_key,
                 attempt=request_attempt,
                 retry_budget=error_retry_budget,
@@ -1843,13 +1874,13 @@ def _open_upstream_response(
                 retry_execution.retry_delay_seconds(
                     request_attempt,
                     failure_class=failure_class,
-                    retry_after_seconds=_retry_after_delay_seconds(exc),
+                    retry_after_seconds=transport.retry_after_seconds(exc),
                 )
                 if retry_execution is not None
-                else transport.retry_delay_seconds(
+                else (transport.retry_delay_seconds or gateway_retry_delay_seconds)(
                     request_attempt,
                     failure_class=failure_class,
-                    retry_after_seconds=_retry_after_delay_seconds(exc),
+                    retry_after_seconds=transport.retry_after_seconds(exc),
                 )
             )
             retry_elapsed_seconds = max(
@@ -1906,7 +1937,7 @@ def _open_upstream_response(
                     )
                 ):
                     raise transport.facts.downstream_closed_before_retry_error("downstream closed before upstream retry")
-            transport.sleep(delay_seconds)
+            (transport.sleep or time.sleep)(delay_seconds)
             attempt += 1
 
 
@@ -1933,7 +1964,7 @@ class UpstreamSseReaderLifecycle:
         *,
         admission: RequestAdmission | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
-        thread_name: str = "codex-proxy-sse-reader",
+        thread_name: str = "gateway-sse-reader",
     ) -> None:
         self._response = response
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=self.QUEUE_CAPACITY)

@@ -10355,7 +10355,7 @@ def _gateway_transport() -> GatewayTransport:
         active_request=_active_gateway_request,
         access_token=codex_access_token,
         account_id=codex_account_id,
-        observe_diagnostic=_observe_gateway_diagnostic,
+        diagnostic_recorder=GATEWAY_DIAGNOSTIC_RECORDER,
         diagnostic_context_value=_diagnostic_context_value,
         diagnostic_connection_disposition=_diagnostic_connection_disposition,
         diagnostic_error_connection_disposition=_diagnostic_error_connection_disposition,
@@ -10364,6 +10364,8 @@ def _gateway_transport() -> GatewayTransport:
         emit_retry=_emit_upstream_retry_event,
         emit_retry_suppressed=_emit_upstream_retry_suppressed_event,
         retry_delay_seconds=gateway_retry_delay_seconds,
+        failure_class_hook=_upstream_failure_class,
+        retry_after_hook=_retry_after_delay_seconds,
         retry_attempts_for_failure_class=_retry_attempts_for_failure_class,
         capacity_elapsed_allows=_capacity_retry_elapsed_limit_allows,
         retry_safety_class=_retry_safety_class,
@@ -10385,6 +10387,7 @@ def _gateway_transport() -> GatewayTransport:
         official_pools_lock=OFFICIAL_HTTP_POOLS_LOCK,
         pool_manager_hook=_official_pool_manager,
         proxy_url_hook=_official_proxy_url,
+        endpoint_url_hook=_upstream_endpoint_url,
     )
 
 
@@ -12495,8 +12498,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
                 operational_authentication=operational_authentication,
             )
-            request = Request(
-                _upstream_endpoint_url(upstream, "/images/generations"),
+            request = _gateway_transport().build_request(
+                upstream,
+                "/images/generations",
                 data=body,
                 headers=headers,
                 method="POST",
@@ -13191,7 +13195,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         reason=lifecycle_final_retry_reason,
                     )
                 return (
-                    Request(
+                    _gateway_transport().build_request_url(
                         attempt.endpoint_url,
                         data=attempt_body,
                         headers=attempt.request_headers.to_dict(),
@@ -14487,7 +14491,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 content_length=0,
                 **proxy_request_context,
             )
-            request = Request(_responses_url(upstream, self.path), headers=headers, method=method)
+            request = _gateway_transport().build_request(
+                upstream,
+                self.path,
+                headers=headers,
+                method=method,
+            )
             adapter_event_context = {
                 "request_id": request_id,
                 "model": None,

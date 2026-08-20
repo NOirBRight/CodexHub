@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from urllib.request import Request
 
 import codex_proxy
+import gateway_transport
 import pytest
 from codex_proxy import CodexProxyHandler
 
@@ -192,13 +193,13 @@ def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classif
 
 def test_upstream_sse_reader_scope_audit_keeps_bounded_queue_and_thread_in_one_owner() -> None:
     lifecycle_source = inspect.getsource(codex_proxy._UpstreamSseReaderLifecycle)
-    module_source = inspect.getsource(codex_proxy)
+    module_source = inspect.getsource(gateway_transport)
 
     assert "QUEUE_CAPACITY = 32" in lifecycle_source
     assert "queue.Queue(maxsize=self.QUEUE_CAPACITY)" in lifecycle_source
     assert "self._queue.put(item, timeout=self.PRODUCER_PUT_TIMEOUT_SECONDS)" in lifecycle_source
     assert "self._queue.put(item)" not in lifecycle_source
-    assert module_source.count('"codex-proxy-sse-reader"') == 1
+    assert module_source.count('"gateway-sse-reader"') == 1
     assert "target=self._read_upstream" in lifecycle_source
 
 
