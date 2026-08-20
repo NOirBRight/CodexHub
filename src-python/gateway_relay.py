@@ -410,22 +410,53 @@ class RelaySymbols:
     compatible_response_body: Callable[..., Any]
     compatible_sse_line: Callable[..., Any]
     safe_upstream_error_detail: Callable[..., Any]
-    json: Any
-    uuid: Any
     write_proxy_event: Callable[..., Any]
+
+
+class RelayHandler(Protocol):
+    close_connection: bool
+    _downstream_stream_commit: Any
+
+    def _relay_transparent_upstream_response(self, *args: Any, **kwargs: Any) -> int: ...
+    def _relay_official_passthrough_sse_response(self, *args: Any, **kwargs: Any) -> int: ...
+    def _iter_upstream_sse_events(self, *args: Any, **kwargs: Any) -> Any: ...
+    def _send_sse_headers(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_sse_bytes(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_sse_data(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_sse_done(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_sse_event(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_downstream_sse_error(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _write_non_streaming_body_relay(self, body: bytes) -> bool: ...
+    def send_response(self, code: int, message: str | None = None) -> None: ...
+    def send_header(self, key: str, value: str) -> None: ...
+    def end_headers(self) -> None: ...
+
+
+class RelayPlan(Protocol):
+    selected_upstream_format: str
+    request_kind: str
+    streaming_policy: Any
+    usage_policy: Any
+    response_mutation_policy: Any
+    sse_mutation_policy: Any
+    verify_cross_protocol_source: bool
+    lifecycle_final_retry_enabled: bool
 
 
 @dataclass(frozen=True)
 class RelayContext:
-    handler: Any
+    handler: RelayHandler
     symbols: RelaySymbols
+    transparent_relay: Callable[..., int]
+    official_passthrough_relay: Callable[..., int]
+    prepared_exchange: Any = None
 
 
 def relay_upstream_response(
     relay_context: RelayContext,
     response: Any,
     upstream_name: str,
-    relay_execution_plan: object,
+    relay_execution_plan: RelayPlan,
     request_id: str | None = None,
     model: str | None = None,
     inbound_format: str = "responses",
@@ -552,8 +583,6 @@ def relay_upstream_response(
     compatible_response_body = relay_context.symbols.compatible_response_body
     compatible_sse_line = relay_context.symbols.compatible_sse_line
     safe_upstream_error_detail = relay_context.symbols.safe_upstream_error_detail
-    json = relay_context.symbols.json
-    uuid = relay_context.symbols.uuid
     upstream_format = relay_execution_plan.selected_upstream_format
     request_kind = relay_execution_plan.request_kind
     streaming_policy = relay_execution_plan.streaming_policy
@@ -662,7 +691,7 @@ def relay_upstream_response(
         and upstream_format == inbound_format
         and not (is_event_stream and not caller_stream and upstream_format == "responses")
     ):
-        return self._relay_transparent_upstream_response(
+        return relay_context.transparent_relay(
             response,
             upstream_name,
             request_id=request_id,
@@ -682,7 +711,7 @@ def relay_upstream_response(
         and upstream_format == "responses"
         and not want_chat_output
     ):
-        return self._relay_official_passthrough_sse_response(
+        return relay_context.official_passthrough_relay(
             response,
             upstream_name,
             request_id=request_id,
@@ -944,7 +973,7 @@ def relay_upstream_response(
                         )
                     )
                 else:
-                    exchange = getattr(self, "_active_prepared_exchange", None)
+                    exchange = relay_context.prepared_exchange
                     if not isinstance(exchange, PreparedExchange):
                         exchange = PreparedExchange(
                             inbound_format,

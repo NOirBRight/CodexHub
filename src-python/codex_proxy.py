@@ -16047,7 +16047,7 @@ class _UpstreamSseReaderLifecycle:
 
 # Explicit facade helper bindings are built once; contexts only bind the handler.
 def _relay_write_proxy_event(event: str, **fields: Any) -> None:
-    globals()["write_proxy_event"](event, **fields)
+    write_proxy_event(event, **fields)
 
 def _relay_compatible_sse_line(*args: Any, **kwargs: Any) -> Any:
     return compatible_sse_line(*args, **kwargs)
@@ -16168,19 +16168,20 @@ _RELAY_SYMBOLS = RelaySymbols(
     compatible_response_body=compatible_response_body,
     compatible_sse_line=_relay_compatible_sse_line,
     safe_upstream_error_detail=safe_upstream_error_detail,
-    json=json,
-    uuid=uuid,
     write_proxy_event=_relay_write_proxy_event,
 )
 
 class CodexProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    _active_prepared_exchange: PreparedExchange | None = None
 
     def handle_one_request(self) -> None:
+        self._active_prepared_exchange: PreparedExchange | None = None
         self._diagnostic_request_id: str | None = None
         try:
             super().handle_one_request()
         finally:
+            self._active_prepared_exchange = None
             self._diagnostic_request_id = None
 
     def _observe_downstream_phase(self, event: str, *, status: int | None = None) -> None:
@@ -19553,7 +19554,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     ) -> int:
         """Adapt the handler to the extracted upstream relay state machine."""
         return relay_upstream_response(
-            RelayContext(handler=self, symbols=_RELAY_SYMBOLS),
+            RelayContext(
+                handler=self,
+                symbols=_RELAY_SYMBOLS,
+                transparent_relay=self._relay_transparent_upstream_response,
+                official_passthrough_relay=self._relay_official_passthrough_sse_response,
+                prepared_exchange=getattr(self, "_active_prepared_exchange", None),
+            ),
             response,
             upstream_name,
             relay_execution_plan,

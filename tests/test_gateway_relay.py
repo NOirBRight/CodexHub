@@ -1,6 +1,9 @@
+import inspect
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
+import codex_proxy
 from gateway_relay import (
     SseLineRelayContext,
     iter_upstream_sse_lines,
@@ -151,6 +154,23 @@ def test_sse_bytes_preserves_direct_write_errors():
         assert str(error) == "closed"
     else:
         raise AssertionError("direct SSE write error was swallowed")
+
+
+def test_relay_context_and_facade_adapter_are_the_seam():
+    from gateway_relay import RelayContext, relay_upstream_response
+
+    assert {
+        "handler",
+        "symbols",
+        "transparent_relay",
+        "official_passthrough_relay",
+        "prepared_exchange",
+    } <= set(RelayContext.__annotations__)
+    source = inspect.getsource(codex_proxy.CodexProxyHandler._relay_upstream_response)
+    assert len(source.splitlines()) < 50
+    assert "relay_upstream_response(" in source
+    module_source = Path(relay_upstream_response.__code__.co_filename).read_text(encoding="utf-8")
+    assert "import codex_proxy" not in module_source
 
 
 def test_sse_line_iterator_uses_injected_lifecycle():
