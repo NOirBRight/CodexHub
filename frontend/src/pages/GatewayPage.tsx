@@ -424,33 +424,26 @@ function GatewayPageImpl({
     setClientBusy(connect ? "dsh:connect" : "dsh:disconnect");
     try {
       await runPersistentAction({
-        showToast: (input) => showToast(input),
-        updateToast,
+        ...persistentActionBase(),
         loading: t(
           repairing ? "gateway.repairClient" : connect ? "gateway.connectClient" : "gateway.disconnectClient",
           { name },
         ),
         work: async () => {
-          if (connect) {
-            await api.dshClientConnect();
-          } else {
-            await api.dshClientDisconnect();
-          }
+          const report = connect ? await api.dshClientConnect() : await api.dshClientDisconnect();
           await onRefreshClients();
+          return report;
         },
-        success: () => ({
+        success: (report) => ({
           text: t(
             repairing ? "gateway.repairClientDone" : connect ? "gateway.connectClientDone" : "gateway.disconnectClientDone",
             { name },
           ),
-          restart: { kind: "none" },
+          restart:
+            report.restart_required && report.restart_required !== "none"
+              ? { kind: "client", name: report.restart_required }
+              : { kind: "none" },
         }),
-        formatRestart: () => t("gateway.restartNone"),
-        disconnected: "start-gateway",
-        disconnectedText: t("gateway.backendNotConnected"),
-        startGatewayLabel: t("gateway.startBackend"),
-        isDisconnected: (error) => isBackendDisconnectedMessage(messageFromError(error)),
-        onStartGateway: () => startBackendFromToast(),
       });
       setError(null);
     } catch {

@@ -3303,9 +3303,6 @@ class PreparedExchange:
     upstream_body: bytes
     stream: bool
 
-    def stream_decoder(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
-        return self.decode_stream()
-
     def decode_stream(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
         if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
             return ChatToResponsesStreamConverter()
@@ -3315,6 +3312,8 @@ class PreparedExchange:
             "unsupported_protocol_semantics",
             "No stream decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
         )
+
+    stream_decoder = decode_stream
 
     def decode_response(self, body: bytes) -> bytes:
         if self.inbound_format == self.outbound_format:

@@ -587,6 +587,12 @@ class RoutingTests(unittest.TestCase):
         self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
         self.runtime_proxy_patch.start()
         self.addCleanup(self.runtime_proxy_patch.stop)
+        self.settings_proxy_patch = patch(
+            "gateway_settings._runtime_proxy_dir",
+            return_value=Path(self.runtime_proxy_dir.name),
+        )
+        self.settings_proxy_patch.start()
+        self.addCleanup(self.settings_proxy_patch.stop)
         self.worker_binding_signing_root_patch = patch(
             "codex_proxy.WORKER_BINDING_SIGNING_ROOT",
             Path(self.runtime_proxy_dir.name) / "worker-binding-signing",
@@ -8692,6 +8698,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {}, clear=True),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+                patch("gateway_settings._runtime_proxy_dir", return_value=Path(temp_dir)),
             ):
                 self.assertFalse(codex_proxy.gateway_auto_retry_enabled())
                 self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 4)
@@ -8705,6 +8712,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {}, clear=True),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+                patch("gateway_settings._runtime_proxy_dir", return_value=Path(temp_dir)),
             ):
                 self.assertEqual(upstream_timeout_seconds(), 45)
 
@@ -8957,6 +8965,7 @@ class RoutingTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+                patch("gateway_settings._runtime_proxy_dir", return_value=Path(temp_dir)),
             ):
                 self.assertFalse(codex_proxy.gateway_auto_retry_enabled())
                 self.assertEqual(codex_proxy.gateway_auto_retry_max_attempts(), 2)
@@ -9006,7 +9015,7 @@ class RoutingTests(unittest.TestCase):
             codex_proxy.gateway_retry_delay_seconds(
                 1,
                 failure_class=codex_proxy.RETRY_FAILURE_PROVIDER_THROTTLE,
-                exc=error,
+                retry_after_seconds=codex_proxy._retry_after_delay_seconds(error),
             ),
             7,
         )
@@ -12011,6 +12020,7 @@ class RoutingTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+                patch("gateway_settings._runtime_proxy_dir", return_value=Path(temp_dir)),
             ):
                 os.environ.pop("CODEX_PROXY_IMAGE_PROXY_ENABLED", None)
                 os.environ.pop("CODEX_PROXY_IMAGE_PROXY_MODEL", None)
@@ -12039,6 +12049,7 @@ class RoutingTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", Path(temp_dir)),
+                patch("gateway_settings._runtime_proxy_dir", return_value=Path(temp_dir)),
             ):
                 self.assertTrue(codex_proxy.gateway_image_proxy_enabled())
                 self.assertEqual(codex_proxy.gateway_image_proxy_model(), "kimi-k2.6")
@@ -12537,6 +12548,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch("gateway_settings._runtime_proxy_dir", return_value=runtime_proxy_dir),
                 patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "1"}, clear=False),
             ):
                 enabled_catalog = codex_proxy.current_catalog_data()
@@ -12544,6 +12556,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch("gateway_settings._runtime_proxy_dir", return_value=runtime_proxy_dir),
                 patch.dict(os.environ, {"CODEX_PROXY_IMAGE_PROXY_ENABLED": "0"}, clear=False),
             ):
                 disabled_catalog = codex_proxy.current_catalog_data()
@@ -12636,6 +12649,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch("gateway_settings._runtime_proxy_dir", return_value=runtime_proxy_dir),
             ):
                 guarded_catalog = codex_proxy.current_catalog_data()
 
@@ -12646,6 +12660,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch("gateway_settings._runtime_proxy_dir", return_value=runtime_proxy_dir),
             ):
                 unguarded_catalog = codex_proxy.current_catalog_data()
 
@@ -12712,6 +12727,7 @@ class RoutingTests(unittest.TestCase):
             with (
                 patch("codex_proxy.existing_generated_catalog_path", return_value=catalog_path),
                 patch("codex_proxy.RUNTIME_PROXY_DIR", runtime_proxy_dir),
+                patch("gateway_settings._runtime_proxy_dir", return_value=runtime_proxy_dir),
             ):
                 catalog = codex_proxy.current_catalog_data()
 

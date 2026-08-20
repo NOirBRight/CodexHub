@@ -1047,3 +1047,22 @@ def test_linux_python_launcher_selects_python_313_or_newer() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "(3, 13)" in result.stdout or "(3, 14)" in result.stdout
+
+
+def test_linux_python_launcher_does_not_inherit_host_pythonpath() -> None:
+    if os.name == "nt":
+        pytest.skip("Linux launcher is not the Windows development entrypoint")
+    result = subprocess.run(
+        ["bash", str(LINUX_LAUNCHER), "-c", "import os; print(os.environ.get('PYTHONPATH', ''))"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": "/tmp/hostile-host-modules"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    pythonpath = result.stdout.strip()
+    assert "src-python" in pythonpath.replace("\\", "/")
+    assert "hostile-host-modules" not in pythonpath

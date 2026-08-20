@@ -81,7 +81,7 @@ fi
 export CODEXHUB_PYTHON="$resolved"
 export CODEXHUB_PROXY_PYTHON="$resolved"
 export CODEXHUB_E2E_PYTHON="$resolved"
-export PYTHONPATH="$repo_root/src-python${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$repo_root/src-python"
 export PATH="$(dirname "$resolved"):$repo_root/scripts:$PATH"
 
 exec "$resolved" "${args[@]}"

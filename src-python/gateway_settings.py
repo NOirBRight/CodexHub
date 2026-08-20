@@ -32,9 +32,9 @@ from subagent_policy import (
 
 
 def _runtime_proxy_dir() -> Path:
-    import codex_proxy
-
-    return Path(codex_proxy.RUNTIME_PROXY_DIR)
+    codex_home = os.environ.get("CODEX_HOME")
+    root = Path(codex_home) if codex_home else Path.home() / ".codex"
+    return root / "proxy"
 
 def upstream_timeout_seconds() -> int:
     settings_value = _runtime_settings_value("gateway_request_timeout_seconds")
@@ -429,10 +429,8 @@ def gateway_retry_delay_seconds(
     attempt: int,
     *,
     failure_class: str = RETRY_FAILURE_QUICK_TRANSIENT,
-    exc: BaseException | None = None,
+    retry_after_seconds: int | None = None,
 ) -> int:
-    from codex_proxy import _retry_after_delay_seconds
-    retry_after_seconds = _retry_after_delay_seconds(exc)
     if retry_after_seconds is not None:
         return retry_after_seconds
     if failure_class == RETRY_FAILURE_PROVIDER_THROTTLE:

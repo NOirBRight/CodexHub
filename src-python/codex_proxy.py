@@ -15626,7 +15626,7 @@ def _open_upstream_response(
                 else gateway_retry_delay_seconds(
                     request_attempt,
                     failure_class=failure_class,
-                    exc=exc,
+                    retry_after_seconds=_retry_after_delay_seconds(exc),
                 )
             )
             retry_elapsed_seconds = max(

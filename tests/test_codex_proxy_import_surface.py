@@ -323,6 +323,13 @@ def test_route_plan_source_does_not_import_facade() -> None:
     assert "_request_header" not in source
 
 
+def test_gateway_settings_source_does_not_import_facade() -> None:
+    with open(gateway_settings.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+
+
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
     assert gateway_sse.DownstreamStreamCommit is codex_proxy._GatewayDownstreamStreamCommit
     with open(gateway_sse.__file__, encoding="utf-8") as handle:
