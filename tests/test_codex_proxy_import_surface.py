@@ -340,6 +340,15 @@ def test_gateway_settings_source_does_not_import_facade() -> None:
     assert "from codex_proxy" not in source
 
 
+def test_collaboration_adapter_does_not_import_facade_or_transport() -> None:
+    with open(collaboration_adapter.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "gateway_sse" not in source
+    assert "transport" not in source
+
+
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
     assert gateway_sse.DownstreamStreamCommit is codex_proxy._GatewayDownstreamStreamCommit
     with open(gateway_sse.__file__, encoding="utf-8") as handle:

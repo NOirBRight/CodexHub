@@ -104,6 +104,7 @@ from runtime_tool_compatibility import (
 )
 
 from codex_semantic_adapter import (
+    COLLABORATION_V1_ALIAS_PREFIXES,
     COLLABORATION_V1 as _COLLABORATION_V1,
     COLLABORATION_V2 as _COLLABORATION_V2,
     COLLABORATION_V2_NAMESPACE as _COLLABORATION_V2_NAMESPACE,
@@ -728,20 +729,10 @@ MULTI_AGENT_NAMESPACE_ALIASES = {
 }
 NODE_REPL_NAMESPACE = "mcp__node_repl"
 THIRD_PARTY_TOOL_NAME_ALIASES = {
-    f"multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES
+    f"{prefix}{tool_name}": tool_name
+    for prefix in COLLABORATION_V1_ALIAS_PREFIXES
+    for tool_name in MULTI_AGENT_TOOL_NAMES
 }
-THIRD_PARTY_TOOL_NAME_ALIASES.update(
-    {f"multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
-)
-THIRD_PARTY_TOOL_NAME_ALIASES.update(
-    {f"multi_agent_v1{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
-)
-THIRD_PARTY_TOOL_NAME_ALIASES.update(
-    {f"mcp__multi_agent_v1__{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
-)
-THIRD_PARTY_TOOL_NAME_ALIASES.update(
-    {f"mcp__multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
-)
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {

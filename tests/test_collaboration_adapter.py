@@ -25,6 +25,7 @@ FORBIDDEN_SOURCE_MARKERS = (
     "import codex_proxy",
     "from codex_proxy",
     "gateway_sse",
+    "transport",
     "urllib3",
     "urlopen",
     "BaseHTTPRequestHandler",

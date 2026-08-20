@@ -36,6 +36,13 @@ COLLABORATION_V2_NAMESPACE = "collaboration"
 COLLABORATION_V1_TOOL_NAMES = frozenset(
     {"spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent"}
 )
+COLLABORATION_V1_ALIAS_PREFIXES = (
+    "multi_agent_v1__",
+    "multi_agent_v1.",
+    "multi_agent_v1",
+    "mcp__multi_agent_v1__",
+    "mcp__multi_agent_v1.",
+)
 COLLABORATION_V2_TOOL_NAMES = frozenset(
     {"spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"}
 )
@@ -52,13 +59,7 @@ class CollaborationBoundaryError(ValueError):
 def _collaboration_alias_protocol(name: Any) -> str | None:
     if not isinstance(name, str):
         return None
-    for prefix in (
-        "multi_agent_v1__",
-        "multi_agent_v1.",
-        "multi_agent_v1",
-        "mcp__multi_agent_v1__",
-        "mcp__multi_agent_v1.",
-    ):
+    for prefix in COLLABORATION_V1_ALIAS_PREFIXES:
         if not name.startswith(prefix):
             continue
         suffix = name[len(prefix) :]

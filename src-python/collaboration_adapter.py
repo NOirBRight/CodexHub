@@ -22,6 +22,7 @@ from codex_semantic_adapter import (
     BINDING_ACCEPTED,
     COLLABORATION_V1,
     COLLABORATION_V2,
+    COLLABORATION_V1_ALIAS_PREFIXES,
     COLLABORATION_V1_NAMESPACE,
     COLLABORATION_V1_TOOL_NAMES,
     CollaborationBoundaryError,
@@ -64,13 +65,7 @@ LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD = "internal_chat_message_metadata_pass
 SPAWN_AGENT_TOOL = "spawn_agent"
 WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
 
-_V1_ALIAS_PREFIXES = (
-    "multi_agent_v1__",
-    "multi_agent_v1.",
-    "multi_agent_v1",
-    "mcp__multi_agent_v1__",
-    "mcp__multi_agent_v1.",
-)
+_V1_ALIAS_PREFIXES = COLLABORATION_V1_ALIAS_PREFIXES
 
 
 class EventEmitter(Protocol):
@@ -134,7 +129,7 @@ def _v1_tool_name_from_wire(name: Any) -> str | None:
     return None
 
 
-def multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
+def collaboration_v1_function_call_name(item: Mapping[str, Any]) -> str | None:
     """Return the V1 tool name for a namespaced or aliased function call."""
     if item.get("type") != "function_call":
         return None
@@ -165,7 +160,9 @@ class CollaborationAdapter:
         surface: str = "request",
         cause: BaseException | None = None,
     ) -> NoReturn:
-        del event_context, classification
+        # The normalized boundary error code is the public classification;
+        # the raw event context is intentionally not emitted.
+        _ = event_context, classification
         self.emit(
             "collaboration_boundary_rejected",
             surface=surface,
@@ -383,7 +380,7 @@ class CollaborationAdapter:
         if not isinstance(value, Mapping):
             return
 
-        if multi_agent_function_call_name(value) == self.facts.spawn_agent_tool:
+        if collaboration_v1_function_call_name(value) == self.facts.spawn_agent_tool:
             raw_arguments = value.get("arguments")
             arguments = json_object_from_arguments(raw_arguments)
             if arguments is not None and raw_arguments not in (None, ""):
@@ -611,7 +608,7 @@ class CollaborationAdapter:
         item_id = item.get("id")
         if not isinstance(item_id, str) or not item_id:
             return
-        tool_name = multi_agent_function_call_name(item)
+        tool_name = collaboration_v1_function_call_name(item)
         items = state.setdefault("items", {})
         if not isinstance(items, dict):
             items = {}
@@ -818,7 +815,7 @@ class CollaborationAdapter:
                 rewritten[key] = replacement
                 changed = True
 
-        if multi_agent_function_call_name(rewritten) != self.facts.spawn_agent_tool:
+        if collaboration_v1_function_call_name(rewritten) != self.facts.spawn_agent_tool:
             return (rewritten if changed else value), changed
         # Binding sidecars require an exact selector.  The general argument
         # normalizer intentionally accepts a valid JSON prefix for other repair
@@ -935,7 +932,7 @@ class CollaborationAdapter:
             if not isinstance(item, Mapping):
                 continue
             call_id = item.get("call_id")
-            if item.get("type") == "function_call" and multi_agent_function_call_name(item) == self.facts.spawn_agent_tool:
+            if item.get("type") == "function_call" and collaboration_v1_function_call_name(item) == self.facts.spawn_agent_tool:
                 raw_arguments = item.get("arguments")
                 arguments = json_object_from_arguments(raw_arguments)
                 strict_arguments = strict_json_object(raw_arguments)
