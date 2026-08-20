@@ -3179,7 +3179,16 @@ def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
 
 
 
-from gateway_relay import relay_raw_response, write_non_streaming_body
+from gateway_relay import (
+    relay_raw_response,
+    send_sse_headers,
+    write_non_streaming_body,
+    write_sse_bytes,
+    write_sse_data,
+    write_sse_done,
+    write_sse_event,
+    write_sse_keepalive,
+)
 from gateway_sse import (
     DownstreamStreamCommit,
     PassthroughSseSemanticStats,
@@ -18326,6 +18335,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             writer=self,
             filtered_headers=_filtered_response_headers,
             active_request=_active_gateway_request,
+            write_body=self._write_non_streaming_body_relay,
         )
 
     def _send_sse_headers(self, status: int, upstream_name: str) -> bool:

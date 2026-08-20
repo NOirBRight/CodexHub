@@ -65,3 +65,43 @@ def test_write_non_streaming_body_isolated_seam():
     writer = Writer()
     assert write_non_streaming_body(writer, b"payload")
     assert writer.wfile.getvalue() == b"payload"
+
+
+def test_relay_raw_response_preserves_injected_body_hook():
+    writer = Writer()
+    seen = []
+    response = SimpleNamespace(status=200, headers={}, read=lambda: b"body")
+    status = relay_raw_response(
+        response,
+        "official",
+        writer=writer,
+        filtered_headers=headers,
+        active_request=lambda: None,
+        write_body=lambda body: seen.append(body) or True,
+    )
+    assert status == 200
+    assert seen == [b"body"]
+    assert writer.wfile.getvalue() == b""
+
+
+def test_relay_raw_response_checks_request_admission_before_headers():
+    writer = Writer()
+
+    class Admission:
+        def raise_if_cancelled(self):
+            raise RuntimeError("cancelled")
+
+    response = SimpleNamespace(status=200, headers={}, read=lambda: b"body")
+    try:
+        relay_raw_response(
+            response,
+            "official",
+            writer=writer,
+            filtered_headers=headers,
+            active_request=lambda: Admission(),
+        )
+    except RuntimeError as error:
+        assert str(error) == "cancelled"
+    else:
+        raise AssertionError("cancellation was not propagated")
+    assert writer.responses == []
