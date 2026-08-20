@@ -3179,6 +3179,7 @@ def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
 
 
 
+from gateway_relay import relay_raw_response, write_non_streaming_body
 from gateway_sse import (
     DownstreamStreamCommit,
     PassthroughSseSemanticStats,
@@ -18319,25 +18320,13 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self._write_non_streaming_body_relay(body)
 
     def _relay_raw_upstream_response(self, response: Any, upstream_name: str) -> int:
-        status = getattr(response, "status", None) or getattr(response, "code", 502)
-        body = response.read()
-        admission = _active_gateway_request()
-        if admission is not None:
-            admission.raise_if_cancelled()
-        self.send_response(status)
-        for key, value in _filtered_response_headers(
-            response.headers,
-            False,
-            content_length=len(body),
-        ):
-            self.send_header(key, value)
-        self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if not self._write_non_streaming_body_relay(body):
-            return 499
-        self.close_connection = True
-        return status
+        return relay_raw_response(
+            response,
+            upstream_name,
+            writer=self,
+            filtered_headers=_filtered_response_headers,
+            active_request=_active_gateway_request,
+        )
 
     def _send_sse_headers(self, status: int, upstream_name: str) -> bool:
         seam = _handler_downstream_stream_commit(self)
@@ -18369,19 +18358,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         return True
 
     def _write_non_streaming_body_relay(self, body: bytes) -> bool:
-        """Write a complete non-streaming response body directly to the downstream.
-
-        This is the narrow allowlisted helper for non-streaming JSON and body-relay
-        writes. It returns True on success and False when the downstream socket is
-        closed, matching the seam contract so callers can surface a 499.
-        """
-        try:
-            self.wfile.write(body)
-            self.wfile.flush()
-        except OSError:
-            self.close_connection = True
-            return False
-        return True
+        return write_non_streaming_body(self, body)
 
     def _write_sse_event(self, event: str, payload: Mapping[str, Any]) -> bool:
         data = (
