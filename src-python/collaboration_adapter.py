@@ -6,8 +6,10 @@ deliberately independent of `codex_proxy`; the facade supplies telemetry emit
 and signing-root callbacks through a typed `CollaborationAdapter`.
 
 Pure payload classification stays in `codex_semantic_adapter`. V2 identity and
-alias handling stay in `runtime_tool_compatibility`. Generic JSON, tool-search,
-and workflow-state helpers stay at the facade.
+alias handling stay in `runtime_tool_compatibility`. Tool schema injection,
+bounded tool_search, structured input rewriting, and third-party tool-surface
+adaptation stay in `tool_surface_adapter`. Generic JSON and workflow-state
+helpers stay at the facade.
 """
 
 from __future__ import annotations

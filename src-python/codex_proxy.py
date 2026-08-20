@@ -104,7 +104,6 @@ from runtime_tool_compatibility import (
 )
 
 from codex_semantic_adapter import (
-    COLLABORATION_V1_ALIAS_PREFIXES,
     COLLABORATION_V1 as _COLLABORATION_V1,
     COLLABORATION_V2 as _COLLABORATION_V2,
     COLLABORATION_V2_NAMESPACE as _COLLABORATION_V2_NAMESPACE,
@@ -129,6 +128,20 @@ from collaboration_adapter import (
     CollaborationAdapter,
     CollaborationFacts,
     PathBindingSigner,
+)
+from tool_surface_adapter import (
+    INTERNAL_INPUT_ITEM_TYPES,
+    MULTI_AGENT_DISCOVERY_TOOLS,
+    MULTI_AGENT_NAMESPACE_ALIASES,
+    NODE_REPL_NAMESPACE,
+    THIRD_PARTY_TOOL_NAME_ALIASES,
+    TOOL_NAME_RE,
+    TOOL_SEARCH_EMPTY_MISS_BOUND,
+    TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL,
+    TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
+    TOOL_SEARCH_UNAVAILABLE_STATUS,
+    ToolSurfaceAdapter,
+    ToolSurfaceFacts,
 )
 
 from catalog import (
@@ -715,7 +728,6 @@ UPSTREAM_MAX_OUTPUT_TOKEN_CAPS = {
     "minimax-m3": 131072,
 }
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
-TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 MULTI_AGENT_TOOL_NAMES = {
     "spawn_agent",
     "wait_agent",
@@ -723,114 +735,12 @@ MULTI_AGENT_TOOL_NAMES = {
     "resume_agent",
     "send_input",
 }
-MULTI_AGENT_NAMESPACE_ALIASES = {
-    "multi_agent_v1",
-    "mcp__multi_agent_v1",
-}
-NODE_REPL_NAMESPACE = "mcp__node_repl"
-THIRD_PARTY_TOOL_NAME_ALIASES = {
-    f"{prefix}{tool_name}": tool_name
-    for prefix in COLLABORATION_V1_ALIAS_PREFIXES
-    for tool_name in MULTI_AGENT_TOOL_NAMES
-}
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
-MULTI_AGENT_DISCOVERY_TOOLS = [
-    {
-        "type": "namespace",
-        "name": "multi_agent_v1",
-        "description": "Tools for spawning and managing Codex sub-agents.",
-        "tools": [
-            {
-                "type": "function",
-                "name": "spawn_agent",
-                "description": "Spawn a sub-agent. Use namespace multi_agent_v1 and function name spawn_agent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "agent_type": {"type": "string", "enum": ["worker", "default"]},
-                        "fork_context": {"type": "boolean"},
-                        "message": {"type": "string"},
-                    },
-                    "required": ["agent_type"],
-                    "additionalProperties": True,
-                },
-            },
-            {
-                "type": "function",
-                "name": "wait_agent",
-                "description": "Wait for one or more spawned sub-agents.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "targets": {"type": "array", "items": {"type": "string"}},
-                        "timeout_ms": {"type": "number"},
-                    },
-                    "required": ["targets"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "close_agent",
-                "description": "Close a spawned sub-agent when it is no longer needed.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"target": {"type": "string"}},
-                    "required": ["target"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "resume_agent",
-                "description": "Resume a previously closed sub-agent by id.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"id": {"type": "string"}},
-                    "required": ["id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "send_input",
-                "description": "Send a message to an existing sub-agent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string"},
-                        "message": {"type": "string"},
-                        "interrupt": {"type": "boolean"},
-                    },
-                    "required": ["target"],
-                    "additionalProperties": True,
-                },
-            },
-        ],
-    }
-]
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
-TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
-    "type": "function",
-    "name": "tool_search",
-    "description": "Discover deferred Codex tools by keyword. Use this before calling a tool that is not already visible.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1},
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-}
-TOOL_SEARCH_EMPTY_MISS_BOUND = 2
-TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION = "identical_exact_query"
-TOOL_SEARCH_UNAVAILABLE_STATUS = "unavailable"
 EXCESSIVE_TOOL_LOOP_BOUND = 3
 EXCESSIVE_TOOL_LOOP_ERROR_CODE = "excessive_tool_loop"
 BROWSER_CONTEXT_MARKERS = (
@@ -851,18 +761,6 @@ BROWSER_CONTEXT_GUIDANCE = (
     "- If executable alias mcp__node_repl__js is visible, use it directly to bootstrap browser-client.mjs and select the iab browser.\n"
     '- In a CLI/no-browser environment, report "browser session unavailable"; do not report "browser tool not exposed".'
 )
-INTERNAL_INPUT_ITEM_TYPES = {
-    "compaction",
-    "compaction_trigger",
-    "reasoning",
-    "function_call",
-    "function_call_output",
-    "custom_tool_call",
-    "custom_tool_call_output",
-    "web_search_call",
-    "tool_search_call",
-    "tool_search_output",
-}
 EMBEDDED_MODEL_RE = re.compile(rb'"model"\s*:\s*"(?:[^"\\]|\\.)+"')
 FORM_MODEL_RE = re.compile(rb'name="model"(?:\r?\n[^\r\n]*)*\r?\n\r?\n([^\r\n]+)')
 
@@ -1761,6 +1659,16 @@ def _collaboration_adapter() -> CollaborationAdapter:
         facts=CollaborationFacts(signing_root=WORKER_BINDING_SIGNING_ROOT),
         emit=write_proxy_event,
         signer=PathBindingSigner(WORKER_BINDING_SIGNING_ROOT),
+    )
+
+
+def _tool_surface_adapter() -> ToolSurfaceAdapter:
+    """Build a request-time adapter so apply-patch and message patches stay live."""
+    return ToolSurfaceAdapter(
+        facts=ToolSurfaceFacts(),
+        adapt_apply_patch_history=_adapt_apply_patch_custom_tool_history,
+        compatible_internal_message=_compatible_internal_message,
+        transcript_message=_assistant_transcript_message,
     )
 
 
@@ -4778,16 +4686,15 @@ def _single_line_internal_field(value: Any) -> str:
 
 
 def _valid_tool_name(value: Any) -> bool:
-    return isinstance(value, str) and bool(TOOL_NAME_RE.fullmatch(value))
+    return _tool_surface_adapter().valid_tool_name(value)
 
 
 def _is_tool_call_item(item: Mapping[str, Any]) -> bool:
-    item_type = item.get("type")
-    return isinstance(item_type, str) and item_type in {"function_call", "custom_tool_call"}
+    return _tool_surface_adapter().is_tool_call_item(item)
 
 
 def _has_invalid_tool_name(item: Mapping[str, Any]) -> bool:
-    return _is_tool_call_item(item) and not _valid_tool_name(item.get("name"))
+    return _tool_surface_adapter().has_invalid_tool_name(item)
 
 
 def _transcript_text(title: str, item: Mapping[str, Any]) -> str:
@@ -4853,27 +4760,15 @@ def _dump_arguments_like(original: Any, arguments: Mapping[str, Any]) -> Any:
 
 
 def _tool_schema_name(value: Any) -> str | None:
-    if not isinstance(value, Mapping):
-        return None
-    name = value.get("name")
-    return name if isinstance(name, str) and name else None
+    return _tool_surface_adapter().tool_schema_name(value)
 
 
 def _tool_parameters_schema(value: Mapping[str, Any]) -> dict[str, Any]:
-    for key in ("parameters", "inputSchema", "input_schema"):
-        schema = value.get(key)
-        if isinstance(schema, dict):
-            return dict(schema)
-    return {"type": "object", "properties": {}, "additionalProperties": True}
+    return _tool_surface_adapter().tool_parameters_schema(value)
 
 
 def _explicit_function_tool(name: str, description: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "name": name,
-        "description": description,
-        "parameters": dict(parameters),
-    }
+    return _tool_surface_adapter().explicit_function_tool(name, description, parameters)
 
 
 def _multi_agent_explicit_function_tools(
@@ -4887,312 +4782,88 @@ def _multi_agent_explicit_function_tools(
     close_agent_ids: list[str] | None = None,
     worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> list[dict[str, Any]]:
-    namespace = MULTI_AGENT_DISCOVERY_TOOLS[0]
-    tools = namespace.get("tools") if isinstance(namespace, Mapping) else None
-    if not isinstance(tools, list):
-        return []
-
-    result: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, Mapping):
-            continue
-        name = _tool_schema_name(tool)
-        if not name or name not in MULTI_AGENT_TOOL_NAMES:
-            continue
-        if name == "spawn_agent" and not include_spawn_agent:
-            continue
-        if name == "wait_agent" and not include_wait_agent:
-            continue
-        if name == "close_agent" and not include_close_agent:
-            continue
-        if name == "resume_agent" and not include_resume_agent:
-            continue
-        if name == "send_input" and not include_send_input:
-            continue
-        alias = f"multi_agent_v1__{name}"
-        description = str(tool.get("description") or f"Invoke Codex multi_agent_v1.{name}.")
-        parameters = json.loads(json.dumps(_tool_parameters_schema(tool)))
-        properties = parameters.setdefault("properties", {})
-        if name == "spawn_agent" and isinstance(properties, dict):
-            agent_type = properties.get("agent_type")
-            if isinstance(agent_type, dict):
-                agent_type["enum"] = list(worker_selector_values)
-            message = properties.get("message")
-            if isinstance(message, dict):
-                message.setdefault(
-                    "description",
-                    "Complete child-agent task prompt. Include all instructions the child needs.",
-                )
-            fork_context = properties.get("fork_context")
-            if isinstance(fork_context, dict):
-                fork_context["description"] = (
-                    "Set false for self-contained child prompts so the child follows only the supplied message. "
-                    "Set true only when inheriting the coordinator transcript is explicitly needed."
-                )
-                fork_context.setdefault("default", False)
-        target_agent_ids = open_agent_ids
-        if name == "wait_agent" and wait_agent_ids is not None:
-            target_agent_ids = wait_agent_ids
-        elif name == "close_agent" and close_agent_ids is not None:
-            target_agent_ids = close_agent_ids
-        if target_agent_ids and name in {"wait_agent", "close_agent"}:
-            ids_text = ", ".join(target_agent_ids)
-            description += f" Current open agent_id target(s): {ids_text}. Use these id(s) next."
-            if isinstance(properties, dict):
-                if name == "wait_agent":
-                    targets = properties.get("targets")
-                    if isinstance(targets, dict):
-                        targets["description"] = (
-                            f"MUST be exactly this list for the currently open Codex child agent(s): {list(target_agent_ids)!r}."
-                        )
-                        targets.setdefault("default", list(target_agent_ids))
-                        items = targets.setdefault("items", {})
-                        if isinstance(items, dict):
-                            items["enum"] = list(target_agent_ids)
-                    timeout_ms = properties.get("timeout_ms")
-                    if isinstance(timeout_ms, dict):
-                        timeout_ms.setdefault("description", "Use 60000 for the standard Codex subagent test.")
-                        timeout_ms.setdefault("default", 60000)
-                elif name == "close_agent":
-                    target = properties.get("target")
-                    if isinstance(target, dict):
-                        target["description"] = (
-                            f"MUST be one of the already-waited open Codex child agent id(s): {', '.join(target_agent_ids)}."
-                        )
-                        if len(target_agent_ids) == 1:
-                            target.setdefault("default", target_agent_ids[0])
-                        target["enum"] = list(target_agent_ids)
-        result.append(_explicit_function_tool(alias, description, parameters))
-    return result
-
-
-def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
-    return namespace_name == "codex_app" or namespace_name.startswith("mcp__")
-
-
-def _is_multi_agent_namespace_name(name: str | None) -> bool:
-    return isinstance(name, str) and name in MULTI_AGENT_NAMESPACE_ALIASES
-
-
-def _is_multi_agent_explicit_tool_name(name: str) -> bool:
-    return name in THIRD_PARTY_TOOL_NAME_ALIASES
-
-
-def _multi_agent_alias_tool_name(name: Any) -> str | None:
-    if not isinstance(name, str):
-        return None
-    if name in MULTI_AGENT_TOOL_NAMES:
-        return name
-    return THIRD_PARTY_TOOL_NAME_ALIASES.get(name)
-
-
-def _looks_like_response_tool_name_fragment(value: Mapping[str, Any]) -> bool:
-    item_type = value.get("type")
-    if isinstance(item_type, str) and item_type.startswith("response."):
-        return True
-    if any(key in value for key in ("call_id", "item_id", "arguments", "status")):
-        return True
-    return set(value.keys()).issubset({"name", "namespace", "index", "id"})
-
-
-def _is_multi_agent_tool_schema(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    item_type = value.get("type")
-    name = _tool_schema_name(value)
-    if item_type == "namespace":
-        return _is_multi_agent_namespace_name(name)
-    if item_type == "function":
-        if value.get("namespace") == "multi_agent_v1":
-            return True
-        return isinstance(name, str) and _is_multi_agent_explicit_tool_name(name)
-    return False
-
-
-def _is_node_repl_explicit_tool_name(name: str) -> bool:
-    return name.startswith(f"{NODE_REPL_NAMESPACE}__") or name.startswith(f"{NODE_REPL_NAMESPACE}.")
-
-
-def _is_node_repl_tool_schema(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    item_type = value.get("type")
-    name = _tool_schema_name(value)
-    if item_type == "namespace":
-        return name == NODE_REPL_NAMESPACE
-    if item_type == "function":
-        if value.get("namespace") == NODE_REPL_NAMESPACE:
-            return True
-        return isinstance(name, str) and _is_node_repl_explicit_tool_name(name)
-    return False
-
-
-def _is_local_tool_gateway_tool_schema(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    name = _tool_schema_name(value)
-    if not isinstance(name, str):
-        return False
-    local_gateway_namespace = "mcp__codex_apps__local_tool_gateway_"
-    if value.get("type") == "namespace":
-        return name == local_gateway_namespace
-    if value.get("type") == "function":
-        namespace = value.get("namespace")
-        if namespace == local_gateway_namespace:
-            return True
-        return name.startswith(f"{local_gateway_namespace}__")
-    return False
-
-
-def _is_mcp_or_codex_app_tool_schema(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    name = _tool_schema_name(value)
-    namespace = value.get("namespace")
-    if isinstance(namespace, str) and (namespace.startswith("mcp__") or namespace == "codex_app"):
-        return True
-    if not isinstance(name, str):
-        return False
-    return name.startswith("mcp__") or name == "codex_app" or name.startswith("codex_app__")
-
-
-def _is_flattened_namespace_schema(value: Any) -> bool:
-    if not isinstance(value, Mapping) or value.get("type") != "namespace":
-        return False
-    name = _tool_schema_name(value)
-    return _is_multi_agent_namespace_name(name) or (
-        isinstance(name, str) and _supports_explicit_namespace_alias(name)
+    return _tool_surface_adapter().multi_agent_explicit_function_tools(
+        include_spawn_agent=include_spawn_agent,
+        include_wait_agent=include_wait_agent,
+        include_close_agent=include_close_agent,
+        include_resume_agent=include_resume_agent,
+        include_send_input=include_send_input,
+        open_agent_ids=open_agent_ids,
+        wait_agent_ids=wait_agent_ids,
+        close_agent_ids=close_agent_ids,
+        worker_selector_values=worker_selector_values,
     )
 
 
+def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
+    return _tool_surface_adapter().supports_explicit_namespace_alias(namespace_name)
+
+
+def _is_multi_agent_namespace_name(name: str | None) -> bool:
+    return _tool_surface_adapter().is_multi_agent_namespace_name(name)
+
+
+def _is_multi_agent_explicit_tool_name(name: str) -> bool:
+    return _tool_surface_adapter().is_multi_agent_explicit_tool_name(name)
+
+
+def _multi_agent_alias_tool_name(name: Any) -> str | None:
+    return _tool_surface_adapter().multi_agent_alias_tool_name(name)
+
+
+def _looks_like_response_tool_name_fragment(value: Mapping[str, Any]) -> bool:
+    return _tool_surface_adapter().looks_like_response_tool_name_fragment(value)
+
+
+def _is_multi_agent_tool_schema(value: Any) -> bool:
+    return _tool_surface_adapter().is_multi_agent_tool_schema(value)
+
+
+def _is_node_repl_explicit_tool_name(name: str) -> bool:
+    return _tool_surface_adapter().is_node_repl_explicit_tool_name(name)
+
+
+def _is_node_repl_tool_schema(value: Any) -> bool:
+    return _tool_surface_adapter().is_node_repl_tool_schema(value)
+
+
+def _is_local_tool_gateway_tool_schema(value: Any) -> bool:
+    return _tool_surface_adapter().is_local_tool_gateway_tool_schema(value)
+
+
+def _is_mcp_or_codex_app_tool_schema(value: Any) -> bool:
+    return _tool_surface_adapter().is_mcp_or_codex_app_tool_schema(value)
+
+
+def _is_flattened_namespace_schema(value: Any) -> bool:
+    return _tool_surface_adapter().is_flattened_namespace_schema(value)
+
+
 def _is_raw_namespace_schema(value: Any) -> bool:
-    return isinstance(value, Mapping) and value.get("type") == "namespace"
+    return _tool_surface_adapter().is_raw_namespace_schema(value)
 
 
 def _valid_namespace_function_names(value: Any) -> tuple[str, tuple[str, ...]] | None:
-    if not _is_raw_namespace_schema(value):
-        return None
-    namespace_name = _tool_schema_name(value)
-    namespace_tools = value.get("tools")
-    if not isinstance(namespace_name, str) or not namespace_name or not isinstance(namespace_tools, list):
-        return None
-    child_names: list[str] = []
-    for tool in namespace_tools:
-        tool_name = _tool_schema_name(tool)
-        if (
-            not isinstance(tool, Mapping)
-            or tool.get("type") != "function"
-            or not isinstance(tool_name, str)
-            or not tool_name
-        ):
-            return None
-        child_names.append(tool_name)
-    if not child_names or len(set(child_names)) != len(child_names):
-        return None
-    return namespace_name, tuple(child_names)
+    return _tool_surface_adapter().valid_namespace_function_names(value)
 
 
 def _deferred_namespace_surface_counts(
     source_tools: list[Any],
     final_tools: list[Any],
 ) -> tuple[int, int]:
-    final_function_names = {
-        name
-        for tool in final_tools
-        if isinstance(tool, Mapping) and tool.get("type") == "function"
-        for name in (_tool_schema_name(tool),)
-        if name is not None
-    }
-    final_qualified_functions = {
-        (tool.get("namespace"), name)
-        for tool in final_tools
-        if isinstance(tool, Mapping)
-        and tool.get("type") == "function"
-        and isinstance(tool.get("namespace"), str)
-        for name in (_tool_schema_name(tool),)
-        if name is not None
-    }
-    final_namespace_children: dict[str, set[str]] = {}
-    for tool in final_tools:
-        details = _valid_namespace_function_names(tool)
-        if details is None:
-            continue
-        namespace_name, child_names = details
-        final_namespace_children.setdefault(namespace_name, set()).update(child_names)
-
-    namespace_count = 0
-    child_count = 0
-    for namespace in source_tools:
-        details = _valid_namespace_function_names(namespace)
-        if details is None:
-            continue
-        namespace_name, child_names = details
-        surviving_namespace_children = final_namespace_children.get(namespace_name, set())
-        if not set(child_names).issubset(surviving_namespace_children):
-            namespace_count += 1
-        for child_name in child_names:
-            if (
-                child_name in surviving_namespace_children
-                or (namespace_name, child_name) in final_qualified_functions
-                or f"{namespace_name}__{child_name}" in final_function_names
-                or f"{namespace_name}.{child_name}" in final_function_names
-            ):
-                continue
-            child_count += 1
-    return namespace_count, child_count
+    return _tool_surface_adapter().deferred_namespace_surface_counts(source_tools, final_tools)
 
 
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for namespace in tools:
-        if not isinstance(namespace, Mapping) or namespace.get("type") != "namespace":
-            continue
-        namespace_name = _tool_schema_name(namespace)
-        namespace_tools = namespace.get("tools")
-        if (
-            not namespace_name
-            or not _valid_tool_name(namespace_name)
-            or not _supports_explicit_namespace_alias(namespace_name)
-            or not isinstance(namespace_tools, list)
-        ):
-            continue
-        for tool in namespace_tools:
-            if not isinstance(tool, Mapping) or tool.get("type") != "function":
-                continue
-            tool_name = _tool_schema_name(tool)
-            if not tool_name or not _valid_tool_name(tool_name):
-                continue
-            alias = f"{namespace_name}__{tool_name}"
-            description = str(tool.get("description") or f"Invoke Codex namespace {namespace_name}.{tool_name}.")
-            result.append(_explicit_function_tool(alias, description, _tool_parameters_schema(tool)))
-    return result
+    return _tool_surface_adapter().flatten_namespace_function_tools(tools)
 
 
 def _multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
-    if item.get("type") != "function_call":
-        return None
-
-    namespace = item.get("namespace")
-    name = item.get("name")
-    tool_name = _multi_agent_alias_tool_name(name)
-    if namespace == "multi_agent_v1" and tool_name is not None:
-        return tool_name
-    if tool_name is not None and name != tool_name:
-        return tool_name
-    return None
+    return _tool_surface_adapter().multi_agent_function_call_name(item)
 
 
 def _node_repl_function_call_name(item: Mapping[str, Any]) -> str | None:
-    if item.get("type") != "function_call":
-        return None
-
-    namespace = item.get("namespace")
-    name = item.get("name")
-    if namespace == NODE_REPL_NAMESPACE and name == "js":
-        return "js"
-    if name in {f"{NODE_REPL_NAMESPACE}__js", f"{NODE_REPL_NAMESPACE}.js"}:
-        return "js"
-    return None
+    return _tool_surface_adapter().node_repl_function_call_name(item)
 
 
 _RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
@@ -5740,17 +5411,7 @@ def _runtime_plan_has_native_plain_function(
     plan: RuntimeToolCompatibilityPlan | None,
     item: Mapping[str, Any],
 ) -> bool:
-    name = item.get("name")
-    return bool(
-        plan is not None
-        and isinstance(name, str)
-        and any(
-            entry.family == "plain_function"
-            and entry.disposition == "native"
-            and entry.original_name == name
-            for entry in plan.entries
-        )
-    )
+    return _tool_surface_adapter().runtime_plan_has_native_plain_function(plan, item)
 
 
 def _rewrite_generated_guidance_tool_name(value: Any, original: str, alias: str) -> Any:
@@ -5953,79 +5614,18 @@ def _adapt_native_responses_tool_declarations(
 
 
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    if item.get("type") != "function_call":
-        return None
-    request_shape = dict(item)
-    for response_only_field in ("id", "status", WORKER_REQUESTED_BINDING_FIELD):
-        request_shape.pop(response_only_field, None)
-    tool_name = _multi_agent_function_call_name(item)
-    if tool_name is not None:
-        rewritten = request_shape
-        rewritten.pop("namespace", None)
-        rewritten["name"] = f"multi_agent_v1__{tool_name}"
-        normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get("arguments"), tool_name)
-        if args_changed:
-            rewritten["arguments"] = normalized
-        return rewritten
-    node_name = _node_repl_function_call_name(item)
-    if node_name is not None:
-        rewritten = request_shape
-        rewritten.pop("namespace", None)
-        rewritten["name"] = f"{NODE_REPL_NAMESPACE}__{node_name}"
-        return rewritten
-    return request_shape
+    return _tool_surface_adapter().structured_tool_function_call_item(item)
 
 
 def _same_selected_v1_collaboration_function_call(
     item: Mapping[str, Any],
     event_context: Mapping[str, Any] | None,
 ) -> bool:
-    """Allow current V1 calls through the legacy structured-call adapter."""
-
-    if (
-        item.get("type") != "function_call"
-        or not isinstance(event_context, Mapping)
-        or event_context.get("collaboration_protocol") != _COLLABORATION_V1
-    ):
-        return False
-    try:
-        return _classify_collaboration_payload({"input": [item]}) == _COLLABORATION_V1
-    except _CollaborationBoundaryError:
-        return False
+    return _tool_surface_adapter().same_selected_v1_collaboration_function_call(item, event_context)
 
 
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
-    """Promote Codex's internal tool carrier to the standard Responses field."""
-    input_items = payload.get("input")
-    if not isinstance(input_items, list):
-        return False
-
-    promoted_tools: list[Any] = []
-    rewritten_items: list[Any] = []
-    changed = False
-    for item in input_items:
-        if not isinstance(item, Mapping) or item.get("type") != "additional_tools":
-            rewritten_items.append(item)
-            continue
-        item_tools = item.get("tools")
-        if isinstance(item_tools, list):
-            promoted_tools.extend(item_tools)
-        changed = True
-
-    if not changed:
-        return False
-
-    tools = payload.get("tools")
-    if isinstance(tools, list):
-        tools.extend(promoted_tools)
-    elif tools is None:
-        payload["tools"] = promoted_tools
-    else:
-        # The caller's top-level tools are already malformed; remove the
-        # internal-only item so it cannot be forwarded to a third party.
-        payload["tools"] = promoted_tools
-    payload["input"] = rewritten_items
-    return True
+    return _tool_surface_adapter().hoist_additional_tools_input_items(payload)
 
 
 def _rewrite_structured_tool_input_items(
@@ -6034,86 +5634,12 @@ def _rewrite_structured_tool_input_items(
     upstream_name: str | None = None,
     compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
 ) -> bool:
-    input_items = payload.get("input")
-    if not isinstance(input_items, list):
-        return False
-
-    input_items, adapted_apply_patch_call_ids, changed = _adapt_apply_patch_custom_tool_history(
-        input_items,
+    changed = _tool_surface_adapter().rewrite_structured_tool_input_items(
+        payload,
         event_context=event_context,
+        compatibility_plan=compatibility_plan,
     )
     if changed:
-        payload["input"] = input_items
-    rewritten_items: list[Any] = []
-    preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
-    available_function_names = _function_tool_names(payload.get("tools"))
-    for item in input_items:
-        if not isinstance(item, dict):
-            rewritten_items.append(item)
-            continue
-        if (
-            compatibility_plan is not None
-            and compatibility_plan.owns_wire_value(item)
-            and not _same_selected_v1_collaboration_function_call(item, event_context)
-            and not _runtime_plan_has_native_plain_function(compatibility_plan, item)
-        ):
-            call_id = item.get("call_id")
-            if isinstance(call_id, str):
-                preserved_structured_call_ids.add(call_id)
-            rewritten_items.append(item)
-            continue
-        if item.get("type") == "function_call":
-            function_name = item.get("name")
-            call_id = item.get("call_id")
-            preserve_apply_patch_history = (
-                function_name == APPLY_PATCH_FUNCTION_NAME
-                and isinstance(call_id, str)
-                and call_id in adapted_apply_patch_call_ids
-            )
-            preserve_available_function = (
-                isinstance(function_name, str) and function_name in available_function_names
-            )
-            if (
-                preserve_available_function
-                or preserve_apply_patch_history
-                or _multi_agent_function_call_name(item) is not None
-                or _node_repl_function_call_name(item) is not None
-            ):
-                if isinstance(call_id, str):
-                    preserved_structured_call_ids.add(call_id)
-                rewritten = _structured_tool_function_call_item(item)
-                rewritten_items.append(rewritten if rewritten is not None else item)
-                changed = changed or rewritten != item
-            else:
-                replacement = _compatible_internal_message(item)
-                if replacement is not None:
-                    rewritten_items.append(replacement)
-                changed = True
-            continue
-        if item.get("type") == "function_call_output":
-            call_id = item.get("call_id")
-            if isinstance(call_id, str) and call_id in preserved_structured_call_ids:
-                rewritten_items.append(dict(item))
-            else:
-                replacement = _compatible_internal_message(item)
-                if replacement is not None:
-                    rewritten_items.append(replacement)
-                changed = True
-            continue
-        item_type = item.get("type")
-        replacement = _compatible_internal_message(item)
-        if replacement is not None:
-            rewritten_items.append(replacement)
-            changed = True
-        elif isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
-            # Internal item (e.g. reasoning, compaction_trigger) with no text
-            # replacement — drop it instead of leaking the raw item upstream.
-            changed = True
-        else:
-            rewritten_items.append(item)
-
-    if changed:
-        payload["input"] = rewritten_items
         _write_adapter_event(
             event_context,
             "structured_tool_input_items_rewritten",
@@ -6144,236 +5670,35 @@ def _inject_explicit_codex_tools(
     close_agent_ids: list[str] | None = None,
     worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> bool:
-    if tool_surface_counts is not None:
-        tool_surface_counts.update(
-            {
-                "namespace_declaration_count": 0,
-                "eager_tool_count": 0,
-                "retained_core_count": 0,
-                "deferred_tool_count": 0,
-            }
-        )
-    tools = payload.get("tools")
-    if tools is None:
-        tools = []
-        payload["tools"] = tools
-    if not isinstance(tools, list):
-        return False
-
-    changed = False
-    surface_source_tools = list(tool_surface_source_tools if tool_surface_source_tools is not None else tools)
-    caller_non_namespace_tools = tuple(
-        tool
-        for tool in surface_source_tools
-        if not (isinstance(tool, Mapping) and tool.get("type") == "namespace")
+    return _tool_surface_adapter().inject_explicit_codex_tools(
+        payload,
+        include_tool_search=include_tool_search,
+        include_multi_agent_tools=include_multi_agent_tools,
+        include_spawn_agent=include_spawn_agent,
+        include_wait_agent=include_wait_agent,
+        include_close_agent=include_close_agent,
+        include_resume_agent=include_resume_agent,
+        include_send_input=include_send_input,
+        include_node_repl_tools=include_node_repl_tools,
+        include_local_tool_gateway_tools=include_local_tool_gateway_tools,
+        strip_namespace_tools=strip_namespace_tools,
+        strip_all_namespace_tools=strip_all_namespace_tools,
+        include_flattened_namespace_tools=include_flattened_namespace_tools,
+        deferred_core_surface=deferred_core_surface,
+        tool_surface_counts=tool_surface_counts,
+        tool_surface_source_tools=tool_surface_source_tools,
+        open_agent_ids=open_agent_ids,
+        wait_agent_ids=wait_agent_ids,
+        close_agent_ids=close_agent_ids,
+        worker_selector_values=worker_selector_values,
     )
-    namespace_declaration_count = sum(
-        1 for tool in surface_source_tools if _is_flattened_namespace_schema(tool)
-    )
-    flattened_namespace_tools = _flatten_namespace_function_tools(surface_source_tools)
-    if strip_namespace_tools:
-        # Eager preserves the #105 compatibility surface: only declarations the
-        # existing flattener understands are removed. deferred_core is the
-        # explicit normalized surface and drops every raw namespace declaration.
-        namespace_to_strip = (
-            _is_raw_namespace_schema if strip_all_namespace_tools else _is_flattened_namespace_schema
-        )
-        filtered_tools = [tool for tool in tools if not namespace_to_strip(tool)]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
-
-    if not include_local_tool_gateway_tools:
-        filtered_tools = [tool for tool in tools if not _is_local_tool_gateway_tool_schema(tool)]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
-        flattened_namespace_tools = [
-            tool for tool in flattened_namespace_tools if not _is_local_tool_gateway_tool_schema(tool)
-        ]
-
-    if not include_multi_agent_tools:
-        filtered_tools = [tool for tool in tools if not _is_multi_agent_tool_schema(tool)]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
-
-    if not include_node_repl_tools:
-        filtered_tools = [tool for tool in tools if not _is_node_repl_tool_schema(tool)]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
-
-    excluded_tool_names = set()
-    if not include_tool_search:
-        excluded_tool_names.add(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"])
-    if not include_multi_agent_tools:
-        excluded_tool_names.update(f"multi_agent_v1__{tool_name}" for tool_name in MULTI_AGENT_TOOL_NAMES)
-    if not include_spawn_agent:
-        excluded_tool_names.add("multi_agent_v1__spawn_agent")
-    if not include_wait_agent:
-        excluded_tool_names.add("multi_agent_v1__wait_agent")
-    if not include_close_agent:
-        excluded_tool_names.add("multi_agent_v1__close_agent")
-    if not include_resume_agent:
-        excluded_tool_names.add("multi_agent_v1__resume_agent")
-    if not include_send_input:
-        excluded_tool_names.add("multi_agent_v1__send_input")
-    if excluded_tool_names:
-        filtered_tools = [
-            tool
-            for tool in tools
-            if not (
-                isinstance(tool, Mapping)
-                and tool.get("type") == "function"
-                and tool.get("name") in excluded_tool_names
-            )
-        ]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
-
-    existing_names = {_tool_schema_name(tool) for tool in tools}
-    existing_names.discard(None)
-    core_additions = []
-    if include_tool_search:
-        core_additions.append(TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL)
-    if include_multi_agent_tools:
-        core_additions.extend(
-            _multi_agent_explicit_function_tools(
-                include_spawn_agent=include_spawn_agent,
-                include_wait_agent=include_wait_agent,
-                include_close_agent=include_close_agent,
-                include_resume_agent=include_resume_agent,
-                include_send_input=include_send_input,
-                open_agent_ids=open_agent_ids,
-                wait_agent_ids=wait_agent_ids,
-                close_agent_ids=close_agent_ids,
-                worker_selector_values=worker_selector_values,
-            )
-        )
-    if not include_multi_agent_tools:
-        core_additions = [tool for tool in core_additions if not _is_multi_agent_tool_schema(tool)]
-        flattened_namespace_tools = [
-            tool for tool in flattened_namespace_tools if not _is_multi_agent_tool_schema(tool)
-        ]
-    if not include_node_repl_tools:
-        core_additions = [tool for tool in core_additions if not _is_node_repl_tool_schema(tool)]
-        flattened_namespace_tools = [
-            tool for tool in flattened_namespace_tools if not _is_node_repl_tool_schema(tool)
-        ]
-    if excluded_tool_names:
-        core_additions = [
-            tool
-            for tool in core_additions
-            if not (
-                isinstance(tool, Mapping)
-                and tool.get("type") == "function"
-                and tool.get("name") in excluded_tool_names
-            )
-        ]
-        flattened_namespace_tools = [
-            tool
-            for tool in flattened_namespace_tools
-            if not (
-                isinstance(tool, Mapping)
-                and tool.get("type") == "function"
-                and tool.get("name") in excluded_tool_names
-            )
-        ]
-
-    potential_names = set(existing_names)
-    for tool in core_additions:
-        name = _tool_schema_name(tool)
-        if name:
-            potential_names.add(name)
-    deferred_tool_count = 0
-    for tool in flattened_namespace_tools:
-        name = _tool_schema_name(tool)
-        if name and name not in potential_names:
-            potential_names.add(name)
-            deferred_tool_count += 1
-
-    flattened_tool_ids = {id(tool) for tool in flattened_namespace_tools}
-    additions = list(core_additions)
-    if include_flattened_namespace_tools:
-        additions.extend(flattened_namespace_tools)
-
-    eager_tool_count = 0
-    for tool in additions:
-        name = _tool_schema_name(tool)
-        if not name:
-            continue
-        replaced_existing = False
-        if name in existing_names:
-            for index, existing_tool in enumerate(tools):
-                if not isinstance(existing_tool, Mapping) or _tool_schema_name(existing_tool) != name:
-                    continue
-                if name.startswith("multi_agent_v1__") and dict(existing_tool) != tool:
-                    tools[index] = tool
-                    changed = True
-                replaced_existing = True
-                break
-        if replaced_existing:
-            continue
-        tools.append(tool)
-        existing_names.add(name)
-        if id(tool) in flattened_tool_ids:
-            eager_tool_count += 1
-        changed = True
-    if tool_surface_counts is not None:
-        if deferred_core_surface:
-            namespace_declaration_count, deferred_tool_count = _deferred_namespace_surface_counts(
-                surface_source_tools,
-                tools,
-            )
-        surviving_tool_ids = {id(tool) for tool in tools}
-        tool_surface_counts.update(
-            {
-                "namespace_declaration_count": namespace_declaration_count,
-                "eager_tool_count": eager_tool_count if include_flattened_namespace_tools else 0,
-                "retained_core_count": sum(
-                    1 for tool in caller_non_namespace_tools if id(tool) in surviving_tool_ids
-                ),
-                "deferred_tool_count": deferred_tool_count if not include_flattened_namespace_tools else 0,
-            }
-        )
-    return changed
 
 
 def _restore_deferred_core_node_repl_namespace(
     payload: dict[str, Any],
     source_tools: list[Any] | None,
 ) -> bool:
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not isinstance(source_tools, list):
-        return False
-    if any(_is_node_repl_tool_schema(tool) for tool in tools):
-        return False
-    namespaces = [
-        tool
-        for tool in source_tools
-        if isinstance(tool, Mapping)
-        and tool.get("type") == "namespace"
-        and tool.get("name") == NODE_REPL_NAMESPACE
-    ]
-    if len(namespaces) != 1:
-        return False
-    source_namespace = namespaces[0]
-    children = source_namespace.get("tools")
-    if not isinstance(children, list):
-        return False
-    js_children = [
-        child
-        for child in children
-        if isinstance(child, Mapping)
-        and child.get("type") == "function"
-        and child.get("name") == "js"
-    ]
-    if len(js_children) != 1:
-        return False
-    tools.append({**source_namespace, "tools": [js_children[0]]})
-    return True
+    return _tool_surface_adapter().restore_deferred_core_node_repl_namespace(payload, source_tools)
 
 
 def _filter_tools_for_subagent_coordinator(
@@ -6512,86 +5837,23 @@ def _set_required_subagent_tool_choice(
 
 
 def _function_tool_names(value: Any) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {
-        name
-        for tool in value
-        if isinstance(tool, Mapping)
-        and tool.get("type") == "function"
-        and isinstance((name := tool.get("name")), str)
-    }
-
-
-def _coerce_targets(value: Any) -> tuple[Any, bool]:
-    return _semantic_coerce_targets(value)
-
-
-def _coerce_target(value: Any) -> tuple[Any, bool]:
-    return _semantic_coerce_target(value)
-
-
-def _coerce_number(value: Any) -> tuple[Any, bool]:
-    return _semantic_coerce_number(value)
+    return _tool_surface_adapter().function_tool_names(value)
 
 
 def _codex_apps_flat_alias_parts(name: Any) -> tuple[str, str] | None:
-    if not isinstance(name, str) or not name.startswith("mcp__codex_apps__"):
-        return None
-    local_gateway_namespace = "mcp__codex_apps__local_tool_gateway_"
-    if name.startswith(local_gateway_namespace):
-        tool_name = name[len(local_gateway_namespace) :].lstrip("_")
-        if _valid_tool_name(tool_name):
-            return local_gateway_namespace, tool_name
-    namespace_stem, found, tool_name = name.rpartition("___")
-    if not found:
-        return None
-    namespace = f"{namespace_stem}_"
-    if (
-        namespace.startswith("mcp__codex_apps__")
-        and namespace.endswith("_")
-        and _valid_tool_name(namespace)
-        and _valid_tool_name(tool_name)
-    ):
-        return namespace, tool_name
-    return None
+    return _tool_surface_adapter().codex_apps_flat_alias_parts(name)
 
 
 def _codex_apps_flat_alias_name(name: Any) -> str | None:
-    return name if _codex_apps_flat_alias_parts(name) is not None else None
+    return _tool_surface_adapter().codex_apps_flat_alias_name(name)
 
 
 def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
-    if not isinstance(name, str):
-        return None
-    codex_apps_alias = _codex_apps_flat_alias_parts(name)
-    if codex_apps_alias is not None:
-        return codex_apps_alias
-    for separator in ("__", "."):
-        namespace, found, tool_name = name.rpartition(separator)
-        if not found:
-            continue
-        if (
-            _valid_tool_name(namespace)
-            and _supports_explicit_namespace_alias(namespace)
-            and _valid_tool_name(tool_name)
-        ):
-            return namespace, tool_name
-    return None
+    return _tool_surface_adapter().split_namespace_tool_alias(name)
 
 
 def _codex_apps_namespace_flat_alias(namespace: Any, name: Any) -> str | None:
-    if not (
-        isinstance(namespace, str)
-        and isinstance(name, str)
-        and namespace.startswith("mcp__codex_apps__")
-        and namespace.endswith("_")
-        and _valid_tool_name(namespace)
-        and _valid_tool_name(name)
-    ):
-        return None
-    alias = f"{namespace}__{name}"
-    return alias if _valid_tool_name(alias) else None
+    return _tool_surface_adapter().codex_apps_namespace_flat_alias(namespace, name)
 
 
 def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
@@ -6599,126 +5861,26 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
 
 
 def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str, int]]:
-    if not isinstance(value, list):
-        return {}
-
-    queries_by_call_id: dict[str, str] = {}
-    empty_call_ids_by_query: dict[str, list[str]] = {}
-    successful_queries: set[str] = set()
-    for item in value:
-        if not isinstance(item, Mapping):
-            continue
-        call_id = item.get("call_id")
-        if not isinstance(call_id, str) or not call_id:
-            continue
-        # A search-shaped item is client-owned only with the explicit
-        # execution marker.  Missing/unknown ownership must not seed the
-        # bounded-search ledger or later rewrite a provider lifecycle.
-        if item.get("type") == "tool_search_call" and item.get("execution") == "client":
-            arguments = _normalize_tool_search_arguments(item.get("arguments"))
-            if arguments is None or _is_multi_agent_discovery_arguments(arguments):
-                continue
-            queries_by_call_id[call_id] = arguments["query"]
-            continue
-        if item.get("type") != "tool_search_output":
-            continue
-        query = queries_by_call_id.pop(call_id, None)
-        tools = item.get("tools")
-        if query is None or not isinstance(tools, list):
-            continue
-        if tools:
-            successful_queries.add(query)
-            continue
-        empty_call_ids_by_query.setdefault(query, []).append(call_id)
-
-    terminal_calls: dict[str, tuple[str, int]] = {}
-    for query, call_ids in empty_call_ids_by_query.items():
-        if query in successful_queries or len(call_ids) < TOOL_SEARCH_EMPTY_MISS_BOUND:
-            continue
-        terminal_calls[call_ids[TOOL_SEARCH_EMPTY_MISS_BOUND - 1]] = (
-            query,
-            TOOL_SEARCH_EMPTY_MISS_BOUND,
-        )
-    return terminal_calls
+    return _tool_surface_adapter().bounded_empty_tool_search_terminal_calls(value)
 
 
 def _terminalize_bounded_empty_tool_search_misses(
     payload: dict[str, Any],
     terminal_calls: Mapping[str, tuple[str, int]],
 ) -> bool:
-    input_items = payload.get("input")
-    if not isinstance(input_items, list) or not terminal_calls:
-        return False
-
-    rewritten_items: list[Any] = []
-    changed = False
-    for item in input_items:
-        if (
-            isinstance(item, Mapping)
-            and item.get("type") == "tool_search_output"
-            and isinstance(item.get("call_id"), str)
-            and item["call_id"] in terminal_calls
-        ):
-            rewritten = dict(item)
-            rewritten["status"] = TOOL_SEARCH_UNAVAILABLE_STATUS
-            rewritten["query_classification"] = TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION
-            _, count = terminal_calls[item["call_id"]]
-            rewritten["empty_miss_count"] = count
-            rewritten["terminal"] = True
-            rewritten_items.append(rewritten)
-            changed = True
-            continue
-        rewritten_items.append(item)
-    if changed:
-        payload["input"] = rewritten_items
-    return changed
+    return _tool_surface_adapter().terminalize_bounded_empty_tool_search_misses(payload, terminal_calls)
 
 
 def _restrict_bounded_tool_search_queries(payload: dict[str, Any], bounded_queries: set[str]) -> bool:
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not bounded_queries:
-        return False
-
-    restriction = {"enum": sorted(bounded_queries)}
-    changed = False
-    rewritten_tools: list[Any] = []
-    for tool in tools:
-        if not (
-            isinstance(tool, Mapping)
-            and tool.get("type") == "function"
-            and tool.get("name") == TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
-        ):
-            rewritten_tools.append(tool)
-            continue
-        rewritten_tool = dict(tool)
-        parameters = dict(_tool_parameters_schema(tool))
-        properties_value = parameters.get("properties")
-        properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
-        query_value = properties.get("query")
-        query_schema = dict(query_value) if isinstance(query_value, Mapping) else {"type": "string"}
-        if "not" in query_schema:
-            query_schema = {"allOf": [query_schema, {"not": restriction}]}
-        else:
-            query_schema["not"] = restriction
-        properties["query"] = query_schema
-        parameters["properties"] = properties
-        rewritten_tool["parameters"] = parameters
-        rewritten_tools.append(rewritten_tool)
-        changed = True
-    if changed:
-        payload["tools"] = rewritten_tools
-    return changed
+    return _tool_surface_adapter().restrict_bounded_tool_search_queries(payload, bounded_queries)
 
 
 def _tool_search_query_digest(query: str) -> bytes:
-    return hashlib.sha256(query.encode("utf-8")).digest()
+    return _tool_surface_adapter().tool_search_query_digest(query)
 
 
 def _bounded_tool_search_query_digests(event_context: Mapping[str, Any] | None) -> set[bytes]:
-    value = (event_context or {}).get("_bounded_tool_search_query_digests")
-    if not isinstance(value, (set, frozenset)):
-        return set()
-    return {digest for digest in value if isinstance(digest, bytes)}
+    return _tool_surface_adapter().bounded_tool_search_query_digests(event_context)
 
 
 def _tool_search_call_arguments(
@@ -6727,87 +5889,22 @@ def _tool_search_call_arguments(
     candidate_item_ids: set[str] | None = None,
     allow_legacy_function: bool = False,
 ) -> dict[str, Any] | None:
-    # A provider may use the same item type for its own lifecycle.  An
-    # explicit provider execution marker must never be treated as the
-    # client-owned Codex search call that the bounded-miss guard can suppress.
-    # The execution marker is part of the ownership contract.  Missing or
-    # unknown values are not evidence that Codex owns the lifecycle; leave
-    # those provider items untouched rather than letting the bounded-search
-    # guard rewrite them.
-    if value.get("type") == "tool_search_call" and value.get("execution") == "client":
-        return _normalize_tool_search_arguments(value.get("arguments"))
-    # A provider is allowed to expose an ordinary function named
-    # ``tool_search``.  Treat the flattened spelling as client-owned only
-    # after the stream has declared the item as a search candidate (or when a
-    # legacy caller explicitly supplies the candidate set).  Otherwise the
-    # bounded empty-search suppression would silently rewrite an unrelated
-    # provider function with a matching ``query`` argument.
-    if (
-        value.get("type") == "function_call"
-        and value.get("name") == "tool_search"
-        and isinstance(value.get("id"), str)
-        and value.get("id")
-        and candidate_item_ids is not None
-        and value.get("id") in candidate_item_ids
-        and allow_legacy_function
-    ):
-        return _normalize_tool_search_arguments(value.get("arguments"))
-    return None
+    return _tool_surface_adapter().tool_search_call_arguments(
+        value,
+        candidate_item_ids=candidate_item_ids,
+        allow_legacy_function=allow_legacy_function,
+    )
 
 
 def _bounded_tool_search_unavailable_message(item: Mapping[str, Any]) -> dict[str, Any]:
-    message: dict[str, Any] = {
-        "type": "message",
-        "role": "assistant",
-        "status": "completed",
-        "content": [
-            {
-                "type": "output_text",
-                "text": (
-                    "tool_search_unavailable\n"
-                    f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}\n"
-                    f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}\n"
-                    f"status: {TOOL_SEARCH_UNAVAILABLE_STATUS}\n"
-                    "terminal: true\n"
-                    "execution: suppressed"
-                ),
-            }
-        ],
-    }
-    item_id = item.get("id")
-    if isinstance(item_id, str) and item_id:
-        message["id"] = item_id
-    return message
+    return _tool_surface_adapter().bounded_tool_search_unavailable_message(item)
 
 
 def _suppress_bounded_tool_search_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    bounded_digests = _bounded_tool_search_query_digests(event_context)
-    if not bounded_digests:
-        return value, False
-
-    if isinstance(event_context, dict):
-        candidates_value = event_context.setdefault("_tool_search_stream_candidate_item_ids", set())
-        candidate_item_ids = candidates_value if isinstance(candidates_value, set) else set()
-        event_context["_tool_search_stream_candidate_item_ids"] = candidate_item_ids
-        suppressed_value = event_context.setdefault("_bounded_tool_search_suppressed_item_ids", set())
-        suppressed_item_ids = suppressed_value if isinstance(suppressed_value, set) else set()
-        event_context["_bounded_tool_search_suppressed_item_ids"] = suppressed_item_ids
-        allow_legacy_function = bool(event_context.get("_tool_search_client_owned"))
-    else:
-        candidate_item_ids = set()
-        suppressed_item_ids = set()
-        allow_legacy_function = False
-
-    return _suppress_bounded_tool_search_calls_inner(
-        value,
-        bounded_digests,
-        candidate_item_ids,
-        suppressed_item_ids,
-        allow_legacy_function,
-    )
+    return _tool_surface_adapter().suppress_bounded_tool_search_calls(value, event_context)
 
 
 def _suppress_bounded_tool_search_calls_inner(
@@ -6817,107 +5914,17 @@ def _suppress_bounded_tool_search_calls_inner(
     suppressed_item_ids: set[str],
     allow_legacy_function: bool,
 ) -> tuple[Any, bool]:
-    if isinstance(value, list):
-        changed = False
-        rewritten_items: list[Any] = []
-        for item in value:
-            replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
-                item,
-                bounded_digests,
-                candidate_item_ids,
-                suppressed_item_ids,
-                allow_legacy_function,
-            )
-            if replacement is None:
-                changed = True
-                continue
-            rewritten_items.append(replacement)
-            changed = changed or item_changed
-        return (rewritten_items if changed else value), changed
-
-    if not isinstance(value, dict):
-        return value, False
-
-    event_type = value.get("type")
-    if event_type == "response.output_item.added":
-        item = value.get("item")
-        if isinstance(item, Mapping):
-            item_id = item.get("id")
-            if (
-                isinstance(item_id, str)
-                and item_id
-                and (
-                    (
-                        item.get("type") == "tool_search_call"
-                        and item.get("execution") == "client"
-                    )
-                    or (
-                        allow_legacy_function
-                        and item.get("type") == "function_call"
-                        and item.get("name") == "tool_search"
-                    )
-                )
-            ):
-                candidate_item_ids.add(item_id)
-    elif event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
-        item_id = value.get("item_id")
-        if isinstance(item_id, str) and item_id in suppressed_item_ids:
-            return None, True
-        if (
-            event_type == "response.function_call_arguments.done"
-            and isinstance(item_id, str)
-            and item_id in candidate_item_ids
-        ):
-            arguments = _normalize_tool_search_arguments(value.get("arguments"))
-            if (
-                arguments is not None
-                and _tool_search_query_digest(arguments["query"]) in bounded_digests
-            ):
-                suppressed_item_ids.add(item_id)
-                return None, True
-
-    arguments = _tool_search_call_arguments(
+    return _tool_surface_adapter()._suppress_bounded_tool_search_calls_inner(
         value,
-        candidate_item_ids=candidate_item_ids,
-        allow_legacy_function=allow_legacy_function,
+        bounded_digests,
+        candidate_item_ids,
+        suppressed_item_ids,
+        allow_legacy_function,
     )
-    if (
-        arguments is not None
-        and _tool_search_query_digest(arguments["query"]) in bounded_digests
-    ):
-        item_id = value.get("id")
-        if isinstance(item_id, str) and item_id:
-            suppressed_item_ids.add(item_id)
-        return _bounded_tool_search_unavailable_message(value), True
-
-    changed = False
-    rewritten = dict(value)
-    for key, item in value.items():
-        replacement, item_changed = _suppress_bounded_tool_search_calls_inner(
-            item,
-            bounded_digests,
-            candidate_item_ids,
-            suppressed_item_ids,
-            allow_legacy_function,
-        )
-        if replacement is None:
-            rewritten.pop(key, None)
-            changed = True
-            continue
-        if item_changed:
-            rewritten[key] = replacement
-            changed = True
-    return (rewritten if changed else value), changed
 
 
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
-    if not arguments:
-        return False
-    query = arguments.get("query")
-    if not isinstance(query, str):
-        return False
-    lowered = query.lower()
-    return all(term in lowered for term in ("spawn_agent", "multi_agent", "subagent"))
+    return _tool_surface_adapter().is_multi_agent_discovery_arguments(arguments)
 
 
 def _multi_agent_discovery_arguments(value: Any) -> dict[str, Any] | None:
@@ -7076,108 +6083,7 @@ def _normalize_third_party_tool_call(
     value: Any,
     event_context: Mapping[str, Any] | None = None,
 ) -> tuple[Any, bool]:
-    if _is_collaboration_v2_context(event_context):
-        return value, False
-    if isinstance(value, list):
-        changed = False
-        rewritten = []
-        for item in value:
-            replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
-            rewritten.append(replacement)
-            changed = changed or item_changed
-        return (rewritten if changed else value), changed
-
-    if not isinstance(value, dict):
-        return value, False
-
-    changed = False
-    rewritten = dict(value)
-    if (
-        value.get("type") == "function_call"
-        and value.get("name") == "tool_search"
-        and bool((event_context or {}).get("_tool_search_client_owned"))
-    ):
-        arguments = _normalize_tool_search_arguments(value.get("arguments"))
-        if arguments is not None:
-            rewritten["type"] = "tool_search_call"
-            rewritten["arguments"] = arguments
-            rewritten.pop("name", None)
-            rewritten.setdefault("execution", "client")
-            rewritten.setdefault("status", "completed")
-            changed = True
-    elif (
-        value.get("type") == "function_call"
-        and value.get("name") in MULTI_AGENT_NAMESPACE_ALIASES
-        and _multi_agent_discovery_arguments(value.get("arguments")) is not None
-    ):
-        arguments = _multi_agent_discovery_arguments(value.get("arguments"))
-        rewritten["type"] = "tool_search_call"
-        rewritten["arguments"] = arguments
-        rewritten.pop("name", None)
-        rewritten.setdefault("execution", "client")
-        rewritten.setdefault("status", "completed")
-        changed = True
-    elif _is_tool_call_item(value):
-        original_name = value.get("name")
-        tool_name = _multi_agent_alias_tool_name(original_name)
-        namespace_alias = None
-        argument_key = "arguments" if "arguments" in value else "input" if "input" in value else None
-        if (
-            argument_key is not None
-            and not (
-                value.get("type") == "custom_tool_call"
-                and original_name == APPLY_PATCH_FUNCTION_NAME
-            )
-            and _json_argument_string_needs_repair(value.get(argument_key))
-        ):
-            repaired_arguments = _json_object_from_arguments(value.get(argument_key))
-            if repaired_arguments is not None:
-                rewritten[argument_key] = _dump_arguments_like(value.get(argument_key), repaired_arguments)
-                changed = True
-        if (
-            (value.get("namespace") == NODE_REPL_NAMESPACE and original_name == "js")
-            or original_name in {f"{NODE_REPL_NAMESPACE}.js", f"{NODE_REPL_NAMESPACE}__js"}
-        ):
-            rewritten["namespace"] = NODE_REPL_NAMESPACE
-            rewritten["name"] = "js"
-            changed = True
-        elif tool_name is None:
-            namespace_alias = _split_namespace_tool_alias(original_name)
-        if original_name in MULTI_AGENT_NAMESPACE_ALIASES and argument_key is not None:
-            normalized, tool_name, args_changed = _normalize_multi_agent_arguments(rewritten.get(argument_key), None)
-            if args_changed:
-                rewritten[argument_key] = normalized
-                changed = True
-        elif tool_name is not None and argument_key is not None:
-            normalized, _, args_changed = _normalize_multi_agent_arguments(rewritten.get(argument_key), tool_name)
-            if args_changed:
-                rewritten[argument_key] = normalized
-                changed = True
-
-        if tool_name is not None:
-            rewritten["name"] = tool_name
-            rewritten["namespace"] = "multi_agent_v1"
-            changed = True
-        elif namespace_alias is not None:
-            namespace_name, namespaced_tool_name = namespace_alias
-            rewritten["name"] = namespaced_tool_name
-            rewritten["namespace"] = namespace_name
-            changed = True
-    else:
-        original_name = value.get("name")
-        tool_name = _multi_agent_alias_tool_name(original_name)
-        if tool_name is not None and _looks_like_response_tool_name_fragment(value):
-            rewritten["name"] = tool_name
-            rewritten["namespace"] = "multi_agent_v1"
-            changed = True
-
-    for key, item in list(rewritten.items()):
-        replacement, item_changed = _normalize_third_party_tool_call(item, event_context)
-        if item_changed:
-            rewritten[key] = replacement
-            changed = True
-
-    return (rewritten if changed else value), changed
+    return _tool_surface_adapter().normalize_third_party_tool_call(value, event_context)
 
 
 def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str) -> dict[str, str]:
@@ -8528,34 +7434,7 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
 
 
 def _downgrade_invalid_third_party_tool_calls(value: Any) -> tuple[Any, bool]:
-    if isinstance(value, list):
-        changed = False
-        rewritten = []
-        for item in value:
-            replacement, item_changed = _downgrade_invalid_third_party_tool_calls(item)
-            rewritten.append(replacement)
-            changed = changed or item_changed
-        return (rewritten if changed else value), changed
-
-    if not isinstance(value, dict):
-        return value, False
-
-    if _has_invalid_tool_name(value):
-        title = (
-            "Invalid third-party tool call transcript"
-            if value.get("type") == "custom_tool_call"
-            else "Invalid third-party function call transcript"
-        )
-        return _assistant_transcript_message(title, value), True
-
-    changed = False
-    rewritten = dict(value)
-    for key, item in value.items():
-        replacement, item_changed = _downgrade_invalid_third_party_tool_calls(item)
-        if item_changed:
-            rewritten[key] = replacement
-            changed = True
-    return (rewritten if changed else value), changed
+    return _tool_surface_adapter().downgrade_invalid_third_party_tool_calls(value)
 
 
 def _worker_multi_agent_suppressed_message(item: Mapping[str, Any]) -> dict[str, Any]:

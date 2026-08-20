@@ -9,6 +9,7 @@ import pytest
 
 import codex_proxy
 import collaboration_adapter
+import tool_surface_adapter
 import gateway_errors
 import gateway_settings
 import gateway_sse
@@ -300,6 +301,18 @@ REEXPORT_IDENTITY = {
     "LEGACY_NATIVE_WORKER_SPAWN_FIELDS": collaboration_adapter.LEGACY_NATIVE_WORKER_SPAWN_FIELDS,
     "LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD": collaboration_adapter.LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
     "CollaborationAdapter": collaboration_adapter.CollaborationAdapter,
+    "INTERNAL_INPUT_ITEM_TYPES": tool_surface_adapter.INTERNAL_INPUT_ITEM_TYPES,
+    "MULTI_AGENT_DISCOVERY_TOOLS": tool_surface_adapter.MULTI_AGENT_DISCOVERY_TOOLS,
+    "MULTI_AGENT_NAMESPACE_ALIASES": tool_surface_adapter.MULTI_AGENT_NAMESPACE_ALIASES,
+    "NODE_REPL_NAMESPACE": tool_surface_adapter.NODE_REPL_NAMESPACE,
+    "THIRD_PARTY_TOOL_NAME_ALIASES": tool_surface_adapter.THIRD_PARTY_TOOL_NAME_ALIASES,
+    "TOOL_NAME_RE": tool_surface_adapter.TOOL_NAME_RE,
+    "TOOL_SEARCH_EMPTY_MISS_BOUND": tool_surface_adapter.TOOL_SEARCH_EMPTY_MISS_BOUND,
+    "TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL": tool_surface_adapter.TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL,
+    "TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION": tool_surface_adapter.TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
+    "TOOL_SEARCH_UNAVAILABLE_STATUS": tool_surface_adapter.TOOL_SEARCH_UNAVAILABLE_STATUS,
+    "ToolSurfaceAdapter": tool_surface_adapter.ToolSurfaceAdapter,
+    "ToolSurfaceFacts": tool_surface_adapter.ToolSurfaceFacts,
     "_responses_url": route_plan._responses_url,
     "_chat_completions_url": route_plan._chat_completions_url,
     "_external_tool_protocol": route_plan._external_tool_protocol,
@@ -347,6 +360,18 @@ def test_collaboration_adapter_does_not_import_facade_or_transport() -> None:
     assert "from codex_proxy" not in source
     assert "gateway_sse" not in source
     assert "transport" not in source
+
+
+def test_tool_surface_adapter_does_not_import_facade_or_transport() -> None:
+    with open(tool_surface_adapter.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "gateway_sse" not in source
+    assert "transport" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "urllib3" not in source
+    assert "urlopen" not in source
 
 
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
