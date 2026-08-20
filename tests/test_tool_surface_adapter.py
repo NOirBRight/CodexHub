@@ -89,6 +89,48 @@ def test_inject_explicit_codex_tools_uses_scripted_declarations():
     assert spawn["description"] == "Spawn a scripted child."
 
 
+def test_flattened_namespace_tools_are_projected_from_source_declarations():
+    adapter = _adapter()
+    source = [{
+        "type": "namespace",
+        "name": NODE_REPL_NAMESPACE,
+        "tools": [{"type": "function", "name": "js", "parameters": {"type": "object"}}],
+    }]
+    flattened = adapter.flatten_namespace_function_tools(source)
+    assert any(tool.get("name") == f"{NODE_REPL_NAMESPACE}__js" for tool in flattened)
+
+
+def test_hoist_additional_tools_moves_tools_out_of_input_items():
+    adapter = _adapter()
+    payload = {
+        "input": [{"type": "additional_tools", "tools": [{"type": "function", "name": "shell"}]}],
+    }
+    assert adapter.hoist_additional_tools_input_items(payload) is True
+    assert payload["input"] == []
+    assert payload["tools"][0]["name"] == "shell"
+
+
+def test_restore_deferred_node_repl_namespace_is_surgical():
+    adapter = _adapter()
+    payload = {"tools": []}
+    source = [{"type": "namespace", "name": NODE_REPL_NAMESPACE, "tools": [{"type": "function", "name": "js"}, {"type": "function", "name": "other"}]}]
+    assert adapter.restore_deferred_core_node_repl_namespace(payload, source) is True
+    assert payload["tools"][0]["name"] == NODE_REPL_NAMESPACE
+    assert [tool["name"] for tool in payload["tools"][0]["tools"]] == ["js"]
+
+
+def test_normalize_preserves_native_plain_functions_and_apply_patch():
+    adapter = _adapter()
+    plain = {"type": "function_call", "name": "shell", "arguments": {"command": "echo hi"}}
+    unchanged, changed = adapter.normalize_third_party_tool_call(plain)
+    assert changed is False
+    assert unchanged is plain
+    apply_patch = {"type": "custom_tool_call", "name": adapter.facts.apply_patch_function_name, "input": "*** Begin Patch"}
+    unchanged, changed = adapter.normalize_third_party_tool_call(apply_patch)
+    assert changed is False
+    assert unchanged is apply_patch
+
+
 def test_bounded_tool_search_terminalizes_and_suppresses_identical_query():
     adapter = _adapter()
     query = "node_repl js"
