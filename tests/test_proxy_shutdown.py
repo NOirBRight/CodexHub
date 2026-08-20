@@ -192,7 +192,7 @@ def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classif
 
 
 def test_upstream_sse_reader_scope_audit_keeps_bounded_queue_and_thread_in_one_owner() -> None:
-    lifecycle_source = inspect.getsource(codex_proxy._UpstreamSseReaderLifecycle)
+    lifecycle_source = inspect.getsource(gateway_transport.UpstreamSseReaderLifecycle)
     module_source = inspect.getsource(gateway_transport)
 
     assert "QUEUE_CAPACITY = 32" in lifecycle_source

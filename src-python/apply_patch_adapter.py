@@ -284,6 +284,7 @@ class ApplyPatchAdapter:
         adapted_call_ids: set[str] = set()
         foreign_call_ids: set[str] = set()
         unmatched_custom_output_ids: set[str] = set()
+        native_item_ids: set[str] = set()
         adapted = 0
         untouched = 0
 
@@ -294,6 +295,11 @@ class ApplyPatchAdapter:
 
             item_type = raw_item.get("type")
             call_id = raw_item.get("call_id")
+            native_item_id = raw_item.get("id")
+            if item_type in {"custom_tool_call", "custom_tool_call_output"} and isinstance(native_item_id, str):
+                if native_item_id in native_item_ids:
+                    self.raise_history_failure(event_context)
+                native_item_ids.add(native_item_id)
             if self.is_custom_tool_call(raw_item):
                 if (
                     not _has_exact_apply_patch_custom_tool_history_fields(
@@ -626,6 +632,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
             _require_exact_apply_patch_function_call_fields(
                 item,
                 self._adapter.facts.function_call_fields,
+                expected_status="completed",
             )
             item_id, call_id = _apply_patch_item_identity(item)
             arguments, patch = _apply_patch_arguments_text_and_input(item.get("arguments"))
@@ -753,6 +760,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
                     _require_exact_apply_patch_function_call_fields(
                         item,
                         self._adapter.facts.function_call_fields,
+                        expected_status="completed",
                     )
                     item_id, _ = _apply_patch_item_identity(item)
                 except _ApplyPatchAdapterFailure as exc:

@@ -1965,6 +1965,7 @@ class UpstreamSseReaderLifecycle:
         admission: RequestAdmission | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
         thread_name: str = "gateway-sse-reader",
+        logger_hook: logging.Logger | None = None,
     ) -> None:
         self._response = response
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=self.QUEUE_CAPACITY)
@@ -1972,6 +1973,7 @@ class UpstreamSseReaderLifecycle:
         self._close_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._thread_name = thread_name
+        self._logger = logger_hook or logger
         self._cancellation_requested = (
             (lambda: admission.cancelled) if admission is not None else cancellation_requested
         )
@@ -2128,7 +2130,7 @@ class UpstreamSseReaderLifecycle:
         if thread.is_alive():
             outcome = "upstream_sse_reader_thread_did_not_terminate"
             if self._join_outcome != outcome:
-                logger.warning("upstream SSE reader join ended with %s", outcome)
+                self._logger.warning("upstream SSE reader join ended with %s", outcome)
             self._join_outcome = outcome
             return False, self._join_outcome
         if self._join_outcome is None:

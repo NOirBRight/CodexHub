@@ -920,6 +920,8 @@ class ToolSurfaceAdapter:
         request_shape = dict(item)
         for response_only_field in ("id", "status", self.facts.worker_requested_binding_field):
             request_shape.pop(response_only_field, None)
+        if item.get("name") == self.facts.apply_patch_function_name and isinstance(item.get("id"), str):
+            request_shape["id"] = item["id"]
         tool_name = self.multi_agent_function_call_name(item)
         if tool_name is not None:
             rewritten = request_shape

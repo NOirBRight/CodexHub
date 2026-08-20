@@ -105,23 +105,31 @@ impl AppServerSession {
     }
 
     pub fn poll_message(&mut self, remaining: Duration) -> Result<AppServerPoll, String> {
+        self.poll_message_until(Instant::now() + remaining)
+    }
+
+    fn poll_message_until(&mut self, deadline: Instant) -> Result<AppServerPoll, String> {
         loop {
-        match self.receiver.recv_timeout(remaining) {
-            Ok(Ok(Some(line))) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(trimmed) {
-                    Ok(message) => return Ok(AppServerPoll::Message(message)),
-                    Err(_) => continue,
-                }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(AppServerPoll::Timeout);
             }
-            Ok(Ok(None)) => return Ok(AppServerPoll::Closed),
-            Ok(Err(error)) => return Err(error),
-            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(AppServerPoll::Timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(AppServerPoll::Closed),
-        }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(Ok(Some(line))) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<Value>(trimmed) {
+                        Ok(message) => return Ok(AppServerPoll::Message(message)),
+                        Err(_) => continue,
+                    }
+                }
+                Ok(Ok(None)) => return Ok(AppServerPoll::Closed),
+                Ok(Err(error)) => return Err(error),
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(AppServerPoll::Timeout),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(AppServerPoll::Closed),
+            }
         }
     }
 
@@ -185,55 +193,29 @@ impl AppServerSession {
     }
 
     fn read_message(&mut self, deadline: Instant, timeout: Duration, purpose: &str) -> Result<Value, String> {
-        loop {
-            let now = Instant::now();
-            if now >= deadline {
+        if Instant::now() >= deadline {
+            self.kill();
+            return Err(format!(
+                "codex app-server {purpose} timed out after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        match self.poll_message_until(deadline)? {
+            AppServerPoll::Message(message) => Ok(message),
+            AppServerPoll::Timeout => {
                 self.kill();
-                return Err(format!(
+                Err(format!(
                     "codex app-server {purpose} timed out after {} seconds",
                     timeout.as_secs()
-                ));
+                ))
             }
-            let remaining = deadline.saturating_duration_since(now);
-            match self.receiver.recv_timeout(remaining) {
-                Ok(Ok(Some(line))) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<Value>(trimmed) {
-                        Ok(message) => return Ok(message),
-                        Err(_) => continue,
-                    }
-                }
-                Ok(Ok(None)) => {
-                    let _ = self.child.wait();
-                    return Err(format!(
-                        "codex app-server {purpose} did not return a response"
-                    ));
-                }
-                Ok(Err(error)) => {
-                    self.kill();
-                    return Err(format!(
-                        "failed to read codex app-server {purpose} response: {error}"
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.kill();
-                    return Err(format!(
-                        "codex app-server {purpose} timed out after {} seconds",
-                        timeout.as_secs()
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = self.child.wait();
-                    return Err(format!(
-                        "codex app-server {purpose} reader stopped before a response"
-                    ));
-                }
+            AppServerPoll::Closed => {
+                let _ = self.child.wait();
+                Err(format!("codex app-server {purpose} did not return a response"))
             }
         }
     }
+
 }
 
 impl Drop for AppServerSession {
