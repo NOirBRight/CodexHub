@@ -8,6 +8,7 @@ import logging
 import pytest
 
 import codex_proxy
+import apply_patch_adapter
 import collaboration_adapter
 import tool_surface_adapter
 import gateway_errors
@@ -313,6 +314,16 @@ REEXPORT_IDENTITY = {
     "TOOL_SEARCH_UNAVAILABLE_STATUS": tool_surface_adapter.TOOL_SEARCH_UNAVAILABLE_STATUS,
     "ToolSurfaceAdapter": tool_surface_adapter.ToolSurfaceAdapter,
     "ToolSurfaceFacts": tool_surface_adapter.ToolSurfaceFacts,
+    "APPLY_PATCH_FUNCTION_NAME": tool_surface_adapter.APPLY_PATCH_FUNCTION_NAME,
+    "APPLY_PATCH_ADAPTER_EVENT": apply_patch_adapter.APPLY_PATCH_ADAPTER_EVENT,
+    "APPLY_PATCH_ADAPTER_ERROR_CODE": apply_patch_adapter.APPLY_PATCH_ADAPTER_ERROR_CODE,
+    "APPLY_PATCH_FUNCTION_CALL_FIELDS": apply_patch_adapter.APPLY_PATCH_FUNCTION_CALL_FIELDS,
+    "APPLY_PATCH_HISTORY_ADAPTER_EVENT": apply_patch_adapter.APPLY_PATCH_HISTORY_ADAPTER_EVENT,
+    "APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS": apply_patch_adapter.APPLY_PATCH_CUSTOM_TOOL_HISTORY_CALL_FIELDS,
+    "APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS": apply_patch_adapter.APPLY_PATCH_CUSTOM_TOOL_HISTORY_OUTPUT_FIELDS,
+    "APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS": apply_patch_adapter.APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS,
+    "ApplyPatchAdapter": apply_patch_adapter.ApplyPatchAdapter,
+    "ApplyPatchFacts": apply_patch_adapter.ApplyPatchFacts,
     "_responses_url": route_plan._responses_url,
     "_chat_completions_url": route_plan._chat_completions_url,
     "_external_tool_protocol": route_plan._external_tool_protocol,
@@ -364,6 +375,18 @@ def test_collaboration_adapter_does_not_import_facade_or_transport() -> None:
 
 def test_tool_surface_adapter_does_not_import_facade_or_transport() -> None:
     with open(tool_surface_adapter.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "gateway_sse" not in source
+    assert "transport" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "urllib3" not in source
+    assert "urlopen" not in source
+
+
+def test_apply_patch_adapter_does_not_import_facade_or_transport() -> None:
+    with open(apply_patch_adapter.__file__, encoding="utf-8") as handle:
         source = handle.read()
     assert "import codex_proxy" not in source
     assert "from codex_proxy" not in source

@@ -7,7 +7,8 @@ third-party tool-call surface adaptation. It is deliberately independent of
 internal-message callbacks through a typed `ToolSurfaceAdapter`.
 
 Runtime plan construction stays in `runtime_tool_compatibility`. Collaboration
-V1/V2 worker lifecycle and apply_patch adaptation stay at the facade.
+V1/V2 worker lifecycle stays in `collaboration_adapter`. apply_patch
+request/history/response/stream adaptation stays in `apply_patch_adapter`.
 """
 
 from __future__ import annotations
