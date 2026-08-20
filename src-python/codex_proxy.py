@@ -70,6 +70,8 @@ from sse_events import (
 )
 from protocol_translation import (
     ChatToResponsesStreamConverter,
+    NonForwardable,
+    PreparedExchange,
     ResponsesToChatStreamConverter,
     UnsupportedProtocolTranslationError,
     UpstreamStreamIncompleteError,
@@ -16736,7 +16738,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 if cached_body is not None:
                     return cached_body
                 try:
-                    attempt_body = attempt.prepare_body(prepared_body).upstream_body
+                    exchange = attempt.prepare_body(prepared_body)
+                    self._active_prepared_exchange = exchange
+                    attempt_body = exchange.upstream_body
                 except UnsupportedProtocolTranslationError as exc:
                     raise UpstreamProtocolTranslationError(exc) from exc
                 compatibility_upstream = dict(upstream)
@@ -19895,14 +19899,23 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                             )
                         )
                     else:
-                        # Upstream returned Responses format; convert to Chat Completions.
-                        if (
-                            response_mutation_policy
-                            == MutationPolicy.TRANSPARENT
-                        ):
-                            body = _response_body_to_chat_completion_body(body)
+                        exchange = getattr(self, "_active_prepared_exchange", None)
+                        if not isinstance(exchange, PreparedExchange):
+                            exchange = PreparedExchange(
+                                inbound_format,
+                                upstream_format,
+                                b"",
+                                False,
+                            )
+                        def decode_to_caller(payload: bytes) -> bytes:
+                            try:
+                                return exchange.decode_response(payload)
+                            except NonForwardable as exc:
+                                raise UpstreamProtocolTranslationError(exc) from exc
+                        if response_mutation_policy == MutationPolicy.TRANSPARENT:
+                            body = decode_to_caller(body)
                         else:
-                            body = _response_body_to_chat_completion_body(
+                            body = decode_to_caller(
                                 compatible_response_body(
                                     body,
                                     upstream_name,
