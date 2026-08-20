@@ -31,6 +31,23 @@ from subagent_policy import (
 )
 
 
+# (environment override, persisted setting, default attempts)
+_REQUEST_KIND_RETRY_POLICY: dict[str, tuple[str | None, str | None, int]] = {
+    RETRY_REQUEST_COMPACT: (
+        "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS",
+        "gateway_compact_retry_max_attempts",
+        3,
+    ),
+    RETRY_REQUEST_MAIN_GENERATION: (
+        "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS",
+        "gateway_main_generation_retry_max_attempts",
+        5,
+    ),
+    RETRY_REQUEST_IMAGE_PROXY_VISION: (None, None, 3),
+    RETRY_REQUEST_OFFICIAL_CONTROL: (None, None, 1),
+}
+
+
 def _runtime_proxy_dir() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     root = Path(codex_home) if codex_home else Path.home() / ".codex"
@@ -307,29 +324,15 @@ def gateway_auto_retry_max_attempts() -> int:
 
 
 def _request_kind_retry_env_name(request_kind: str) -> str | None:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return "CODEX_PROXY_COMPACT_RETRY_MAX_ATTEMPTS"
-    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
-        return "CODEX_PROXY_MAIN_GENERATION_RETRY_MAX_ATTEMPTS"
-    return None
+    return _REQUEST_KIND_RETRY_POLICY.get(request_kind, (None, None, 5))[0]
 
 
 def _request_kind_retry_settings_name(request_kind: str) -> str | None:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return "gateway_compact_retry_max_attempts"
-    if request_kind == RETRY_REQUEST_MAIN_GENERATION:
-        return "gateway_main_generation_retry_max_attempts"
-    return None
+    return _REQUEST_KIND_RETRY_POLICY.get(request_kind, (None, None, 5))[1]
 
 
 def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
-    if request_kind == RETRY_REQUEST_COMPACT:
-        return 3
-    if request_kind == RETRY_REQUEST_IMAGE_PROXY_VISION:
-        return 3
-    if request_kind == RETRY_REQUEST_OFFICIAL_CONTROL:
-        return 1
-    return 5
+    return _REQUEST_KIND_RETRY_POLICY.get(request_kind, (None, None, 5))[2]
 
 
 def _bounded_retry_attempts(value: Any, default: int) -> int:
