@@ -47,6 +47,10 @@ $debugManifest = Get-ReleaseManifestName -Flavor "debug"
 $normalPortable = "CodexHub_{0}_portable_{1}.zip" -f $Version, $commitSha.Substring(0, 8)
 $selectedInstaller = Get-ReleaseArtifactName -Flavor $Flavor -Version $Version
 $selectedManifest = Get-ReleaseManifestName -Flavor $Flavor
+$normalLinuxAppImage = Get-LinuxReleaseArtifactName -Flavor "normal" -Version $Version -Kind appimage
+$debugLinuxAppImage = Get-LinuxReleaseArtifactName -Flavor "debug" -Version $Version -Kind appimage
+$normalLinuxDeb = Get-LinuxReleaseArtifactName -Flavor "normal" -Version $Version -Kind deb
+$debugLinuxDeb = Get-LinuxReleaseArtifactName -Flavor "debug" -Version $Version -Kind deb
 $plan = [ordered]@{
     flavor = $Flavor
     version = $Version
@@ -69,6 +73,14 @@ $plan = [ordered]@{
             $debugManifest
         )
     }
+    linux_assets = @(
+        $normalLinuxAppImage,
+        "$normalLinuxAppImage.sig",
+        $normalLinuxDeb,
+        $debugLinuxAppImage,
+        "$debugLinuxAppImage.sig",
+        $debugLinuxDeb
+    )
     channel_release = $null
 }
 

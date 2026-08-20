@@ -378,6 +378,16 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
         "CodexHub_0.1.8-beta.4.1_debug_x64-setup.exe.sig",
         "latest-debug.json",
     ]
+    assert plan["linux_assets"] == [
+        "CodexHub_0.1.8-beta.4.1_amd64.AppImage",
+        "CodexHub_0.1.8-beta.4.1_amd64.AppImage.sig",
+        "CodexHub_0.1.8-beta.4.1_amd64.deb",
+        "CodexHub_0.1.8-beta.4.1_debug_amd64.AppImage",
+        "CodexHub_0.1.8-beta.4.1_debug_amd64.AppImage.sig",
+        "CodexHub_0.1.8-beta.4.1_debug_amd64.deb",
+    ]
+    assert plan["immutable_release"]["assets"][0].startswith("CodexHub_")
+    assert "AppImage" not in "".join(plan["immutable_release"]["assets"])
 
 
 def test_release_plan_rejects_invalid_versions_and_non_main_commits(tmp_path):
@@ -390,6 +400,17 @@ def test_release_plan_rejects_invalid_versions_and_non_main_commits(tmp_path):
     assert "valid SemVer" in invalid.stderr
     assert wrong_commit.returncode != 0
     assert "exact main commit" in wrong_commit.stderr
+
+
+def test_release_plan_script_adds_linux_assets_without_reordering_windows_names() -> None:
+    script = (ROOT / "scripts" / "New-ReleaseChannelPlan.ps1").read_text(encoding="utf-8-sig")
+    assets_block = script.split("assets = @(")[1].split(")")[0]
+    linux_block = script.split("linux_assets = @(")[1].split(")")[0]
+    assert "Get-LinuxReleaseArtifactName" in script
+    assert "$normalInstaller" in assets_block
+    assert "AppImage" not in assets_block
+    assert "$normalLinuxAppImage" in linux_block
+    assert "$normalLinuxDeb" in linux_block
 
 
 def test_release_builder_uses_release_optimized_flavor_features_and_immutable_urls():
