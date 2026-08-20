@@ -5,6 +5,7 @@ import ts from "typescript";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
+const runtimeStorePath = new URL("../src/lib/runtimeStore.ts", import.meta.url);
 const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
 const buildWindowsPortablePath = new URL("../../scripts/build-windows-portable.ps1", import.meta.url);
@@ -296,11 +297,12 @@ test("heavy tab pages are memoized behind stable app callbacks", async () => {
 });
 
 test("runtime data uses app-level cached refreshes instead of page lifecycle reloads", async () => {
-  const [appSource, providersSource] = await Promise.all([
+  const [appSource, providersSource, runtimeStoreSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(providersPagePath, "utf8"),
+    readFile(runtimeStorePath, "utf8"),
   ]);
-  const runtimeCacheType = appSource.match(/type RuntimeCache<T> = \{[\s\S]*?\};/)?.[0] ?? "";
+  const runtimeCacheType = runtimeStoreSource.match(/export type RuntimeCache<T> = \{[\s\S]*?\};/)?.[0] ?? "";
   const providersMountEffect = providersSource.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[\]\);/)?.[0] ?? "";
 
   assert.match(runtimeCacheType, /data: T \| null/);
@@ -308,6 +310,7 @@ test("runtime data uses app-level cached refreshes instead of page lifecycle rel
   assert.match(runtimeCacheType, /error: string \| null/);
   assert.match(runtimeCacheType, /updatedAt: number \| null/);
   assert.match(runtimeCacheType, /inflight\?: Promise<T>/);
+  assert.match(appSource, /createEmptyRuntimeSnapshot/);
   assert.match(appSource, /runtimeInflight/);
   assert.match(appSource, /refreshRuntimeStatus/);
   assert.match(appSource, /refreshGatewayTelemetry/);
@@ -320,17 +323,18 @@ test("runtime data uses app-level cached refreshes instead of page lifecycle rel
 });
 
 test("Gateway lifecycle transitions disable Start and failed actions clear stale Running state", async () => {
-  const [appSource, runtimeBarSource, typesSource] = await Promise.all([
+  const [appSource, runtimeBarSource, typesSource, runtimeStoreSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(runtimeBarPath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(runtimeStorePath, "utf8"),
   ]);
   const runtimeAction = appSource.match(/const runRuntimeAction = useCallback\(async \([\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0] ?? "";
 
   assert.match(typesSource, /gateway_lifecycle: "unavailable" \| "stopped" \| "starting" \| "running" \| "stopping" \| "restarting" \| "failed"/);
   assert.match(runtimeBarSource, /const lifecycleTransitionActive = \["unavailable", "starting", "stopping", "restarting"\]\.includes/);
   assert.match(runtimeBarSource, /disabled=\{Boolean\(busy\) \|\| !status \|\| lifecycleTransitionActive\}/);
-  assert.match(appSource, /data: key === "status" \? null : cache\.data/);
+  assert.match(runtimeStoreSource, /data: key === "status" \? null : cache\.data/);
   assert.match(runtimeAction, /catch \(err\) \{[\s\S]*await refreshRuntimeStatus\(\{ force: true \}\)/);
   assert.match(runtimeAction, /updateToast\(toastId, \{[\s\S]*tone: "error"/);
 });
@@ -988,7 +992,7 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
   assert.match(tauriSource, /gatewayUsageSnapshot: \(window\?: UsageQueryWindow \| null\) =>/);
   assert.match(tauriSource, /call<GatewayUsageSnapshot>\(COMMANDS.gatewayUsageSnapshot/);
   const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[runCachedRequest, usageWindow\]\);/)?.[0] ?? "";
-  assert.match(appSource, /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
+  assert.match(await readFile(runtimeStorePath, "utf8"), /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
   assert.match(telemetryRefresh, /api\.gatewayUsageSnapshot\(usageWindow\)/);
   assert.match(telemetryRefresh, /quiet: true/);
   assert.match(appSource, /usageError=\{runtime\.gatewayUsageSnapshot\.error\}/);

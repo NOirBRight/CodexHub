@@ -11,6 +11,15 @@ import { historyIssueKey } from "./lib/history";
 import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
+import {
+  createEmptyRuntimeSnapshot,
+  setCacheData,
+  setCacheError,
+  setCacheLoading,
+  type RuntimeCache,
+  type RuntimeCacheKey,
+  type RuntimeSnapshot,
+} from "./lib/runtimeStore";
 import { isUpdateInstallActive, updateInstallToastText } from "./lib/updateStatus";
 import type {
   AppFlavorInfo,
@@ -32,21 +41,6 @@ import type {
 import { GatewayPage } from "./pages/GatewayPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 
-type RuntimeSnapshot = {
-  status: RuntimeCache<AppStatus>;
-  settings: RuntimeCache<Settings>;
-  providers: RuntimeCache<Provider[]>;
-  gatewayStatus: RuntimeCache<GatewayStatus>;
-  gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>;
-  gatewayEvents: RuntimeCache<GatewayEvent[]>;
-  gatewayClients: RuntimeCache<GatewayClientInfo[]>;
-  catalogModels: RuntimeCache<Model[]>;
-  modelMetadata: RuntimeCache<Model[]>;
-  appFlavor: RuntimeCache<AppFlavorInfo>;
-  appVersion: RuntimeCache<AppVersionInfo>;
-  updateStatus: RuntimeCache<AppUpdateStatus>;
-};
-
 type TrayToastPayload = {
   id: string;
   text: string;
@@ -58,16 +52,6 @@ type LoadRuntimeOptions = {
   includeClientVersions?: boolean;
   staleMs?: number;
 };
-
-type RuntimeCache<T> = {
-  data: T | null;
-  loading: boolean;
-  error: string | null;
-  updatedAt: number | null;
-  inflight?: Promise<T>;
-};
-
-type RuntimeCacheKey = keyof RuntimeSnapshot;
 
 type RuntimeCacheOptions<T> = {
   apply?: (current: RuntimeSnapshot, data: T) => RuntimeSnapshot;
@@ -97,57 +81,6 @@ function defaultUsageWindow(): UsageQueryWindow {
   };
 }
 
-function runtimeCache<T>(data: T | null = null): RuntimeCache<T> {
-  return {
-    data,
-    loading: false,
-    error: null,
-    updatedAt: data === null ? null : Date.now(),
-  };
-}
-
-function setCacheLoading(current: RuntimeSnapshot, key: RuntimeCacheKey): RuntimeSnapshot {
-  const cache = current[key] as RuntimeCache<unknown>;
-  return {
-    ...current,
-    [key]: {
-      ...cache,
-      loading: true,
-      error: null,
-    },
-  } as RuntimeSnapshot;
-}
-
-function setCacheData<T>(
-  current: RuntimeSnapshot,
-  key: RuntimeCacheKey,
-  data: T,
-): RuntimeSnapshot {
-  const cache = current[key] as RuntimeCache<T>;
-  return {
-    ...current,
-    [key]: {
-      ...cache,
-      data,
-      loading: false,
-      error: null,
-      updatedAt: Date.now(),
-    },
-  } as RuntimeSnapshot;
-}
-
-function setCacheError(current: RuntimeSnapshot, key: RuntimeCacheKey, error: string): RuntimeSnapshot {
-  const cache = current[key] as RuntimeCache<unknown>;
-  return {
-    ...current,
-    [key]: {
-      ...cache,
-      data: key === "status" ? null : cache.data,
-      loading: false,
-      error,
-    },
-  } as RuntimeSnapshot;
-}
 
 function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheEntry> {
   if (typeof window === "undefined") {
@@ -309,20 +242,7 @@ export default function App() {
   });
   const [gatewayVisited, setGatewayVisited] = useState(false);
   const [, startUiTransition] = useTransition();
-  const [runtime, setRuntime] = useState<RuntimeSnapshot>({
-    status: runtimeCache<AppStatus>(),
-    settings: runtimeCache<Settings>(),
-    providers: runtimeCache<Provider[]>([]),
-    gatewayStatus: runtimeCache<GatewayStatus>(),
-    gatewayUsageSnapshot: runtimeCache<GatewayUsageSnapshot>(),
-    gatewayEvents: runtimeCache<GatewayEvent[]>([]),
-    gatewayClients: runtimeCache<GatewayClientInfo[]>([]),
-    catalogModels: runtimeCache<Model[]>([]),
-    modelMetadata: runtimeCache<Model[]>([]),
-    appFlavor: runtimeCache<AppFlavorInfo>(),
-    appVersion: runtimeCache<AppVersionInfo>(),
-    updateStatus: runtimeCache<AppUpdateStatus>(),
-  });
+  const [runtime, setRuntime] = useState<RuntimeSnapshot>(createEmptyRuntimeSnapshot);
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
