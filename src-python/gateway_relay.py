@@ -1,22 +1,38 @@
-"""Gateway upstream response relay primitives.
-
-This module owns downstream body writes and raw response forwarding. It is
-deliberately independent of codex_proxy; the facade supplies transport and
-request-admission callbacks at the seam.
-"""
+"""Gateway upstream response relay primitives."""
 
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any, Protocol
+from typing import BinaryIO, Protocol
+
+
+class RelayResponse(Protocol):
+    status: int | None
+    code: int | None
+    headers: Mapping[str, str]
+
+    def read(self) -> bytes: ...
+
+
+class RequestAdmission(Protocol):
+    def raise_if_cancelled(self) -> None: ...
 
 
 class RelayWriter(Protocol):
     close_connection: bool
+    wfile: BinaryIO
 
     def send_response(self, status: int) -> None: ...
     def send_header(self, key: str, value: str) -> None: ...
     def end_headers(self) -> None: ...
-    @property
-    def wfile(self) -> Any: ...
+
+
+class FilteredHeaders(Protocol):
+    def __call__(
+        self,
+        headers: Mapping[str, str],
+        is_event_stream: bool,
+        *,
+        content_length: int | None = None,
+    ) -> Iterable[tuple[str, str]]: ...
 
 
 def write_non_streaming_body(writer: RelayWriter, body: bytes) -> bool:
@@ -31,15 +47,15 @@ def write_non_streaming_body(writer: RelayWriter, body: bytes) -> bool:
 
 
 def relay_raw_response(
-    response: Any,
+    response: RelayResponse,
     upstream_name: str,
     *,
     writer: RelayWriter,
-    filtered_headers: Callable[..., Iterable[tuple[str, str]]],
-    active_request: Callable[[], Any],
+    filtered_headers: FilteredHeaders,
+    active_request: Callable[[], RequestAdmission | None],
 ) -> int:
     """Forward a non-SSE upstream response without protocol mutation."""
-    status = getattr(response, "status", None) or getattr(response, "code", 502)
+    status = response.status or response.code or 502
     body = response.read()
     admission = active_request()
     if admission is not None:
