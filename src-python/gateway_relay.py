@@ -1,6 +1,9 @@
 """Gateway upstream response relay primitives."""
 
+import queue
+import time
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
 
@@ -105,13 +108,9 @@ def write_sse_bytes(
 ) -> bool:
     """Write SSE bytes through the request-scoped commit seam when present."""
     if commit_sse_bytes is not None:
-        return commit_sse_bytes(data, observe)
-    try:
-        writer.wfile.write(data)
-        writer.wfile.flush()
-    except OSError:
-        writer.close_connection = True
-        return False
+        return commit_sse_bytes(data, observe=observe)
+    writer.wfile.write(data)
+    writer.wfile.flush()
     return True
 
 
@@ -158,9 +157,132 @@ def write_sse_done(
     writer: RelayWriter,
     *,
     commit_sse_bytes: Callable[[bytes, bool], bool] | None = None,
+    terminal_committed: bool = False,
 ) -> bool:
+    if terminal_committed:
+        return True
     return write_sse_bytes(
         writer,
         b"data: [DONE]\n\n",
         commit_sse_bytes=commit_sse_bytes,
     )
+
+class SseLineLifecycle(Protocol):
+    closed: bool
+
+    def start(self) -> None: ...
+    def get(self, timeout: float | None = None) -> tuple[str, object]: ...
+    def close(self) -> None: ...
+    def join(self, timeout: float) -> None: ...
+
+
+class SseLineContext(Protocol):
+    admission: RequestAdmission | None
+    keepalive_interval: float
+    transport_timeout_seconds: float
+    model_event_timeout_seconds: float
+    lifecycle_factory: Callable[[object, RequestAdmission | None], SseLineLifecycle]
+    attach_upstream: Callable[[SseLineLifecycle], None]
+    write_keepalive: Callable[[], bool]
+    idle_timeout_error: Callable[[float, str], BaseException]
+    keepalive_failure_error: Callable[[str], BaseException]
+    join_timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class SseLineRelayContext:
+    admission: RequestAdmission | None
+    keepalive_interval: float
+    transport_timeout_seconds: float
+    model_event_timeout_seconds: float
+    lifecycle_factory: Callable[[object, RequestAdmission | None], SseLineLifecycle]
+    attach_upstream: Callable[[SseLineLifecycle], None]
+    write_keepalive: Callable[[], bool]
+    idle_timeout_error: Callable[[float, str], BaseException]
+    keepalive_failure_error: Callable[[str], BaseException]
+    join_timeout_seconds: float
+
+
+def iter_upstream_sse_lines(
+    response: object,
+    *,
+    context: SseLineContext,
+    downstream_output_started: Callable[[], bool] | None = None,
+    line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
+    on_line: Callable[[bytes], None] | None = None,
+):
+    admission = context.admission
+    lifecycle = context.lifecycle_factory(response, admission)
+    context.attach_upstream(lifecycle)
+    lifecycle.start()
+    keepalive_interval = context.keepalive_interval
+    transport_timeout_seconds = context.transport_timeout_seconds
+    model_event_timeout_seconds = context.model_event_timeout_seconds
+    transport_idle_guard_enabled = transport_timeout_seconds > 0
+    model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
+    try:
+        stream_started_at = time.monotonic()
+        last_transport_at = stream_started_at
+        last_model_event_at = stream_started_at
+        last_keepalive_at = stream_started_at
+        while True:
+            if admission is not None:
+                admission.raise_if_cancelled()
+            now = time.monotonic()
+            timeout_seconds: float | None = None
+            if keepalive_interval > 0:
+                timeout_seconds = max(0.001, keepalive_interval - (now - last_keepalive_at))
+            if transport_idle_guard_enabled:
+                remaining_idle = transport_timeout_seconds - (now - last_transport_at)
+                if remaining_idle <= 0:
+                    lifecycle.close()
+                    raise context.idle_timeout_error(transport_timeout_seconds, "transport")
+                timeout_seconds = remaining_idle if timeout_seconds is None else max(0.001, min(timeout_seconds, remaining_idle))
+            if model_event_idle_guard_enabled:
+                remaining_idle = model_event_timeout_seconds - (now - last_model_event_at)
+                if remaining_idle <= 0:
+                    lifecycle.close()
+                    raise context.idle_timeout_error(model_event_timeout_seconds, "model_event")
+                timeout_seconds = remaining_idle if timeout_seconds is None else max(0.001, min(timeout_seconds, remaining_idle))
+            if admission is not None:
+                timeout_seconds = 0.1 if timeout_seconds is None else max(0.001, min(timeout_seconds, 0.1))
+            try:
+                kind, value = lifecycle.get(timeout=timeout_seconds)
+            except queue.Empty:
+                if admission is not None:
+                    admission.raise_if_cancelled()
+                if lifecycle.closed:
+                    return
+                now = time.monotonic()
+                if transport_idle_guard_enabled and now - last_transport_at >= transport_timeout_seconds:
+                    lifecycle.close()
+                    raise context.idle_timeout_error(transport_timeout_seconds, "transport")
+                if model_event_idle_guard_enabled and now - last_model_event_at >= model_event_timeout_seconds:
+                    lifecycle.close()
+                    raise context.idle_timeout_error(model_event_timeout_seconds, "model_event")
+                if keepalive_interval > 0:
+                    if not context.write_keepalive():
+                        lifecycle.close()
+                        raise context.keepalive_failure_error("downstream keepalive write failed")
+                    last_keepalive_at = time.monotonic()
+                continue
+            if kind == "error":
+                if admission is not None:
+                    admission.raise_if_cancelled()
+                raise value
+            if isinstance(value, bytes) and value:
+                now = time.monotonic()
+                last_transport_at = now
+                if model_event_idle_guard_enabled and line_resets_idle_timeout(value):
+                    last_model_event_at = now
+                if on_line is not None:
+                    try:
+                        on_line(value)
+                    except Exception:
+                        pass
+            yield value
+            if not value:
+                return
+    finally:
+        lifecycle.close()
+        lifecycle.join(timeout=context.join_timeout_seconds)

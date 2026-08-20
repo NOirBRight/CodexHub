@@ -3180,6 +3180,8 @@ def _is_reasoning_text_stream_event(payload: Mapping[str, Any]) -> bool:
 
 
 from gateway_relay import (
+    SseLineRelayContext,
+    iter_upstream_sse_lines,
     relay_raw_response,
     send_sse_headers,
     write_non_streaming_body,
@@ -18340,58 +18342,57 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
     def _send_sse_headers(self, status: int, upstream_name: str) -> bool:
         seam = _handler_downstream_stream_commit(self)
-
-        def _send() -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Codex-Proxy-Upstream", upstream_name)
-            self.send_header("Connection", "close")
-            self.end_headers()
-
-        if seam is not None:
-            return seam.commit_headers(status, _send)
-        _send()
-        return True
+        commit_headers = None if seam is None else seam.commit_headers
+        return send_sse_headers(
+            self,
+            status,
+            upstream_name,
+            commit_headers=commit_headers,
+        )
 
     def _write_sse_bytes(self, data: bytes, *, observe: bool = True) -> bool:
-        """Commit arbitrary SSE bytes through the request-scoped seam if active.
-
-        When no seam is active the bytes are written directly and any OSError is
-        allowed to propagate so callers can recover the original exception.
-        """
         seam = _handler_downstream_stream_commit(self)
-        if seam is not None:
-            return seam.commit_sse_bytes(data, observe=observe)
-        self.wfile.write(data)
-        self.wfile.flush()
-        return True
+        commit_sse_bytes = None if seam is None else seam.commit_sse_bytes
+        return write_sse_bytes(
+            self,
+            data,
+            commit_sse_bytes=commit_sse_bytes,
+            observe=observe,
+        )
 
     def _write_non_streaming_body_relay(self, body: bytes) -> bool:
         return write_non_streaming_body(self, body)
 
     def _write_sse_event(self, event: str, payload: Mapping[str, Any]) -> bool:
-        data = (
-            f"event: {event}\n".encode("utf-8")
-            + b"data: "
-            + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            + b"\n\n"
+        return write_sse_event(
+            self,
+            event,
+            payload,
+            encode_json_line=_sse_json_line,
+            commit_sse_bytes=self._write_sse_bytes,
         )
-        return self._write_sse_bytes(data)
 
     def _write_sse_data(self, payload: Mapping[str, Any]) -> bool:
-        return self._write_sse_bytes(_sse_json_line(payload, b"\n") + b"\n")
+        return write_sse_data(
+            self,
+            payload,
+            encode_json_line=_sse_json_line,
+            commit_sse_bytes=self._write_sse_bytes,
+        )
 
     def _write_sse_keepalive(self) -> bool:
-        return self._write_sse_bytes(b": codexhub.keepalive\n\n", observe=False)
+        return write_sse_keepalive(
+            self,
+            commit_sse_bytes=self._write_sse_bytes,
+        )
 
     def _write_sse_done(self) -> bool:
         seam = _handler_downstream_stream_commit(self)
-        if seam is not None and seam.terminal_committed:
-            # The protocol-specific terminal has already been committed; do not
-            # write the legacy Chat [DONE] sentinel after Responses terminals.
-            return True
-        return self._write_sse_bytes(b"data: [DONE]\n\n")
+        return write_sse_done(
+            self,
+            commit_sse_bytes=self._write_sse_bytes,
+            terminal_committed=seam is not None and seam.terminal_committed,
+        )
 
     def _iter_upstream_sse_lines(
         self,
@@ -18402,116 +18403,37 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
         admission = _active_gateway_request()
+        seam = _handler_downstream_stream_commit(self)
 
-        def raise_if_shutdown_requested() -> None:
-            if admission is not None:
-                admission.raise_if_cancelled()
+        def attach_upstream(lifecycle: Any) -> None:
+            if seam is not None:
+                seam.attach_upstream(lifecycle)
 
-        def observe_line(line: bytes) -> None:
-            if not line or on_line is None:
-                return
-            try:
-                on_line(line)
-            except Exception:
-                return
-
-        keepalive_interval = sse_keepalive_seconds()
-        transport_timeout_seconds = transport_sse_idle_timeout_seconds()
-        model_event_timeout_seconds = model_event_sse_idle_timeout_seconds()
-        transport_idle_guard_enabled = transport_timeout_seconds > 0
-        model_event_idle_guard_enabled = model_event_timeout_seconds > 0 and line_resets_idle_timeout is not None
-
-        lifecycle = _UpstreamSseReaderLifecycle(
-            response,
+        context = SseLineRelayContext(
             admission=admission,
+            keepalive_interval=sse_keepalive_seconds(),
+            transport_timeout_seconds=transport_sse_idle_timeout_seconds(),
+            model_event_timeout_seconds=model_event_sse_idle_timeout_seconds(),
+            lifecycle_factory=lambda upstream_response, current_admission: _UpstreamSseReaderLifecycle(
+                upstream_response,
+                admission=current_admission,
+            ),
+            attach_upstream=attach_upstream,
+            write_keepalive=self._write_sse_keepalive,
+            idle_timeout_error=lambda timeout_seconds, phase: UpstreamStreamIdleTimeoutError(
+                timeout_seconds,
+                phase=phase,
+            ),
+            keepalive_failure_error=DownstreamKeepaliveFailedError,
+            join_timeout_seconds=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS,
         )
-        request_scoped_seam = _handler_downstream_stream_commit(self)
-        if request_scoped_seam is not None:
-            request_scoped_seam.attach_upstream(lifecycle)
-        lifecycle.start()
-        try:
-            stream_started_at = time.monotonic()
-            last_transport_at = stream_started_at
-            last_model_event_at = stream_started_at
-            last_keepalive_at = stream_started_at
-
-            def raise_idle_timeout(timeout_seconds: float, phase: str) -> None:
-                lifecycle.close()
-                raise UpstreamStreamIdleTimeoutError(timeout_seconds, phase=phase)
-
-            while True:
-                raise_if_shutdown_requested()
-                now = time.monotonic()
-                timeout_seconds: float | None = None
-                if keepalive_interval > 0:
-                    timeout_seconds = max(0.001, keepalive_interval - (now - last_keepalive_at))
-                if transport_idle_guard_enabled:
-                    remaining_idle = transport_timeout_seconds - (now - last_transport_at)
-                    if remaining_idle <= 0:
-                        raise_idle_timeout(transport_timeout_seconds, "transport")
-                    timeout_seconds = (
-                        remaining_idle
-                        if timeout_seconds is None
-                        else max(0.001, min(timeout_seconds, remaining_idle))
-                    )
-                if model_event_idle_guard_enabled:
-                    remaining_idle = model_event_timeout_seconds - (now - last_model_event_at)
-                    if remaining_idle <= 0:
-                        raise_idle_timeout(model_event_timeout_seconds, "model_event")
-                    timeout_seconds = (
-                        remaining_idle
-                        if timeout_seconds is None
-                        else max(0.001, min(timeout_seconds, remaining_idle))
-                    )
-                if admission is not None:
-                    timeout_seconds = (
-                        0.1
-                        if timeout_seconds is None
-                        else max(0.001, min(timeout_seconds, 0.1))
-                    )
-
-                try:
-                    if timeout_seconds is None:
-                        kind, value = lifecycle.get()
-                    else:
-                        kind, value = lifecycle.get(timeout=timeout_seconds)
-                except queue.Empty:
-                    raise_if_shutdown_requested()
-                    if lifecycle.closed:
-                        return
-                    now = time.monotonic()
-                    if transport_idle_guard_enabled and (now - last_transport_at) >= transport_timeout_seconds:
-                        raise_idle_timeout(transport_timeout_seconds, "transport")
-                    if model_event_idle_guard_enabled and (now - last_model_event_at) >= model_event_timeout_seconds:
-                        raise_idle_timeout(model_event_timeout_seconds, "model_event")
-                    if keepalive_interval > 0:
-                        if not self._write_sse_keepalive():
-                            lifecycle.close()
-                            raise DownstreamKeepaliveFailedError(
-                                "downstream keepalive write failed"
-                            )
-                        last_keepalive_at = time.monotonic()
-                    continue
-                if kind == "error":
-                    raise_if_shutdown_requested()
-                    raise value
-                if isinstance(value, bytes) and value:
-                    now = time.monotonic()
-                    last_transport_at = now
-                    resets_model_event_timeout = (
-                        line_resets_idle_timeout(value)
-                        if line_resets_idle_timeout is not None
-                        else False
-                    )
-                    if model_event_idle_guard_enabled and resets_model_event_timeout:
-                        last_model_event_at = now
-                    observe_line(value)
-                yield value
-                if not value:
-                    return
-        finally:
-            lifecycle.close()
-            lifecycle.join(timeout=_UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
+        return iter_upstream_sse_lines(
+            response,
+            context=context,
+            downstream_output_started=downstream_output_started,
+            line_resets_idle_timeout=line_resets_idle_timeout,
+            on_line=on_line,
+        )
 
     def _iter_upstream_sse_events(
         self,

@@ -1,7 +1,14 @@
 from io import BytesIO
 from types import SimpleNamespace
 
-from gateway_relay import relay_raw_response, write_non_streaming_body
+from gateway_relay import (
+    SseLineRelayContext,
+    iter_upstream_sse_lines,
+    relay_raw_response,
+    write_non_streaming_body,
+    write_sse_bytes,
+    write_sse_done,
+)
 
 
 class Writer:
@@ -105,3 +112,85 @@ def test_relay_raw_response_checks_request_admission_before_headers():
     else:
         raise AssertionError("cancellation was not propagated")
     assert writer.responses == []
+
+
+def test_sse_commit_callback_receives_keyword_only_observe():
+    writer = Writer()
+    calls = []
+
+    def commit(data, *, observe=True):
+        calls.append((data, observe))
+        return True
+
+    assert write_sse_bytes(writer, b"frame", commit_sse_bytes=commit, observe=False)
+    assert calls == [(b"frame", False)]
+    assert writer.wfile.getvalue() == b""
+
+
+def test_sse_done_respects_terminal_commit_guard():
+    writer = Writer()
+    calls = []
+
+    def commit(data, *, observe=True):
+        calls.append(data)
+        return True
+
+    assert write_sse_done(writer, commit_sse_bytes=commit, terminal_committed=True)
+    assert calls == []
+
+
+def test_sse_bytes_preserves_direct_write_errors():
+    writer = Writer()
+    writer.wfile = SimpleNamespace(
+        write=lambda _: (_ for _ in ()).throw(OSError("closed")),
+        flush=lambda: None,
+    )
+    try:
+        write_sse_bytes(writer, b"frame")
+    except OSError as error:
+        assert str(error) == "closed"
+    else:
+        raise AssertionError("direct SSE write error was swallowed")
+
+
+def test_sse_line_iterator_uses_injected_lifecycle():
+    class Lifecycle:
+        closed = False
+
+        def __init__(self):
+            self.values = [("line", b"one"), ("line", b"")]
+            self.started = False
+            self.closed_calls = 0
+            self.joined = False
+
+        def start(self):
+            self.started = True
+
+        def get(self, timeout=None):
+            return self.values.pop(0)
+
+        def close(self):
+            self.closed_calls += 1
+
+        def join(self, timeout):
+            self.joined = True
+
+    lifecycle = Lifecycle()
+    attached = []
+    context = SseLineRelayContext(
+        admission=None,
+        keepalive_interval=0,
+        transport_timeout_seconds=0,
+        model_event_timeout_seconds=0,
+        lifecycle_factory=lambda response, admission: lifecycle,
+        attach_upstream=attached.append,
+        write_keepalive=lambda: True,
+        idle_timeout_error=lambda seconds, phase: RuntimeError(phase),
+        keepalive_failure_error=RuntimeError,
+        join_timeout_seconds=1,
+    )
+    assert list(iter_upstream_sse_lines(object(), context=context)) == [b"one", b""]
+    assert attached == [lifecycle]
+    assert lifecycle.started
+    assert lifecycle.closed_calls == 1
+    assert lifecycle.joined
