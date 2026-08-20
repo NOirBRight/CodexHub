@@ -567,7 +567,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
         self,
         item: Mapping[str, Any],
         output_index: int,
-    ) -> tuple[_ApplyPatchStreamState, str]:
+    ) -> None:
         try:
             _require_exact_apply_patch_function_call_fields(
                 item,
@@ -593,7 +593,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
         )
         self._states[item_id] = state
         self._item_id_by_call_id[call_id] = item_id
-        return state, ""
+        return
 
     def _state_for_event(self, event: Mapping[str, Any]) -> _ApplyPatchStreamState:
         item_id = event.get("item_id")
