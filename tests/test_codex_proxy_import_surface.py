@@ -14,6 +14,7 @@ import tool_surface_adapter
 import gateway_errors
 import gateway_settings
 import gateway_sse
+import gateway_transport
 import route_plan
 import route_primitives
 
@@ -45,6 +46,7 @@ FROZEN_CODEX_PROXY_NAMES = (
     'GATEWAY_EVENT_WRITER',
     'GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS',
     'GatewayPreResponseBudgetExhausted',
+    'GatewayTransport',
     'GatewayRequestAdmission',
     'GatewayShutdownController',
     'GatewayUserRequestedShutdown',
@@ -94,6 +96,7 @@ FROZEN_CODEX_PROXY_NAMES = (
     'TRANSIENT_HTTP_RETRY_STATUSES',
     'ThreadingHTTPServer',
     'ToolExposureMode',
+    'TransportFacts',
     'TransportPolicy',
     'USAGE_ASYNC_TAP',
     'USAGE_SYNC_CAPTURE',
@@ -116,6 +119,7 @@ FROZEN_CODEX_PROXY_NAMES = (
     '_OfficialHTTPSConnectionPool',
     '_OfficialPooledResponse',
     '_TRANSPORT_PHASE_ATTRIBUTE',
+    'UpstreamSseReaderLifecycle',
     '_UpstreamSseReaderLifecycle',
     '_activate_gateway_request',
     '_active_gateway_request',
@@ -324,6 +328,37 @@ REEXPORT_IDENTITY = {
     "APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS": apply_patch_adapter.APPLY_PATCH_CUSTOM_TOOL_HISTORY_NATIVE_FIELDS,
     "ApplyPatchAdapter": apply_patch_adapter.ApplyPatchAdapter,
     "ApplyPatchFacts": apply_patch_adapter.ApplyPatchFacts,
+    "GatewayTransport": gateway_transport.GatewayTransport,
+    "TransportFacts": gateway_transport.TransportFacts,
+    "UpstreamSseReaderLifecycle": gateway_transport.UpstreamSseReaderLifecycle,
+    "_OfficialHTTPSConnection": gateway_transport._OfficialHTTPSConnection,
+    "_OfficialHTTPSConnectionPool": gateway_transport._OfficialHTTPSConnectionPool,
+    "_OfficialPooledResponse": gateway_transport._OfficialPooledResponse,
+    "_TRANSPORT_PHASE_ATTRIBUTE": gateway_transport._TRANSPORT_PHASE_ATTRIBUTE,
+    "_UpstreamSseReaderLifecycle": gateway_transport._UpstreamSseReaderLifecycle,
+    "_capacity_retry_elapsed_limit_allows": gateway_transport._capacity_retry_elapsed_limit_allows,
+    "_clamp_timeout_to_pre_response_budget": gateway_transport._clamp_timeout_to_pre_response_budget,
+    "_configure_official_windows_keepalive": gateway_transport._configure_official_windows_keepalive,
+    "_connection_disposition": gateway_transport._connection_disposition,
+    "_explicit_transport_phase": gateway_transport._explicit_transport_phase,
+    "_get_header": gateway_transport._get_header,
+    "_header_items": gateway_transport._header_items,
+    "_http_error_body_bytes": gateway_transport._http_error_body_bytes,
+    "_official_socket_options": gateway_transport._official_socket_options,
+    "_remaining_pre_response_budget_seconds": gateway_transport._remaining_pre_response_budget_seconds,
+    "_require_retry_delay_within_pre_response_budget": gateway_transport._require_retry_delay_within_pre_response_budget,
+    "_retry_after_delay_seconds": gateway_transport._retry_after_delay_seconds,
+    "_retry_attempts_for_failure_class": gateway_transport._retry_attempts_for_failure_class,
+    "_upstream_error_retryable": gateway_transport._upstream_error_retryable,
+    "_upstream_failure_class": gateway_transport._upstream_failure_class,
+    "_upstream_retry_status": gateway_transport._upstream_retry_status,
+    "transport_failure_phase": gateway_transport.transport_failure_phase,
+    "OFFICIAL_CONNECT_TIMEOUT_SECONDS": gateway_transport.OFFICIAL_CONNECT_TIMEOUT_SECONDS,
+    "OFFICIAL_HTTP_POOLS": gateway_transport.OFFICIAL_HTTP_POOLS,
+    "OFFICIAL_POOL_MAX_CONNECTIONS": gateway_transport.OFFICIAL_POOL_MAX_CONNECTIONS,
+    "OFFICIAL_POOL_MAX_IDLE_SECONDS": gateway_transport.OFFICIAL_POOL_MAX_IDLE_SECONDS,
+    "OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS": gateway_transport.OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS,
+    "OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS": gateway_transport.OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
     "_responses_url": route_plan._responses_url,
     "_chat_completions_url": route_plan._chat_completions_url,
     "_external_tool_protocol": route_plan._external_tool_protocol,
@@ -395,6 +430,18 @@ def test_apply_patch_adapter_does_not_import_facade_or_transport() -> None:
     assert "BaseHTTPRequestHandler" not in source
     assert "urllib3" not in source
     assert "urlopen" not in source
+
+
+def test_gateway_transport_does_not_import_facade_handler_or_sse() -> None:
+    with open(gateway_transport.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "gateway_sse" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "CodexProxyHandler" not in source
+    assert "class GatewayTransport" in source
+    assert "TransportPolicy.OFFICIAL_KEEPALIVE" in source
 
 
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
