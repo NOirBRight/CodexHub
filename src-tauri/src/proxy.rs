@@ -302,6 +302,7 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
     }
 }
 
+#[derive(Debug, Deserialize)]
 struct HealthResponse {
     ok: Option<bool>,
     build: Option<String>,

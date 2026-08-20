@@ -352,17 +352,22 @@ pub fn preflight_unified_history(
         .ok()
         .as_deref()
         .and_then(config::codex_overlay_owner);
-    let mutation_blocked = apply_repairs
+    if apply_repairs
         && crate::routing_owner::permit(
             current_app_owner,
             target_owner,
             crate::routing_owner::MutationKind::HistoryRepair,
             false,
         )
-        .is_err();
-    let effective_apply_repairs = apply_repairs && !mutation_blocked;
+        .is_err()
+    {
+        return Ok(UnifiedHistoryResult::pending(
+            UnifiedHistoryStatus::Conflict,
+            "route_takeover_required",
+        ));
+    }
     let _repair_guard = match acquire_history_repair(
-        effective_apply_repairs,
+        apply_repairs,
         &HISTORY_REPAIR_IN_PROGRESS,
     ) {
         Ok(guard) => guard,
@@ -379,7 +384,7 @@ pub fn preflight_unified_history(
                 apply_repairs,
                 target_unified,
             ),
-            apply_repairs: effective_apply_repairs,
+            apply_repairs,
         },
         &paths,
         &python,
@@ -387,12 +392,6 @@ pub fn preflight_unified_history(
         &budget,
         true,
     )?;
-    if mutation_blocked && result.status != UnifiedHistoryStatus::Clean {
-        return Ok(UnifiedHistoryResult::pending(
-            UnifiedHistoryStatus::Conflict,
-            "route_takeover_required",
-        ));
-    }
     Ok(result)
 }
 
