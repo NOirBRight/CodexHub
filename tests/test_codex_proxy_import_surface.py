@@ -16,6 +16,7 @@ import gateway_errors
 import gateway_settings
 import gateway_sse
 import gateway_transport
+import vision_proxy
 import route_plan
 import route_primitives
 
@@ -112,7 +113,10 @@ FROZEN_CODEX_PROXY_NAMES = (
     'UsagePolicy',
     'VISION_PROXY_TRANSPARENT_OVERLAY',
     'VisionAction',
+    'VisionFacts',
     'VisionNetworkAction',
+    'VisionProxyAdapter',
+    'VisionProxyHooks',
     'WIRE_CHAT_TO_RESPONSES',
     'WIRE_RESPONSES_TO_CHAT',
     'WIRE_TRANSPARENT',
@@ -335,6 +339,9 @@ REEXPORT_IDENTITY = {
     "ApplyPatchFacts": apply_patch_adapter.ApplyPatchFacts,
     "GatewayTransport": gateway_transport.GatewayTransport,
     "TransportFacts": gateway_transport.TransportFacts,
+    "VisionFacts": vision_proxy.VisionFacts,
+    "VisionProxyAdapter": vision_proxy.VisionProxyAdapter,
+    "VisionProxyHooks": vision_proxy.VisionProxyHooks,
     "UpstreamSseReaderLifecycle": gateway_transport.UpstreamSseReaderLifecycle,
     "_OfficialHTTPSConnection": gateway_transport._OfficialHTTPSConnection,
     "_OfficialHTTPSConnectionPool": gateway_transport._OfficialHTTPSConnectionPool,
@@ -464,6 +471,24 @@ def test_gateway_transport_does_not_import_facade_handler_or_sse() -> None:
     assert "CodexProxyHandler" not in source
     assert "class GatewayTransport" in source
     assert "TransportPolicy.OFFICIAL_KEEPALIVE" in source
+
+
+def test_vision_proxy_does_not_import_facade_handler_sse_transport_or_catalog() -> None:
+    with open(vision_proxy.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    for marker in (
+        "import codex_proxy",
+        "from codex_proxy",
+        "BaseHTTPRequestHandler",
+        "CodexProxyHandler",
+        "gateway_sse",
+        "gateway_transport",
+        "gateway_catalog_runtime",
+    ):
+        assert marker not in source
+    assert "class VisionProxyAdapter" in source
+    assert "class VisionFacts" in source
+    assert "class VisionProxyHooks" in source
 
 
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:
