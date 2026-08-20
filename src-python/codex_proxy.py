@@ -798,6 +798,7 @@ from gateway_errors import (
 )
 
 logger = logging.getLogger("codex_proxy")
+UpstreamSseReaderLifecycle.default_logger_provider = lambda: logger
 IMAGE_PROXY_CACHE_PATH = RUNTIME_PROXY_DIR / "image-proxy-cache.sqlite"
 
 
@@ -5224,7 +5225,7 @@ def _normalize_third_party_tool_call(
     event_context: Mapping[str, Any] | None = None,
     compatibility_plan: Any = None,
 ) -> tuple[Any, bool]:
-    return _tool_surface_adapter().normalize_third_party_tool_call(value, event_context)
+    return _tool_surface_adapter().normalize_third_party_tool_call(value, event_context, compatibility_plan)
 
 
 def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str) -> dict[str, str]:
@@ -6575,7 +6576,7 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
 
 
 def _downgrade_invalid_third_party_tool_calls(value: Any, compatibility_plan: Any = None) -> tuple[Any, bool]:
-    return _tool_surface_adapter().downgrade_invalid_third_party_tool_calls(value)
+    return _tool_surface_adapter().downgrade_invalid_third_party_tool_calls(value, compatibility_plan)
 
 
 def _worker_multi_agent_suppressed_message(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -11040,12 +11041,7 @@ def _relay_symbols() -> RelaySymbols:
             write_proxy_event=_relay_write_proxy_event,
     )
 
-class _UpstreamSseReaderLifecycle(UpstreamSseReaderLifecycle):
-    """Compatibility adapter that keeps the facade logger patchable."""
-
-    def __init__(self, response: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("logger_hook", logger)
-        super().__init__(response, **kwargs)
+_UpstreamSseReaderLifecycle = UpstreamSseReaderLifecycle
 
 
 class CodexProxyHandler(BaseHTTPRequestHandler):

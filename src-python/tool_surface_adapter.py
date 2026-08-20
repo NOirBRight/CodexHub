@@ -1386,6 +1386,14 @@ class ToolSurfaceAdapter:
                 changed = True
         return (rewritten if changed else value), changed
 
+    def _should_preserve_owned_wire_value(self, value: Mapping[str, Any], plan: ToolCompatibilityPlanView | None) -> bool:
+        if plan is None or not plan.owns_wire_value(value):
+            return False
+        name = value.get("name")
+        if name == "tool_search" or name in self.facts.multi_agent_namespace_aliases:
+            return False
+        return True
+
     def is_collaboration_v2_context(self, event_context: Mapping[str, Any] | None) -> bool:
         return (event_context or {}).get("collaboration_protocol") == self.facts.collaboration_v2
 
@@ -1393,6 +1401,7 @@ class ToolSurfaceAdapter:
         self,
         value: Any,
         event_context: Mapping[str, Any] | None = None,
+        compatibility_plan: ToolCompatibilityPlanView | None = None,
     ) -> tuple[Any, bool]:
         if self.is_collaboration_v2_context(event_context):
             return value, False
@@ -1400,12 +1409,14 @@ class ToolSurfaceAdapter:
             changed = False
             rewritten = []
             for item in value:
-                replacement, item_changed = self.normalize_third_party_tool_call(item, event_context)
+                replacement, item_changed = self.normalize_third_party_tool_call(item, event_context, compatibility_plan)
                 rewritten.append(replacement)
                 changed = changed or item_changed
             return (rewritten if changed else value), changed
 
         if not isinstance(value, dict):
+            return value, False
+        if self._should_preserve_owned_wire_value(value, compatibility_plan):
             return value, False
 
         changed = False
@@ -1493,24 +1504,30 @@ class ToolSurfaceAdapter:
                 changed = True
 
         for key, item in list(rewritten.items()):
-            replacement, item_changed = self.normalize_third_party_tool_call(item, event_context)
+            replacement, item_changed = self.normalize_third_party_tool_call(item, event_context, compatibility_plan)
             if item_changed:
                 rewritten[key] = replacement
                 changed = True
 
         return (rewritten if changed else value), changed
 
-    def downgrade_invalid_third_party_tool_calls(self, value: Any) -> tuple[Any, bool]:
+    def downgrade_invalid_third_party_tool_calls(
+        self,
+        value: Any,
+        compatibility_plan: ToolCompatibilityPlanView | None = None,
+    ) -> tuple[Any, bool]:
         if isinstance(value, list):
             changed = False
             rewritten = []
             for item in value:
-                replacement, item_changed = self.downgrade_invalid_third_party_tool_calls(item)
+                replacement, item_changed = self.downgrade_invalid_third_party_tool_calls(item, compatibility_plan)
                 rewritten.append(replacement)
                 changed = changed or item_changed
             return (rewritten if changed else value), changed
 
         if not isinstance(value, dict):
+            return value, False
+        if self._should_preserve_owned_wire_value(value, compatibility_plan):
             return value, False
 
         if self.has_invalid_tool_name(value):
@@ -1524,7 +1541,7 @@ class ToolSurfaceAdapter:
         changed = False
         rewritten = dict(value)
         for key, item in value.items():
-            replacement, item_changed = self.downgrade_invalid_third_party_tool_calls(item)
+            replacement, item_changed = self.downgrade_invalid_third_party_tool_calls(item, compatibility_plan)
             if item_changed:
                 rewritten[key] = replacement
                 changed = True

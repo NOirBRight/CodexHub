@@ -517,8 +517,11 @@ class VisionProxyAdapter:
                     break
                 for frame in assembler.feed(chunk):
                     payload = event_payload(frame)
-                    if payload is not None and payload != "[DONE]":
-                        events.append(payload)
+                    if payload == "[DONE]" or payload is None:
+                        continue
+                    if not isinstance(payload, Mapping):
+                        raise ImageProxyError("Vision model returned an unsupported SSE payload")
+                    events.append(payload)
             termination = assembler.finish()
             if termination.disposition == "incomplete":
                 raise UpstreamStreamIncompleteError(
@@ -526,8 +529,11 @@ class VisionProxyAdapter:
                 )
             for frame in termination.events:
                 payload = event_payload(frame)
-                if payload is not None and payload != "[DONE]":
-                    events.append(payload)
+                if payload == "[DONE]" or payload is None:
+                    continue
+                if not isinstance(payload, Mapping):
+                    raise ImageProxyError("Vision model returned an unsupported SSE payload")
+                events.append(payload)
             return self.hooks.events_to_responses_body(events)
 
         chunks: list[bytes] = []

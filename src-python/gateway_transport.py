@@ -446,12 +446,12 @@ class GatewayTransport:
     ) -> Request:
         if self.endpoint_url_hook is None:
             raise RuntimeError("Gateway transport endpoint URL hook is not configured")
-        return self.build_request_url(
-            self.endpoint_url_hook(upstream, path),
-            data=data,
-            headers=headers,
-            method=method,
-        )
+        parsed = urlsplit(path)
+        endpoint_path = parsed.path or "/"
+        url = self.endpoint_url_hook(upstream, endpoint_path)
+        if parsed.query:
+            url += "?" + parsed.query
+        return self.build_request_url(url, data=data, headers=headers, method=method)
 
     def proxy_url(self, url: str) -> str | None:
         if self.proxy_url_hook is not None:
@@ -1958,6 +1958,7 @@ class UpstreamSseReaderLifecycle:
     PRODUCER_PUT_TIMEOUT_SECONDS = 0.05
     CONSUMER_POLL_TIMEOUT_SECONDS = 0.1
     JOIN_TIMEOUT_SECONDS = 1.0
+    default_logger_provider: Callable[[], logging.Logger] = lambda: logger
 
     def __init__(
         self,
@@ -1966,7 +1967,7 @@ class UpstreamSseReaderLifecycle:
         admission: RequestAdmission | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
         thread_name: str = "gateway-sse-reader",
-        logger_hook: logging.Logger | None = None,
+        logger_hook: logging.Logger | Callable[[], logging.Logger] | None = None,
     ) -> None:
         self._response = response
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=self.QUEUE_CAPACITY)
@@ -1974,7 +1975,8 @@ class UpstreamSseReaderLifecycle:
         self._close_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._thread_name = thread_name
-        self._logger = logger_hook or logger
+        selected_logger = logger_hook if logger_hook is not None else type(self).default_logger_provider
+        self._logger = selected_logger() if callable(selected_logger) else selected_logger
         self._cancellation_requested = (
             (lambda: admission.cancelled) if admission is not None else cancellation_requested
         )
