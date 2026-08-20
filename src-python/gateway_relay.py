@@ -1253,7 +1253,8 @@ def relay_upstream_response(
             and upstream_format != "chat_completions"
         ):
             line_ending = b"\n"
-            converter = _ResponsesToChatStreamConverter()
+            exchange = relay_context.prepared_exchange
+            converter = exchange.decode_stream() if isinstance(exchange, PreparedExchange) else _ResponsesToChatStreamConverter()
             incomplete_frame = False
             try:
                 for frame in self._iter_upstream_sse_events(
@@ -1422,7 +1423,8 @@ def relay_upstream_response(
             and not want_chat_output
         ):
             line_ending = b"\n"
-            converter = _ChatToResponsesStreamConverter()
+            exchange = relay_context.prepared_exchange
+            converter = exchange.decode_stream() if isinstance(exchange, PreparedExchange) else _ChatToResponsesStreamConverter()
             incomplete_frame = False
 
             def write_converted_response_event(event: Mapping[str, Any]) -> bool:

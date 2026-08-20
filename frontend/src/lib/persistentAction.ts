@@ -53,7 +53,11 @@ export async function runPersistentAction<T>(
     dedupeKey?: string;
     loading: string;
     work: () => Promise<T>;
-    success: (result: T) => { text: string; restart: RestartTarget };
+    success: (result: T) => {
+      text: string;
+      restart: RestartTarget;
+      tone?: "info" | "success";
+    };
   },
 ): Promise<T> {
   const toastId = spec.showToast({
@@ -67,7 +71,7 @@ export async function runPersistentAction<T>(
     const completed = spec.success(result);
     const restartText = (spec.formatRestart ?? formatRestartDisclosure)(completed.restart);
     spec.updateToast(toastId, {
-      tone: "success",
+      tone: completed.tone ?? "success",
       text: (completed.text + " " + restartText).trim(),
       action: null,
     });
