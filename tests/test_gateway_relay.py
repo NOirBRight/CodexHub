@@ -157,7 +157,12 @@ def test_sse_bytes_preserves_direct_write_errors():
 
 
 def test_relay_context_and_facade_adapter_are_the_seam():
-    from gateway_relay import RelayContext, relay_upstream_response
+    from gateway_relay import (
+        RelayContext,
+        relay_official_passthrough_sse_response,
+        relay_transparent_upstream_response,
+        relay_upstream_response,
+    )
 
     assert {
         "handler",
@@ -166,11 +171,23 @@ def test_relay_context_and_facade_adapter_are_the_seam():
         "official_passthrough_relay",
         "prepared_exchange",
     } <= set(RelayContext.__annotations__)
-    source = inspect.getsource(codex_proxy.CodexProxyHandler._relay_upstream_response)
-    assert len(source.splitlines()) < 50
-    assert "relay_upstream_response(" in source
+    for method_name, extracted_name in (
+        ("_relay_upstream_response", "relay_upstream_response("),
+        ("_relay_transparent_upstream_response", "relay_transparent_upstream_response("),
+        ("_relay_official_passthrough_sse_response", "relay_official_passthrough_sse_response("),
+    ):
+        source = inspect.getsource(getattr(codex_proxy.CodexProxyHandler, method_name))
+        assert len(source.splitlines()) < 50, method_name
+        assert extracted_name in source, method_name
+        assert "_relay_context_for_handler(" in source, method_name
     module_source = Path(relay_upstream_response.__code__.co_filename).read_text(encoding="utf-8")
     assert "import codex_proxy" not in module_source
+    assert "import *" not in module_source
+    assert 'globals()[' not in module_source
+    assert "def relay_transparent_upstream_response(" in module_source
+    assert "def relay_official_passthrough_sse_response(" in module_source
+    assert relay_transparent_upstream_response.__code__.co_filename == relay_upstream_response.__code__.co_filename
+    assert relay_official_passthrough_sse_response.__code__.co_filename == relay_upstream_response.__code__.co_filename
 
 
 def test_sse_line_iterator_uses_injected_lifecycle():
