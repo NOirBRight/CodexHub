@@ -256,6 +256,14 @@ def test_transport_build_request_materializes_endpoint_url():
     assert request.get_header("Content-type") == "application/json"
 
 
+def test_transport_build_request_merges_endpoint_query_parameters():
+    transport = GatewayTransport(
+        endpoint_url_hook=lambda upstream, path: "https://example.test" + path + "?api-version=1",
+    )
+    request = transport.build_request({}, "/responses?trace=1")
+    assert request.full_url == "https://example.test/responses?api-version=1&trace=1"
+
+
 def test_open_once_hook_is_used_by_open_response() -> None:
     seen: list[str] = []
 

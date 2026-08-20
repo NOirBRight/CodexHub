@@ -91,6 +91,10 @@ def authentication_strategy(value: Any) -> AuthenticationStrategy:
         return AuthenticationStrategy.UNKNOWN
 
 
+APPLY_PATCH_FUNCTION_NAME = "apply_patch"
+WORKER_REQUESTED_BINDING_FIELD = "_codexhub_worker_requested_binding"
+
+
 class SensitiveValue:
     """An immutable secret whose representation and equality never expose value."""
 

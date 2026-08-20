@@ -39,6 +39,7 @@ from codex_semantic_adapter import (
     validate_worker_selector,
 )
 from gateway_errors import UpstreamProtocolTranslationError
+from route_primitives import WORKER_REQUESTED_BINDING_FIELD
 from protocol_translation import UnsupportedProtocolTranslationError
 import worker_binding_signing
 
@@ -46,7 +47,6 @@ import worker_binding_signing
 COLLABORATION_BOUNDARY_ERROR_CODE = "invalid_collaboration_boundary"
 WORKER_SELECTOR_ERROR_CODE = "external_worker_selector_rejected"
 WORKER_BINDING_ERROR_CODE = "external_worker_binding_rejected"
-WORKER_REQUESTED_BINDING_FIELD = "_codexhub_worker_requested_binding"
 WORKER_REQUESTED_BINDING_VERSION = "codexhub.requested-worker-binding.v1"
 WORKER_REQUESTED_BINDING_FIELDS = {
     "contract_version",

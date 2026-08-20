@@ -24,6 +24,7 @@ import time
 from typing import Any, Protocol
 from urllib.request import Request
 
+from gateway_interfaces import AdapterEventWriter, UpstreamResponseLike
 from gateway_errors import ImageProxyError, UpstreamStreamIncompleteError
 from route_primitives import (
     IMAGE_PROXY_PROMPT,
@@ -56,15 +57,6 @@ class VisionPlanLike(Protocol):
     network_action: VisionNetworkAction
     target_accepts_images: bool
     image_proxy_enabled: bool
-
-
-class AdapterEventWriter(Protocol):
-    def __call__(
-        self,
-        event_context: Mapping[str, Any] | None,
-        event: str,
-        **fields: Any,
-    ) -> None: ...
 
 
 class RequestCompatibilityHook(Protocol):
@@ -112,14 +104,6 @@ class ToolStripHook(Protocol):
 
 class PreparedExchangeLike(Protocol):
     upstream_body: bytes
-
-
-class UpstreamResponseLike(Protocol):
-    headers: Mapping[str, str]
-    status: int | None
-
-    def read(self, size: int = -1) -> bytes: ...
-    def readline(self) -> bytes: ...
 
 
 class SseFrameLike(Protocol):
@@ -1097,10 +1081,12 @@ class VisionProxyAdapter:
             if inbound_protocol is RouteProtocol.CHAT_COMPLETIONS
             else "input"
         )
-        if self.value_contains_image(payload.get(root_key)):
+        remaining_image = self.value_contains_image(payload.get(root_key))
+        if remaining_image:
             raise ImageProxyError(
                 "Vision Proxy could not replace the image for the text-only target model."
             )
+        changed = bool(changed) or (contains_image and not remaining_image)
         if changed:
             self.hooks.write_event(
                 event_context,

@@ -14,6 +14,7 @@ if __name__ == "__main__":
     sys.modules.setdefault("codex_proxy", sys.modules[__name__])
 
 import argparse
+import contextvars
 from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass, replace
 from datetime import timezone
@@ -10031,11 +10032,21 @@ _CATALOG_ORIGINAL_MODALITIES = _modalities_include_image
 _CATALOG_ORIGINAL_INPUT_MODALITIES = _catalog_input_modalities
 _CATALOG_ORIGINAL_BY_SLUG = generated_catalog_by_slug
 _CATALOG_ORIGINAL_PUBLISHED_BUDGETS = published_official_context_budgets
+_CATALOG_HOOK_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("catalog_hook_depth", default=0)
 
 
 def _catalog_override(candidate: Callable[..., Any], original: Callable[..., Any]) -> Callable[..., Any] | None:
-    wrapped = getattr(candidate, "__wrapped__", None)
-    return None if candidate is original or wrapped is original else candidate
+    if candidate is original or _CATALOG_HOOK_DEPTH.get() > 0:
+        return None
+
+    def invoke(*args: Any, **kwargs: Any) -> Any:
+        token = _CATALOG_HOOK_DEPTH.set(_CATALOG_HOOK_DEPTH.get() + 1)
+        try:
+            return candidate(*args, **kwargs)
+        finally:
+            _CATALOG_HOOK_DEPTH.reset(token)
+
+    return invoke
 
 
 def _is_image_part(value: Any) -> bool:

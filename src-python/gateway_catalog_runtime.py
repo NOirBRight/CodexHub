@@ -187,7 +187,10 @@ class CatalogRuntime:
     published_budget_reader: Callable[[Path], dict[str, Mapping[str, Any]]] | None = None
 
     def _resolved_catalog_path(self, path: Path) -> Path:
-        parameters = inspect.signature(self.catalog_path_reader).parameters
+        try:
+            parameters = inspect.signature(self.catalog_path_reader).parameters
+        except (TypeError, ValueError):
+            return self.catalog_path_reader(path)
         positional = [
             parameter
             for parameter in parameters.values()

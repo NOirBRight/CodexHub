@@ -12,6 +12,7 @@ from enum import Enum
 import json
 from typing import Any, Protocol
 
+from gateway_interfaces import UpstreamResponseLike
 from gateway_errors import UpstreamProtocolTranslationError
 from protocol_translation import PreparedExchange, UnsupportedProtocolTranslationError
 from route_plan import RelayExecutionPlan, RouteAttemptPlan, RoutePlan
@@ -131,11 +132,6 @@ class CompatibilityMutationHook(Protocol):
 class UpstreamRequestLike(Protocol):
     data: bytes | None
     headers: Mapping[str, str]
-
-
-class UpstreamResponseLike(Protocol):
-    headers: Mapping[str, str]
-    status: int | None
 
 
 class RetrySafetyHook(Protocol):

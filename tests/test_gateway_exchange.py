@@ -7,8 +7,11 @@ from types import SimpleNamespace
 
 from gateway_exchange import (
     ExchangeFailureTypes,
+    ExchangeDisposition,
     ExchangeHooks,
     ExchangeRequest,
+    ExchangeProgress,
+    ExchangeResult,
     ParsedInboundRequest,
     execute_exchange,
     terminal_result,
@@ -19,6 +22,12 @@ from route_primitives import MutationPolicy, RouteProtocol
 
 class _NeverRaised(Exception):
     pass
+
+
+def test_terminal_result_rejects_contradictory_states():
+    progress = ExchangeProgress()
+    assert terminal_result(ExchangeResult(ExchangeDisposition.COMPLETED, progress, status=200, stop_reason="bad")).error == "invalid_exchange_result"
+    assert terminal_result(ExchangeResult(ExchangeDisposition.STOPPED, progress, status=500, stop_reason="downstream_closed")).error == "invalid_exchange_result"
 
 
 class _FallbackError(Exception):

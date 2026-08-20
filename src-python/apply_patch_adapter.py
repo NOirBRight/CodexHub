@@ -20,9 +20,7 @@ from typing import Any, NoReturn, Protocol
 
 from gateway_errors import UpstreamProtocolTranslationError
 from protocol_translation import UnsupportedProtocolTranslationError
-
-
-APPLY_PATCH_FUNCTION_NAME = "apply_patch"
+from route_primitives import APPLY_PATCH_FUNCTION_NAME
 APPLY_PATCH_ADAPTER_EVENT = "third_party_apply_patch_freeform_adapter"
 APPLY_PATCH_ADAPTER_ERROR_CODE = "invalid_apply_patch_function_call"
 APPLY_PATCH_FUNCTION_CALL_FIELDS = frozenset(
@@ -46,14 +44,6 @@ DEFAULT_TERMINAL_EVENT_TYPES = frozenset(
     }
 )
 
-
-class AdapterEventWriter(Protocol):
-    def __call__(
-        self,
-        event_context: Mapping[str, Any] | None,
-        event: str,
-        **fields: Any,
-    ) -> None: ...
 
 
 class _ApplyPatchAdapterFailure(ValueError):

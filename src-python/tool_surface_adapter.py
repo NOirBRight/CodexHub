@@ -34,8 +34,7 @@ from codex_semantic_adapter import (
     normalize_multi_agent_arguments,
     normalize_tool_search_arguments,
 )
-from apply_patch_adapter import APPLY_PATCH_FUNCTION_NAME
-from collaboration_adapter import WORKER_REQUESTED_BINDING_FIELD
+from route_primitives import APPLY_PATCH_FUNCTION_NAME, WORKER_REQUESTED_BINDING_FIELD
 
 
 TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")

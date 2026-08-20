@@ -62,7 +62,6 @@ from gateway_settings import (
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
 )
-from route_plan import RetryExecutionPlan
 from route_primitives import authentication_strategy as _authentication_strategy
 from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
@@ -188,7 +187,20 @@ def _diagnostic_phase_name(failure_phase: str | None) -> str | None:
     }.get(failure_phase)
 
 
-@dataclass(frozen=True)
+class RetryExecutionPlanLike(Protocol):
+    request_kind: str
+    policy: Any
+    retry_http_errors: bool
+    request_timeout_seconds: int | float
+    base_open_attempts: int
+    open_attempt_budget: Any
+
+    def new_open_attempt_budget(self) -> dict[str, int]: ...
+    def open_attempts_for_failure_class(self, failure_class: str) -> int: ...
+    def retry_delay_seconds(self, attempt: int, failure_class: str) -> int: ...
+    def capacity_elapsed_limit_allows(self, started_at: float, delay_seconds: int | float) -> bool: ...
+
+
 class DiagnosticRecorder(Protocol):
     def observe_upstream_phase(self, request_key: str | None, **fields: Any) -> None: ...
     def observe_upstream_attempt(self, request_key: str | None, **fields: Any) -> None: ...
@@ -450,7 +462,7 @@ class GatewayTransport:
         endpoint_path = parsed.path or "/"
         url = self.endpoint_url_hook(upstream, endpoint_path)
         if parsed.query:
-            url += "?" + parsed.query
+            url += ("&" if "?" in url else "?") + parsed.query
         return self.build_request_url(url, data=data, headers=headers, method=method)
 
     def proxy_url(self, url: str) -> str | None:
@@ -1609,7 +1621,7 @@ def _open_upstream_response(
     max_attempts: int | None = None,
     retry_policy: str = RETRY_GATEWAY_FULL,
     retry_http_errors: bool = True,
-    retry_execution: RetryExecutionPlan | None = None,
+    retry_execution: RetryExecutionPlanLike | None = None,
     transport_policy: TransportPolicy | None = None,
     downstream_exposed: Callable[[], bool] | None = None,
     pre_response_deadline: float | None = None,
