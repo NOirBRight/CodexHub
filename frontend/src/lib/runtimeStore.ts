@@ -36,6 +36,7 @@ export type RuntimeSnapshot = {
 };
 
 export type RuntimeCacheKey = keyof RuntimeSnapshot;
+export type RuntimeData<K extends RuntimeCacheKey> = NonNullable<RuntimeSnapshot[K]["data"]>;
 
 export function runtimeCache<T>(data: T | null = null): RuntimeCache<T> {
   return {
@@ -75,12 +76,12 @@ export function setCacheLoading(current: RuntimeSnapshot, key: RuntimeCacheKey):
   } as RuntimeSnapshot;
 }
 
-export function setCacheData<T>(
+export function setCacheData<K extends RuntimeCacheKey>(
   current: RuntimeSnapshot,
-  key: RuntimeCacheKey,
-  data: T,
+  key: K,
+  data: RuntimeData<K>,
 ): RuntimeSnapshot {
-  const cache = current[key] as RuntimeCache<T>;
+  const cache = current[key] as RuntimeCache<RuntimeData<K>>;
   return {
     ...current,
     [key]: {

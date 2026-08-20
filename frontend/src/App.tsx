@@ -19,6 +19,7 @@ import {
   setCacheLoading,
   type RuntimeCache,
   type RuntimeCacheKey,
+  type RuntimeData,
   type RuntimeSnapshot,
 } from "./lib/runtimeStore";
 import { isUpdateInstallActive, updateInstallToastText } from "./lib/updateStatus";
@@ -260,16 +261,16 @@ export default function App() {
   runtimeRef.current = runtime;
   const settingsLoaded = Boolean(runtime.settings.data);
 
-  const runCachedRequest = useCallback(async <T,>(
-    key: RuntimeCacheKey,
-    loader: () => Promise<T>,
-  options?: RuntimeCacheOptions<T>,
-  ): Promise<T> => {
-    const existing = runtimeInflight.current[key] as Promise<T> | undefined;
+  const runCachedRequest = useCallback(async <K extends RuntimeCacheKey>(
+    key: K,
+    loader: () => Promise<RuntimeData<K>>,
+    options?: RuntimeCacheOptions<RuntimeData<K>>,
+  ): Promise<RuntimeData<K>> => {
+    const existing = runtimeInflight.current[key] as Promise<RuntimeData<K>> | undefined;
     if (existing && !options?.force) {
       return existing;
     }
-    const cached = runtimeRef.current?.[key] as RuntimeCache<T> | undefined;
+    const cached = runtimeRef.current?.[key] as RuntimeCache<RuntimeData<K>> | undefined;
     const staleMs = options?.staleMs ?? 0;
     if (
       !options?.force &&
@@ -288,7 +289,7 @@ export default function App() {
       });
     }
 
-    let request: Promise<T>;
+    let request: Promise<RuntimeData<K>>;
     request = loader()
       .then((data) => {
         startUiTransition(() => {
@@ -318,7 +319,7 @@ export default function App() {
     return request;
   }, [startUiTransition]);
 
-  const setRuntimeCacheData = useCallback(<T,>(key: RuntimeCacheKey, data: T) => {
+  const setRuntimeCacheData = useCallback(<K extends RuntimeCacheKey>(key: K, data: RuntimeData<K>) => {
     startUiTransition(() => {
       setRuntime((current) => setCacheData(current, key, data));
     });
@@ -326,37 +327,37 @@ export default function App() {
 
   const refreshStatus = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<AppStatus>("status", () => api.getStatus(), options),
+      runCachedRequest("status", () => api.getStatus(), options),
     [runCachedRequest],
   );
 
   const refreshGatewayStatus = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<GatewayStatus>("gatewayStatus", () => api.gatewayStatus(), options),
+      runCachedRequest("gatewayStatus", () => api.gatewayStatus(), options),
     [runCachedRequest],
   );
 
   const refreshSettings = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<Settings>("settings", () => api.getSettings(), options),
+      runCachedRequest("settings", () => api.getSettings(), options),
     [runCachedRequest],
   );
 
   const refreshProviders = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<Provider[]>("providers", () => api.getProviders(), options),
+      runCachedRequest("providers", () => api.getProviders(), options),
     [runCachedRequest],
   );
 
   const refreshCatalogModels = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<Model[]>("catalogModels", () => api.listModels(), options),
+      runCachedRequest("catalogModels", () => api.listModels(), options),
     [runCachedRequest],
   );
 
   const refreshModelMetadata = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
-      runCachedRequest<Model[]>("modelMetadata", () => api.listModelMetadata(), {
+      runCachedRequest("modelMetadata", () => api.listModelMetadata(), {
         quiet: true,
         ...options,
       }),
@@ -364,7 +365,7 @@ export default function App() {
   );
 
   const loadAppFlavor = useCallback(async (options?: LoadRuntimeOptions) => {
-    await runCachedRequest<AppFlavorInfo>(
+    await runCachedRequest(
       "appFlavor",
       () => api.getAppFlavor(),
       {
@@ -376,7 +377,7 @@ export default function App() {
 
   const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
     const includeClientVersions = Boolean(options?.includeClientVersions);
-    await runCachedRequest<GatewayClientInfo[]>(
+    await runCachedRequest(
       "gatewayClients",
       async () => {
         const clients = await api.listGatewayClients(includeClientVersions);
@@ -404,12 +405,12 @@ export default function App() {
 
   const refreshGatewayTelemetry = useCallback(async (options?: { force?: boolean }) => {
     await Promise.allSettled([
-      runCachedRequest<GatewayUsageSnapshot>(
+      runCachedRequest(
         "gatewayUsageSnapshot",
         () => api.gatewayUsageSnapshot(usageWindow),
         { force: options?.force, quiet: true, staleMs: 4000 },
       ),
-      runCachedRequest<GatewayEvent[]>(
+      runCachedRequest(
         "gatewayEvents",
         () => api.gatewayRecentEvents(80),
         { force: options?.force, quiet: true, staleMs: 4000 },
@@ -460,7 +461,7 @@ export default function App() {
 
   const loadAppVersion = useCallback(async () => {
     try {
-      return await runCachedRequest<AppVersionInfo>(
+      return await runCachedRequest(
         "appVersion",
         async () => {
           const info = await api.getAppVersion();
@@ -477,7 +478,7 @@ export default function App() {
   }, [runCachedRequest, t]);
 
   const loadAppUpdateStatus = useCallback(async () => {
-    return runCachedRequest<AppUpdateStatus>(
+    return runCachedRequest(
       "updateStatus",
       async () => {
         const status = await AppUpdater.check();
@@ -539,6 +540,10 @@ export default function App() {
 
       try {
         const status = await AppUpdater.install();
+        if (!status) {
+          showToast(t("settings.desktopUpdatesUnavailable"), "info");
+          return;
+        }
         setUpdateInstallStatus(status);
         updateInstallToast(status, source);
         if (source === "settings" && status.phase === "failed") {

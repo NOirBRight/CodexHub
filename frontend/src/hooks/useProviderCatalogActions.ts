@@ -143,7 +143,7 @@ export function useProviderCatalogActions({
         },
       },
     );
-    const syncResult = published.syncResult;
+    let syncResult = published.syncResult;
     await refreshGatewayState();
     const overrideDiagnostics = await api.catalogOverrideDiagnostics().catch(() => null);
     if (syncResult) {

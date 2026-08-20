@@ -113,6 +113,16 @@ def test_adapt_custom_tool_history_reconstructs_exact_pair():
             assert forbidden not in fields
 
 
+def test_apply_patch_lifecycle_status_is_phase_specific():
+    adapter, _ = _adapter()
+    with pytest.raises(Exception):
+        adapter.adapt_response_body({"output": [_function_call(status="in_progress")]})
+    with pytest.raises(Exception):
+        adapter.adapt_stream_events([
+            {"type": "response.output_item.added", "output_index": 0, "item": _function_call(status="completed")},
+        ])
+
+
 def test_adapt_response_body_rewrites_function_call_to_custom_tool():
     adapter, events = _adapter()
     payload, changed = adapter.adapt_response_body(

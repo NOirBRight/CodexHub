@@ -81,11 +81,15 @@ def _is_apply_patch_custom_tool_call(item: Any, function_name: str) -> bool:
 def _require_exact_apply_patch_function_call_fields(
     item: Mapping[str, Any],
     required_fields: frozenset[str],
+    *,
+    expected_status: str | None = None,
 ) -> None:
     if set(item) != required_fields:
         raise _ApplyPatchAdapterFailure("function_call_fields_not_exact")
     if "status" in item and item.get("status") not in {"in_progress", "completed"}:
         raise _ApplyPatchAdapterFailure("function_call_status_not_supported")
+    if expected_status is not None and item.get("status") != expected_status:
+        raise _ApplyPatchAdapterFailure("function_call_status_not_expected")
 
 
 def _apply_patch_arguments_text_and_input(arguments: Any) -> tuple[str, str]:
@@ -340,6 +344,7 @@ class ApplyPatchAdapter:
                     rewritten_items.append(
                         {
                             "type": "function_call_output",
+                            **({"id": raw_item["id"]} if isinstance(raw_item.get("id"), str) else {}),
                             "call_id": call_id,
                             "output": raw_item["output"],
                         }
@@ -408,6 +413,7 @@ class ApplyPatchAdapter:
                     _require_exact_apply_patch_function_call_fields(
                         raw_item,
                         self.facts.function_call_fields,
+                        expected_status="completed",
                     )
                     item_id, call_id = _apply_patch_item_identity(raw_item)
                     _, patch = _apply_patch_arguments_text_and_input(raw_item.get("arguments"))
@@ -575,6 +581,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
             _require_exact_apply_patch_function_call_fields(
                 item,
                 self._adapter.facts.function_call_fields,
+                expected_status="in_progress",
             )
             item_id, call_id = _apply_patch_item_identity(item)
             arguments = item.get("arguments")
