@@ -16,13 +16,14 @@ from dataclasses import asdict, dataclass, fields, replace
 from http.client import HTTPConnection, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
 import catalog_sync
 import codex_proxy
 import gateway_sse
+import gateway_exchange
 from collaboration_runtime_contract import (
     COLLABORATION_V1,
     COLLABORATION_V2,
@@ -3594,6 +3595,66 @@ class RoutingTests(unittest.TestCase):
                 )
                 self.assertEqual(request_error["error"], case["expected_error"])
                 self.write_proxy_event.reset_mock()
+
+    def test_exchange_result_mapping_fails_closed_before_facade_dereference(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, fake = post_handler("/v1/responses", body)
+
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.execute_exchange", return_value=object()),
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+            )
+
+        self.assertEqual(fake.status, 500)
+        downstream = b"".join(fake.wfile.writes)
+        self.assertIn(b"invalid_exchange_result", downstream)
+        self.assertNotIn(b"AttributeError", downstream)
+
+    def test_exchange_retry_clock_uses_live_facade_patch(self):
+        body = json.dumps(
+            {
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler, _fake = post_handler("/v1/responses", body)
+        captured_clock: list[Callable[[], float]] = []
+
+        def stop_exchange(_request, hooks, *, progress):
+            captured_clock.append(hooks.monotonic)
+            return gateway_exchange.ExchangeResult(
+                gateway_exchange.ExchangeDisposition.STOPPED,
+                progress,
+                stop_reason="downstream_closed",
+            )
+
+        clock = Mock(return_value=123.0)
+        with (
+            patch("codex_proxy.codex_access_token", return_value="sub-token"),
+            patch("codex_proxy.codex_account_id", return_value="acct-1"),
+            patch("codex_proxy.time.monotonic", clock),
+            patch("codex_proxy.execute_exchange", side_effect=stop_exchange),
+        ):
+            CodexProxyHandler._proxy_post_request(
+                handler,
+                inbound_format="responses",
+            )
+
+        self.assertEqual(len(captured_clock), 1)
+        self.assertEqual(captured_clock[0](), 123.0)
+        self.assertIs(captured_clock[0], clock)
 
     def test_third_party_app_official_responses_uses_transparent_metered_runtime_path(self):
         body = json.dumps(

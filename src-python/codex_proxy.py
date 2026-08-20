@@ -60,6 +60,20 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 import urllib3
 
 from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
+from gateway_exchange import (
+    ExchangeFailureTypes,
+    ExchangeHooks,
+    ExchangeProgress,
+    ExchangeRequest,
+    InboundRequest,
+    InboundRequestHooks,
+    OpenExchangeRequest,
+    ParsedInboundRequest as GatewayRequestInput,
+    RelayExchangeRequest,
+    execute_exchange,
+    parse_inbound_request,
+    terminal_result,
+)
 from vision_proxy import (
     IMAGE_PROXY_CACHE_LOCK,
     VisionFacts,
@@ -10660,25 +10674,6 @@ def _json_error_payload_for_inbound_format(
     return payload
 
 
-@dataclass(frozen=True)
-class GatewayRequestInput:
-    request_id: str
-    started_at: float
-    request_context: dict[str, Any]
-    proxy_request_context: dict[str, Any]
-    raw_provider_probe: bool
-    content_length: int
-    content_type: str | None
-    content_encoding: str | None
-    content_decoded: bool
-    body: bytes
-    inbound_payload: Any
-    request_kind: str
-    model_requested: str | None
-    model: str | None
-    route_reason: str
-
-
 def _parse_gateway_request_input(
     handler: Any,
     *,
@@ -10691,46 +10686,29 @@ def _parse_gateway_request_input(
     raw_provider_probe: bool,
     content_length: int,
 ) -> GatewayRequestInput:
-    body = handler.rfile.read(content_length)
-    content_type = _get_header(handler.headers, "Content-Type")
-    content_encoding = _get_header(handler.headers, "Content-Encoding")
-    body, content_decoded, decode_error = decoded_request_body(body, content_encoding)
-    if decode_error:
-        raise ValueError(f"request body content-encoding decode failed: {decode_error}")
-    try:
-        inbound_payload = json.loads(body.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        inbound_payload = None
-    request_kind = _request_kind_from_headers_and_payload(handler.headers, inbound_payload, inbound_format)
-    parsed_proxy_request_context = dict(proxy_request_context)
-    if request_kind == RETRY_REQUEST_COMPACT:
-        parsed_proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
-        if raw_provider_probe:
-            parsed_proxy_request_context["raw_provider_probe"] = True
-    if isinstance(inbound_payload, Mapping) and isinstance(inbound_payload.get("model"), str):
-        model_requested = inbound_payload["model"]
-    else:
-        model_requested = try_extract_model(body)
-    model = provider_scoped_route_model(model_requested, provider_hint)
-    if provider_hint is not None and not model:
-        raise ValueError(f"model is required for provider path: {provider_hint}")
-    route_reason = "provider_path" if provider_hint and model else "model" if model else "official_control_fallback"
-    return GatewayRequestInput(
-        request_id=request_id,
-        started_at=started_at,
-        request_context=dict(request_context),
-        proxy_request_context=parsed_proxy_request_context,
-        raw_provider_probe=raw_provider_probe,
-        content_length=content_length,
-        content_type=content_type,
-        content_encoding=content_encoding,
-        content_decoded=content_decoded,
-        body=body,
-        inbound_payload=inbound_payload,
-        request_kind=request_kind,
-        model_requested=model_requested,
-        model=model,
-        route_reason=route_reason,
+    """Compatibility adapter from HTTP input to the typed inbound seam."""
+    return parse_inbound_request(
+        InboundRequest(
+            request_id=request_id,
+            started_at=started_at,
+            path=handler.path,
+            protocol=RouteProtocol(inbound_format),
+            provider_hint=provider_hint,
+            headers=handler.headers,
+            body=handler.rfile.read(content_length),
+            request_context=request_context,
+            proxy_request_context=proxy_request_context,
+            raw_provider_probe=raw_provider_probe,
+        ),
+        InboundRequestHooks(
+            decode_body=decoded_request_body,
+            get_header=_get_header,
+            request_kind=_request_kind_from_headers_and_payload,
+            compact_request_kind=RETRY_REQUEST_COMPACT,
+            event_context_for_kind=_event_context_with_request_kind,
+            try_extract_model=try_extract_model,
+            provider_scoped_model=provider_scoped_route_model,
+        ),
     )
 
 
@@ -11603,20 +11581,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     route_plan.protocol_failure_reason
                     or "configured upstream protocol is not executable"
                 )
-            operational_authentication = (
-                materialize_operational_authentication(
-                    self.headers,
-                    upstream,
-                )
-            )
-            route_plan = bind_route_plan_operational_authentication(
-                route_plan,
-                self.headers,
-                upstream,
-                operational_authentication,
-                drop_content_encoding=content_decoded,
-            )
-            primary_route_attempt = route_plan.attempts[0]
             model_canonical = canonical_model_id(model) if model else None
             # Create the request-scoped downstream stream-commit seam early so that
             # every production SSE header/body (status, retry, keepalive, converted
@@ -11757,133 +11721,47 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_exc=seam.last_write_error() or OSError("downstream closed")
                 )
                 return
-            prepared_caller_body = body
-            mutated_attempt_bodies: dict[int, bytes] = {}
-
-            def upstream_body_for_attempt(
-                attempt: RouteAttemptPlan,
-                prepared_body: bytes = prepared_caller_body,
-            ) -> bytes:
-                cached_body = mutated_attempt_bodies.get(attempt.index)
-                if cached_body is not None:
-                    return cached_body
-                try:
-                    exchange = attempt.prepare_body(prepared_body)
-                    self._active_prepared_exchange = exchange
-                    attempt_body = exchange.upstream_body
-                except UnsupportedProtocolTranslationError as exc:
-                    raise UpstreamProtocolTranslationError(exc) from exc
-                compatibility_upstream = dict(upstream)
-                compatibility_upstream["upstream_format"] = attempt.selected_upstream_format
-                mutation_policy = route_plan.request_mutation_policy
-                if mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH:
-                    official_payload = (
-                        inbound_payload
-                        if attempt.selected_upstream_format == inbound_format
-                        else _safe_json_mapping(attempt_body)
-                    )
-                    mutated_attempt_bodies[attempt.index] = official_passthrough_request_body(
-                        attempt_body,
-                        official_payload,
-                        compatibility_upstream,
-                        model_id=model,
-                    )
-                    return mutated_attempt_bodies[attempt.index]
-                if mutation_policy == MutationPolicy.TRANSPARENT:
-                    mutated = transparent_request_body(
-                        attempt_body,
-                        _safe_json_mapping(attempt_body),
-                        compatibility_upstream,
-                        model_id=model,
-                    )
-                    mutated, developer_role_rewrites = _rewrite_transparent_developer_role_messages(
-                        mutated,
-                        compatibility_upstream,
-                    )
-                    if developer_role_rewrites:
-                        write_proxy_event(
-                            "developer_role_rewrite_applied",
-                            request_id=request_id,
-                            model=model_canonical,
-                            upstream=upstream_name,
-                            inbound_format=inbound_format,
-                            messages_rewritten=developer_role_rewrites,
-                            **proxy_request_context,
-                        )
-                    mutated, tool_schema_rewrites = _normalize_transparent_tool_schema_booleans(mutated)
-                    if tool_schema_rewrites:
-                        write_proxy_event(
-                            "tool_schema_boolean_normalized",
-                            request_id=request_id,
-                            model=model_canonical,
-                            upstream=upstream_name,
-                            inbound_format=inbound_format,
-                            schemas_rewritten=tool_schema_rewrites,
-                            **proxy_request_context,
-                        )
-                    if route_plan.transparent_tool_loop_guard:
-                        transparent_payload = _safe_json_mapping(mutated) or {}
-                        attempt_format = attempt.selected_upstream_format
-                        repeated_count = (
-                            _excessive_transparent_responses_tool_loop_count(transparent_payload)
-                            if attempt_format == "responses"
-                            else _excessive_transparent_chat_tool_loop_count(transparent_payload)
-                            if attempt_format == "chat_completions"
-                            else None
-                        )
-                        if repeated_count is not None:
-                            raise UpstreamProtocolTranslationError(
-                                UnsupportedProtocolTranslationError(
-                                    EXCESSIVE_TOOL_LOOP_ERROR_CODE,
-                                    f"Repeated successful function calls exceeded the bound of {EXCESSIVE_TOOL_LOOP_BOUND}.",
-                                )
-                            )
-                    mutated_attempt_bodies[attempt.index] = mutated
-                    return mutated
-                if mutation_policy != MutationPolicy.GATEWAY_COMPATIBILITY:
-                    mutated_attempt_bodies[attempt.index] = attempt_body
-                    return attempt_body
-                mutated_attempt_bodies[attempt.index] = compatible_request_body(
-                    attempt_body,
-                    compatibility_upstream,
-                    model_id=model,
-                    event_context=adapter_event_context,
-                    inject_codex_tools=route_plan.tool_exposure.gateway_schema_injection,
-                    tool_protocol_override=attempt.tool_protocol,
-                    tool_surface_strategy_override=attempt.tool_surface_strategy,
-                    native_responses_tool_codec_override=attempt.native_responses_tool_codec,
+            operational_authentication = (
+                materialize_operational_authentication(
+                    self.headers,
+                    upstream,
                 )
-                return mutated_attempt_bodies[attempt.index]
+            )
+            route_plan = bind_route_plan_operational_authentication(
+                route_plan,
+                self.headers,
+                upstream,
+                operational_authentication,
+                drop_content_encoding=content_decoded,
+            )
+            primary_route_attempt = route_plan.attempts[0]
+            prepared_caller_body = body
 
             def request_observability_for_attempt(
                 attempt: RouteAttemptPlan,
                 attempt_body: bytes,
             ) -> dict[str, Any]:
-                upstream_observability = (
-                    proxy_telemetry.enrich_request_observability(
-                        body=attempt_body,
-                        codex_home=RUNTIME_CODEX_DIR,
-                        upstream=upstream,
-                        include_body_hmac=(
-                            attempt.request_mutation_policy
-                            != MutationPolicy.OFFICIAL_PASSTHROUGH
-                        ),
-                        prompt_cache_key=prompt_cache_key,
-                        extract_prompt_cache_key=(
-                            attempt.request_mutation_policy
-                            != MutationPolicy.OFFICIAL_PASSTHROUGH
-                        ),
-                    )
+                upstream_observability = proxy_telemetry.enrich_request_observability(
+                    body=attempt_body,
+                    codex_home=RUNTIME_CODEX_DIR,
+                    upstream=upstream,
+                    include_body_hmac=(
+                        attempt.request_mutation_policy
+                        != MutationPolicy.OFFICIAL_PASSTHROUGH
+                    ),
+                    prompt_cache_key=prompt_cache_key,
+                    extract_prompt_cache_key=(
+                        attempt.request_mutation_policy
+                        != MutationPolicy.OFFICIAL_PASSTHROUGH
+                    ),
                 )
                 return {
                     **upstream_observability,
                     **_request_observability_with_prefix(
-                        caller_request_observability,
-                        "caller",
+                        caller_request_observability, "caller"
                     ),
                     **_request_observability_with_prefix(
-                        upstream_observability,
-                        "upstream",
+                        upstream_observability, "upstream"
                     ),
                     "request_observability_scope": "executed_attempt",
                     "request_observability_attempt_index": attempt.index,
@@ -11892,50 +11770,113 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     ),
                 }
 
-            request_observability = request_observability_for_attempt(
-                primary_route_attempt,
-                upstream_body_for_attempt(primary_route_attempt),
-            )
-            emit_request_start_once(request_observability)
+            def set_active_exchange(exchange: PreparedExchange) -> None:
+                self._active_prepared_exchange = exchange
+
+            def activate_route_attempt(attempt: RouteAttemptPlan) -> None:
+                attempt_fields = _route_attempt_event_fields(
+                    attempt,
+                    provider_id=route_plan.provider_id,
+                    model_requested=route_plan.model_requested,
+                    model_canonical=route_plan.canonical_model,
+                    upstream_model=route_plan.upstream_model,
+                )
+                proxy_request_context.update(attempt_fields)
+                adapter_event_context.update(attempt_fields)
+                adapter_event_context["tool_protocol"] = attempt.tool_protocol
+
+            def rewrite_developer_roles(
+                attempt_body: bytes,
+                compatibility_upstream: Mapping[str, Any],
+            ) -> tuple[bytes, int]:
+                mutated, rewrites = _rewrite_transparent_developer_role_messages(
+                    attempt_body, compatibility_upstream
+                )
+                if rewrites:
+                    write_proxy_event(
+                        "developer_role_rewrite_applied",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        messages_rewritten=rewrites,
+                        **proxy_request_context,
+                    )
+                return mutated, rewrites
+
+            def normalize_tool_schema_booleans(
+                attempt_body: bytes,
+            ) -> tuple[bytes, int]:
+                mutated, rewrites = _normalize_transparent_tool_schema_booleans(
+                    attempt_body
+                )
+                if rewrites:
+                    write_proxy_event(
+                        "tool_schema_boolean_normalized",
+                        request_id=request_id,
+                        model=model_canonical,
+                        upstream=upstream_name,
+                        inbound_format=inbound_format,
+                        schemas_rewritten=rewrites,
+                        **proxy_request_context,
+                    )
+                return mutated, rewrites
+
+            def validate_transparent_tool_loop(
+                attempt_body: bytes,
+                attempt_format: str,
+            ) -> None:
+                transparent_payload = _safe_json_mapping(attempt_body) or {}
+                repeated_count = (
+                    _excessive_transparent_responses_tool_loop_count(
+                        transparent_payload
+                    )
+                    if attempt_format == "responses"
+                    else _excessive_transparent_chat_tool_loop_count(
+                        transparent_payload
+                    )
+                    if attempt_format == "chat_completions"
+                    else None
+                )
+                if repeated_count is not None:
+                    raise UpstreamProtocolTranslationError(
+                        UnsupportedProtocolTranslationError(
+                            EXCESSIVE_TOOL_LOOP_ERROR_CODE,
+                            "Repeated successful function calls exceeded "
+                            f"the bound of {EXCESSIVE_TOOL_LOOP_BOUND}.",
+                        )
+                    )
+
+            def build_attempt_request(
+                attempt: RouteAttemptPlan,
+                attempt_body: bytes,
+            ) -> Request:
+                return _gateway_transport().build_request_url(
+                    attempt.endpoint_url,
+                    data=attempt_body,
+                    headers=attempt.request_headers.to_dict(),
+                    method="POST",
+                )
+
+            def lifecycle_guidance(
+                attempt_body: bytes,
+                reason: str,
+            ) -> bytes:
+                guided = _responses_body_with_lifecycle_final_retry_guidance(
+                    attempt_body, reason
+                )
+                _write_adapter_event(
+                    adapter_event_context,
+                    "lifecycle_final_retry_guidance_injected",
+                    upstream=upstream_name,
+                    upstream_format="responses",
+                    reason=reason,
+                )
+                return guided
+
             emit_retry_to_downstream = (
                 primary_route_attempt.retry.emit_downstream_retry_notice
             )
-
-            def upstream_request_for_attempt(
-                attempt: RouteAttemptPlan,
-                lifecycle_final_retry_reason: str | None = None,
-            ) -> tuple[Request, dict[str, Any]]:
-                attempt_body = upstream_body_for_attempt(
-                    attempt,
-                    prepared_caller_body,
-                )
-                if (
-                    lifecycle_final_retry_reason
-                    and attempt.upstream_protocol == RouteProtocol.RESPONSES
-                ):
-                    attempt_body = _responses_body_with_lifecycle_final_retry_guidance(
-                        attempt_body,
-                        lifecycle_final_retry_reason,
-                    )
-                    _write_adapter_event(
-                        adapter_event_context,
-                        "lifecycle_final_retry_guidance_injected",
-                        upstream=upstream_name,
-                        upstream_format=attempt.selected_upstream_format,
-                        reason=lifecycle_final_retry_reason,
-                    )
-                return (
-                    _gateway_transport().build_request_url(
-                        attempt.endpoint_url,
-                        data=attempt_body,
-                        headers=attempt.request_headers.to_dict(),
-                        method="POST",
-                    ),
-                    request_observability_for_attempt(
-                        attempt,
-                        attempt_body,
-                    ),
-                )
 
             def emit_downstream_retry(payload: Mapping[str, Any]) -> bool:
                 nonlocal downstream_sse_started
@@ -11959,7 +11900,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                         "upstream_format": upstream_format,
                         "behavior_profile": behavior_profile,
                         "route_reason": route_reason,
-                        "route_mode": "official" if upstream_name == "official" else "codexhub",
+                        "route_mode": (
+                            "official"
+                            if upstream_name == "official"
+                            else "codexhub"
+                        ),
                         "inbound_format": inbound_format,
                         "is_stream": caller_stream,
                     }
@@ -11970,412 +11915,282 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                 write_proxy_event("sse_retry_notice", **notice_fields)
                 return True
 
-            def mark_downstream_sse_started() -> None:
-                nonlocal downstream_sse_started
-                downstream_sse_started = True
+            def set_upstream_format(selected_format: str) -> None:
+                seam = _handler_downstream_stream_commit(self)
+                if seam is not None:
+                    seam.set_upstream_format(selected_format)
 
-            open_attempt_budget = (
-                primary_route_attempt.retry.new_open_attempt_budget()
-            )
-            runtime_tool_compatibility_attempt_generation = 0
-            for route_attempt in route_plan.attempts:
-                active_route_attempt = route_attempt
-                upstream_format = route_attempt.selected_upstream_format
-                route_attempt_event_fields = _route_attempt_event_fields(
-                    route_attempt,
-                    provider_id=route_plan.provider_id,
-                    model_requested=route_plan.model_requested,
-                    model_canonical=route_plan.canonical_model,
-                    upstream_model=route_plan.upstream_model,
+            def attach_upstream(response: Any) -> None:
+                seam = _handler_downstream_stream_commit(self)
+                if seam is not None:
+                    seam.attach_upstream(response)
+
+            def open_exchange(
+                opening: OpenExchangeRequest,
+            ) -> Any:
+                return _open_upstream_response(
+                    opening.request,
+                    upstream_name=opening.upstream_name,
+                    upstream_format=opening.upstream_format,
+                    timeout=opening.attempt.retry.request_timeout_seconds,
+                    event_context=opening.event_context,
+                    downstream_retry_callback=(
+                        opening.downstream_retry_callback
+                    ),
+                    retry_execution=opening.attempt.retry,
+                    transport_policy=opening.attempt.transport_policy,
+                    downstream_exposed=opening.downstream_exposed,
+                    pre_response_deadline=opening.pre_response_deadline,
+                    open_attempt_budget=opening.open_attempt_budget,
                 )
-                proxy_request_context.update(route_attempt_event_fields)
-                if isinstance(adapter_event_context, dict):
-                    adapter_event_context.update(route_attempt_event_fields)
-                    adapter_event_context["tool_protocol"] = (
-                        route_attempt.tool_protocol
-                    )
-                base_relay_attempts = route_attempt.retry.base_relay_attempts
-                relay_attempts = base_relay_attempts
-                lifecycle_final_extra_attempts = (
-                    route_attempt.retry.lifecycle_final_extra_attempts(
+
+            def relay_exchange(
+                response: Any,
+                relay: RelayExchangeRequest,
+            ) -> int:
+                return self._relay_upstream_response(
+                    response,
+                    relay.upstream_name,
+                    request_id=relay.request_id,
+                    model=relay.model,
+                    inbound_format=relay.inbound_format,
+                    caller_stream=relay.caller_stream,
+                    event_context=relay.event_context,
+                    usage_capture=relay.usage_capture,
+                    headers_already_sent=relay.headers_already_sent,
+                    defer_stream_errors=relay.defer_stream_errors,
+                    mark_downstream_sse_started=(
+                        relay.mark_downstream_sse_started
+                    ),
+                    response_lifecycle_state=relay.response_lifecycle_state,
+                    relay_execution_plan=relay.relay_plan,
+                )
+
+            def raise_if_cancelled() -> None:
+                active_request = _active_gateway_request()
+                if active_request is not None:
+                    active_request.raise_if_cancelled()
+
+            def protocol_fallback(
+                failed_attempt: RouteAttemptPlan,
+                next_attempt: RouteAttemptPlan,
+                exc: BaseException,
+                attempt_observability: Mapping[str, Any],
+            ) -> None:
+                failed = failed_attempt.telemetry_snapshot()
+                following = next_attempt.telemetry_snapshot()
+                write_proxy_event(
+                    "upstream_protocol_fallback",
+                    request_id=request_id,
+                    model=model_canonical,
+                    model_requested=model_requested,
+                    model_canonical=model_canonical,
+                    upstream=upstream_name,
+                    provider_id=upstream_name,
+                    provider_hint=provider_hint,
+                    upstream_format=(
+                        route_plan.configured_upstream_protocol_name
+                    ),
+                    behavior_profile=behavior_profile,
+                    failed_upstream_format=(
+                        failed_attempt.selected_upstream_format
+                    ),
+                    next_upstream_format=(
+                        next_attempt.selected_upstream_format
+                    ),
+                    failed_route_attempt_index=failed["index"],
+                    failed_route_attempt_request_body_mode=(
+                        failed["request_body_mode"]
+                    ),
+                    failed_route_attempt_request_conversion_steps=(
+                        failed["request_conversion_steps"]
+                    ),
+                    failed_route_attempt_mutation_summary=(
+                        failed["mutation_summary"]
+                    ),
+                    next_route_attempt_index=following["index"],
+                    next_route_attempt_request_body_mode=(
+                        following["request_body_mode"]
+                    ),
+                    next_route_attempt_request_conversion_steps=(
+                        following["request_conversion_steps"]
+                    ),
+                    next_route_attempt_mutation_summary=(
+                        following["mutation_summary"]
+                    ),
+                    status=getattr(exc, "code", 502),
+                    error="HTTPError",
+                    detail=safe_upstream_error_detail(
+                        exc,
+                        redact_identity=_retry_identity_from_context(
+                            adapter_event_context
+                        ),
+                    ),
+                    **dict(attempt_observability),
+                    **proxy_request_context,
+                )
+
+            def exchange_error_status(exc: BaseException) -> int | None:
+                status_value = getattr(exc, "code", None)
+                return status_value if isinstance(status_value, int) else None
+
+            def handle_empty_completed(exc: BaseException) -> bool:
+                detail = (
+                    "Upstream Responses stream completed without visible "
+                    "output or tool calls."
+                )
+                write_proxy_event(
+                    "upstream_empty_completed_response",
+                    request_id=request_id,
+                    model=model,
+                    upstream=upstream_name,
+                    status=502,
+                    upstream_format=upstream_format,
+                    inbound_format=inbound_format,
+                    terminal_seen=False,
+                    completed_seen=True,
+                    visible_or_tool_output_seen=False,
+                    completed_tool_calls=0,
+                    pending_downstream_lines=0,
+                    pending_downstream_bytes=0,
+                    last_event_type="response.completed",
+                )
+                wrote = self._write_downstream_sse_error(
+                    inbound_format=inbound_format,
+                    upstream_name=upstream_name,
+                    status=502,
+                    error="upstream_empty_completed_response",
+                    detail=detail,
+                    redact_identity=_retry_identity_from_context(
                         adapter_event_context
-                    )
+                    ),
                 )
-                relay_execution_plan = route_attempt.relay_execution_plan(
-                    lifecycle_final_retry_enabled=(
-                        lifecycle_final_extra_attempts > 0
-                    )
+                _capture_usage(
+                    usage_capture,
+                    None,
+                    missing_reason="empty_completed_response",
                 )
-                max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
-                relay_attempt = 1
-                lifecycle_final_retry_reason: str | None = None
-                try:
-                    while relay_attempt <= max_relay_attempts:
-                        runtime_tool_compatibility_attempt_generation += 1
-                        if isinstance(adapter_event_context, dict):
-                            adapter_event_context[
-                                _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
-                            ] = runtime_tool_compatibility_attempt_generation
-                        seam = _handler_downstream_stream_commit(self)
-                        if seam is not None:
-                            seam.set_upstream_format(upstream_format)
-                        request, request_observability = upstream_request_for_attempt(
-                            route_attempt,
-                            lifecycle_final_retry_reason,
-                        )
-                        emit_request_start_once(request_observability)
-                        try:
-                            with _open_upstream_response(
-                                request,
-                                upstream_name=upstream_name,
-                                upstream_format=upstream_format,
-                                timeout=(
-                                    route_attempt.retry.request_timeout_seconds
-                                ),
-                                event_context=adapter_event_context,
-                                downstream_retry_callback=emit_downstream_retry if emit_retry_to_downstream else None,
-                                retry_execution=route_attempt.retry,
-                                transport_policy=route_attempt.transport_policy,
-                                downstream_exposed=lambda: _downstream_has_been_exposed(self),
-                                pre_response_deadline=(
-                                    None if downstream_sse_started else self._pre_response_deadline
-                                ),
-                                open_attempt_budget=open_attempt_budget,
-                            ) as response:
-                                seam = _handler_downstream_stream_commit(self)
-                                if seam is not None:
-                                    seam.attach_upstream(response)
-                                status = self._relay_upstream_response(
-                                    response,
-                                    upstream_name,
-                                    request_id=request_id,
-                                    model=model_canonical,
-                                    inbound_format=inbound_format,
-                                    caller_stream=caller_stream,
-                                    event_context=adapter_event_context,
-                                    usage_capture=usage_capture,
-                                    headers_already_sent=downstream_sse_started,
-                                    defer_stream_errors=relay_attempt < relay_attempts,
-                                    mark_downstream_sse_started=mark_downstream_sse_started,
-                                    response_lifecycle_state=response_lifecycle_state,
-                                    relay_execution_plan=relay_execution_plan,
-                                )
-                            break
-                        except DownstreamClosedBeforeRetryError:
-                            finish_downstream_write_failure()
-                            return
-                        except (
-                            CompactEmptyResponseError,
-                            IncompleteRead,
-                            UpstreamStreamInterruptedError,
-                            UpstreamStreamIdleTimeoutError,
-                            UpstreamStreamIncompleteError,
-                            UpstreamStreamErrorEvent,
-                            LifecycleEmptyFinalResponseError,
-                            LifecycleFinalFormatResponseError,
-                        ) as exc:
-                            active_request = _active_gateway_request()
-                            if active_request is not None:
-                                active_request.raise_if_cancelled()
-                            lifecycle_retry = isinstance(
-                                exc,
-                                (LifecycleEmptyFinalResponseError, LifecycleFinalFormatResponseError),
-                            )
-                            retry_safety_class: str | None = None
-                            if lifecycle_retry:
-                                stream_failure = True
-                                retry_exc: BaseException = exc
-                                failure_class = RETRY_FAILURE_QUICK_TRANSIENT
-                                lifecycle_final_retry_reason = "empty" if isinstance(exc, LifecycleEmptyFinalResponseError) else "format"
-                                stream_model_access_path = _model_access_path_from_event_context(
-                                    adapter_event_context,
-                                    upstream_name,
-                                    upstream_format,
-                                )
-                                retry_safety_class = _retry_safety_class(
-                                    retry_exc,
-                                    request=request,
-                                    upstream_name=upstream_name,
-                                    request_kind=request_kind,
-                                    downstream_exposed=_downstream_has_been_exposed(self),
-                                    model_access_path=stream_model_access_path,
-                                    failure_phase="stream_body",
-                                )
-                                if retry_safety_class in _SUPPRESSED_RETRY_SAFETY_CLASSES:
-                                    _emit_upstream_retry_suppressed_event(
-                                        adapter_event_context,
-                                        upstream_name=upstream_name,
-                                        upstream_format=upstream_format,
-                                        request_kind=request_kind,
-                                        attempt=relay_attempt,
-                                        max_attempts=max_relay_attempts,
-                                        exc=retry_exc,
-                                        failure_class=failure_class,
-                                        failure_phase="stream_body",
-                                        retry_safety_class=retry_safety_class,
-                                    )
-                                    raise retry_exc
-                                retry_limit = max_relay_attempts
-                                if relay_attempt >= retry_limit:
-                                    raise
-                                delay_seconds = 0
-                            else:
-                                stream_failure = isinstance(
-                                    exc,
-                                    (
-                                        UpstreamStreamInterruptedError,
-                                        UpstreamStreamIdleTimeoutError,
-                                        UpstreamStreamIncompleteError,
-                                    ),
-                                )
-                                is_stream_error_event = isinstance(exc, UpstreamStreamErrorEvent)
-                                retry_exc = exc.cause if isinstance(exc, UpstreamStreamInterruptedError) else exc
-                                failure_class = _upstream_failure_class(retry_exc)
-                                relay_attempts = route_attempt.retry.relay_attempts_for_failure_class(
-                                    failure_class=failure_class,
-                                    stream_failure=stream_failure,
-                                )
-                                if isinstance(retry_exc, UpstreamEmptyCompletedResponseError):
-                                    relay_attempts = min(
-                                        relay_attempts,
-                                        route_attempt.retry.empty_completed_max_attempts,
-                                    )
-                                max_relay_attempts = relay_attempts + lifecycle_final_extra_attempts
-                                retry_limit = relay_attempts
-                                stream_failure_phase = "stream_body" if (stream_failure or is_stream_error_event) else None
-                                stream_model_access_path = _model_access_path_from_event_context(
-                                    adapter_event_context,
-                                    upstream_name,
-                                    upstream_format,
-                                )
-                                retry_safety_class = _retry_safety_class(
-                                    retry_exc,
-                                    request=request,
-                                    upstream_name=upstream_name,
-                                    request_kind=request_kind,
-                                    downstream_exposed=_downstream_has_been_exposed(self),
-                                    model_access_path=stream_model_access_path,
-                                    failure_phase=stream_failure_phase,
-                                )
-                                if retry_safety_class in _SUPPRESSED_RETRY_SAFETY_CLASSES:
-                                    _emit_upstream_retry_suppressed_event(
-                                        adapter_event_context,
-                                        upstream_name=upstream_name,
-                                        upstream_format=upstream_format,
-                                        request_kind=request_kind,
-                                        attempt=relay_attempt,
-                                        max_attempts=retry_limit,
-                                        exc=retry_exc,
-                                        failure_class=failure_class,
-                                        failure_phase=stream_failure_phase,
-                                        retry_safety_class=retry_safety_class,
-                                    )
-                                    if isinstance(retry_exc, UpstreamEmptyCompletedResponseError):
-                                        detail = "Upstream Responses stream completed without visible output or tool calls."
-                                        write_proxy_event(
-                                            "upstream_empty_completed_response",
-                                            request_id=request_id,
-                                            model=model,
-                                            upstream=upstream_name,
-                                            status=502,
-                                            upstream_format=upstream_format,
-                                            inbound_format=inbound_format,
-                                            terminal_seen=False,
-                                            completed_seen=True,
-                                            visible_or_tool_output_seen=False,
-                                            completed_tool_calls=0,
-                                            pending_downstream_lines=0,
-                                            pending_downstream_bytes=0,
-                                            last_event_type="response.completed",
-                                        )
-                                        if not self._write_downstream_sse_error(
-                                            inbound_format=inbound_format,
-                                            upstream_name=upstream_name,
-                                            status=502,
-                                            error="upstream_empty_completed_response",
-                                            detail=detail,
-                                            redact_identity=_retry_identity_from_context(adapter_event_context),
-                                        ):
-                                            finish_downstream_write_failure()
-                                            return
-                                        _capture_usage(usage_capture, None, missing_reason="empty_completed_response")
-                                        return
-                                    raise retry_exc
-                                if relay_attempt >= retry_limit or failure_class == RETRY_FAILURE_PERMANENT:
-                                    raise retry_exc
-                                delay_seconds = route_attempt.retry.retry_delay_seconds(
-                                    relay_attempt,
-                                    failure_class=failure_class,
-                                    retry_after_seconds=_retry_after_delay_seconds(retry_exc),
-                                )
-                                retry_elapsed_seconds = max(
-                                    0.0,
-                                    time.monotonic() - started_at,
-                                )
-                                if (
-                                    failure_class
-                                    in CAPACITY_RETRY_FAILURE_CLASSES
-                                    and not route_attempt.retry.capacity_elapsed_limit_allows(
-                                        retry_elapsed_seconds,
-                                        delay_seconds,
-                                    )
-                                ):
-                                    raise retry_exc
-                                if (
-                                    stream_failure
-                                    and failure_class == RETRY_FAILURE_QUICK_TRANSIENT
-                                    and not route_attempt.retry.stream_elapsed_limit_allows(
-                                        retry_elapsed_seconds,
-                                        delay_seconds,
-                                    )
-                                ):
-                                    raise retry_exc
-                            _emit_upstream_retry_event(
-                                adapter_event_context,
-                                upstream_name=upstream_name,
-                                upstream_format=upstream_format,
-                                request_kind=request_kind,
-                                attempt=relay_attempt,
-                                max_attempts=retry_limit,
-                                exc=retry_exc,
-                                delay_seconds=delay_seconds,
-                                failure_class=failure_class,
-                                failure_phase="stream_body" if stream_failure else None,
-                                retry_safety_class=retry_safety_class,
-                            )
-                            if not emit_downstream_retry(
-                                _downstream_retry_payload(
-                                    upstream_name=upstream_name,
-                                    upstream_format=upstream_format,
-                                    request_kind=request_kind,
-                                    attempt=relay_attempt,
-                                    max_attempts=retry_limit,
-                                    exc=retry_exc,
-                                    delay_seconds=delay_seconds,
-                                    failure_class=failure_class,
-                                    failure_phase="stream_body" if stream_failure else None,
-                                    redact_identity=_retry_identity_from_context(adapter_event_context),
-                                )
-                            ):
-                                finish_downstream_write_failure()
-                                return
-                            _sleep_for_retry_with_gateway_cancellation(delay_seconds)
-                            relay_attempt += 1
-                            continue
-                        relay_attempt += 1
-                    else:
-                        raise RuntimeError("unreachable upstream relay retry state")
-                    break
-                except HTTPError as exc:
-                    next_attempt_index = route_attempt.index + 1
-                    next_attempt = (
-                        route_plan.attempts[next_attempt_index]
-                        if next_attempt_index < len(route_plan.attempts)
-                        else None
-                    )
-                    fallback_allowed = (
-                        next_attempt is not None
-                        and not downstream_sse_started
-                        and route_attempt.allows_protocol_fallback_status(
-                            getattr(exc, "code", None)
-                        )
-                    )
-                    if fallback_allowed:
-                        fallback_model_access_path = _model_access_path_from_event_context(
-                            adapter_event_context,
-                            upstream_name,
-                            upstream_format,
-                        )
-                        fallback_retry_safety_class = _retry_safety_class(
-                            exc,
-                            request=request,
-                            upstream_name=upstream_name,
-                            request_kind=request_kind,
-                            downstream_exposed=bool(downstream_sse_started),
-                            model_access_path=fallback_model_access_path,
-                            failure_phase="response_headers",
-                        )
-                        if fallback_retry_safety_class not in _SUPPRESSED_RETRY_SAFETY_CLASSES:
-                            failed_attempt_snapshot = (
-                                route_attempt.telemetry_snapshot()
-                            )
-                            next_attempt_snapshot = (
-                                next_attempt.telemetry_snapshot()
-                            )
-                            write_proxy_event(
-                                "upstream_protocol_fallback",
-                                request_id=request_id,
-                                model=model_canonical,
-                                model_requested=model_requested,
-                                model_canonical=model_canonical,
-                                upstream=upstream_name,
-                                provider_id=upstream_name,
-                                provider_hint=provider_hint,
-                                upstream_format=route_plan.configured_upstream_protocol_name,
-                                behavior_profile=behavior_profile,
-                                failed_upstream_format=upstream_format,
-                                next_upstream_format=next_attempt.selected_upstream_format,
-                                failed_route_attempt_index=(
-                                    failed_attempt_snapshot["index"]
-                                ),
-                                failed_route_attempt_request_body_mode=(
-                                    failed_attempt_snapshot[
-                                        "request_body_mode"
-                                    ]
-                                ),
-                                failed_route_attempt_request_conversion_steps=(
-                                    failed_attempt_snapshot[
-                                        "request_conversion_steps"
-                                    ]
-                                ),
-                                failed_route_attempt_mutation_summary=(
-                                    failed_attempt_snapshot[
-                                        "mutation_summary"
-                                    ]
-                                ),
-                                next_route_attempt_index=(
-                                    next_attempt_snapshot["index"]
-                                ),
-                                next_route_attempt_request_body_mode=(
-                                    next_attempt_snapshot[
-                                        "request_body_mode"
-                                    ]
-                                ),
-                                next_route_attempt_request_conversion_steps=(
-                                    next_attempt_snapshot[
-                                        "request_conversion_steps"
-                                    ]
-                                ),
-                                next_route_attempt_mutation_summary=(
-                                    next_attempt_snapshot[
-                                        "mutation_summary"
-                                    ]
-                                ),
-                                status=getattr(exc, "code", 502),
-                                error="HTTPError",
-                                detail=safe_upstream_error_detail(
-                                    exc,
-                                    redact_identity=_retry_identity_from_context(adapter_event_context),
-                                ),
-                                **request_observability,
-                                **proxy_request_context,
-                            )
-                            continue
-                        _emit_upstream_retry_suppressed_event(
-                            adapter_event_context,
-                            upstream_name=upstream_name,
-                            upstream_format=upstream_format,
-                            request_kind=request_kind,
-                            attempt=relay_attempt,
-                            max_attempts=relay_attempts,
-                            exc=exc,
-                            failure_class=_upstream_failure_class(exc),
-                            failure_phase="response_headers",
-                            retry_safety_class=fallback_retry_safety_class,
-                        )
-                    raise
-            else:
-                raise RuntimeError("unreachable upstream protocol selection state")
+                return wrote
+
+            exchange_progress = ExchangeProgress(
+                upstream_format=upstream_format,
+                downstream_sse_started=downstream_sse_started,
+            )
+            exchange_request = ExchangeRequest(
+                inbound=request_input,
+                route_plan=route_plan,
+                upstream=upstream,
+                upstream_name=upstream_name,
+                prepared_body=prepared_caller_body,
+                inbound_payload=inbound_payload,
+                model_canonical=model_canonical,
+                caller_stream=caller_stream,
+                prompt_cache_key=prompt_cache_key,
+                caller_request_observability=caller_request_observability,
+                event_context=adapter_event_context,
+                proxy_request_context=proxy_request_context,
+                usage_capture=usage_capture,
+                response_lifecycle_state=response_lifecycle_state,
+                pre_response_deadline=self._pre_response_deadline,
+                downstream_sse_started=downstream_sse_started,
+            )
+            exchange_hooks = ExchangeHooks(
+                failure_types=ExchangeFailureTypes(
+                    downstream_closed_before_retry=(
+                        DownstreamClosedBeforeRetryError
+                    ),
+                    incomplete_read=IncompleteRead,
+                    protocol_fallback_error=HTTPError,
+                    compact_empty=CompactEmptyResponseError,
+                    stream_interrupted=UpstreamStreamInterruptedError,
+                    stream_idle_timeout=UpstreamStreamIdleTimeoutError,
+                    stream_incomplete=UpstreamStreamIncompleteError,
+                    stream_error_event=UpstreamStreamErrorEvent,
+                    lifecycle_empty_final=LifecycleEmptyFinalResponseError,
+                    lifecycle_final_format=LifecycleFinalFormatResponseError,
+                    upstream_empty_completed=(
+                        UpstreamEmptyCompletedResponseError
+                    ),
+                ),
+                set_active_prepared_exchange=set_active_exchange,
+                activate_attempt=activate_route_attempt,
+                safe_json_mapping=_safe_json_mapping,
+                official_mutation=official_passthrough_request_body,
+                transparent_mutation=transparent_request_body,
+                rewrite_developer_roles=rewrite_developer_roles,
+                normalize_tool_schema_booleans=(
+                    normalize_tool_schema_booleans
+                ),
+                validate_transparent_tool_loop=(
+                    validate_transparent_tool_loop
+                ),
+                compatibility_mutation=compatible_request_body,
+                request_observability=request_observability_for_attempt,
+                emit_request_start=emit_request_start_once,
+                build_request=build_attempt_request,
+                lifecycle_guidance=lifecycle_guidance,
+                open_response=open_exchange,
+                relay_response=relay_exchange,
+                set_upstream_format=set_upstream_format,
+                attach_upstream=attach_upstream,
+                downstream_exposed=lambda: _downstream_has_been_exposed(
+                    self
+                ),
+                raise_if_cancelled=raise_if_cancelled,
+                emit_downstream_retry=emit_downstream_retry,
+                finish_downstream_failure=finish_downstream_write_failure,
+                failure_class=_upstream_failure_class,
+                retry_safety_class=_retry_safety_class,
+                model_access_path=_model_access_path_from_event_context,
+                retry_after_seconds=_retry_after_delay_seconds,
+                emit_retry=_emit_upstream_retry_event,
+                emit_retry_suppressed=(
+                    _emit_upstream_retry_suppressed_event
+                ),
+                downstream_retry_payload=_downstream_retry_payload,
+                retry_identity=_retry_identity_from_context,
+                sleep=_sleep_for_retry_with_gateway_cancellation,
+                protocol_fallback=protocol_fallback,
+                error_status=exchange_error_status,
+                handle_empty_completed=handle_empty_completed,
+                monotonic=time.monotonic,
+                suppressed_retry_safety_classes=(
+                    _SUPPRESSED_RETRY_SAFETY_CLASSES
+                ),
+                runtime_attempt_key=(
+                    _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
+                ),
+            )
+            try:
+                exchange_result = execute_exchange(
+                    exchange_request,
+                    exchange_hooks,
+                    progress=exchange_progress,
+                )
+            finally:
+                active_route_attempt = exchange_progress.active_attempt
+                relay_execution_plan = (
+                    exchange_progress.relay_execution_plan
+                )
+                upstream_format = exchange_progress.upstream_format
+                request_observability = (
+                    exchange_progress.request_observability
+                )
+                downstream_sse_started = (
+                    exchange_progress.downstream_sse_started
+                    or downstream_sse_started
+                )
+                self._active_prepared_exchange = (
+                    exchange_progress.active_prepared_exchange
+                )
+            terminal = terminal_result(exchange_result)
+            if terminal.handled and not terminal.completed:
+                return
+            if not terminal.completed:
+                raise RuntimeError(
+                    terminal.error or "invalid exchange terminal result"
+                )
+            status = terminal.status
             write_proxy_event(
                 "request_complete",
                 request_id=request_id,

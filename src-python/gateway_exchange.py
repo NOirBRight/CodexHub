@@ -1,0 +1,564 @@
+"""Typed request-to-relay orchestration for the Python Gateway.
+
+The facade reads HTTP bytes and supplies live-patchable typed hooks. The
+implementation remains independent of the HTTP facade.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from enum import Enum
+import json
+from typing import Any, Protocol
+
+from gateway_errors import UpstreamProtocolTranslationError
+from protocol_translation import PreparedExchange, UnsupportedProtocolTranslationError
+from route_plan import RelayExecutionPlan, RouteAttemptPlan, RoutePlan
+from route_primitives import (
+    CAPACITY_RETRY_FAILURE_CLASSES,
+    RETRY_FAILURE_PERMANENT,
+    RETRY_FAILURE_QUICK_TRANSIENT,
+    MutationPolicy,
+    RouteProtocol,
+)
+
+class DecodeBodyHook(Protocol):
+    def __call__(self, body: bytes, encoding: str | None) -> tuple[bytes, bool, str | None]: ...
+
+class RequestKindHook(Protocol):
+    def __call__(self, headers: Mapping[str, str], payload: Any, inbound_format: str) -> str: ...
+
+@dataclass(frozen=True, slots=True)
+class InboundRequest:
+    """HTTP-independent inbound bytes and request-scoped routing facts."""
+    request_id: str
+    started_at: float
+    path: str
+    protocol: RouteProtocol
+    provider_hint: str | None
+    headers: Mapping[str, str]
+    body: bytes
+    request_context: Mapping[str, Any]
+    proxy_request_context: Mapping[str, Any]
+    raw_provider_probe: bool = False
+
+    @property
+    def inbound_format(self) -> str:
+        return self.protocol.value
+
+@dataclass(frozen=True, slots=True)
+class InboundRequestHooks:
+    decode_body: DecodeBodyHook
+    get_header: Callable[[Mapping[str, str], str], str | None]
+    request_kind: RequestKindHook
+    compact_request_kind: str
+    event_context_for_kind: Callable[[Mapping[str, Any], str], dict[str, Any]]
+    try_extract_model: Callable[[bytes], str | None]
+    provider_scoped_model: Callable[[str | None, str | None], str | None]
+
+@dataclass(frozen=True)
+class ParsedInboundRequest:
+    request_id: str
+    started_at: float
+    path: str
+    protocol: RouteProtocol
+    provider_hint: str | None
+    headers: Mapping[str, str]
+    request_context: dict[str, Any]
+    proxy_request_context: dict[str, Any]
+    raw_provider_probe: bool
+    content_length: int
+    content_type: str | None
+    content_encoding: str | None
+    content_decoded: bool
+    body: bytes
+    inbound_payload: Any
+    request_kind: str
+    model_requested: str | None
+    model: str | None
+    route_reason: str
+
+    @property
+    def inbound_format(self) -> str:
+        return self.protocol.value
+
+def parse_inbound_request(request: InboundRequest, hooks: InboundRequestHooks) -> ParsedInboundRequest:
+    """Parse caller bytes once without depending on an HTTP handler."""
+    content_type = hooks.get_header(request.headers, "Content-Type")
+    content_encoding = hooks.get_header(request.headers, "Content-Encoding")
+    body, decoded, decode_error = hooks.decode_body(request.body, content_encoding)
+    if decode_error:
+        raise ValueError(f"request body content-encoding decode failed: {decode_error}")
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    request_kind = hooks.request_kind(request.headers, payload, request.inbound_format)
+    proxy_context = dict(request.proxy_request_context)
+    if request_kind == hooks.compact_request_kind:
+        proxy_context = hooks.event_context_for_kind(request.request_context, request_kind)
+        if request.raw_provider_probe:
+            proxy_context["raw_provider_probe"] = True
+    if isinstance(payload, Mapping) and isinstance(payload.get("model"), str):
+        requested = payload["model"]
+    else:
+        requested = hooks.try_extract_model(body)
+    model = hooks.provider_scoped_model(requested, request.provider_hint)
+    if request.provider_hint is not None and not model:
+        raise ValueError(f"model is required for provider path: {request.provider_hint}")
+    reason = "provider_path" if request.provider_hint and model else "model" if model else "official_control_fallback"
+    return ParsedInboundRequest(
+        request_id=request.request_id, started_at=request.started_at, path=request.path,
+        protocol=request.protocol, provider_hint=request.provider_hint,
+        headers=request.headers, request_context=dict(request.request_context),
+        proxy_request_context=proxy_context, raw_provider_probe=request.raw_provider_probe,
+        content_length=len(request.body), content_type=content_type,
+        content_encoding=content_encoding, content_decoded=decoded, body=body,
+        inbound_payload=payload, request_kind=request_kind, model_requested=requested,
+        model=model, route_reason=reason,
+    )
+
+class OfficialMutationHook(Protocol):
+    def __call__(self, body: bytes, payload: Mapping[str, Any] | None, upstream: Mapping[str, Any], *, model_id: str | None) -> bytes: ...
+
+class TransparentMutationHook(Protocol):
+    def __call__(self, body: bytes, payload: Mapping[str, Any] | None, upstream: Mapping[str, Any], *, model_id: str | None) -> bytes: ...
+
+class CompatibilityMutationHook(Protocol):
+    def __call__(self, body: bytes, upstream: Mapping[str, Any], *, model_id: str | None, event_context: Mapping[str, Any] | None, inject_codex_tools: bool, tool_protocol_override: str, tool_surface_strategy_override: str, native_responses_tool_codec_override: str) -> bytes: ...
+
+class UpstreamRequestLike(Protocol):
+    data: bytes | None
+    headers: Mapping[str, str]
+
+
+class UpstreamResponseLike(Protocol):
+    headers: Mapping[str, str]
+    status: int | None
+
+
+class RetrySafetyHook(Protocol):
+    def __call__(
+        self,
+        exc: BaseException,
+        *,
+        request: UpstreamRequestLike,
+        upstream_name: str,
+        request_kind: str,
+        downstream_exposed: bool,
+        model_access_path: str,
+        failure_phase: str | None,
+    ) -> str: ...
+
+
+class RetryEventHook(Protocol):
+    def __call__(
+        self,
+        event_context: Mapping[str, Any] | None,
+        *,
+        upstream_name: str,
+        upstream_format: str,
+        request_kind: str,
+        attempt: int,
+        max_attempts: int,
+        exc: BaseException,
+        failure_class: str,
+        failure_phase: str | None,
+        retry_safety_class: str,
+        delay_seconds: int | float = 0,
+    ) -> None: ...
+
+
+class DownstreamRetryPayloadHook(Protocol):
+    def __call__(
+        self,
+        *,
+        upstream_name: str,
+        upstream_format: str,
+        request_kind: str,
+        attempt: int,
+        max_attempts: int,
+        exc: BaseException,
+        delay_seconds: int | float,
+        failure_class: str,
+        failure_phase: str | None,
+        redact_identity: str | None,
+    ) -> Mapping[str, Any]: ...
+
+
+class ProtocolFallbackHook(Protocol):
+    def __call__(
+        self,
+        failed_attempt: RouteAttemptPlan,
+        next_attempt: RouteAttemptPlan,
+        exc: BaseException,
+        request_observability: Mapping[str, Any],
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class OpenExchangeRequest:
+    request: UpstreamRequestLike
+    attempt: RouteAttemptPlan
+    upstream_name: str
+    upstream_format: str
+    event_context: Mapping[str, Any] | None
+    downstream_retry_callback: Callable[[Mapping[str, Any]], bool] | None
+    downstream_exposed: Callable[[], bool]
+    pre_response_deadline: float | None
+    open_attempt_budget: dict[str, int] | None
+
+@dataclass(frozen=True)
+class RelayExchangeRequest:
+    attempt: RouteAttemptPlan
+    relay_plan: RelayExecutionPlan
+    upstream_name: str
+    request_id: str
+    model: str | None
+    inbound_format: str
+    caller_stream: bool
+    event_context: Mapping[str, Any] | None
+    usage_capture: dict[str, Any]
+    headers_already_sent: bool
+    defer_stream_errors: bool
+    mark_downstream_sse_started: Callable[[], None]
+    response_lifecycle_state: dict[str, str]
+
+@dataclass(frozen=True)
+class ExchangeRequest:
+    inbound: ParsedInboundRequest
+    route_plan: RoutePlan
+    upstream: Mapping[str, Any]
+    upstream_name: str
+    prepared_body: bytes
+    inbound_payload: Any
+    model_canonical: str | None
+    caller_stream: bool
+    prompt_cache_key: str | None
+    caller_request_observability: Mapping[str, Any]
+    event_context: dict[str, Any]
+    proxy_request_context: dict[str, Any]
+    usage_capture: dict[str, Any]
+    response_lifecycle_state: dict[str, str]
+    pre_response_deadline: float | None
+    downstream_sse_started: bool = False
+
+@dataclass
+class ExchangeProgress:
+    active_attempt: RouteAttemptPlan | None = None
+    relay_execution_plan: RelayExecutionPlan | None = None
+    upstream_format: str = "responses"
+    request_observability: dict[str, Any] = field(default_factory=dict)
+    downstream_sse_started: bool = False
+    active_prepared_exchange: PreparedExchange | None = None
+
+class ExchangeDisposition(Enum):
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+
+@dataclass(frozen=True)
+class ExchangeResult:
+    disposition: ExchangeDisposition
+    progress: ExchangeProgress
+    status: int | None = None
+    stop_reason: str | None = None
+
+@dataclass(frozen=True)
+class TerminalExchangeResult:
+    completed: bool
+    handled: bool
+    status: int
+    error: str | None = None
+
+def terminal_result(result: object) -> TerminalExchangeResult:
+    """Map the closed result union; unknown values fail closed."""
+    if isinstance(result, ExchangeResult):
+        if result.disposition is ExchangeDisposition.COMPLETED and isinstance(result.status, int):
+            return TerminalExchangeResult(True, True, result.status)
+        if result.disposition is ExchangeDisposition.STOPPED:
+            status = 499 if result.stop_reason == "downstream_closed" else 502
+            return TerminalExchangeResult(False, True, status, result.stop_reason or "exchange_stopped")
+    return TerminalExchangeResult(False, False, 500, "invalid_exchange_result")
+
+@dataclass(frozen=True)
+class ExchangeFailureTypes:
+    downstream_closed_before_retry: type[BaseException]
+    incomplete_read: type[BaseException]
+    protocol_fallback_error: type[BaseException]
+    compact_empty: type[BaseException]
+    stream_interrupted: type[BaseException]
+    stream_idle_timeout: type[BaseException]
+    stream_incomplete: type[BaseException]
+    stream_error_event: type[BaseException]
+    lifecycle_empty_final: type[BaseException]
+    lifecycle_final_format: type[BaseException]
+    upstream_empty_completed: type[BaseException]
+
+    @property
+    def relay_retryable(self) -> tuple[type[BaseException], ...]:
+        return (self.incomplete_read, self.compact_empty, self.stream_interrupted, self.stream_idle_timeout,
+                self.stream_incomplete, self.stream_error_event,
+                self.lifecycle_empty_final, self.lifecycle_final_format)
+
+@dataclass(frozen=True)
+class ExchangeHooks:
+    """Typed live dependencies used by exchange orchestration."""
+    failure_types: ExchangeFailureTypes
+    set_active_prepared_exchange: Callable[[PreparedExchange], None]
+    activate_attempt: Callable[[RouteAttemptPlan], None]
+    safe_json_mapping: Callable[[bytes], Mapping[str, Any] | None]
+    official_mutation: OfficialMutationHook
+    transparent_mutation: TransparentMutationHook
+    rewrite_developer_roles: Callable[[bytes, Mapping[str, Any]], tuple[bytes, int]]
+    normalize_tool_schema_booleans: Callable[[bytes], tuple[bytes, int]]
+    validate_transparent_tool_loop: Callable[[bytes, str], None]
+    compatibility_mutation: CompatibilityMutationHook
+    request_observability: Callable[[RouteAttemptPlan, bytes], dict[str, Any]]
+    emit_request_start: Callable[[Mapping[str, Any]], None]
+    build_request: Callable[[RouteAttemptPlan, bytes], UpstreamRequestLike]
+    lifecycle_guidance: Callable[[bytes, str], bytes]
+    open_response: Callable[[OpenExchangeRequest], AbstractContextManager[UpstreamResponseLike]]
+    relay_response: Callable[[UpstreamResponseLike, RelayExchangeRequest], int]
+    set_upstream_format: Callable[[str], None]
+    attach_upstream: Callable[[UpstreamResponseLike], None]
+    downstream_exposed: Callable[[], bool]
+    raise_if_cancelled: Callable[[], None]
+    emit_downstream_retry: Callable[[Mapping[str, Any]], bool]
+    finish_downstream_failure: Callable[[], None]
+    failure_class: Callable[[BaseException], str]
+    retry_safety_class: RetrySafetyHook
+    model_access_path: Callable[[Mapping[str, Any] | None, str, str], str]
+    retry_after_seconds: Callable[[BaseException], int | float | None]
+    emit_retry: RetryEventHook
+    emit_retry_suppressed: RetryEventHook
+    downstream_retry_payload: DownstreamRetryPayloadHook
+    retry_identity: Callable[[Mapping[str, Any] | None], str | None]
+    sleep: Callable[[int | float], None]
+    protocol_fallback: ProtocolFallbackHook
+    error_status: Callable[[BaseException], int | None]
+    handle_empty_completed: Callable[[BaseException], bool]
+    monotonic: Callable[[], float]
+    suppressed_retry_safety_classes: frozenset[str] = field(default_factory=frozenset)
+    permanent_failure_class: str = RETRY_FAILURE_PERMANENT
+    quick_transient_failure_class: str = RETRY_FAILURE_QUICK_TRANSIENT
+    runtime_attempt_key: str = "_runtime_tool_compatibility_attempt_generation"
+
+def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptPlan, hooks: ExchangeHooks) -> tuple[PreparedExchange, bytes]:
+    """Prepare protocol first, then apply exactly one planned mutation policy."""
+    try:
+        exchange = attempt.prepare_body(request.prepared_body)
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
+    hooks.set_active_prepared_exchange(exchange)
+    body = exchange.upstream_body
+    upstream = dict(request.upstream)
+    upstream["upstream_format"] = attempt.selected_upstream_format
+    policy = attempt.request_mutation_policy
+    if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
+        payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else hooks.safe_json_mapping(body)
+        return exchange, hooks.official_mutation(body, payload, upstream, model_id=request.inbound.model)
+    if policy is MutationPolicy.TRANSPARENT:
+        body = hooks.transparent_mutation(body, hooks.safe_json_mapping(body), upstream, model_id=request.inbound.model)
+        body, developer_rewrites = hooks.rewrite_developer_roles(body, upstream)
+        if developer_rewrites:
+            request.proxy_request_context["developer_role_rewrites"] = developer_rewrites
+        body, schema_rewrites = hooks.normalize_tool_schema_booleans(body)
+        if schema_rewrites:
+            request.proxy_request_context["tool_schema_rewrites"] = schema_rewrites
+        if request.route_plan.transparent_tool_loop_guard:
+            hooks.validate_transparent_tool_loop(body, attempt.selected_upstream_format)
+        return exchange, body
+    if policy is MutationPolicy.GATEWAY_COMPATIBILITY:
+        return exchange, hooks.compatibility_mutation(
+            body, upstream, model_id=request.inbound.model,
+            event_context=request.event_context,
+            inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection,
+            tool_protocol_override=attempt.tool_protocol,
+            tool_surface_strategy_override=attempt.tool_surface_strategy,
+            native_responses_tool_codec_override=attempt.native_responses_tool_codec,
+        )
+    return exchange, body
+
+def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress: ExchangeProgress | None = None) -> ExchangeResult:
+    """Prepare and execute RoutePlan attempts through transport and relay hooks."""
+    state = progress or ExchangeProgress()
+    state.downstream_sse_started = request.downstream_sse_started
+    bodies: dict[int, bytes] = {}
+    exchanges: dict[int, PreparedExchange] = {}
+    def body_for(attempt: RouteAttemptPlan) -> bytes:
+        if attempt.index not in bodies:
+            exchange, body = _prepare_attempt_body(request, attempt, hooks)
+            exchanges[attempt.index], bodies[attempt.index] = exchange, body
+        state.active_prepared_exchange = exchanges[attempt.index]
+        hooks.set_active_prepared_exchange(exchanges[attempt.index])
+        return bodies[attempt.index]
+
+    primary = request.route_plan.primary_attempt
+    if primary is None:
+        raise RuntimeError("cannot execute a route plan without attempts")
+    state.request_observability = hooks.request_observability(primary, body_for(primary))
+    hooks.emit_request_start(state.request_observability)
+    emit_notice = primary.retry.emit_downstream_retry_notice
+    open_budget = primary.retry.new_open_attempt_budget()
+    generation = 0
+
+    for attempt in request.route_plan.attempts:
+        state.active_attempt = attempt
+        state.upstream_format = attempt.selected_upstream_format
+        hooks.activate_attempt(attempt)
+        request.event_context["tool_protocol"] = attempt.tool_protocol
+        relay_attempts = attempt.retry.base_relay_attempts
+        lifecycle_extra = attempt.retry.lifecycle_final_extra_attempts(request.event_context)
+        state.relay_execution_plan = attempt.relay_execution_plan(lifecycle_final_retry_enabled=lifecycle_extra > 0)
+        max_relay_attempts = relay_attempts + lifecycle_extra
+        relay_attempt = 1
+        lifecycle_reason: str | None = None
+        try:
+            while relay_attempt <= max_relay_attempts:
+                generation += 1
+                request.event_context[hooks.runtime_attempt_key] = generation
+                hooks.set_upstream_format(state.upstream_format)
+                attempt_body = body_for(attempt)
+                if lifecycle_reason and attempt.upstream_protocol is RouteProtocol.RESPONSES:
+                    attempt_body = hooks.lifecycle_guidance(attempt_body, lifecycle_reason)
+                upstream_request = hooks.build_request(attempt, attempt_body)
+                state.request_observability = hooks.request_observability(attempt, attempt_body)
+                hooks.emit_request_start(state.request_observability)
+                def mark_started() -> None:
+                    state.downstream_sse_started = True
+
+                def emit_open_retry(payload: Mapping[str, Any]) -> bool:
+                    emitted = hooks.emit_downstream_retry(payload)
+                    if emitted:
+                        state.downstream_sse_started = True
+                    return emitted
+
+                try:
+                    with hooks.open_response(OpenExchangeRequest(
+                        request=upstream_request, attempt=attempt,
+                        upstream_name=request.upstream_name,
+                        upstream_format=state.upstream_format,
+                        event_context=request.event_context,
+                        downstream_retry_callback=emit_open_retry if emit_notice else None,
+                        downstream_exposed=hooks.downstream_exposed,
+                        pre_response_deadline=None if state.downstream_sse_started else request.pre_response_deadline,
+                        open_attempt_budget=open_budget,
+                    )) as response:
+                        hooks.attach_upstream(response)
+                        status = hooks.relay_response(response, RelayExchangeRequest(
+                            attempt=attempt, relay_plan=state.relay_execution_plan,
+                            upstream_name=request.upstream_name,
+                            request_id=request.inbound.request_id, model=request.model_canonical,
+                            inbound_format=request.inbound.inbound_format,
+                            caller_stream=request.caller_stream,
+                            event_context=request.event_context,
+                            usage_capture=request.usage_capture,
+                            headers_already_sent=state.downstream_sse_started,
+                            defer_stream_errors=relay_attempt < relay_attempts,
+                            mark_downstream_sse_started=mark_started,
+                            response_lifecycle_state=request.response_lifecycle_state,
+                        ))
+                    return ExchangeResult(ExchangeDisposition.COMPLETED, state, status=status)
+                except hooks.failure_types.downstream_closed_before_retry:
+                    hooks.finish_downstream_failure()
+                    return ExchangeResult(ExchangeDisposition.STOPPED, state, stop_reason="downstream_closed")
+                except hooks.failure_types.relay_retryable as exc:
+                    hooks.raise_if_cancelled()
+                    lifecycle_retry = isinstance(exc, (hooks.failure_types.lifecycle_empty_final, hooks.failure_types.lifecycle_final_format))
+                    if lifecycle_retry:
+                        stream_failure, retry_exc = True, exc
+                        failure_class = hooks.quick_transient_failure_class
+                        lifecycle_reason = "empty" if isinstance(exc, hooks.failure_types.lifecycle_empty_final) else "format"
+                        retry_limit, delay = max_relay_attempts, 0
+                    else:
+                        stream_failure = isinstance(exc, (hooks.failure_types.incomplete_read, hooks.failure_types.stream_interrupted, hooks.failure_types.stream_idle_timeout, hooks.failure_types.stream_incomplete))
+                        retry_exc = getattr(exc, "cause", exc) if isinstance(exc, hooks.failure_types.stream_interrupted) else exc
+                        failure_class = hooks.failure_class(retry_exc)
+                        relay_attempts = attempt.retry.relay_attempts_for_failure_class(failure_class=failure_class, stream_failure=stream_failure)
+                        if isinstance(retry_exc, hooks.failure_types.upstream_empty_completed):
+                            relay_attempts = min(relay_attempts, attempt.retry.empty_completed_max_attempts)
+                        max_relay_attempts = relay_attempts + lifecycle_extra
+                        retry_limit = relay_attempts
+                        delay = 0
+                    phase = "stream_body" if stream_failure else None
+                    safety = hooks.retry_safety_class(
+                        retry_exc, request=upstream_request,
+                        upstream_name=request.upstream_name,
+                        request_kind=request.inbound.request_kind,
+                        downstream_exposed=hooks.downstream_exposed(),
+                        model_access_path=hooks.model_access_path(request.event_context, request.upstream_name, state.upstream_format),
+                        failure_phase=phase,
+                    )
+                    if safety in hooks.suppressed_retry_safety_classes:
+                        hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
+                        if isinstance(retry_exc, hooks.failure_types.upstream_empty_completed):
+                            if not hooks.handle_empty_completed(retry_exc):
+                                hooks.finish_downstream_failure()
+                                return ExchangeResult(ExchangeDisposition.STOPPED, state, stop_reason="downstream_closed")
+                            return ExchangeResult(ExchangeDisposition.STOPPED, state, stop_reason="empty_completed_response")
+                        raise retry_exc
+                    if lifecycle_retry:
+                        if relay_attempt >= retry_limit:
+                            raise
+                    else:
+                        if (
+                            relay_attempt >= retry_limit
+                            or failure_class == hooks.permanent_failure_class
+                        ):
+                            raise retry_exc
+                        delay = attempt.retry.retry_delay_seconds(
+                            relay_attempt,
+                            failure_class=failure_class,
+                            retry_after_seconds=hooks.retry_after_seconds(
+                                retry_exc
+                            ),
+                        )
+                        elapsed = max(
+                            0.0,
+                            hooks.monotonic() - request.inbound.started_at,
+                        )
+                        if (
+                            failure_class in CAPACITY_RETRY_FAILURE_CLASSES
+                            and not attempt.retry.capacity_elapsed_limit_allows(
+                                elapsed, delay
+                            )
+                        ):
+                            raise retry_exc
+                        if (
+                            stream_failure
+                            and failure_class
+                            == hooks.quick_transient_failure_class
+                            and not attempt.retry.stream_elapsed_limit_allows(
+                                elapsed, delay
+                            )
+                        ):
+                            raise retry_exc
+                    hooks.emit_retry(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
+                    if emit_notice:
+                        payload = hooks.downstream_retry_payload(upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, redact_identity=hooks.retry_identity(request.event_context))
+                        if not hooks.emit_downstream_retry(payload):
+                            hooks.finish_downstream_failure()
+                            return ExchangeResult(ExchangeDisposition.STOPPED, state, stop_reason="downstream_closed")
+                        state.downstream_sse_started = True
+                    hooks.sleep(delay)
+                    relay_attempt += 1
+            raise RuntimeError("unreachable upstream relay retry state")
+        except hooks.failure_types.protocol_fallback_error as exc:
+            next_index = attempt.index + 1
+            next_attempt = request.route_plan.attempts[next_index] if next_index < len(request.route_plan.attempts) else None
+            if next_attempt is not None and not state.downstream_sse_started and attempt.allows_protocol_fallback_status(hooks.error_status(exc)):
+                safety = hooks.retry_safety_class(
+                    exc, request=upstream_request,
+                    upstream_name=request.upstream_name,
+                    request_kind=request.inbound.request_kind,
+                    downstream_exposed=hooks.downstream_exposed(),
+                    model_access_path=hooks.model_access_path(request.event_context, request.upstream_name, state.upstream_format),
+                    failure_phase="response_headers",
+                )
+                if safety not in hooks.suppressed_retry_safety_classes:
+                    hooks.protocol_fallback(attempt, next_attempt, exc, state.request_observability)
+                    continue
+                hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=relay_attempts, exc=exc, failure_class=hooks.failure_class(exc), failure_phase="response_headers", retry_safety_class=safety)
+            raise
+    raise RuntimeError("unreachable upstream protocol selection state")
