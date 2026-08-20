@@ -44,7 +44,6 @@ MULTI_AGENT_NAMESPACE_ALIASES = {
 }
 NODE_REPL_NAMESPACE = "mcp__node_repl"
 LOCAL_TOOL_GATEWAY_NAMESPACE = "mcp__codex_apps__local_tool_gateway_"
-APPLY_PATCH_FUNCTION_NAME = "apply_patch"
 THIRD_PARTY_TOOL_NAME_ALIASES = {
     f"{prefix}{tool_name}": tool_name
     for prefix in COLLABORATION_V1_ALIAS_PREFIXES

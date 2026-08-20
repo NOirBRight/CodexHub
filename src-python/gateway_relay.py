@@ -411,6 +411,7 @@ class RelaySymbols:
 
 class RelayHandler(Protocol):
     close_connection: bool
+    _active_prepared_exchange: Any
     _downstream_stream_commit: Any
 
     def _relay_transparent_upstream_response(self, *args: Any, **kwargs: Any) -> int: ...
@@ -451,7 +452,7 @@ class RelayContext:
 
 def relay_upstream_response(
     relay_context: RelayContext,
-    response: Any,
+    response: UpstreamResponseLike,
     upstream_name: str,
     relay_execution_plan: RelayPlan,
     request_id: str | None = None,

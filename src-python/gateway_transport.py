@@ -141,13 +141,6 @@ def _noop(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
-class RequestAdmission(Protocol):
-    cancelled: bool
-
-    def attach_upstream_transport(self, transport: Any) -> None: ...
-    def raise_if_cancelled(self) -> None: ...
-
-
 def _diagnostic_connection_disposition_value(response: Any) -> str:
     try:
         disposition = getattr(response, "connection_disposition", "unobserved")
