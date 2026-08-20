@@ -2969,11 +2969,11 @@ test("app update flow separates silent automatic checks from settings checks and
   assert.doesNotMatch(settingsCheck, /action:\s*\{/);
   assert.match(installAction, /const toastId = updateAvailableToastId\.current/);
   assert.match(installAction, /if \(toastId\) \{[\s\S]*dismissToast\(toastId\);[\s\S]*updateAvailableToastId\.current = null;[\s\S]*\}/);
-  assert.match(installAction, /api\.startAppUpdateInstall\(\)/);
+  assert.match(installAction, /AppUpdater\.install\(\)/);
   assert.match(installAction, /settings\.downloadingUpdate/);
   assert.match(updateStatusSource, /settings\.installingUpdateRestarting/);
   assert.ok(
-    installAction.indexOf("dismissToast(toastId)") < installAction.indexOf("api.startAppUpdateInstall()"),
+    installAction.indexOf("dismissToast(toastId)") < installAction.indexOf("AppUpdater.install()"),
     "the stale update-available toast should be removed before the install loading toast settles",
   );
 });
@@ -3247,10 +3247,10 @@ test("startup update check is delayed and silent on failure", async () => {
   assert.match(appSource, /STARTUP_UPDATE_CHECK_DELAY_MS\s*=\s*2500/);
   assert.match(appSource, /APP_UPDATE_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
   assert.match(appSource, /startupUpdateCheckStarted/);
-  assert.match(appSource, /api\.checkAppUpdate\(\)/);
+  assert.match(appSource, /AppUpdater\.check\(\)/);
   assert.match(appSource, /settings\.updateAvailable/);
   assert.match(appSource, /settings\.update/);
-  assert.match(appSource, /api\.startAppUpdateInstall\(\)/);
+  assert.match(appSource, /AppUpdater\.install\(\)/);
   assert.match(appSource, /window\.setInterval\(\(\) => void runAutomaticUpdateCheck\(\), APP_UPDATE_CHECK_INTERVAL_MS\)/);
   assert.match(appSource, /Automatic update checks are best-effort/);
   assert.doesNotMatch(appSource, /setBanner\(messageFromError\(err\)\)[\s\S]*Startup update/);

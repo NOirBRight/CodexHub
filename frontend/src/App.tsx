@@ -9,6 +9,7 @@ import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
 import { historyIssueKey } from "./lib/history";
 import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
+import { AppUpdater } from "./lib/appUpdater";
 import { api, messageFromError } from "./lib/tauri";
 import contract from "./lib/ui-contract.json";
 import {
@@ -479,7 +480,7 @@ export default function App() {
     return runCachedRequest<AppUpdateStatus>(
       "updateStatus",
       async () => {
-        const status = await api.checkAppUpdate();
+        const status = await AppUpdater.check();
         if (!status) {
           throw new Error(t("settings.desktopUpdatesUnavailable"));
         }
@@ -537,7 +538,7 @@ export default function App() {
       }
 
       try {
-        const status = await api.startAppUpdateInstall();
+        const status = await AppUpdater.install();
         setUpdateInstallStatus(status);
         updateInstallToast(status, source);
         if (source === "settings" && status.phase === "failed") {
