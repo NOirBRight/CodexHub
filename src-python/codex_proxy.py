@@ -104,24 +104,30 @@ from runtime_tool_compatibility import (
 )
 
 from codex_semantic_adapter import (
-    BINDING_ACCEPTED as _BINDING_ACCEPTED,
     COLLABORATION_V1 as _COLLABORATION_V1,
     COLLABORATION_V2 as _COLLABORATION_V2,
     COLLABORATION_V2_NAMESPACE as _COLLABORATION_V2_NAMESPACE,
     CollaborationBoundaryError as _CollaborationBoundaryError,
     classify_collaboration_payload as _classify_collaboration_payload,
-    collaboration_protocols as _collaboration_protocols,
     coerce_number as _semantic_coerce_number,
     coerce_target as _semantic_coerce_target,
     coerce_targets as _semantic_coerce_targets,
     multi_agent_discovery_arguments as _semantic_multi_agent_discovery_arguments,
     normalize_multi_agent_arguments as _semantic_normalize_multi_agent_arguments,
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
-    strict_json_object as _semantic_strict_json_object,
-    synthesize_effective_worker_binding_readback as _semantic_synthesize_effective_worker_binding_readback,
-    validate_effective_worker_binding as _semantic_validate_effective_worker_binding,
-    validate_requested_worker_binding as _semantic_validate_requested_worker_binding,
-    validate_worker_selector as _semantic_validate_worker_selector,
+)
+from collaboration_adapter import (
+    COLLABORATION_BOUNDARY_ERROR_CODE,
+    LEGACY_NATIVE_WORKER_SPAWN_FIELDS,
+    LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
+    WORKER_BINDING_ERROR_CODE,
+    WORKER_REQUESTED_BINDING_FIELD,
+    WORKER_REQUESTED_BINDING_FIELDS,
+    WORKER_REQUESTED_BINDING_VERSION,
+    WORKER_SELECTOR_ERROR_CODE,
+    CollaborationAdapter,
+    CollaborationFacts,
+    PathBindingSigner,
 )
 
 from catalog import (
@@ -737,26 +743,6 @@ THIRD_PARTY_TOOL_NAME_ALIASES.update(
     {f"mcp__multi_agent_v1.{tool_name}": tool_name for tool_name in MULTI_AGENT_TOOL_NAMES}
 )
 MULTI_AGENT_DISCOVERY_QUERY = "spawn_agent multi_agent subagent native Codex"
-WORKER_SELECTOR_ERROR_CODE = "external_worker_selector_rejected"
-WORKER_BINDING_ERROR_CODE = "external_worker_binding_rejected"
-WORKER_REQUESTED_BINDING_FIELD = "_codexhub_worker_requested_binding"
-WORKER_REQUESTED_BINDING_VERSION = "codexhub.requested-worker-binding.v1"
-WORKER_REQUESTED_BINDING_FIELDS = {
-    "contract_version",
-    "agent_type",
-    "model",
-    "reasoning",
-    "signature",
-}
-LEGACY_NATIVE_WORKER_SPAWN_FIELDS = {
-    "type",
-    "id",
-    "call_id",
-    "namespace",
-    "name",
-    "arguments",
-}
-LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 MULTI_AGENT_DISCOVERY_TOOLS = [
     {
         "type": "namespace",
@@ -837,7 +823,6 @@ STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 TOOL_SURFACE_STRATEGIES = {"eager", "deferred_core"}
 NATIVE_RESPONSES_TOOL_CODECS = {"none", "strict_apply_patch"}
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
-COLLABORATION_BOUNDARY_ERROR_CODE = "invalid_collaboration_boundary"
 TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL = {
     "type": "function",
     "name": "tool_search",
@@ -1779,6 +1764,15 @@ def _write_failure_event(
     )
 
 
+def _collaboration_adapter() -> CollaborationAdapter:
+    """Build a request-time adapter so emit and signing-root patches stay live."""
+    return CollaborationAdapter(
+        facts=CollaborationFacts(signing_root=WORKER_BINDING_SIGNING_ROOT),
+        emit=write_proxy_event,
+        signer=PathBindingSigner(WORKER_BINDING_SIGNING_ROOT),
+    )
+
+
 def _raise_collaboration_boundary_error(
     event_context: Mapping[str, Any] | None,
     *,
@@ -1787,21 +1781,13 @@ def _raise_collaboration_boundary_error(
     surface: str = "request",
     cause: BaseException | None = None,
 ) -> NoReturn:
-    write_proxy_event(
-        "collaboration_boundary_rejected",
+    _collaboration_adapter().raise_boundary_error(
+        event_context,
+        classification=classification,
+        message=message,
         surface=surface,
-        outcome="rejected",
-        count=1,
+        cause=cause,
     )
-    error = UpstreamProtocolTranslationError(
-        UnsupportedProtocolTranslationError(
-            COLLABORATION_BOUNDARY_ERROR_CODE,
-            message,
-        )
-    )
-    if cause is not None:
-        raise error from cause
-    raise error
 
 
 def _resolve_collaboration_boundary(
@@ -1810,156 +1796,22 @@ def _resolve_collaboration_boundary(
     *,
     surface: str = "request",
 ) -> str | None:
-    if surface != "request":
-        try:
-            protocol = _classify_collaboration_payload(payload)
-        except _CollaborationBoundaryError as exc:
-            _raise_collaboration_boundary_error(
-                event_context,
-                classification=exc.classification,
-                message="Collaboration protocol boundary is malformed or ambiguous.",
-                surface=surface,
-                cause=exc,
-            )
-        context_protocol = (
-            event_context.get("collaboration_protocol")
-            if isinstance(event_context, Mapping)
-            else None
-        )
-        if context_protocol is not None and context_protocol not in {
-            _COLLABORATION_V1,
-            _COLLABORATION_V2,
-        }:
-            _raise_collaboration_boundary_error(
-                event_context,
-                classification="unknown_state",
-                message="Collaboration protocol selection is unknown.",
-                surface=surface,
-            )
-        if (
-            context_protocol is not None
-            and protocol is not None
-            and protocol != context_protocol
-        ):
-            _raise_collaboration_boundary_error(
-                event_context,
-                classification="conflicting_selection",
-                message="Collaboration protocol selection conflicts with the response.",
-                surface=surface,
-            )
-    else:
-        try:
-            request_boundary = {
-                "tools": payload.get("tools", []),
-                "tool_choice": payload.get("tool_choice"),
-            } if isinstance(payload, Mapping) else {"tools": [], "tool_choice": None}
-            if isinstance(payload, Mapping):
-                for key in ("multi_agent_version", "metadata", "features", "client_metadata"):
-                    if key in payload:
-                        request_boundary[key] = payload[key]
-            current_protocol = _classify_collaboration_payload(request_boundary)
-
-            raw_context_protocol = (
-                event_context.get("collaboration_protocol")
-                if isinstance(event_context, Mapping)
-                else None
-            )
-            context_protocol = raw_context_protocol if raw_context_protocol in {
-                _COLLABORATION_V1,
-                _COLLABORATION_V2,
-            } else None
-            history_boundary = (
-                {"input": payload.get("input", [])}
-                if isinstance(payload, Mapping)
-                else {"input": []}
-            )
-            if isinstance(payload, Mapping):
-                for key in (
-                    "tools",
-                    "tool_choice",
-                    "multi_agent_version",
-                    "metadata",
-                    "features",
-                    "client_metadata",
-                ):
-                    if key in payload:
-                        history_boundary[key] = payload[key]
-            history_protocols = _collaboration_protocols(history_boundary)
-            protocol = (
-                current_protocol
-                or context_protocol
-            )
-            if (
-                current_protocol is not None
-                and context_protocol is not None
-                and current_protocol != context_protocol
-            ):
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="conflicting_selection",
-                    message="Collaboration protocol selection conflicts with the request.",
-                    surface=surface,
-                )
-            if len(history_protocols) > 1:
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="mixed_v1_v2",
-                    message="Collaboration history contains multiple protocol families.",
-                    surface=surface,
-                )
-            history_protocol = next(iter(history_protocols), None)
-            if (
-                protocol is not None
-                and history_protocol is not None
-                and protocol != history_protocol
-            ):
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="conflicting_selection",
-                    message="Collaboration protocol selection conflicts with history.",
-                    surface=surface,
-                )
-            if (
-                raw_context_protocol is not None
-                and context_protocol is None
-                and protocol is None
-            ):
-                _raise_collaboration_boundary_error(
-                    event_context,
-                    classification="unknown_state",
-                    message="Collaboration protocol selection is unknown.",
-                    surface=surface,
-                )
-        except _CollaborationBoundaryError as exc:
-            _raise_collaboration_boundary_error(
-                event_context,
-                classification=exc.classification,
-                message="Collaboration protocol boundary is malformed or ambiguous.",
-                surface=surface,
-                cause=exc,
-            )
-
-        if protocol is None:
-            protocol = history_protocol
-
-    if isinstance(event_context, dict) and protocol is not None:
-        event_context["collaboration_protocol"] = protocol
-    return protocol
+    return _collaboration_adapter().resolve_boundary(
+        payload,
+        event_context,
+        surface=surface,
+    )
 
 
 def _is_collaboration_v2_context(event_context: Mapping[str, Any] | None) -> bool:
-    return (event_context or {}).get("collaboration_protocol") == _COLLABORATION_V2
+    return _collaboration_adapter().is_v2_context(event_context)
 
 
 def _collaboration_context_with_protocol(
     event_context: Mapping[str, Any] | None,
     protocol: str | None,
 ) -> Mapping[str, Any] | None:
-    if protocol is None or isinstance(event_context, dict):
-        return event_context
-    context = dict(event_context or {})
-    context["collaboration_protocol"] = protocol
-    return context
+    return _collaboration_adapter().context_with_protocol(event_context, protocol)
 
 
 def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: str) -> dict[str, Any]:
@@ -7095,18 +6947,11 @@ def _raise_worker_contract_error(
     classification: str,
     surface: str | None = None,
 ) -> None:
-    fields = {
-        "outcome": "rejected",
-        "classification": classification,
-    }
-    if surface is not None:
-        fields["surface"] = surface
-    write_proxy_event(event, **fields)
-    raise UpstreamProtocolTranslationError(
-        UnsupportedProtocolTranslationError(
-            error_code,
-            "External Worker delegation contract validation failed.",
-        )
+    _collaboration_adapter().raise_worker_contract_error(
+        event=event,
+        error_code=error_code,
+        classification=classification,
+        surface=surface,
     )
 
 
@@ -7116,51 +6961,15 @@ def _validate_external_worker_selectors(
     *,
     surface: str,
 ) -> None:
-    if isinstance(value, list):
-        for item in value:
-            _validate_external_worker_selectors(item, event_context, surface=surface)
-        return
-    if not isinstance(value, Mapping):
-        return
-
-    if _multi_agent_function_call_name(value) == "spawn_agent":
-        raw_arguments = value.get("arguments")
-        arguments = _json_object_from_arguments(raw_arguments)
-        if arguments is not None and raw_arguments not in (None, ""):
-            agent_type = arguments.get("agent_type")
-            if agent_type in {"general", "default"}:
-                pass
-            elif agent_type == "worker":
-                if not _worker_caller_carrier_supported(event_context):
-                    _raise_worker_contract_error(
-                        event="worker_selector_validated",
-                        error_code=WORKER_SELECTOR_ERROR_CODE,
-                        classification="unsupported_caller_carrier",
-                        surface=surface,
-                    )
-                write_proxy_event(
-                    "worker_selector_validated",
-                    outcome="accepted",
-                    classification="worker_preserved",
-                    surface=surface,
-                )
-            elif agent_type is not None or bool((event_context or {}).get("_spawn_selector_required")):
-                validation = _semantic_validate_worker_selector(arguments)
-                _raise_worker_contract_error(
-                    event="worker_selector_validated",
-                    error_code=WORKER_SELECTOR_ERROR_CODE,
-                    classification=validation.classification,
-                    surface=surface,
-                )
-
-    for item in value.values():
-        _validate_external_worker_selectors(item, event_context, surface=surface)
+    _collaboration_adapter().validate_external_worker_selectors(
+        value,
+        event_context,
+        surface=surface,
+    )
 
 
 def _worker_caller_carrier_supported(event_context: Mapping[str, Any] | None) -> bool:
-    context = event_context or {}
-    caller_format = context.get("_caller_wire_format", context.get("inbound_format", "responses"))
-    return caller_format != "chat_completions"
+    return _collaboration_adapter().worker_caller_carrier_supported(event_context)
 
 
 def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
@@ -7173,172 +6982,36 @@ def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
 
 
 def _worker_requested_binding_signature_payload(binding: Mapping[str, Any], call_id: str) -> bytes:
-    signed_binding = {
-        "contract_version": binding.get("contract_version"),
-        "agent_type": binding.get("agent_type"),
-        "model": binding.get("model"),
-        "reasoning": binding.get("reasoning"),
-    }
-    canonical = json.dumps(signed_binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return call_id.encode("utf-8") + b"\0" + canonical
+    return _collaboration_adapter().requested_binding_signature_payload(binding, call_id)
 
 
 def _requested_worker_binding_signature(binding: Mapping[str, Any], call_id: str) -> str:
-    return worker_binding_signing.sign(
-        WORKER_BINDING_SIGNING_ROOT,
-        _worker_requested_binding_signature_payload(binding, call_id),
-    )
+    return _collaboration_adapter().requested_binding_signature(binding, call_id)
 
 
 def _worker_requested_binding_sidecar(
     requested: Mapping[str, Any],
     call_id: str,
 ) -> dict[str, Any]:
-    validation = _semantic_validate_requested_worker_binding(requested)
-    if validation.outcome != _BINDING_ACCEPTED:
-        _raise_worker_contract_error(
-            event="worker_requested_binding_validated",
-            error_code=WORKER_BINDING_ERROR_CODE,
-            classification=validation.classification,
-        )
-    binding = {
-        "contract_version": WORKER_REQUESTED_BINDING_VERSION,
-        "agent_type": requested["agent_type"],
-        "model": requested["model"],
-        "reasoning": requested["reasoning"],
-    }
-    return {**binding, "signature": _requested_worker_binding_signature(binding, call_id)}
+    return _collaboration_adapter().requested_binding_sidecar(requested, call_id)
 
 
 def _verified_worker_requested_binding(
     value: Any,
     call_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if value is None:
-        return None, "missing_requested_binding_sidecar"
-    if not isinstance(value, Mapping) or set(value) != WORKER_REQUESTED_BINDING_FIELDS:
-        return None, "unknown_requested_binding_sidecar"
-    if value.get("contract_version") != WORKER_REQUESTED_BINDING_VERSION:
-        return None, "unknown_requested_binding_sidecar"
-    signature = value.get("signature")
-    binding = {
-        "contract_version": value.get("contract_version"),
-        "agent_type": value.get("agent_type"),
-        "model": value.get("model"),
-        "reasoning": value.get("reasoning"),
-    }
-    if not worker_binding_signing.verify(
-        WORKER_BINDING_SIGNING_ROOT,
-        _worker_requested_binding_signature_payload(binding, call_id),
-        signature,
-    ):
-        return None, "unknown_requested_binding_sidecar"
-    requested = {
-        "agent_type": binding["agent_type"],
-        "model": binding["model"],
-        "reasoning": binding["reasoning"],
-    }
-    validation = _semantic_validate_requested_worker_binding(requested)
-    if validation.outcome != _BINDING_ACCEPTED:
-        return None, validation.classification
-    return requested, None
+    return _collaboration_adapter().verified_requested_binding(value, call_id)
 
 
 def _is_legacy_native_worker_spawn_call(
     item: Mapping[str, Any],
     arguments: Mapping[str, Any] | None,
 ) -> bool:
-    """Recognize the pre-sidecar native V1 worker call shape.
-
-    Beta4 added signed model/reasoning sidecars to worker calls.  Sessions
-    created before that change contain the native CLI's original
-    ``multi_agent_v1.spawn_agent`` item instead, so they cannot be validated
-    against a binding that was never persisted.  The pre-selector native
-    schema omitted ``agent_type`` but included ``fork_context`` and
-    ``message``. Keep this compatibility predicate deliberately exact: only
-    the historical namespace/name and argument shape may bypass the new
-    sidecar contract.
-    """
-    # The first native V1 Responses history used two equivalent wire shapes:
-    # the namespace/name form and the flattened ``multi_agent_v1__spawn_agent``
-    # form.  The CLI also omitted the generated item ``id`` when replaying old
-    # history.  Keep those variants explicit instead of treating every
-    # unbound spawn call as legacy.
-    item_fields = set(item)
-    allowed_fields = {
-        "type",
-        "call_id",
-        "name",
-        "arguments",
-        "namespace",
-        "id",
-        LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
-    }
-    if not item_fields.issubset(allowed_fields):
-        return False
-    if item_fields - {"type", "call_id", "name", "arguments"} not in (
-        set(),
-        {"namespace"},
-        {"id"},
-        {"namespace", "id"},
-        {"id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
-        {"namespace", "id", LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD},
-    ):
-        return False
-    if (
-        item.get("type") != "function_call"
-        or not isinstance(item.get("call_id"), str)
-        or not item.get("call_id")
-    ):
-        return False
-    has_id = "id" in item
-    if has_id and (not isinstance(item.get("id"), str) or not item.get("id")):
-        return False
-    if LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD in item:
-        if not has_id:
-            return False
-        metadata = item.get(LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD)
-        if (
-            not isinstance(metadata, Mapping)
-            or set(metadata) != {"turn_id"}
-            or not isinstance(metadata.get("turn_id"), str)
-            or not metadata.get("turn_id")
-        ):
-            return False
-    namespace = item.get("namespace")
-    name = item.get("name")
-    if not (
-        (namespace == "multi_agent_v1" and name == "spawn_agent")
-        or (namespace is None and name == "multi_agent_v1__spawn_agent")
-    ):
-        return False
-    if not isinstance(arguments, Mapping):
-        return False
-    if set(arguments) not in (
-        {"fork_context", "message"},
-        {"agent_type", "fork_context", "message"},
-    ):
-        return False
-    if "agent_type" in arguments and arguments.get("agent_type") != "worker":
-        return False
-    return (
-        isinstance(arguments.get("fork_context"), bool)
-        and isinstance(arguments.get("message"), str)
-    )
+    return _collaboration_adapter().is_legacy_native_worker_spawn_call(item, arguments)
 
 
 def _is_legacy_native_worker_spawn_readback(value: Any) -> bool:
-    readback = _semantic_strict_json_object(value)
-    return (
-        isinstance(readback, Mapping)
-        and set(readback) == {"agent_id", "nickname"}
-        and isinstance(readback.get("agent_id"), str)
-        and bool(readback.get("agent_id"))
-        and (readback.get("nickname") is None or isinstance(readback.get("nickname"), str))
-    )
-
-
-_WORKER_STREAM_BINDING_STATE_FIELD = "_worker_stream_binding_state"
+    return _collaboration_adapter().is_legacy_native_worker_spawn_readback(value)
 
 
 def _remember_worker_stream_item(
@@ -7347,124 +7020,14 @@ def _remember_worker_stream_item(
     *,
     terminal: bool = False,
 ) -> None:
-    if not isinstance(item, Mapping):
-        return
-    item_id = item.get("id")
-    if not isinstance(item_id, str) or not item_id:
-        return
-    tool_name = _multi_agent_function_call_name(item)
-    items = state.setdefault("items", {})
-    if not isinstance(items, dict):
-        items = {}
-        state["items"] = items
-    record = items.setdefault(item_id, {})
-    if not isinstance(record, dict):
-        record = {}
-        items[item_id] = record
-    if tool_name is not None:
-        record["tool_name"] = tool_name
-    if tool_name != "spawn_agent":
-        return
-    raw_arguments = item.get("arguments")
-    if raw_arguments not in (None, ""):
-        record["selector_arguments_pending"] = False
-        if isinstance(raw_arguments, str):
-            record["arguments"] = raw_arguments
-        elif isinstance(raw_arguments, Mapping):
-            record["arguments"] = json.dumps(raw_arguments, ensure_ascii=True, separators=(",", ":"))
-        parsed = _semantic_strict_json_object(record.get("arguments"))
-        if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            if not record.get("selector_invalid"):
-                record["selector_delta_incomplete"] = False
-                record["agent_type"] = parsed["agent_type"]
-        elif terminal:
-            record["selector_invalid"] = True
-            record.pop("agent_type", None)
-        else:
-            record["selector_delta_incomplete"] = True
-            record.pop("agent_type", None)
-    else:
-        if not terminal:
-            record["selector_arguments_pending"] = True
-        elif record.get("selector_arguments_pending") and not record.get("selector_arguments_done"):
-            record["selector_invalid"] = True
-            record.pop("agent_type", None)
+    _collaboration_adapter().remember_stream_item(state, item, terminal=terminal)
 
 
 def _remember_worker_stream_event(
     value: Mapping[str, Any],
     event_context: Mapping[str, Any] | None,
 ) -> None:
-    if not isinstance(event_context, dict):
-        return
-    state = event_context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
-    if not isinstance(state, dict):
-        state = {"items": {}}
-        event_context[_WORKER_STREAM_BINDING_STATE_FIELD] = state
-    event_type = value.get("type")
-    if event_type in {"response.output_item.added", "response.output_item.done"}:
-        _remember_worker_stream_item(
-            state,
-            value.get("item"),
-            terminal=event_type == "response.output_item.done",
-        )
-        return
-    if event_type == "response.function_call_arguments.delta":
-        item_id = value.get("item_id")
-        delta = value.get("delta")
-        if not isinstance(item_id, str) or not item_id or not isinstance(delta, str):
-            return
-        items = state.setdefault("items", {})
-        if not isinstance(items, dict):
-            return
-        record = items.setdefault(item_id, {})
-        if not isinstance(record, dict):
-            record = {}
-            items[item_id] = record
-        record["arguments"] = f"{record.get('arguments', '')}{delta}"
-        record["selector_arguments_pending"] = True
-        parsed = _semantic_strict_json_object(record["arguments"])
-        if parsed is not None and isinstance(parsed.get("agent_type"), str):
-            if not record.get("selector_invalid"):
-                record["selector_delta_incomplete"] = False
-                record["agent_type"] = parsed["agent_type"]
-        else:
-            record["selector_delta_incomplete"] = True
-            record.pop("agent_type", None)
-        return
-    if event_type == "response.function_call_arguments.done":
-        item_id = value.get("item_id")
-        if not isinstance(item_id, str) or not item_id:
-            return
-        items = state.setdefault("items", {})
-        if not isinstance(items, dict):
-            return
-        record = items.setdefault(item_id, {})
-        if not isinstance(record, dict):
-            record = {}
-            items[item_id] = record
-        arguments = value.get("arguments")
-        if isinstance(arguments, str):
-            record["arguments"] = arguments
-            if record.get("tool_name") != "spawn_agent":
-                return
-            record["selector_arguments_done"] = True
-            record["selector_arguments_pending"] = False
-            parsed = _semantic_strict_json_object(arguments)
-            if parsed is not None and isinstance(parsed.get("agent_type"), str):
-                if not record.get("selector_invalid"):
-                    record["selector_delta_incomplete"] = False
-                    record["agent_type"] = parsed["agent_type"]
-            else:
-                record["selector_invalid"] = True
-                record.pop("agent_type", None)
-        return
-    if event_type == "response.completed":
-        response = value.get("response")
-        output = response.get("output") if isinstance(response, Mapping) else None
-        if isinstance(output, list):
-            for item in output:
-                _remember_worker_stream_item(state, item, terminal=True)
+    _collaboration_adapter().remember_stream_event(value, event_context)
 
 
 def _raise_on_invalid_worker_stream_event(
@@ -7473,53 +7036,11 @@ def _raise_on_invalid_worker_stream_event(
     *,
     surface: str,
 ) -> None:
-    """Reject a terminal streamed worker call before any semantic repair."""
-    if _is_collaboration_v2_context(event_context):
-        return
-    context = event_context or {}
-    if not context.get("_worker_binding_required"):
-        return
-    state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
-    items = state.get("items") if isinstance(state, Mapping) else None
-    if not isinstance(items, Mapping):
-        return
-
-    event_type = value.get("type")
-    item_ids: list[str] = []
-    if event_type == "response.function_call_arguments.done":
-        item_id = value.get("item_id")
-        if isinstance(item_id, str) and item_id:
-            item_ids.append(item_id)
-    elif event_type == "response.output_item.done":
-        item = value.get("item")
-        item_id = item.get("id") if isinstance(item, Mapping) else None
-        if isinstance(item_id, str) and item_id:
-            item_ids.append(item_id)
-    elif event_type == "response.completed":
-        response = value.get("response")
-        output = response.get("output") if isinstance(response, Mapping) else None
-        if isinstance(output, list):
-            item_ids.extend(
-                item["id"]
-                for item in output
-                if isinstance(item, Mapping)
-                and isinstance(item.get("id"), str)
-                and item.get("id")
-            )
-
-    for item_id in item_ids:
-        record = items.get(item_id)
-        if (
-            isinstance(record, Mapping)
-            and record.get("tool_name") == "spawn_agent"
-            and record.get("selector_invalid")
-        ):
-            _raise_worker_contract_error(
-                event="worker_selector_validated",
-                error_code=WORKER_SELECTOR_ERROR_CODE,
-                classification="malformed_arguments",
-                surface=surface,
-            )
+    _collaboration_adapter().raise_on_invalid_stream_event(
+        value,
+        event_context,
+        surface=surface,
+    )
 
 
 def _attach_worker_requested_binding_sidecars(
@@ -7528,112 +7049,11 @@ def _attach_worker_requested_binding_sidecars(
     *,
     capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
-    if isinstance(value, list):
-        changed = False
-        rewritten = []
-        for item in value:
-            replacement, item_changed = _attach_worker_requested_binding_sidecars(
-                item,
-                event_context,
-                capture_stream_event=capture_stream_event,
-            )
-            rewritten.append(replacement)
-            changed = changed or item_changed
-        return (rewritten if changed else value), changed
-    if not isinstance(value, dict):
-        return value, False
-
-    if capture_stream_event:
-        _remember_worker_stream_event(value, event_context)
-    changed = False
-    rewritten = dict(value)
-    for key, item in value.items():
-        replacement, item_changed = _attach_worker_requested_binding_sidecars(
-            item,
-            event_context,
-            capture_stream_event=capture_stream_event,
-        )
-        if item_changed:
-            rewritten[key] = replacement
-            changed = True
-
-    if _multi_agent_function_call_name(rewritten) != "spawn_agent":
-        return (rewritten if changed else value), changed
-    # Binding sidecars require an exact selector.  The general argument
-    # normalizer intentionally accepts a valid JSON prefix for other repair
-    # paths, but that would let malformed streamed arguments inherit a worker
-    # binding after the strict stream state has already been cleared.
-    raw_arguments = rewritten.get("arguments")
-    arguments = _semantic_strict_json_object(raw_arguments)
-    context = event_context or {}
-    pending_agent_type = None
-    pending_arguments = None
-    stream_item_tracked = False
-    stream_selector_invalid = False
-    stream_state = context.get(_WORKER_STREAM_BINDING_STATE_FIELD)
-    item_id = rewritten.get("id")
-    if isinstance(stream_state, Mapping) and isinstance(item_id, str):
-        stream_items = stream_state.get("items")
-        record = stream_items.get(item_id) if isinstance(stream_items, Mapping) else None
-        if isinstance(record, Mapping):
-            stream_item_tracked = True
-            pending_agent_type = record.get("agent_type")
-            pending_arguments = _semantic_strict_json_object(record.get("arguments"))
-            stream_selector_invalid = bool(record.get("selector_invalid"))
-    if arguments is None:
-        # Responses streams may publish the function-call item before its
-        # arguments.  The arguments delta/done events carry the selector, but
-        # the item that Codex persists can still have an empty arguments field.
-        # When this request has an external worker binding, carry the signed
-        # sidecar on that item so the next turn can validate the reconstructed
-        # worker call.  A normal body call has no lifecycle status and keeps the
-        # old fail-closed behavior.
-        if not (
-            raw_arguments in (None, "")
-            and bool(context.get("_worker_binding_required"))
-            and rewritten.get("status") in {"in_progress", "completed"}
-            and pending_agent_type == "worker"
-            and pending_arguments is not None
-        ):
-            return (rewritten if changed else value), changed
-        arguments = pending_arguments
-    elif arguments.get("agent_type") != "worker":
-        return (rewritten if changed else value), changed
-    elif stream_item_tracked and (
-        stream_selector_invalid or pending_agent_type not in {None, "worker"}
-    ):
-        return (rewritten if changed else value), changed
-    call_id = rewritten.get("call_id")
-    if not isinstance(call_id, str) or not call_id:
-        _raise_worker_contract_error(
-            event="worker_requested_binding_validated",
-            error_code=WORKER_BINDING_ERROR_CODE,
-            classification="missing_call_identity",
-        )
-    requested = (event_context or {}).get("_worker_requested_binding")
-    if not isinstance(requested, Mapping):
-        _raise_worker_contract_error(
-            event="worker_requested_binding_validated",
-            error_code=WORKER_BINDING_ERROR_CODE,
-            classification="missing_requested_binding_sidecar",
-        )
-    sidecar = _worker_requested_binding_sidecar(requested, call_id)
-    persisted_arguments = dict(arguments)
-    # Keep one inert native field as the post-Beta4 marker so removing only the
-    # private carrier cannot turn a new call into the exact legacy shape. A
-    # null optional model is parsed by Codex CLI as no override, so the worker
-    # still inherits the external parent model and reasoning effort.
-    persisted_arguments["model"] = None
-    persisted_arguments.pop("reasoning_effort", None)
-    persisted_arguments[WORKER_REQUESTED_BINDING_FIELD] = sidecar
-    encoded_arguments = _dump_arguments_like(raw_arguments, persisted_arguments)
-    if raw_arguments != encoded_arguments:
-        rewritten["arguments"] = encoded_arguments
-        changed = True
-    if WORKER_REQUESTED_BINDING_FIELD in rewritten:
-        rewritten.pop(WORKER_REQUESTED_BINDING_FIELD, None)
-        changed = True
-    return (rewritten if changed else value), changed
+    return _collaboration_adapter().attach_requested_binding_sidecars(
+        value,
+        event_context,
+        capture_stream_event=capture_stream_event,
+    )
 
 
 def _apply_external_worker_response_contract(
@@ -7645,225 +7065,20 @@ def _apply_external_worker_response_contract(
     attach_sidecars: bool = True,
     capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
-    if _is_collaboration_v2_context(event_context):
-        return value, False
-    if validate_selectors:
-        _validate_external_worker_selectors(value, event_context, surface=surface)
-    if attach_sidecars:
-        return _attach_worker_requested_binding_sidecars(
-            value,
-            event_context,
-            capture_stream_event=capture_stream_event,
-        )
-    return value, False
+    return _collaboration_adapter().apply_external_worker_response_contract(
+        value,
+        event_context,
+        surface=surface,
+        validate_selectors=validate_selectors,
+        attach_sidecars=attach_sidecars,
+        capture_stream_event=capture_stream_event,
+    )
 
 
 def _validate_worker_binding_history(
     payload: Mapping[str, Any],
 ) -> bool:
-    input_items = payload.get("input")
-    if not isinstance(input_items, list):
-        return False
-
-    changed = False
-    worker_calls: dict[str, Mapping[str, Any] | None] = {}
-    legacy_worker_calls: set[str] = set()
-    validated_call_ids: set[str] = set()
-    for item in input_items:
-        if not isinstance(item, Mapping):
-            continue
-        call_id = item.get("call_id")
-        if item.get("type") == "function_call" and _multi_agent_function_call_name(item) == "spawn_agent":
-            raw_arguments = item.get("arguments")
-            arguments = _json_object_from_arguments(raw_arguments)
-            strict_arguments = _semantic_strict_json_object(raw_arguments)
-            agent_type = arguments.get("agent_type") if arguments is not None else None
-            if agent_type in {"general", "default"}:
-                continue
-            if not isinstance(call_id, str) or not call_id:
-                _raise_worker_contract_error(
-                    event="worker_effective_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification="missing_call_identity",
-                )
-            if call_id in worker_calls:
-                _raise_worker_contract_error(
-                    event="worker_effective_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification="duplicate_worker_call_identity",
-                )
-            nested_sidecar_present = (
-                isinstance(arguments, Mapping)
-                and WORKER_REQUESTED_BINDING_FIELD in arguments
-            )
-            top_level_sidecar_present = WORKER_REQUESTED_BINDING_FIELD in item
-            if (
-                not nested_sidecar_present
-                and not top_level_sidecar_present
-                and _is_legacy_native_worker_spawn_call(item, strict_arguments)
-            ):
-                legacy_worker_calls.add(call_id)
-                worker_calls[call_id] = None
-                continue
-            selector_validation = _semantic_validate_worker_selector(arguments)
-            if selector_validation.outcome != _BINDING_ACCEPTED:
-                _raise_worker_contract_error(
-                    event="worker_selector_validated",
-                    error_code=WORKER_SELECTOR_ERROR_CODE,
-                    classification=selector_validation.classification,
-                    surface="history",
-                )
-            if nested_sidecar_present and strict_arguments is None:
-                _raise_worker_contract_error(
-                    event="worker_requested_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification="unknown_requested_binding_sidecar",
-                )
-            nested_sidecar = (
-                strict_arguments.get(WORKER_REQUESTED_BINDING_FIELD)
-                if nested_sidecar_present and strict_arguments is not None
-                else None
-            )
-            top_level_sidecar = item.get(WORKER_REQUESTED_BINDING_FIELD)
-            if (
-                nested_sidecar_present
-                and top_level_sidecar_present
-                and nested_sidecar != top_level_sidecar
-            ):
-                _raise_worker_contract_error(
-                    event="worker_requested_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification="conflicting_requested_binding_sidecar",
-                )
-            requested, sidecar_failure = _verified_worker_requested_binding(
-                nested_sidecar if nested_sidecar_present else top_level_sidecar,
-                call_id,
-            )
-            if requested is None:
-                _raise_worker_contract_error(
-                    event="worker_requested_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification=sidecar_failure or "unknown_requested_binding_sidecar",
-                )
-            if strict_arguments is not None:
-                if nested_sidecar_present and (
-                    "model" not in strict_arguments
-                    or strict_arguments.get("model") is not None
-                ):
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_model",
-                    )
-                if nested_sidecar_present and "reasoning_effort" in strict_arguments:
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_reasoning",
-                    )
-                if (
-                    not nested_sidecar_present
-                    and "model" in strict_arguments
-                    and strict_arguments.get("model") != requested["model"]
-                ):
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_model",
-                    )
-                if (
-                    not nested_sidecar_present
-                    and "reasoning_effort" in strict_arguments
-                    and strict_arguments.get("reasoning_effort") != requested["reasoning"]
-                ):
-                    _raise_worker_contract_error(
-                        event="worker_requested_binding_validated",
-                        error_code=WORKER_BINDING_ERROR_CODE,
-                        classification="contradictory_requested_reasoning",
-                    )
-            if isinstance(item, dict):
-                if WORKER_REQUESTED_BINDING_FIELD in item:
-                    item.pop(WORKER_REQUESTED_BINDING_FIELD, None)
-                    changed = True
-                if nested_sidecar_present and strict_arguments is not None:
-                    forwarded_arguments = dict(strict_arguments)
-                    forwarded_arguments.pop(WORKER_REQUESTED_BINDING_FIELD, None)
-                    # The null model is a persistence marker added after the
-                    # provider produced the call. Do not replay persistence
-                    # metadata as provider-authored tool arguments.
-                    forwarded_arguments.pop("model", None)
-                    forwarded_arguments.pop("reasoning_effort", None)
-                    item["arguments"] = _dump_arguments_like(
-                        raw_arguments,
-                        forwarded_arguments,
-                    )
-                    changed = True
-            worker_calls[call_id] = requested
-            continue
-        if (
-            item.get("type") != "function_call_output"
-            or not isinstance(call_id, str)
-            or call_id not in worker_calls
-        ):
-            continue
-        if call_id in validated_call_ids:
-            _raise_worker_contract_error(
-                event="worker_effective_binding_validated",
-                error_code=WORKER_BINDING_ERROR_CODE,
-                classification="duplicate_worker_effective_output",
-            )
-
-        output = item.get("output")
-        if call_id in legacy_worker_calls:
-            if not _is_legacy_native_worker_spawn_readback(output):
-                _raise_worker_contract_error(
-                    event="worker_effective_binding_validated",
-                    error_code=WORKER_BINDING_ERROR_CODE,
-                    classification="malformed_readback",
-                )
-            write_proxy_event(
-                "worker_effective_binding_validated",
-                outcome="accepted",
-                classification="legacy_native_spawn",
-            )
-            validated_call_ids.add(call_id)
-            continue
-        readback = _semantic_strict_json_object(output)
-        if readback is None and isinstance(output, str) and output.strip():
-            _raise_worker_contract_error(
-                event="worker_effective_binding_validated",
-                error_code=WORKER_BINDING_ERROR_CODE,
-                classification="malformed_readback",
-            )
-        requested = worker_calls[call_id]
-        readback = _semantic_synthesize_effective_worker_binding_readback(
-            requested,
-            readback,
-        )
-        validation = _semantic_validate_effective_worker_binding(
-            requested,
-            readback,
-        )
-        if validation.outcome != _BINDING_ACCEPTED:
-            _raise_worker_contract_error(
-                event="worker_effective_binding_validated",
-                error_code=WORKER_BINDING_ERROR_CODE,
-                classification=validation.classification,
-            )
-        write_proxy_event(
-            "worker_effective_binding_validated",
-            outcome="accepted",
-            classification=validation.classification,
-        )
-        validated_call_ids.add(call_id)
-
-    if set(worker_calls) - validated_call_ids:
-        _raise_worker_contract_error(
-            event="worker_effective_binding_validated",
-            error_code=WORKER_BINDING_ERROR_CODE,
-            classification="missing_readback",
-        )
-    return changed
+    return _collaboration_adapter().validate_worker_binding_history(payload)
 
 
 def _normalize_third_party_tool_call(
@@ -10533,13 +9748,11 @@ def _reject_missing_worker_selector_for_generated_call(
     *,
     surface: str,
 ) -> None:
-    if spec.get("tool_name") == "spawn_agent" and bool((event_context or {}).get("_spawn_selector_required")):
-        _raise_worker_contract_error(
-            event="worker_selector_validated",
-            error_code=WORKER_SELECTOR_ERROR_CODE,
-            classification="missing_selector",
-            surface=surface,
-        )
+    _collaboration_adapter().reject_missing_worker_selector_for_generated_call(
+        spec,
+        event_context,
+        surface=surface,
+    )
 
 
 def _repair_missing_required_subagent_call_payload(

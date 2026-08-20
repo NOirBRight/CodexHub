@@ -8,6 +8,7 @@ import logging
 import pytest
 
 import codex_proxy
+import collaboration_adapter
 import gateway_errors
 import gateway_settings
 import gateway_sse
@@ -290,6 +291,15 @@ REEXPORT_IDENTITY = {
     "PassthroughSseSemanticStats": gateway_sse.PassthroughSseSemanticStats,
     "_identity_failure": gateway_errors._identity_failure,
     "UpstreamProtocolTranslationError": gateway_errors.UpstreamProtocolTranslationError,
+    "COLLABORATION_BOUNDARY_ERROR_CODE": collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
+    "WORKER_SELECTOR_ERROR_CODE": collaboration_adapter.WORKER_SELECTOR_ERROR_CODE,
+    "WORKER_BINDING_ERROR_CODE": collaboration_adapter.WORKER_BINDING_ERROR_CODE,
+    "WORKER_REQUESTED_BINDING_FIELD": collaboration_adapter.WORKER_REQUESTED_BINDING_FIELD,
+    "WORKER_REQUESTED_BINDING_VERSION": collaboration_adapter.WORKER_REQUESTED_BINDING_VERSION,
+    "WORKER_REQUESTED_BINDING_FIELDS": collaboration_adapter.WORKER_REQUESTED_BINDING_FIELDS,
+    "LEGACY_NATIVE_WORKER_SPAWN_FIELDS": collaboration_adapter.LEGACY_NATIVE_WORKER_SPAWN_FIELDS,
+    "LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD": collaboration_adapter.LEGACY_NATIVE_WORKER_SPAWN_METADATA_FIELD,
+    "CollaborationAdapter": collaboration_adapter.CollaborationAdapter,
     "_responses_url": route_plan._responses_url,
     "_chat_completions_url": route_plan._chat_completions_url,
     "_external_tool_protocol": route_plan._external_tool_protocol,
