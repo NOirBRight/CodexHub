@@ -48,6 +48,7 @@ QUALIFICATION_KEY_ENV = "CODEXHUB_AUTH_QUAL_KEY"
 DEFAULT_CREDENTIAL_SOURCE = Path.home() / ".codex" / "proxy" / "config" / "providers.toml"
 DEFAULT_OUTPUT_DIR = Path("docs/evidence/authenticated-provider")
 EXPECTED_V2_TOOLS = frozenset(V2_TOOLS)
+ALLOWED_FAILURE_CATEGORIES = frozenset({"client_cancellation"})
 EXPECTED_V2_SEQUENCE = (
     "spawn_agent",
     "wait_agent",
@@ -569,6 +570,26 @@ def _gateway_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def _gateway_failures_are_acceptable(gateway: Mapping[str, Any]) -> bool:
+    """Return true only when the run has no upstream or Gateway failures.
+
+    A qualification may intentionally cancel a streamed turn while exercising
+    lifecycle/restart behavior, but a 4xx (including a protocol translation
+    400) or any 5xx is a failed primary path and must not be converted into
+    passing evidence merely because another request succeeded.
+    """
+
+    failures = gateway.get("failures")
+    if not isinstance(failures, list):
+        return False
+    return all(
+        isinstance(failure, Mapping)
+        and failure.get("category") in ALLOWED_FAILURE_CATEGORIES
+        and failure.get("status") == 499
+        for failure in failures
+    )
+
+
 def _run_identity(home: Path, port: int, workspace: Path) -> dict[str, Any]:
     code, lines, stdout, _stderr = lifecycle._run_cli(
         home,
@@ -962,7 +983,7 @@ def _run_cell(
             gateway["streaming"]["progressive_text_stream_count"] >= 1
             and gateway["streaming"]["text_delta_source_count"] >= 2
             and gateway["reasoning_policies"] == ["explicit"]
-            and all(failure.get("category") for failure in gateway["failures"])
+            and _gateway_failures_are_acceptable(gateway)
         )
         if "collaboration" in scenarios:
             protocol_observations = protocol_observations and (

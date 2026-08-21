@@ -225,13 +225,80 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
                 return False, 404, None, "not found"
             raise AssertionError(f"unexpected probe path: {path}")
 
-        with patch("probe_upstream_format.request_json", side_effect=fake_request_json) as request_json:
+        def fake_request_sse_events(
+            base_url: str,
+            api_key: str,
+            path: str,
+            payload: dict,
+            timeout: int,
+        ):
+            self.assertEqual(base_url, "https://example.test/v1")
+            self.assertEqual(api_key, "test-key")
+            self.assertTrue(payload["stream"])
+            if path == "/responses":
+                return (
+                    True,
+                    200,
+                    [
+                        {
+                            "type": "response.output_item.done",
+                            "item": {
+                                "type": "function_call",
+                                "name": "get_weather",
+                                "call_id": "call_weather",
+                            },
+                        },
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "output": [
+                                    {
+                                        "type": "function_call",
+                                        "name": "get_weather",
+                                        "call_id": "call_weather",
+                                    }
+                                ]
+                            },
+                        },
+                    ],
+                    None,
+                )
+            if path == "/chat/completions":
+                return (
+                    True,
+                    200,
+                    [
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "id": "call_weather",
+                                                "function": {"name": "get_weather"},
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    None,
+                )
+            raise AssertionError(f"unexpected stream probe path: {path}")
+
+        with (
+            patch("probe_upstream_format.request_json", side_effect=fake_request_json) as request_json,
+            patch("probe_upstream_format.request_sse_events", side_effect=fake_request_sse_events),
+        ):
             result = probe("https://example.test/v1", "test-key", None, 2)
 
         self.assertTrue(result["responses_text_ok"])
         self.assertTrue(result["responses_tool_ok"])
+        self.assertTrue(result["responses_tool_stream_ok"])
         self.assertTrue(result["chat_text_ok"])
         self.assertTrue(result["chat_tool_ok"])
+        self.assertTrue(result["chat_tool_stream_ok"])
         self.assertTrue(result["chat_tool_history_ok"])
         self.assertFalse(result["anthropic_text_ok"])
         self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
@@ -302,10 +369,47 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
                 return True, 200, {"choices": [{"message": {"content": "OK"}}]}, None
             raise AssertionError(f"unexpected probe path: {path}")
 
-        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+        def fake_request_sse_events(
+            _base_url: str,
+            _api_key: str,
+            path: str,
+            _payload: dict,
+            *,
+            timeout: int,
+        ):
+            self.assertEqual(timeout, 2)
+            if path == "/chat/completions":
+                return (
+                    True,
+                    200,
+                    [
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "id": "call_weather",
+                                                "function": {"name": "get_weather"},
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    None,
+                )
+            return False, 404, [], "not found"
+
+        with (
+            patch("probe_upstream_format.request_json", side_effect=fake_request_json),
+            patch("probe_upstream_format.request_sse_events", side_effect=fake_request_sse_events),
+        ):
             result = probe("https://api.example.test/coding", "test-key", "k3", 2)
 
         self.assertTrue(result["chat_tool_ok"])
+        self.assertTrue(result["chat_tool_stream_ok"])
         self.assertTrue(result["chat_tool_history_ok"])
         self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_CHAT)
         self.assertEqual(result["recommended_tool_protocol"], "chat_tools")

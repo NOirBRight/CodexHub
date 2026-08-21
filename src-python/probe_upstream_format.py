@@ -554,6 +554,35 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         else:
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
 
+    stream_tool_checks = [
+        (
+            "responses_tool_stream_ok",
+            "/responses",
+            responses_tool_payload(model, stream=True),
+            responses_stream_tool_ok,
+        ),
+        (
+            "chat_tool_stream_ok",
+            "/chat/completions",
+            chat_tool_payload(model, stream=True),
+            chat_stream_tool_ok,
+        ),
+    ]
+    for key, path, body, validator in stream_tool_checks:
+        ok, status, events, detail = request_sse_events(
+            base_url,
+            api_key,
+            path,
+            body,
+            timeout=request_timeout,
+        )
+        result[key] = bool(ok and validator(events))
+        label = key.removesuffix("_ok").replace("_", " ")
+        if result[key]:
+            notes.append(f"{label}: OK")
+        else:
+            notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid SSE response shape'}")
+
     result["recommended_format"] = recommended_format(result)
     if result["recommended_format"] == UPSTREAM_FORMAT_RESPONSES:
         notes.append("Recommended: Responses")

@@ -7,7 +7,7 @@
     },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "df890a1a9435670e36d456e6170022279fb9191083785a1ecdeb075724b131fd"
+      "sha256": "224a841a547e6683210331d448498ee2c06d72ea560f7fbcf57ab9705093697a"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
@@ -190,9 +190,9 @@
       "id": "request.reasoning.effort",
       "implementation": "protocol_translation",
       "key": "reasoning",
-      "notes": "The selected third-party model owns reasoning; unknown keys or values fail closed.",
-      "responses": "{effort: none|minimal|low|medium|high|xhigh}",
-      "when": "exact Codex reasoning-effort object"
+      "notes": "Chat cannot return a Responses reasoning summary. The Gateway consumes known effort/summary selectors locally for compatibility; unknown keys or values fail closed.",
+      "responses": "{effort: none|minimal|low|medium|high|xhigh|max, summary?: auto|concise|detailed}",
+      "when": "exact bounded Codex reasoning-control object"
     },
     {
       "category": "request_field",

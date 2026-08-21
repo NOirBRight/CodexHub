@@ -256,3 +256,18 @@ def test_capture_writes_bounded_summary_without_credential(
     assert secret not in serialized
     assert "https://ollama.example" not in serialized
     assert result["sanitization"]["credentials_retained"] is False
+
+
+def test_gateway_failure_gate_rejects_protocol_errors_but_allows_intentional_cancel() -> None:
+    assert runner._gateway_failures_are_acceptable(
+        {"failures": [{"category": "client_cancellation", "status": 499}]}
+    ) is True
+    assert runner._gateway_failures_are_acceptable(
+        {"failures": [{"category": "request_or_semantic_rejection", "status": 400}]}
+    ) is False
+    assert runner._gateway_failures_are_acceptable(
+        {"failures": [{"category": "upstream_or_gateway_failure", "status": 502}]}
+    ) is False
+    assert runner._gateway_failures_are_acceptable(
+        {"failures": [{"category": "client_cancellation", "status": 502}]}
+    ) is False
