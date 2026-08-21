@@ -11729,20 +11729,19 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
                 )
 
-            operational_authentication = (
-                materialize_operational_authentication(
+            if route_plan.vision.action is not VisionAction.REJECT:
+                operational_authentication = materialize_operational_authentication(
                     self.headers,
                     upstream,
                 )
-            )
-            route_plan = bind_route_plan_operational_authentication(
-                route_plan,
-                self.headers,
-                upstream,
-                operational_authentication,
-                drop_content_encoding=content_decoded,
-            )
-            primary_route_attempt = route_plan.attempts[0]
+                route_plan = bind_route_plan_operational_authentication(
+                    route_plan,
+                    self.headers,
+                    upstream,
+                    operational_authentication,
+                    drop_content_encoding=content_decoded,
+                )
+                primary_route_attempt = route_plan.attempts[0]
             usage_capture: dict[str, Any] = {}
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value
