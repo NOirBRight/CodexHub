@@ -859,9 +859,29 @@ fn block_fingerprint_value(
 
 fn is_local_gateway_url(url: &str) -> bool {
     let value = url.trim().trim_matches('"').trim_matches('\'');
-    value.starts_with("http://127.0.0.1:")
-        || value.starts_with("http://localhost:")
-        || value.starts_with("http://[::1]:")
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" {
+        return false;
+    }
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    // Reject userinfo tricks like http://localhost@evil.example.
+    if authority.contains('@') {
+        return false;
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, port),
+        None => (authority, ""),
+    };
+    let valid_port = port.is_empty() || port.chars().all(|c| c.is_ascii_digit());
+    if !valid_port {
+        return false;
+    }
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 fn read_yaml_mapping(path: &Path) -> Result<Mapping, String> {
@@ -1017,9 +1037,7 @@ pub(crate) fn dsh_disconnect(root: &Path, expectation: &ReadbackExpectation) -> 
     let descriptor = dsh_descriptor();
     let before = verify_readback(root, &descriptor, expectation)?;
     if matches!(before.status, ReadbackStatus::Drift) {
-        let mut report = dsh_report(root, expectation)?;
-        report.connected = false;
-        return Ok(report);
+        return Err("DSH Injected Block drifted; refusing destructive detach. Repair or reconnect first.".to_string());
     }
     detach(root, &descriptor)?;
     let mut report = dsh_report(root, expectation)?;
@@ -1344,6 +1362,36 @@ mod tests {
             "conflict must leave the user file untouched"
         );
         assert!(!root.join(".credentials.yaml").exists());
+    }
+
+    #[test]
+    fn inject_rejects_spoofed_local_gateway_url() {
+        let root = dsh_root("codexhub-injection-spoofed-url");
+        let descriptor = dsh_descriptor();
+        let original = concat!(
+            "llm-pi-ai:\n",
+            "  providers:\n",
+            "    codexhub:\n",
+            "      api: openai-responses\n",
+            "      baseURL: http://localhost:9109@evil.example/v1\n"
+        );
+        fs::write(root.join("settings.yaml"), original).unwrap();
+
+        let error = inject(&root, &descriptor, &request()).unwrap_err();
+        assert!(error.contains("codexhub"), "unexpected error: {error}");
+        assert_eq!(read_file(&root.join("settings.yaml")), original);
+        assert!(!root.join(".credentials.yaml").exists());
+    }
+
+    #[test]
+    fn local_gateway_url_requires_local_authority() {
+        assert!(is_local_gateway_url("http://127.0.0.1:9109"));
+        assert!(is_local_gateway_url("http://localhost:9109/v1"));
+        assert!(is_local_gateway_url("http://[::1]:9109"));
+        assert!(!is_local_gateway_url("http://localhost:9109@evil.example/v1"));
+        assert!(!is_local_gateway_url("https://localhost:9109"));
+        assert!(!is_local_gateway_url("http://localhost:evil"));
+        assert!(!is_local_gateway_url("http://localhost.evil.test:9109"));
     }
 
     #[test]
