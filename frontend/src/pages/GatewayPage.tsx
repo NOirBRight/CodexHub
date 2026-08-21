@@ -389,14 +389,14 @@ function GatewayPageImpl({
           const cancelled = message === t("runtime.gatewayRetirementCancelled");
           const restarted = message === t("gateway.gatewaySettingsSavedRestarted");
           return {
-            text: cancelled
+            text: cancelled || restarted
               ? message
               : enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
             tone: cancelled ? "info" : "success",
-            restart: restarted ? { kind: "runtime", name: "Gateway" } : { kind: "none" },
+            restart: { kind: "none" },
           };
         },
-        formatRestart: (target) => target.kind === "runtime" ? t("gateway.restartGateway") : "",
+        formatRestart: () => "",
       });
       setError(null);
     } catch {

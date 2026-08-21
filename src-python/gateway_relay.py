@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from gateway_interfaces import RequestAdmission, RelayWriter, UpstreamResponseLike
+from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 
 
 RelayResponse = UpstreamResponseLike
@@ -433,10 +434,10 @@ class RelayHandler(Protocol):
 class RelayPlan(Protocol):
     selected_upstream_format: str
     request_kind: str
-    streaming_policy: Any
-    usage_policy: Any
-    response_mutation_policy: Any
-    sse_mutation_policy: Any
+    streaming_policy: StreamingPolicy
+    usage_policy: UsagePolicy
+    response_mutation_policy: MutationPolicy
+    sse_mutation_policy: MutationPolicy
     verify_cross_protocol_source: bool
     lifecycle_final_retry_enabled: bool
 

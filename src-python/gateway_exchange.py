@@ -34,11 +34,28 @@ class RetryPolicyLike(Protocol):
     base_relay_attempts: int
     lifecycle_final_extra_attempts: Callable[[Mapping[str, Any]], int]
     empty_completed_max_attempts: int
+    emit_downstream_retry_notice: bool
 
     def relay_attempts_for_failure_class(self, *, failure_class: str, stream_failure: bool) -> int: ...
-    def retry_delay_seconds(self, attempt: int, failure_class: str) -> int: ...
-    def capacity_elapsed_limit_allows(self, started_at: float, delay_seconds: int | float) -> bool: ...
-    def stream_elapsed_limit_allows(self, started_at: float, delay_seconds: int | float) -> bool: ...
+    def retry_delay_seconds(self, attempt: int, *, failure_class: str, retry_after_seconds: int | None = None) -> int: ...
+    def capacity_elapsed_limit_allows(self, elapsed_seconds: float, delay_seconds: int | float) -> bool: ...
+    def stream_elapsed_limit_allows(self, elapsed_seconds: float, delay_seconds: int | float) -> bool: ...
+    def new_open_attempt_budget(self) -> dict[str, int] | None: ...
+
+
+class ToolExposureLike(Protocol):
+    gateway_schema_injection: bool
+
+
+class RelayExecutionPlanLike(Protocol):
+    selected_upstream_format: str
+    request_kind: str
+    streaming_policy: Any
+    usage_policy: Any
+    response_mutation_policy: Any
+    sse_mutation_policy: Any
+    verify_cross_protocol_source: bool
+    lifecycle_final_retry_enabled: bool
 
 
 class RouteAttemptLike(Protocol):
@@ -48,17 +65,19 @@ class RouteAttemptLike(Protocol):
     tool_protocol: str
     tool_surface_strategy: str
     native_responses_tool_codec: str
-    request_mutation_policy: Any
+    request_mutation_policy: MutationPolicy
     retry: RetryPolicyLike
 
     def prepare_body(self, body: bytes) -> PreparedExchange: ...
-    def relay_execution_plan(self, *, lifecycle_final_retry_enabled: bool) -> Any: ...
+    def relay_execution_plan(self, *, lifecycle_final_retry_enabled: bool) -> RelayExecutionPlanLike: ...
     def allows_protocol_fallback_status(self, status: int) -> bool: ...
 
 
 class RoutePlanLike(Protocol):
     attempts: tuple[RouteAttemptLike, ...]
     primary_attempt: RouteAttemptLike | None
+    transparent_tool_loop_guard: bool
+    tool_exposure: ToolExposureLike
 
 @dataclass(frozen=True, slots=True)
 class InboundRequest:
@@ -238,7 +257,7 @@ class OpenExchangeRequest:
 @dataclass(frozen=True)
 class RelayExchangeRequest:
     attempt: RouteAttemptLike
-    relay_plan: Any
+    relay_plan: RelayExecutionPlanLike
     upstream_name: str
     request_id: str
     model: str | None
@@ -273,7 +292,7 @@ class ExchangeRequest:
 @dataclass
 class ExchangeProgress:
     active_attempt: RouteAttemptLike | None = None
-    relay_execution_plan: Any | None = None
+    relay_execution_plan: RelayExecutionPlanLike | None = None
     upstream_format: str = "responses"
     request_observability: dict[str, Any] = field(default_factory=dict)
     downstream_sse_started: bool = False
