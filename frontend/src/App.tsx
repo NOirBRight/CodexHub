@@ -196,6 +196,7 @@ function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings
     return false;
   }
   return (
+    previous.gateway_client_key !== next.gateway_client_key ||
     previous.gateway_auto_retry_enabled !== next.gateway_auto_retry_enabled ||
     previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
@@ -502,7 +503,7 @@ export default function App() {
 
   const updateInstallToast = useCallback(
     (status: AppUpdateInstallStatus, source: "settings" | "toast" | null = updateInstallSource) => {
-      if (source !== "toast" || !updateInstallToastId.current) {
+      if (!updateInstallToastId.current) {
         return;
       }
       updateToast(updateInstallToastId.current, {
@@ -519,7 +520,7 @@ export default function App() {
 
   const startAppUpdateInstall = useCallback(
     async (source: "settings" | "toast" = "settings") => {
-      if (!window.confirm(t("runtime.gatewayRetirementWarning"))) {
+      if (!window.confirm(t("settings.updateInstallConfirm"))) {
         return;
       }
       const toastId = updateAvailableToastId.current;
@@ -529,7 +530,7 @@ export default function App() {
       }
 
       setUpdateInstallSource(source);
-      if (source === "toast") {
+      {
         updateInstallToastId.current = showToast({
           dedupeKey: "app-update-install",
           text: t("settings.downloadingUpdate"),
@@ -556,9 +557,6 @@ export default function App() {
         }
         setUpdateInstallStatus(status);
         updateInstallToast(status, source);
-        if (source === "settings" && status.phase === "failed") {
-          showToast(t("settings.updateInstallFailed", { message: status.message }), "error");
-        }
       } catch (err) {
         const message = messageFromError(err);
         const failedStatus = failedUpdateInstallStatus(
@@ -569,9 +567,6 @@ export default function App() {
         );
         setUpdateInstallStatus(failedStatus);
         updateInstallToast(failedStatus, source);
-        if (source === "settings") {
-          showToast(t("settings.updateInstallFailed", { message }), "error");
-        }
       }
     },
     [dismissToast, showToast, t, updateInstallStatus, updateInstallToast],

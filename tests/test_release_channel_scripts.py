@@ -379,9 +379,11 @@ def test_release_plan_marks_semver_prerelease_versions_as_prereleases(tmp_path):
         "latest-debug.json",
     ]
     assert plan["linux_assets"] == [
+        f"CodexHub_0.1.8-beta.4.1_linux_portable_{main_commit[:8]}.tar.gz",
         "CodexHub_0.1.8-beta.4.1_amd64.AppImage",
         "CodexHub_0.1.8-beta.4.1_amd64.AppImage.sig",
         "CodexHub_0.1.8-beta.4.1_amd64.deb",
+        f"CodexHub_0.1.8-beta.4.1_debug_linux_portable_{main_commit[:8]}.tar.gz",
         "CodexHub_0.1.8-beta.4.1_debug_amd64.AppImage",
         "CodexHub_0.1.8-beta.4.1_debug_amd64.AppImage.sig",
         "CodexHub_0.1.8-beta.4.1_debug_amd64.deb",
