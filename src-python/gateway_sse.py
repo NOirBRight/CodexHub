@@ -700,6 +700,3 @@ class DownstreamStreamCommit:
             "last_upstream_byte_at": self._last_upstream_byte_at,
         }
 
-
-
-

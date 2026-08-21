@@ -72,6 +72,7 @@ export async function runPersistentAction<T>(
     const restartText = (spec.formatRestart ?? formatRestartDisclosure)(completed.restart);
     spec.updateToast(toastId, {
       tone: completed.tone ?? "success",
+      timeoutMs: 3000,
       text: (completed.text + " " + restartText).trim(),
       action: null,
     });
@@ -83,6 +84,7 @@ export async function runPersistentAction<T>(
     const errorText = error instanceof Error ? error.message : String(error);
     spec.updateToast(toastId, {
       tone: "error",
+      timeoutMs: disconnected ? null : 5000,
       text: disconnected ? spec.disconnectedText ?? errorText : errorText,
       action:
         disconnected && spec.onStartGateway

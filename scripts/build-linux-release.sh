@@ -58,7 +58,7 @@ if [[ -z "${version:-}" ]]; then
   exit 1
 fi
 
-python3 - "$generated_config" <<'PY'
+"$repo_root/scripts/codexhub-python.sh" - "$generated_config" <<'PY'
 import json, sys
 from pathlib import Path
 cfg = json.loads(Path(sys.argv[1]).read_text())

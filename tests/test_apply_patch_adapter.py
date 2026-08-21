@@ -267,4 +267,3 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
     events, changed = terminal_adapter.adapt_stream_events([{"type": "response.custom_terminal"}])
     assert events == [{"type": "response.custom_terminal"}]
     assert changed is False
-

@@ -2147,5 +2147,3 @@ class UpstreamSseReaderLifecycle:
 
 
 _UpstreamSseReaderLifecycle = UpstreamSseReaderLifecycle
-
-
