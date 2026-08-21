@@ -337,16 +337,26 @@ def _session_tool_evidence(home: Path) -> dict[str, Any]:
             if isinstance(call_id, str) and call_id not in outputs:
                 outputs[call_id] = item.get("output")
 
-    def lifecycle(name: str, namespace: str | None = None) -> tuple[list[str], bool]:
+    def lifecycle(
+        names: str | tuple[str, ...], namespace: str | None = None
+    ) -> tuple[list[str], bool]:
+        accepted_names = {names} if isinstance(names, str) else set(names)
         matching = [
             call_id
             for call_id in call_order
-            if calls[call_id] == (name, namespace)
-            or (namespace is None and calls[call_id][0] == name)
+            if (
+                calls[call_id][0] in accepted_names
+                and calls[call_id][1] == namespace
+            )
+            or (namespace is None and calls[call_id][0] in accepted_names)
         ]
         return matching, bool(matching) and all(call_id in outputs for call_id in matching)
 
-    exec_calls, exec_identity = lifecycle("exec_command")
+    # Codex CLI 0.146+ exposes the standard shell tool on the wire as
+    # ``shell_command``; older evidence and some clients call it
+    # ``exec_command``.  Both are the same standard function lifecycle for
+    # this qualification and must retain exact call/result pairing.
+    exec_calls, exec_identity = lifecycle(("exec_command", "shell_command"))
     patch_calls, patch_identity = lifecycle("apply_patch")
     collaboration_ids = [
         call_id for call_id in call_order if calls[call_id][1] == "collaboration"

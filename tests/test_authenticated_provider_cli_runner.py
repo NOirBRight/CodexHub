@@ -221,6 +221,32 @@ def test_session_tool_evidence_requires_exact_call_result_and_task_identity(tmp_
     }
 
 
+def test_session_tool_evidence_accepts_current_shell_command_wire_name(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    values = [
+        {
+            "type": "function_call",
+            "name": "shell_command",
+            "call_id": "shell-1",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "shell-1",
+            "output": "ok",
+        },
+    ]
+    (session_dir / "rollout.jsonl").write_text(
+        chr(10).join(json.dumps(value) for value in values) + chr(10),
+        encoding="utf-8",
+    )
+
+    evidence = runner._session_tool_evidence(tmp_path)
+    assert evidence["exec_command_call_count"] == 1
+    assert evidence["exec_command_identity_preserved"] is True
+
+
 def test_capture_writes_bounded_summary_without_credential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

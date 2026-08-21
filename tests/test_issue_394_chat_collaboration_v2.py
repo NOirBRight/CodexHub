@@ -155,6 +155,9 @@ def test_native_responses_codec_is_inert_on_chat_custom_adapter() -> None:
     function = chat["tools"][0]["function"]
     assert function["name"].startswith("__codexhub_custom_")
     assert function["parameters"]["required"] == ["__codexhub_custom_input"]
+    assert function["parameters"]["properties"]["__codexhub_custom_input"] == {
+        "type": "string"
+    }
 
 
 def test_v2_declarations_flatten_to_six_deterministic_chat_functions() -> None:
