@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodexHub 深模块问题图</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --card: #1a2332;
+    --line: #3d4f66;
+    --text: #e8eef6;
+    --muted: #93a4b8;
+    --bad: #c45c5c;
+    --good: #3d9a6d;
+    --warn: #c9a227;
+    --iface: #4d7ec8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 24px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
+    max-width: 1100px;
+    margin-inline: auto;
+  }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; }
+  h3 { font-size: 16px; margin: 0 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-right: 6px;
+  }
+  .bad { background: #3a1f1f; color: #f0b4b4; }
+  .good { background: #173325; color: #9ee0bb; }
+  .warn { background: #332b12; color: #ead48a; }
+  .iface { background: #1c2d4a; color: #b7d0f5; }
+  .now { background: #3a1f1f; border-color: #7a3030; }
+  .next { background: #173325; border-color: #2f6b4a; }
+  .iface-bar {
+    background: var(--iface);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 8px 8px 0 0;
+    font-weight: 700;
+  }
+  .iface-bar.bad-bar { background: #7a3030; }
+  .iface-bar.good-bar { background: #2f6b4a; }
+  .impl {
+    background: #121820;
+    padding: 12px;
+    border-radius: 0 0 8px 8px;
+    color: var(--muted);
+  }
+  .arrow { text-align: center; color: var(--bad); font-weight: 800; padding: 8px 0; }
+  .ok-arrow { color: var(--good); }
+  pre {
+    background: #121820;
+    padding: 12px;
+    border-radius: 8px;
+    overflow: auto;
+    font-size: 12.5px;
+    line-height: 1.45;
+    border: 1px solid var(--line);
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+  ol.steps { padding-left: 20px; }
+  ol.steps li { margin: 6px 0; }
+  .cluster { display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: start; }
+  .num {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: grid; place-items: center;
+    font-weight: 800; background: #121820; border: 1px solid var(--line);
+  }
+  .num.active { background: #2a3f66; border-color: #4d7ec8; }
+  a { color: #8cb4f0; }
+  .note { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>CodexHub 深模块问题图</h1>
+  <p class="sub">问题不是文件太长，而是策略穿过了错误的 seam：调用者必须知道实现细节。本页只读讨论用，不改变 0.1.9-beta.2 发布候选。</p>
+
+  <p>
+    <span class="tag iface">Interface 调用者必须学会的</span>
+    <span class="tag bad">现在泄漏出去的</span>
+    <span class="tag good">应藏进实现的</span>
+  </p>
+
+  <h2>深 vs 浅</h2>
+  <div class="grid">
+    <div class="card now">
+      <span class="tag bad">现在</span>
+      <h3>浅模块</h3>
+      <div>
+        <div class="iface-bar bad-bar">很大的接口：16 个参数 / 70 个命令 / 20 个 setter</div>
+        <div class="impl">薄实现：转发、match、getattr、页面复制 Toast</div>
+      </div>
+      <p>删除这个模块后，复杂度不会消失，会散回每个调用者和测试。</p>
+    </div>
+    <div class="card next">
+      <span class="tag good">目标</span>
+      <h3>深模块</h3>
+      <div>
+        <div class="iface-bar good-bar">很小的接口：connect / prepare / commit</div>
+        <div class="impl">大量行为：adoption、fingerprint、协议转换、terminal-once、精确 restart</div>
+      </div>
+      <p>删除这个模块后，同样的复杂度会在 N 个调用者里重新长出来。这才说明它赚回了存在价值。</p>
+    </div>
+  </div>
+
+  <h2>四块问题，一个个谈</h2>
+  <div class="stack">
+    <div class="card cluster">
+      <div class="num active">1</div>
+      <div>
+        <h3>Python Gateway：假深度</h3>
+        <p><code>RoutePlan</code> 看起来是深模块，实际通过 <code>_proxy_attr</code> 反向依赖 <code>codex_proxy.py</code>。规划事实仍住在 HTTP facade 里。</p>
+      </div>
+    </div>
+    <div class="card cluster">
+      <div class="num">2</div>
+      <div>
+        <h3>Rust 客户端集成：一个真 seam，五个旧分支</h3>
+        <p><code>injection.rs</code> 已经把 DSH 的 inject/detach/readback 藏好了。Pi / OpenCode / OMP / ZCode 仍散落在 <code>gateway.rs</code> 的 match arms 里。</p>
+      </div>
+    </div>
+    <div class="card cluster">
+      <div class="num">3</div>
+      <div>
+        <h3>前端工作流：策略复制进页面</h3>
+        <p>Toast 生命周期和精确 restart 披露不是模块，是复制。DSH / Codex / 其他客户端有三套连接实现。</p>
+      </div>
+    </div>
+    <div class="card cluster">
+      <div class="num">4</div>
+      <div>
+        <h3>发布与运行时：策略写在脚本里</h3>
+        <p>Windows 与 Linux 产物、Python 3.13 选择、evidence envelope 各算一遍。没有一个 <code>ReleasePlan</code> 作为 Interface。</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>第一项：<code>route_plan._proxy_attr</code> 循环</h2>
+  <p class="sub">这是 Gateway 里最小、最明确、也最该先修的 seam。下面两张图是现在 vs 目标。</p>
+
+  <h3>现在：规划模块回头抓 facade</h3>
+  <div class="grid">
+    <div class="card">
+      <div class="iface-bar">route_plan.py 声称的 Interface</div>
+      <div class="impl">
+        <code>route_plan_for_request(...)</code><br>
+        → immutable <code>RoutePlan</code>
+        <p>调用者本应只知道：选了哪个 Provider/model，尝试哪些协议，是否允许 fallback。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="iface-bar bad-bar">codex_proxy.py 实际拥有的 Implementation</div>
+      <div class="impl">
+        <code>_responses_url</code><br>
+        <code>_chat_completions_url</code><br>
+        <code>_external_tool_protocol</code><br>
+        <code>_upstream_retry_attempts</code><br>
+        <code>_COLLABORATION_V2</code>
+        <p>这些是规划事实，却仍住在 HTTP facade 里。</p>
+      </div>
+    </div>
+  </div>
+  <div class="arrow">运行时 getattr ↓　　再 import ↑　　形成循环</div>
+  <pre>route_plan.py:81-124
+  def _proxy_attr(name):
+      import codex_proxy
+      return getattr(codex_proxy, name)
+
+codex_proxy.py:13346+
+  from route_plan import (
+      _route_endpoint_url,
+      _tool_exposure_policy_for_route,
+      ...
+  )</pre>
+  <p>Deletion test：删掉 <code>route_plan.py</code> 这个文件，规划行为几乎还在 facade 的私有函数里。所以这次提取没有把复杂度藏进新模块，只是换了文件名，还加了一条反向依赖。</p>
+  <p>测试也走错了 seam：不直接测 <code>route_plan</code>，而是调用 <code>codex_proxy.route_plan_for_request</code>，再 patch <code>codex_proxy._responses_url</code>。Interface 和测试面不一致。</p>
+
+  <h3>目标：单向依赖</h3>
+  <div class="stack" style="max-width:720px">
+    <div class="card next">
+      <b>HTTP Handler / 测试</b><br>
+      只调用 <code>route_plan_for_request</code>
+    </div>
+    <div class="arrow ok-arrow">↓ 单向</div>
+    <div class="card" style="border-color:#4d7ec8">
+      <b>route_plan Interface</b><br>
+      输入：已选 Provider/model + inbound format + runtime facts<br>
+      输出：immutable RoutePlan / 失败
+    </div>
+    <div class="arrow ok-arrow">↓ 内部</div>
+    <div class="card">
+      Implementation：URL 拼接、tool protocol 默认值、retry budget、V2 identity。<br>
+      需要设置时问 <code>gateway_settings</code>，不问 <code>codex_proxy</code>。
+    </div>
+    <div class="arrow ok-arrow">↓ 兼容</div>
+    <div class="card">
+      <b>codex_proxy facade</b> 只 re-export 旧名字，不再拥有这些事实。
+    </div>
+  </div>
+
+  <h3>这一步藏什么、不藏什么</h3>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">藏进去</span>
+      <ul>
+        <li>URL 构造：<code>_responses_url</code> / <code>_chat_completions_url</code></li>
+        <li>tool protocol / surface / native codec</li>
+        <li>Collaboration V2 身份</li>
+        <li>retry budget 读设置 → <code>gateway_settings</code></li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">明确不做</span>
+      <ul>
+        <li>不建 <code>upstream_plumbing.py</code></li>
+        <li>不把 Chat 语义放进 <code>gateway_sse</code></li>
+        <li>不把 <code>choose_upstream</code> 变成按兼容性换模型</li>
+        <li>这一步不发明 <code>GatewayEngine</code></li>
+        <li>旧名字继续由 facade re-export，避免一次打碎私有测试</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>现在被 getattr 的 10 个名字</h3>
+  <p class="sub"><code>route_plan.py:81-124</code> 和 <code>:1123</code>。名字已经在 planner 里，函数体还在 facade。</p>
+  <table>
+    <thead>
+      <tr><th>现在 getattr 的名字</th><th>真正该住的地方</th><th>为什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>_responses_url</code><br><code>_chat_completions_url</code></td>
+        <td><code>route_plan</code></td>
+        <td>规划事实：这个 attempt 打哪个 URL。Vision Proxy 继续从 facade re-export 调用。</td>
+      </tr>
+      <tr>
+        <td><code>_external_tool_protocol</code><br><code>_external_tool_surface_strategy</code><br><code>_external_native_responses_tool_codec</code></td>
+        <td><code>route_plan</code></td>
+        <td>写进 <code>RouteAttemptPlan</code> 的规划字段，不是 HTTP 细节。</td>
+      </tr>
+      <tr>
+        <td><code>_upstream_retry_attempts</code><br><code>_default_retry_attempts_for_request_kind</code><br><code>_request_kind_retry_attempts_configured</code></td>
+        <td><code>gateway_settings</code></td>
+        <td>读 env/settings。planner 问 settings，不问 facade。</td>
+      </tr>
+      <tr>
+        <td><code>_COLLABORATION_V2</code></td>
+        <td><code>codex_semantic_adapter</code></td>
+        <td>已经在那里：<code>COLLABORATION_V2 = "collaboration_v2"</code>。planner 直接 import，不要 <code>_proxy_attr("_COLLABORATION_V2")</code>。</td>
+      </tr>
+      <tr>
+        <td><code>_get_header</code><br><code>_retry_after_delay_seconds</code></td>
+        <td>先留 facade，planner 不再调用</td>
+        <td>这是 transport/retry 执行期事实，不是规划期事实。这一项不要把它们搬进 planner。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>这一项改完后的 Interface</h3>
+  <p>外部 Interface 暂时不变，这是刻意的。先修依赖方向，再收参数。</p>
+  <pre>plan = route_plan_for_request(
+    upstream,
+    request_context,
+    inbound_format="responses",
+    runtime_facts=facts,
+)
+# plan.primary_attempt.endpoint_url
+# plan.primary_attempt.tool_protocol
+# plan.attempts</pre>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>删掉 <code>_proxy_attr</code></li>
+        <li>URL / tool protocol 函数体搬进 <code>route_plan</code></li>
+        <li>retry budget 读设置搬进 <code>gateway_settings</code></li>
+        <li>V2 身份改成正向 import</li>
+        <li>facade 继续 re-export 旧名字</li>
+        <li>规划测试走 <code>route_plan.route_plan_for_request</code> + <code>runtime_facts</code></li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不收窄 <code>route_plan_for_request</code> 的 16 个参数</li>
+        <li>不拆 ResolvedRoute / ToolCompatibilityPlan 两阶段</li>
+        <li>不搬 <code>_get_header</code> / Retry-After</li>
+        <li>不建 <code>upstream_plumbing.py</code> / <code>GatewayEngine</code></li>
+        <li>不一次改掉 493 处私有 patch；facade 名字先留着</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>测试怎么迁：replace，不要叠加</h3>
+  <p class="sub">Interface 就是测试面。规划测试走 planner；设置测试走 settings；执行器测试禁止再派生规划事实。</p>
+  <table>
+    <thead>
+      <tr><th>现在</th><th>迁到</th><th>断言什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>UpstreamUrlTests</code> 调 <code>codex_proxy._responses_url</code></td>
+        <td><code>route_plan._responses_url</code>（facade 可 re-export 兼容）</td>
+        <td>base_url 拼接结果。这是 planner 的内部 helper，允许作为 planner 的 internal seam。</td>
+      </tr>
+      <tr>
+        <td><code>test_routing.py:1810</code> patch facade 的 timeout/retry，证明 planner 不再读它们</td>
+        <td>同一意图，patch 目标改成 <code>gateway_settings</code>，或直接注入 <code>RouteRuntimeFacts</code></td>
+        <td>planner 不读 live settings；facts 进 <code>RetryExecutionPlan</code>。</td>
+      </tr>
+      <tr>
+        <td><code>test_routing.py:1968</code> patch 一串 facade URL/tool/retry，证明 executor 不派生计划</td>
+        <td>继续证明 executor 只用 <code>RouteAttemptPlan</code>。patch 目标跟实现走：实现离开 facade 后，就不要再 patch <code>codex_proxy._responses_url</code></td>
+        <td>打开 upstream 时用的是 plan 里的 URL/protocol/retry，不是现场再算。</td>
+      </tr>
+      <tr>
+        <td><code>test_retry_attempts_are_bounded_by_request_kind</code> 调 <code>codex_proxy._upstream_retry_attempts</code></td>
+        <td><code>gateway_settings</code> 的 retry 读取 Interface</td>
+        <td>env/settings → bounded attempts。这不再是 routing 测试。</td>
+      </tr>
+      <tr>
+        <td>import surface 冻结 <code>route_plan_for_request</code> 在 facade 上</td>
+        <td>保留为 re-export 兼容；新增一条：<code>route_plan</code> 不再出现 <code>_proxy_attr</code> / <code>import codex_proxy</code></td>
+        <td>循环被关闭。旧 freeze 名单这一项先不拆。</td>
+      </tr>
+    </tbody>
+  </table>
+  <style>
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 24px; font-size: 14px; }
+    th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; }
+    td:first-child { white-space: nowrap; }
+  </style>
+
+  <h2 id="item-2">第二项：downstream commit / terminal 属于 gateway_sse</h2>
+  <p class="sub">约束已经写过：<code>gateway_sse</code> 拥有 framing / commit / terminal，不拥有 Chat codec。今天这个模块是 74 行 parse bag；真正的 ledger 还在 facade。</p>
+
+  <div class="grid">
+    <div class="card now">
+      <span class="tag bad">现在</span>
+      <div class="iface-bar bad-bar">gateway_sse.py（74 行）</div>
+      <div class="impl">
+        <code>_parse_sse_json_payload</code><br>
+        <code>_sse_line_ending</code> / blank / metadata<br>
+        没有 commit，没有 terminal-once，没有 close_phase
+      </div>
+    </div>
+    <div class="card now">
+      <span class="tag bad">真正的 Implementation</span>
+      <div class="iface-bar bad-bar">codex_proxy._GatewayDownstreamStreamCommit :16051</div>
+      <div class="impl">
+        header-before-write · terminal-once · close_phase ledger<br>
+        attach_upstream · cancel/close · frame discard<br>
+        Handler 在打开 upstream <b>之前</b>创建（:17203）
+      </div>
+    </div>
+  </div>
+  <p>已经深、不要并进去的：<code>sse_events.SseEventAssembler</code>。那是无损组帧，deletion test 独立成立。gateway_sse 管的是「这些帧能不能写给下游、终态写几次」。</p>
+
+  <h3>目标 Interface（relay / 测试共用）</h3>
+  <pre>commit = DownstreamStreamCommit(...)
+commit.attach_upstream(response)
+commit.commit_headers(status, send_headers) -> bool
+commit.commit_sse_bytes(data) -> bool
+commit.commit_terminal_failure(...) -> bool
+commit.close() / cancel()
+commit.terminal_committed
+commit.close_phase   # before_output | during_event | after_terminal</pre>
+  <p>Observers（terminal 检测、usage tap、synthetic terminal formatter）作为注入的 callable。这是内部 seam：生产一组、测试一组。模块自己只拥有 lifecycle ledger 和 byte commitment。</p>
+
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">藏进去</span>
+      <ul>
+        <li>先 header 再写 body</li>
+        <li>terminal 只 commit 一次</li>
+        <li>close_phase ledger</li>
+        <li>写失败后关掉 owned upstream</li>
+        <li>过大 frame 丢弃</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">禁止放进 gateway_sse</span>
+      <ul>
+        <li>protocol translation / prepare_exchange</li>
+        <li>retry / fallback 决策</li>
+        <li>usage 政策（只接受 tap callback）</li>
+        <li>Vision Proxy</li>
+        <li>把四套 relay 整段搬进来</li>
+      </ul>
+    </div>
+  </div>
+  <p>四套 relay 先留在 facade，改成<b>调用</b>这个 Interface，而不是自己再解释 close_phase。relay 搬家是后一步。</p>
+
+  <h3>第二项测试面</h3>
+  <table>
+    <thead>
+      <tr><th>现在</th><th>迁到</th><th>断言什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>test_routing.py</code> 直接构造 <code>codex_proxy._GatewayDownstreamStreamCommit</code>（:7602, :18005 等）</td>
+        <td><code>gateway_sse.DownstreamStreamCommit</code> + 假 downstream（write/send_headers/close）</td>
+        <td>header 先于 body；第二个 terminal 被拒绝；close_phase 三段；cancel 关掉 attached upstream。</td>
+      </tr>
+      <tr>
+        <td>patch <code>codex_proxy._parse_sse_json_payload</code>（:5403）</td>
+        <td>patch <code>gateway_sse</code> 或根本不 patch：official relay 不应自己 parse</td>
+        <td>parse 不在 relay 里发生；commit 才写字节。</td>
+      </tr>
+      <tr>
+        <td>import surface 冻结私有类名</td>
+        <td>facade re-export 兼容；新增：commit 类定义不在 <code>codex_proxy.py</code></td>
+        <td>seam 搬家，旧名字可暂时留下。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>构造器不要再接收整个 <code>CodexProxyHandler</code>。下游是 <code>send_headers / write / close</code>；upstream 是 <code>close / cancel</code>。Handler 只在创建时绑定 request scope。</p>
+
+  <h2 id="item-3">第三项：prepare_exchange 一次完成转换</h2>
+  <p class="sub">Interface 已经存在，调用者绕开它。Handler 先 Chat→Responses，attempt 再 Responses→Chat。无效参数 <code>route_attempt</code> / <code>tool_plan</code> 被立刻 <code>del</code>。</p>
+  <pre>exchange = prepare_exchange(
+    request_body,
+    inbound_format=caller_protocol,
+    outbound_format=attempt_protocol,
+)
+exchange.upstream_body
+exchange.stream
+exchange.decode_response(body)
+exchange.decode_stream()</pre>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>Handler 不再做第一步转换</li>
+        <li>Attempt 按 inbound→outbound 调一次 <code>prepare_exchange</code></li>
+        <li>删掉未使用的 <code>route_attempt</code> / <code>tool_plan</code></li>
+        <li><code>PreparedExchange</code> 拥有 decode_response / decode_stream</li>
+        <li>同协议 identity：原样转发，不绕 Responses</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 tool_plan encode 塞进 translation</li>
+        <li>不把 official passthrough / compatible_request_body / Vision 手搓 body 并进来</li>
+        <li>不把二十多个 helper 留作外部 Interface</li>
+        <li>不按模型名分支</li>
+      </ul>
+    </div>
+  </div>
+  <h3>第三项测试面</h3>
+  <table>
+    <thead><tr><th>现在</th><th>迁到</th><th>断言什么</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>tests/test_prepare_exchange.py</code></td>
+        <td>留下，这是正确 seam</td>
+        <td>inbound/outbound 一次转换；同协议不绕圈；未知协议 NonForwardable。</td>
+      </tr>
+      <tr>
+        <td><code>test_chat_completions_gateway.py</code> 调 facade <code>_chat_completions_request_to_responses_body</code></td>
+        <td><code>prepare_exchange(inbound=chat, outbound=responses)</code></td>
+        <td>请求体转换结果。不再证明 Handler 会先转一层。</td>
+      </tr>
+      <tr>
+        <td><code>test_protocol_translation.py</code> 直接打几十个 helper</td>
+        <td>行为用例改走 <code>prepare_exchange</code>；helper 只留 fail-closed 单测</td>
+        <td>调用者不需要知道 helper 名字。</td>
+      </tr>
+      <tr>
+        <td><code>test_routing.py</code> patch facade wrapper</td>
+        <td>executor 只调 <code>RouteAttemptPlan.prepare_body</code> / <code>prepare_exchange</code></td>
+        <td>Handler 不再出现 Chat→Responses 的第一步。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="item-4">第四项：一个 routing-owner policy 模块</h2>
+  <p class="sub">这是 Client Integration 的第一刀，不是拆 <code>gateway.rs</code>。四套 gate 看起来像同一条规则，其实分叉了。</p>
+  <table>
+    <thead><tr><th>位置</th><th>Interface 形状</th><th>实际规则</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>app_flavor.rs:119</code><br><code>codex_takeover_required</code></td>
+        <td>bool，给 UI 披露</td>
+        <td>Beta：目标不是自己就要 takeover。Stable：目标不是 Official/Release 就要 takeover。</td>
+      </tr>
+      <tr>
+        <td><code>config.rs:1135</code><br><code>ensure_codex_owner_mutation_allowed</code></td>
+        <td>typed error：<code>TakeoverRequired</code> / <code>OwnerMismatch</code></td>
+        <td>看 mode。Release 改 Official/none 可向后兼容。force_takeover 放行。</td>
+      </tr>
+      <tr>
+        <td><code>gateway.rs:2592</code><br><code>ensure_route_owner_mutation_allowed</code></td>
+        <td>自由文本 String</td>
+        <td>Official <b>永远允许</b>，没有 mode。Managed client 用这套。</td>
+      </tr>
+      <tr>
+        <td><code>history.rs:407</code><br><code>history_mutation_allowed_for_owner</code></td>
+        <td>bool，没有 takeover 旋钮</td>
+        <td>Official/Unknown 永不改 history。Release 不能改 Beta。不允许就 Conflict，不能静默 Clean。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Deletion test：删掉其中一套，那个调用者会误用另一套规则。Beta 可能改到 Release 的 history，或 client apply 跳过 takeover。</p>
+  <h3>目标 Interface</h3>
+  <pre>enum MutationKind { CodexOverlay { mode: Official | Hub }, ManagedClient, HistoryRepair }
+
+fn permit(
+    current: RoutingOwner,
+    target: Option&lt;RoutingOwner&gt;,
+    kind: MutationKind,
+    force_takeover: bool,  // HistoryRepair 忽略这个旋钮
+) -> Result&lt;(), OwnerError&gt;   // TakeoverRequired | OwnerMismatch</pre>
+  <p>规则写进 Interface，不是藏在四个文件里：Official/Unknown 永不 mutate；Beta 只能动 Beta，除非 force；Release 可以动 Official/none；HistoryRepair 没有 takeover，只能 Conflict。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>一个 in-process 模块，无 adapter（没有第二套真实实现）</li>
+        <li>一张矩阵测试覆盖 (current, target, kind, force)</li>
+        <li>四处调用改走 <code>permit</code>，删掉复制的 assert</li>
+        <li>gateway 的 String error 改成稳定错误码</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 History 的保守规则“统一掉”</li>
+        <li>不在这一项迁 Pi/OpenCode</li>
+        <li>不引入 trait / FileSystem</li>
+        <li>不改用户可见的 Beta/Release takeover 文案，除非矩阵证明现在就是 bug</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-5">第五项：SettingsStore，sanitize 只做一次</h2>
+  <p class="sub">owner policy 之后的最小 Rust 切片。同一份 JSON 被解析两次，规则还不一样。</p>
+  <div class="grid">
+    <div class="card now">
+      <span class="tag bad">config.rs:314</span>
+      <div class="impl">
+        <code>SettingsDocument::into_settings(self, known_official_models)</code><br>
+        save 前 sanitize 官方 ID。未知 official alias 丢掉。
+      </div>
+    </div>
+    <div class="card now">
+      <span class="tag bad">proxy.rs:306</span>
+      <div class="impl">
+        <code>SettingsDocument::into_settings(self)</code><br>
+        Gateway start/status 再解析一遍。<b>不</b>吃 known official IDs。
+      </div>
+    </div>
+  </div>
+  <p>Deletion test：删掉 proxy 那份 copy，start/stop 仍需要 Settings，就会去调 config。今天两份可能在 disabled-model 上分叉。</p>
+  <pre>SettingsStore::load() -> Settings
+SettingsStore::save(Settings) -> Settings   // sanitize once</pre>
+  <p>Proxy 吃 <code>Settings</code>，不再有第二套 document。写路径继续走已有的 <code>safe_file</code>（已经是深模块）。无新 adapter。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>一份 document → Settings</li>
+        <li>bind-address clamp、retry cap、auto_start_proxy alias、known official IDs 只在 store</li>
+        <li>proxy::status 继续便宜：不要每次 load 去读 catalog</li>
+        <li>round-trip 测试替换对 SettingsDocument 字段的断言</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 providers.toml / overlay / env 合成“一个 config 模块”</li>
+        <li>不把 catalog IO 绑进每次 status</li>
+        <li>不引入 FileSystem trait</li>
+        <li>不在这一项迁客户端</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-6">第六项：OfficialCatalog，一个 runner</h2>
+  <p class="sub">三套 catalog 实现 + 两套 Python env 已经漂了。<code>catalog::generate_catalog</code> 是 1 行 pass-through，deletion test 失败。</p>
+  <table>
+    <thead><tr><th>现在</th><th>设了哪些 home</th><th>问题</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>official_refresh.rs</code></td>
+        <td>编排层</td>
+        <td>single-flight、publication fence、restart disclosure。深，但依赖下面两套 runner。</td>
+      </tr>
+      <tr>
+        <td><code>models::generate_catalog</code></td>
+        <td>只设 <code>CODEX_HOME</code></td>
+        <td>真正跑 Python sync 的一条路径。</td>
+      </tr>
+      <tr>
+        <td><code>catalog::sync_catalog</code></td>
+        <td><code>CODEX_HOME</code> <b>和</b> <code>CODEXHUB_CODEX_TARGET_HOME</code></td>
+        <td>另一条 runner，env 合同不同。</td>
+      </tr>
+      <tr>
+        <td><code>catalog::generate_catalog</code></td>
+        <td>—</td>
+        <td>一行转发到 models。删了不丢政策。</td>
+      </tr>
+    </tbody>
+  </table>
+  <pre>OfficialCatalog::refresh(trigger) -> OfficialRefreshResult
+OfficialCatalog::published() -> Option&lt;Vec&lt;Model&gt;&gt;   // 绝不返回采集向量
+OfficialCatalog::sync_runtime() -> Path           // 一个 runner，两个 home
+OfficialCatalog::override_diagnostics() -> CatalogOverrideDiagnostics</pre>
+  <p>成功 refresh 必须先原子发布 catalog <b>和</b> managed Codex overlay，再亮 <code>publication_ready</code>。UI 读 published 路径，不读 acquisition 向量。硬编码 <code>OFFICIAL_MODELS</code> fallback 删掉，改 fail-closed 空列表。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>合并两套 Python runner 为一个生产 adapter</li>
+        <li>测试继续用 recording runner（两个 adapter → 真 seam）</li>
+        <li>env 统一是行为修复：加一条旧 models runner 会失败的测试</li>
+        <li>删掉 <code>catalog::generate_catalog</code> pass-through</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 App Server 采集并进来（那是下一个 CodexAppServer）</li>
+        <li>不把 catalog 变“更真实”地复制 sync 进 generate</li>
+        <li>不引入 HTTP port</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-7">第七项：CodexAppServer，一份 stdio 客户端</h2>
+  <p class="sub">true external。model list 和 usage 各养了一套 handshake / Job Object / kill-on-drop。models 侧已有测试 adapter，usage 没有。</p>
+  <table>
+    <thead><tr><th>现在</th><th>位置</th><th>泄漏的 Interface</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>model/list</td>
+        <td><code>models.rs:705+</code></td>
+        <td>spawn、initialize、cache grace、<code>AppServerModelListRunner</code></td>
+      </tr>
+      <tr>
+        <td>account/usage + rate-limits</td>
+        <td><code>openai_usage.rs:548+</code></td>
+        <td>另一套 <code>AppServerChild</code>、Job Object、line reader。无测试 double</td>
+      </tr>
+      <tr>
+        <td>可执行文件发现</td>
+        <td>两边各一份 <code>find_codex_executable</code></td>
+        <td>调用者必须知道抄哪一份</td>
+      </tr>
+    </tbody>
+  </table>
+  <pre>trait CodexAppServer {
+    fn transact(&self, calls: &[AppServerCall]) -> Result&lt;AppServerBatch, AppServerError&gt;
+}
+AppServerCall { id, method, params }
+// errors: not_installed | timeout | protocol | auth_required</pre>
+  <p>藏起来：<code>app-server --stdio</code>、initialize、Windows Job Object、line reader、kill-on-drop、可执行文件发现。timeout / cache-grace 留在调用者（OfficialCatalog vs usage 不同）。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>生产 process adapter + scripted test double（已有 models runner 扩到 usage）</li>
+        <li>OfficialCatalog refresh 和 openai_usage 都走 <code>transact</code></li>
+        <li>测试断言 timeout、protocol、子进程必回收</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 cache-grace 放进 App Server Interface（那是 catalog 政策）</li>
+        <li>不把可执行文件发现做成公共方法</li>
+        <li>不在每个测试里 mock <code>Command</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-8">第八项：typed commands，三个 transport 一份默认值</h2>
+  <p class="sub">Tauri IPC、HTTP web_bridge、CLI 是三个真实 adapter。浅的是 dispatch 表；深的是默认值和别名政策写了两遍，已经漂了。</p>
+  <table>
+    <thead><tr><th>现在</th><th>位置</th><th>分叉</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Tauri commands</td>
+        <td><code>main.rs</code> ~70 个 1–3 行 wrapper</td>
+        <td>history 四个别名都调 <code>preflight_unified_history</code>，flag 不同</td>
+      </tr>
+      <tr>
+        <td>HTTP dispatch</td>
+        <td><code>web_bridge.rs:236-582</code></td>
+        <td><code>diagnose</code> 丢掉 <code>full_scan</code>；<code>force_takeover</code> 再解析一遍</td>
+      </tr>
+      <tr>
+        <td>CLI</td>
+        <td><code>cli.rs</code> 子集</td>
+        <td>没有 DSH/history preflight。这是 transport 子集，不是政策分叉</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>不要做 stringly <code>invoke(name, json)</code>。那是 transport 的形状，不是 domain Interface。</p>
+  <pre>// commands 模块拥有默认值；transport 只负责 parse
+get_settings()                 // 永远 reconcile autostart
+switch_mode(..., force_takeover=false)
+history(Status | Repair { target_unified } | Diagnose)</pre>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>typed 函数集中默认值</li>
+        <li>三个 adapter：Tauri wrapper / bridge JSON / CLI argv</li>
+        <li>一张表测试 command+args → domain flags</li>
+        <li>先藏在现有 IPC 名字后面，不要先改前端合同</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不发明 stringly invoke</li>
+        <li>不把 window/tray 做成跨 transport 命令</li>
+        <li>不在这一项折叠四个 history IPC 名字</li>
+        <li>不和 injection 迁移绑在同一 PR</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-9">第九项：injection 逐客户端，Pi 第一刀</h2>
+  <p class="sub"><code>injection.rs</code> 已经是深模块（DSH）。杠杆不在再拆文件，而在删掉 <code>gateway.rs</code> 里同一套 match arms。一次只迁一个客户端：descriptor + apply/detach/readback/isolated 一起落地，旧分支一起删。</p>
+  <p>Rust 编码顺序仍是：<code>permit</code> → SettingsStore → OfficialCatalog → CodexAppServer → typed commands → <b>然后</b>这一项。现在只定 Pi 这一刀的 Interface，避免和 Python seam 抢文件。</p>
+  <pre>descriptor_for("pi") -> InjectionDescriptor
+inject / detach / verify_readback   // 现有四动词，不克隆 PiLifecycleReport
+// 这一刀必须同时删掉 preview/apply/restore/readback/isolated 里的 pi match arm</pre>
+  <p>产品分叉要写成 descriptor 数据，不能藏进序列化：DSH 是单一 <code>codexhub</code> block；Pi 今天是 <code>codexhub-openai</code> / <code>codexhub-ollama-cloud</code> 多 entry。Interface 必须显式 <code>SingleBlock | PerUpstreamProvider</code>（或等价字段）。Activation 只读，永不写入。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">Pi 这一刀做</span>
+      <ul>
+        <li>JSON strategy（YAML 已有；Pi 是 models.json）</li>
+        <li>fingerprint readback 只校验 Injected Block</li>
+        <li>foreign providers 和 Activation 存活</li>
+        <li>测试：temp root 上 inject/detach/readback，搬 <code>pi_apply_and_detach_preserve_foreign_providers_and_activation</code></li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一刀不做</span>
+      <ul>
+        <li>不迁 OpenCode/OMP/ZCode/Codex</li>
+        <li>不把 takeover byte-compare 改成 fingerprint 一刀切</li>
+        <li>不按客户端拆 <code>gateway.rs</code> 空文件</li>
+        <li>不复制 <code>DshLifecycleReport</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-10">第十项：PersistentAction</h2>
+  <p class="sub"><code>docs/agents/user-feedback.md</code> 已经写了政策：一次 persistent loading Toast，更新同一个 Toast，未立即生效必须点名精确 client/runtime。实现却是页面复制。PageToast 的 store 已经深，不要再拆。</p>
+  <pre>type RestartTarget =
+  | { kind: "none" }
+  | { kind: "runtime"; name: "Gateway" | "CodexHub" }
+  | { kind: "client"; name: string }
+  | { kind: "codex-app" }
+  | { kind: "clients"; names: string[] };
+
+runPersistentAction({
+  dedupeKey?,
+  loading: string,
+  work: () => Promise&lt;T&gt;,
+  success: (result: T) => { text: string; restart: RestartTarget },
+  disconnected?: "start-gateway",
+}): Promise&lt;T&gt;</pre>
+  <p>调用者只学 loading 文案、work、成功文案、以及<strong>重启谁</strong>。不学 toast id、timeout、disconnected CTA。<code>RestartTarget</code> 是唯一说法；禁止自由字符串 “restart if needed”。后端 workflow 应返回这个形状，页面不要猜。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>show → update 同一 id；loading 不可点掉</li>
+        <li>backend-disconnected 在同一 Toast 上变成 Start Gateway</li>
+        <li>从 RestartTarget 拼精确 restart 文案 / No restart required</li>
+        <li>先替换 ui-contract 里锁 <code>showToast(..., "loading")</code> 源码顺序的正则测试</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不拆 PageToast store / viewport</li>
+        <li>不引入 IToast</li>
+        <li>不先切 App.tsx / ProvidersPage 文件</li>
+        <li>不在这一项做 DSH/Codex 三套 connect（那是 ClientConnection）</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-11">第十一项：ClientConnection</h2>
+  <p class="sub">ADR-0004：connect/disconnect <b>就是</b> inject/detach，从不做 Activation。前端现在是三套实现。建在 PersistentAction 之上；<code>RestartTarget</code> 由后端报告返回，页面不猜。</p>
+  <pre>connect(target: { id: "codex" } | { id: GatewayClientId })
+  -> Promise&lt;{ restart: RestartTarget }&gt;
+disconnect(target)
+  -> Promise&lt;{ restart: RestartTarget }&gt;
+// stale 的 repair 就是再调 connect()</pre>
+  <p>Interface 不变量：永不写 Activation；Codex 留在 History Bucket；foreign owner 的 takeover 包在同一次 connect 里；refresh clients 不带 version probes。DSH 的 <code>restart_required</code> 必须消费，禁止页面写死 “No restart required”。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">藏进去</span>
+      <ul>
+        <li>DSH connect/disconnect vs switch_gateway_client_route vs Codex switchMode</li>
+        <li>forceTakeover / 启动 Gateway（连 hub 时 proxy 没起来）</li>
+        <li>结果映射到 RestartTarget</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不把 DSH/OpenCode/Codex 做成三个公共模块</li>
+        <li>不加 Activation 指示灯</li>
+        <li>不把 History Bucket 做成公开 mode</li>
+        <li>不先做 CatalogPublish</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-12">第十二项：CatalogPublish</h2>
+  <p class="sub"><code>useProviderCatalogActions</code> 是 20 字段 options、12 个返回函数的浅提取。有价值的是 <code>updateGatewayAfterCatalog</code>：persist → generate → sync Injected Blocks → diagnostics → 精确 restart。ProvidersPage 的 saveSettings 还复制了一份。</p>
+  <pre>publishCatalog({
+  reason: "providers" | "official-settings" | "official-refresh" | "context-guard",
+  persist?: () => Promise&lt;void&gt;,
+  catalogAlreadyPublished?: boolean,
+  syncClients?: boolean,   // default settings.auto_sync_clients
+}): Promise&lt;{
+  sync: GatewayClientSyncSummary | null,
+  restart: RestartTarget,
+  text: string,
+}&gt;</pre>
+  <p>deletion test：删掉 hook 只是把 400 行搬回页面。删掉「发布」这件事，generate/sync/diagnostics/restart 会散回 save provider、save official、toggle include、context guard。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">藏进去</span>
+      <ul>
+        <li>generateCatalog / 已发布则跳过</li>
+        <li>syncGatewayClients 失败变成 failed:1 summary</li>
+        <li>override diagnostics → Restart Codex App</li>
+        <li>partial sync 点名那些 client，不用 “if needed”</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不保留 20 参 hook 当外部 seam</li>
+        <li>probe / mergeDiscoveredModels 留在已有深 lib</li>
+        <li>不先做 RuntimeStore</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-13">第十三项：AppUpdater</h2>
+  <p class="sub">检查/安装/轮询行为是深的，但 Interface 是 App.tsx 的闭包。<code>appUpdates.ts</code> 是死掉的第二套 one-shot install，deletion test 反过来失败：删了它调用者不丢任何东西。</p>
+  <pre>type AppUpdater = {
+  status: AppUpdateStatus | null;
+  install: AppUpdateInstallStatus | null;
+  check(origin: "silent" | "settings"): Promise&lt;AppUpdateStatus | null&gt;;
+  install(origin: "settings" | "toast"): Promise&lt;void&gt;;
+};</pre>
+  <p>不变量：silent check 失败不上 banner；settings check 用 Toast 报告 available/none/error；install 确认 Gateway 退役后，一条 progress Toast 走完 download→install→restart；boot 时 consume completion 一次。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">藏进去</span>
+      <ul>
+        <li>check / start / poll / consume 命令</li>
+        <li>2.5s 启动延迟 + 24h 间隔</li>
+        <li>toast vs settings 的 source 路由</li>
+        <li>删除未使用的 <code>appUpdates.ts</code> 和 <code>install_app_update</code> 死路径</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不拆 VersionUpdateBlock 视图（已经是好 view）</li>
+        <li>不引入 IUpdater</li>
+        <li>不先做 RuntimeStore</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-14">第十四项：RuntimeStore，最后做</h2>
+  <p class="sub">App 的 cache 已经深（inflight、staleMs、quiet）。浅在页面又 copy 一份 providers/settings。先做 1–4 再提取，否则页面会继续私有 store。</p>
+  <pre>type RuntimeStore = {
+  snapshot: RuntimeSnapshot;  // 只读
+  refresh(scope: "core" | "status" | "clients" | "telemetry" | "catalog"): Promise&lt;void&gt;;
+  saveSettings(next: Settings): Promise&lt;{ message: string; restart: RestartTarget }&gt;;
+  startGateway(): Promise&lt;void&gt;;
+  stopGateway(): Promise&lt;void&gt;;
+};</pre>
+  <p>藏起来：cache keys、staleMs、client-version localStorage、shouldRestartGateway、save 里的 restartProxy。页面拿 snapshot + 四五条命令，不要 10 个 callback + 直接 api。</p>
+  <p>唯一真实 seam 仍是现有 <code>api.call</code>（Tauri vs HTTP）。不要发明 IRuntimeRepository。</p>
+  <div class="grid">
+    <div class="card next">
+      <span class="tag good">这一项做</span>
+      <ul>
+        <li>页面 subscribe，不再 local copy providers/settings</li>
+        <li>saveSettings 改端口/retry/image-proxy 且 Gateway 在跑 → restart Gateway，文案说出来</li>
+        <li>切 tab 不 refresh；定时 clients 刷新不带 versions</li>
+      </ul>
+    </div>
+    <div class="card now">
+      <span class="tag warn">这一项不做</span>
+      <ul>
+        <li>不先于 PersistentAction / ClientConnection / CatalogPublish / AppUpdater</li>
+        <li>不把 api 拆成一堆公开 domain 模块</li>
+        <li>不做 per-key cache helper 让页面继续自己调</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="item-15">第十五项：ReleasePlan + Linux launcher</h2>
+  <p class="sub">策略现在分散在 flavor JSON、ReleaseChannel.ps1、Windows-only plan、Linux shell。immutable plan 是 Windows 形状。仓库没有 Linux Python launcher。</p>
+  <pre>plan(version, commit) -> ReleasePlan
+  // artifacts: [{flavor, os, kind, name, manifest, platform_key, python_runtime}]
+validate(plan, artifacts) -> ValidationReport</pre>
+  <p>PowerShell 与 bash 仍是两个真实 builder adapter，不合并语言。先加 Linux launcher 复用同一 runtime policy；<code>linux_assets</code> 只追加，不改现有 Windows 资产名和顺序。</p>
+
+  <h2>建议讨论顺序</h2>
+  <ol class="steps">
+    <li>RoutePlan 循环：<code>47979d1</code> + 修补 <code>b5e9427</code></li>
+    <li>gateway_sse commit：<code>87a99fc</code> + observer 注入 <code>361844e</code></li>
+    <li><code>prepare_exchange</code> 一跳（工作区未提交，进行中）</li>
+    <li>已定待编码：<code>permit</code> → SettingsStore → OfficialCatalog → CodexAppServer → typed commands → Pi injection</li>
+    <li>已定待编码：PersistentAction → ClientConnection → CatalogPublish → AppUpdater → RuntimeStore</li>
+    <li>已定待编码：ReleasePlan + Linux launcher（Windows 资产名不变）</li>
+  </ol>
+  <p class="note">来源：只读审查。Windows 发布候选仍是 <code>20db44e</code>。本文件不是产品文档，只用于这次架构讨论。</p>
+</body>
+</html>

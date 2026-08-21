@@ -429,6 +429,20 @@ def test_release_builder_uses_release_optimized_flavor_features_and_immutable_ur
     assert 'releases/download/beta' not in script
     assert "codexhub_flavor = $Flavor" in script
     assert "codexhub_source_revision = $sourceRevision" in script
+    assert "$existingPlatforms" in script
+    assert "$sameChannel" in script
+
+
+def test_linux_release_builder_writes_and_merges_the_signed_flavor_manifest():
+    script = (ROOT / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
+
+    assert "scripts/codexhub-python.sh" in script
+    assert "linux-x86_64" in script
+    assert "codexhub_source_revision" in script
+    assert "same_channel" in script
+    assert "signature.strip()" in script
+    assert "encoding=\"utf-8\"" in script
+    assert "python3" not in script
 
 
 def _validate_manifest(

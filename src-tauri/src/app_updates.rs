@@ -264,10 +264,12 @@ fn validate_flavor_manifest_data(
         }
     }
 
-    let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
+    let platform_key = build_info::current_updater_platform()?;
+    let platform = manifest.platforms.get(platform_key).ok_or_else(|| {
         format!(
-            "Rejected {} update manifest: windows-x86_64 artifact is missing.",
-            expected_flavor.as_str()
+            "Rejected {} update manifest: {} artifact is missing.",
+            expected_flavor.as_str(),
+            platform_key
         )
     })?;
     if platform.signature.trim().is_empty() {
@@ -283,7 +285,7 @@ fn validate_flavor_manifest_data(
             expected_flavor.as_str()
         )
     })?;
-    let expected_name = expected_flavor.installer_name(version);
+    let expected_name = expected_flavor.artifact_name(version, platform_key)?;
     if !url.path().ends_with(&format!("/{expected_name}")) {
         return Err(format!(
             "Rejected {} update manifest: expected artifact {expected_name}, got {}.",
@@ -317,6 +319,7 @@ fn validate_checked_update_payload(
     expected_flavor: BuildFlavor,
 ) -> Result<(), String> {
     let manifest = parse_flavor_manifest(raw_manifest, expected_flavor)?;
+    let platform_key = build_info::current_updater_platform()?;
     validate_flavor_manifest_data(&manifest, expected_flavor)?;
 
     let manifest_version = manifest.version.trim();
@@ -335,7 +338,7 @@ fn validate_checked_update_payload(
             expected_flavor.as_str()
         )
     })?;
-    let expected_name = expected_flavor.installer_name(manifest_version);
+    let expected_name = expected_flavor.artifact_name(manifest_version, platform_key)?;
     if !selected_url.path().ends_with(&format!("/{expected_name}")) {
         return Err(format!(
             "Rejected {} update: updater selected {}, expected {expected_name}.",
@@ -751,11 +754,7 @@ mod tests {
 
     #[test]
     fn normal_manifest_keeps_flavorless_latest_json_backward_compatibility() {
-        let manifest = flavor_manifest(
-            None,
-            "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
-        );
+        let manifest = flavor_manifest(None, "0.1.5", artifact_url(BuildFlavor::Normal, "0.1.5"));
 
         assert_eq!(
             validate_flavor_manifest(&manifest, BuildFlavor::Normal),
@@ -768,7 +767,7 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+            artifact_url(BuildFlavor::Debug, "0.1.5"),
         );
 
         assert_eq!(
@@ -782,7 +781,7 @@ mod tests {
         let manifest = flavor_manifest(
             Some("normal"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            artifact_url(BuildFlavor::Normal, "0.1.5"),
         );
 
         let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
@@ -796,13 +795,17 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            artifact_url(BuildFlavor::Normal, "0.1.5"),
         );
 
         let error = validate_flavor_manifest(&manifest, BuildFlavor::Debug)
             .expect_err("debug must reject a normal installer artifact");
 
-        assert!(error.contains("expected artifact CodexHub_0.1.5_debug_x64-setup.exe"));
+        let platform = build_info::current_updater_platform().expect("test platform is supported");
+        let expected_name = BuildFlavor::Debug
+            .artifact_name("0.1.5", platform)
+            .expect("test platform is supported");
+        assert!(error.contains(&format!("expected artifact {expected_name}")));
     }
 
     #[test]
@@ -810,13 +813,13 @@ mod tests {
         let manifest = flavor_manifest(
             Some("debug"),
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_debug_x64-setup.exe",
+            artifact_url(BuildFlavor::Debug, "0.1.5"),
         );
 
         let error = validate_checked_update_payload(
             &manifest,
             "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+            &artifact_url(BuildFlavor::Normal, "0.1.5"),
             BuildFlavor::Debug,
         )
         .expect_err("debug must reject a checked update that selects the normal artifact");
@@ -826,17 +829,13 @@ mod tests {
 
     #[test]
     fn normal_checked_update_keeps_flavorless_latest_json_compatibility() {
-        let manifest = flavor_manifest(
-            None,
-            "0.1.5",
-            "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
-        );
+        let manifest = flavor_manifest(None, "0.1.5", artifact_url(BuildFlavor::Normal, "0.1.5"));
 
         assert_eq!(
             validate_checked_update_payload(
                 &manifest,
                 "0.1.5",
-                "https://github.com/NOirBRight/CodexHub/releases/download/v0.1.5/CodexHub_0.1.5_x64-setup.exe",
+                &artifact_url(BuildFlavor::Normal, "0.1.5"),
                 BuildFlavor::Normal,
             ),
             Ok(())
@@ -952,7 +951,10 @@ mod tests {
 
         write_pending_update(&path, "0.1.1").expect("write pending update");
 
-        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock text"),
+            "codexhub-atomic-lock=1\n"
+        );
         assert_eq!(
             read_pending_update(&path)
                 .expect("read pending update")
@@ -967,15 +969,29 @@ mod tests {
         assert!(checked_at_now().starts_with("unix:"));
     }
 
-    fn flavor_manifest(flavor: Option<&str>, version: &str, url: &str) -> String {
+    fn artifact_url(flavor: BuildFlavor, version: &str) -> String {
+        let platform = build_info::current_updater_platform().expect("test platform is supported");
+        let artifact = flavor
+            .artifact_name(version, platform)
+            .expect("test platform is supported");
+        format!("https://github.com/NOirBRight/CodexHub/releases/download/v{version}/{artifact}")
+    }
+
+    fn flavor_manifest(flavor: Option<&str>, version: &str, url: impl Into<String>) -> String {
+        let platform_key = build_info::current_updater_platform()
+            .expect("test platform is supported")
+            .to_string();
+        let mut platforms = serde_json::Map::new();
+        platforms.insert(
+            platform_key,
+            serde_json::json!({
+                "signature": "signed-value",
+                "url": url.into(),
+            }),
+        );
         let mut manifest = serde_json::json!({
             "version": version,
-            "platforms": {
-                "windows-x86_64": {
-                    "signature": "signed-value",
-                    "url": url,
-                }
-            }
+            "platforms": platforms,
         });
         if let Some(flavor) = flavor {
             manifest["codexhub_flavor"] = serde_json::Value::String(flavor.to_string());

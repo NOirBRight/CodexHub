@@ -229,21 +229,43 @@ $sourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceRevision)) {
     throw "Unable to resolve release build commit."
 }
+$manifestPath = Join-Path $bundleDir (Get-ReleaseManifestName -Flavor $Flavor)
+$existingPlatforms = [ordered]@{}
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    $existingManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $existingVersion = if ($existingManifest.PSObject.Properties.Name -contains "version") {
+        [string]$existingManifest.version
+    }
+    else {
+        ""
+    }
+    $existingFlavor = if ($existingManifest.PSObject.Properties.Name -contains "codexhub_flavor") {
+        [string]$existingManifest.codexhub_flavor
+    }
+    else {
+        ""
+    }
+    $sameChannel = $existingVersion -eq $version -and (
+        $existingFlavor -eq $Flavor -or ($existingFlavor -eq "" -and $Flavor -eq "normal")
+    )
+    if ($sameChannel -and $existingManifest.PSObject.Properties.Name -contains "platforms" -and $null -ne $existingManifest.platforms) {
+        foreach ($property in $existingManifest.platforms.PSObject.Properties) {
+            $existingPlatforms[$property.Name] = $property.Value
+        }
+    }
+}
+$existingPlatforms["windows-x86_64"] = [ordered]@{
+    signature = $signature
+    url = "$releaseBaseUrl/$([Uri]::EscapeDataString($canonicalInstallerName))"
+}
 $manifest = [ordered]@{
     version = $version
     codexhub_flavor = $Flavor
     codexhub_source_revision = $sourceRevision
     notes = $Notes
     pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
-    platforms = [ordered]@{
-        "windows-x86_64" = [ordered]@{
-            signature = $signature
-            url = "$releaseBaseUrl/$([Uri]::EscapeDataString($canonicalInstallerName))"
-        }
-    }
+    platforms = $existingPlatforms
 }
-
-$manifestPath = Join-Path $bundleDir (Get-ReleaseManifestName -Flavor $Flavor)
 $manifestName = [System.IO.Path]::GetFileName($manifestPath)
 $manifestJson = $manifest | ConvertTo-Json -Depth 8
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false

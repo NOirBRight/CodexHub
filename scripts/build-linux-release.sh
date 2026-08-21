@@ -117,11 +117,59 @@ if [[ ! -f "$appimage_dst.sig" ]]; then
   exit 1
 fi
 
+manifest_path="$bundle_root/$manifestName"
+signature="$(tr -d '\r\n' < "$appimage_dst.sig")"
+if [[ -z "$signature" ]]; then
+  echo "updater signature is empty: $appimage_dst.sig" >&2
+  exit 1
+fi
+source_revision="$(git -C "$repo_root" rev-parse HEAD)"
+if [[ -z "$source_revision" ]]; then
+  echo "failed to resolve release source revision" >&2
+  exit 1
+fi
+release_notes="${notes:-$productName $version}"
+"$repo_root/scripts/codexhub-python.sh" - "$manifest_path" "$version" "$flavor" "$appimageName" "$signature" "$source_revision" "$release_notes" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version, flavor, appimage_name, signature, source_revision, release_notes = sys.argv[2:8]
+if not signature.strip():
+    raise SystemExit("updater signature is empty")
+base_url = f"https://github.com/NOirBRight/CodexHub/releases/download/v{version}"
+existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+existing_flavor = existing.get("codexhub_flavor")
+same_channel = existing.get("version") == version and (
+    existing_flavor == flavor or (existing_flavor is None and flavor == "normal")
+)
+if not same_channel:
+    existing = {}
+platforms = existing.get("platforms", {})
+if not isinstance(platforms, dict):
+    platforms = {}
+platforms = dict(platforms)
+platforms["linux-x86_64"] = {
+    "signature": signature.strip(),
+    "url": f"{base_url}/{appimage_name}",
+}
+manifest = {
+    **existing,
+    "version": version,
+    "codexhub_flavor": flavor,
+    "codexhub_source_revision": source_revision,
+    "notes": release_notes,
+    "platforms": platforms,
+}
+manifest.setdefault("pub_date", datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
+path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
 echo "Linux release artifacts ready:"
 echo "  AppImage: $appimage_dst"
 echo "  Deb:      $deb_dst"
 echo "  Signature:$appimage_dst.sig"
-echo "  Manifest: $manifestName"
+echo "  Manifest: $manifest_path"
 echo "  Updater platform key: linux-x86_64"
 if [[ -n "$notes" ]]; then
   echo "  Notes: $notes"

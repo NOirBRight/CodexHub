@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+pub const UPDATER_PLATFORM_WINDOWS: &str = "windows-x86_64";
+pub const UPDATER_PLATFORM_LINUX: &str = "linux-x86_64";
+
+pub fn current_updater_platform() -> Result<&'static str, String> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok(UPDATER_PLATFORM_LINUX)
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok(UPDATER_PLATFORM_WINDOWS)
+    } else {
+        Err(format!(
+            "unsupported updater target: {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildFlavor {
@@ -41,10 +58,21 @@ impl BuildFlavor {
         )
     }
 
-    pub fn installer_name(self, version: &str) -> String {
-        match self {
-            Self::Normal => format!("CodexHub_{version}_x64-setup.exe"),
-            Self::Debug => format!("CodexHub_{version}_debug_x64-setup.exe"),
+    pub fn artifact_name(self, version: &str, platform: &str) -> Result<String, String> {
+        match (self, platform) {
+            (Self::Normal, UPDATER_PLATFORM_WINDOWS) => {
+                Ok(format!("CodexHub_{version}_x64-setup.exe"))
+            }
+            (Self::Debug, UPDATER_PLATFORM_WINDOWS) => {
+                Ok(format!("CodexHub_{version}_debug_x64-setup.exe"))
+            }
+            (Self::Normal, UPDATER_PLATFORM_LINUX) => {
+                Ok(format!("CodexHub_{version}_amd64.AppImage"))
+            }
+            (Self::Debug, UPDATER_PLATFORM_LINUX) => {
+                Ok(format!("CodexHub_{version}_debug_amd64.AppImage"))
+            }
+            (_, other) => Err(format!("unsupported updater platform: {other}")),
         }
     }
 
@@ -101,13 +129,38 @@ mod tests {
             "latest-debug.json"
         );
         assert_eq!(
-            BuildFlavor::Normal.installer_name(version),
+            BuildFlavor::Normal
+                .artifact_name(version, UPDATER_PLATFORM_WINDOWS)
+                .expect("windows artifact"),
             "CodexHub_0.2.0_x64-setup.exe"
         );
         assert_eq!(
-            BuildFlavor::Debug.installer_name(version),
+            BuildFlavor::Debug
+                .artifact_name(version, UPDATER_PLATFORM_WINDOWS)
+                .expect("windows artifact"),
             "CodexHub_0.2.0_debug_x64-setup.exe"
         );
+        assert_eq!(
+            BuildFlavor::Normal
+                .artifact_name(version, UPDATER_PLATFORM_LINUX)
+                .expect("linux artifact"),
+            "CodexHub_0.2.0_amd64.AppImage"
+        );
+        assert_eq!(
+            BuildFlavor::Debug
+                .artifact_name(version, UPDATER_PLATFORM_LINUX)
+                .expect("linux artifact"),
+            "CodexHub_0.2.0_debug_amd64.AppImage"
+        );
+        let expected_platform = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            UPDATER_PLATFORM_LINUX
+        } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            UPDATER_PLATFORM_WINDOWS
+        } else {
+            assert!(current_updater_platform().is_err());
+            return;
+        };
+        assert_eq!(current_updater_platform(), Ok(expected_platform));
     }
 
     #[test]
