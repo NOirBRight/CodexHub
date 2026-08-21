@@ -15,7 +15,6 @@ from typing import Any, Protocol
 from gateway_interfaces import UpstreamResponseLike
 from gateway_errors import UpstreamProtocolTranslationError
 from protocol_translation import PreparedExchange, UnsupportedProtocolTranslationError
-from route_plan import RelayExecutionPlan, RouteAttemptPlan, RoutePlan
 from route_primitives import (
     CAPACITY_RETRY_FAILURE_CLASSES,
     RETRY_FAILURE_PERMANENT,
@@ -29,6 +28,37 @@ class DecodeBodyHook(Protocol):
 
 class RequestKindHook(Protocol):
     def __call__(self, headers: Mapping[str, str], payload: Any, inbound_format: str) -> str: ...
+
+
+class RetryPolicyLike(Protocol):
+    base_relay_attempts: int
+    lifecycle_final_extra_attempts: Callable[[Mapping[str, Any]], int]
+    empty_completed_max_attempts: int
+
+    def relay_attempts_for_failure_class(self, *, failure_class: str, stream_failure: bool) -> int: ...
+    def retry_delay_seconds(self, attempt: int, failure_class: str) -> int: ...
+    def capacity_elapsed_limit_allows(self, started_at: float, delay_seconds: int | float) -> bool: ...
+    def stream_elapsed_limit_allows(self, started_at: float, delay_seconds: int | float) -> bool: ...
+
+
+class RouteAttemptLike(Protocol):
+    index: int
+    selected_upstream_format: str
+    upstream_protocol: RouteProtocol
+    tool_protocol: str
+    tool_surface_strategy: str
+    native_responses_tool_codec: str
+    request_mutation_policy: Any
+    retry: RetryPolicyLike
+
+    def prepare_body(self, body: bytes) -> PreparedExchange: ...
+    def relay_execution_plan(self, *, lifecycle_final_retry_enabled: bool) -> Any: ...
+    def allows_protocol_fallback_status(self, status: int) -> bool: ...
+
+
+class RoutePlanLike(Protocol):
+    attempts: tuple[RouteAttemptLike, ...]
+    primary_attempt: RouteAttemptLike | None
 
 @dataclass(frozen=True, slots=True)
 class InboundRequest:
@@ -186,8 +216,8 @@ class DownstreamRetryPayloadHook(Protocol):
 class ProtocolFallbackHook(Protocol):
     def __call__(
         self,
-        failed_attempt: RouteAttemptPlan,
-        next_attempt: RouteAttemptPlan,
+        failed_attempt: RouteAttemptLike,
+        next_attempt: RouteAttemptLike,
         exc: BaseException,
         request_observability: Mapping[str, Any],
     ) -> None: ...
@@ -196,7 +226,7 @@ class ProtocolFallbackHook(Protocol):
 @dataclass(frozen=True)
 class OpenExchangeRequest:
     request: UpstreamRequestLike
-    attempt: RouteAttemptPlan
+    attempt: RouteAttemptLike
     upstream_name: str
     upstream_format: str
     event_context: Mapping[str, Any] | None
@@ -207,8 +237,8 @@ class OpenExchangeRequest:
 
 @dataclass(frozen=True)
 class RelayExchangeRequest:
-    attempt: RouteAttemptPlan
-    relay_plan: RelayExecutionPlan
+    attempt: RouteAttemptLike
+    relay_plan: Any
     upstream_name: str
     request_id: str
     model: str | None
@@ -224,7 +254,7 @@ class RelayExchangeRequest:
 @dataclass(frozen=True)
 class ExchangeRequest:
     inbound: ParsedInboundRequest
-    route_plan: RoutePlan
+    route_plan: RoutePlanLike
     upstream: Mapping[str, Any]
     upstream_name: str
     prepared_body: bytes
@@ -242,8 +272,8 @@ class ExchangeRequest:
 
 @dataclass
 class ExchangeProgress:
-    active_attempt: RouteAttemptPlan | None = None
-    relay_execution_plan: RelayExecutionPlan | None = None
+    active_attempt: RouteAttemptLike | None = None
+    relay_execution_plan: Any | None = None
     upstream_format: str = "responses"
     request_observability: dict[str, Any] = field(default_factory=dict)
     downstream_sse_started: bool = False
@@ -308,7 +338,7 @@ class ExchangeHooks:
     """Typed live dependencies used by exchange orchestration."""
     failure_types: ExchangeFailureTypes
     set_active_prepared_exchange: Callable[[PreparedExchange], None]
-    activate_attempt: Callable[[RouteAttemptPlan], None]
+    activate_attempt: Callable[[RouteAttemptLike], None]
     safe_json_mapping: Callable[[bytes], Mapping[str, Any] | None]
     official_mutation: OfficialMutationHook
     transparent_mutation: TransparentMutationHook
@@ -316,9 +346,9 @@ class ExchangeHooks:
     normalize_tool_schema_booleans: Callable[[bytes], tuple[bytes, int]]
     validate_transparent_tool_loop: Callable[[bytes, str], None]
     compatibility_mutation: CompatibilityMutationHook
-    request_observability: Callable[[RouteAttemptPlan, bytes], dict[str, Any]]
+    request_observability: Callable[[RouteAttemptLike, bytes], dict[str, Any]]
     emit_request_start: Callable[[Mapping[str, Any]], None]
-    build_request: Callable[[RouteAttemptPlan, bytes], UpstreamRequestLike]
+    build_request: Callable[[RouteAttemptLike, bytes], UpstreamRequestLike]
     lifecycle_guidance: Callable[[bytes, str], bytes]
     open_response: Callable[[OpenExchangeRequest], AbstractContextManager[UpstreamResponseLike]]
     relay_response: Callable[[UpstreamResponseLike, RelayExchangeRequest], int]
@@ -346,7 +376,7 @@ class ExchangeHooks:
     quick_transient_failure_class: str = RETRY_FAILURE_QUICK_TRANSIENT
     runtime_attempt_key: str = "_runtime_tool_compatibility_attempt_generation"
 
-def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptPlan, hooks: ExchangeHooks) -> tuple[PreparedExchange, bytes]:
+def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, hooks: ExchangeHooks) -> tuple[PreparedExchange, bytes]:
     """Prepare protocol first, then apply exactly one planned mutation policy."""
     try:
         exchange = attempt.prepare_body(request.prepared_body)
@@ -383,12 +413,12 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptPlan, h
     return exchange, body
 
 def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress: ExchangeProgress | None = None) -> ExchangeResult:
-    """Prepare and execute RoutePlan attempts through transport and relay hooks."""
+    """Prepare and execute RoutePlanLike attempts through transport and relay hooks."""
     state = progress or ExchangeProgress()
     state.downstream_sse_started = request.downstream_sse_started
     bodies: dict[int, bytes] = {}
     exchanges: dict[int, PreparedExchange] = {}
-    def body_for(attempt: RouteAttemptPlan) -> bytes:
+    def body_for(attempt: RouteAttemptLike) -> bytes:
         if attempt.index not in bodies:
             exchange, body = _prepare_attempt_body(request, attempt, hooks)
             exchanges[attempt.index], bodies[attempt.index] = exchange, body

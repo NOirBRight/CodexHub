@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
+from gateway_interfaces import AdapterEventWriter
 from gateway_errors import UpstreamProtocolTranslationError
 from protocol_translation import UnsupportedProtocolTranslationError
 from route_primitives import APPLY_PATCH_FUNCTION_NAME

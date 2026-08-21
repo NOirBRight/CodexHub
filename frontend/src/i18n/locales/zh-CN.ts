@@ -279,6 +279,7 @@ const zhCN = {
     switchClientDone: "已切换到 {{routeName}}。",
     switchClientDoneRestart: "已切换到 {{routeName}}；请重启 {{clientName}} 使其生效",
     restartClient: "请重启 {{name}}。",
+    restartGateway: "请重启 Gateway。",
     switching: "切换中",
     switchingRoute: "正在切换 {{name}} 路由...",
     takeover: "接管",

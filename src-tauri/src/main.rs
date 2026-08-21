@@ -753,9 +753,9 @@ async fn sync_conversation_history(
 async fn diagnose_conversation_history(
     full_scan: Option<bool>,
 ) -> Result<history::UnifiedHistoryResult, String> {
-    let full_scan = full_scan.unwrap_or(true);
-    run_blocking("diagnose_conversation_history", move || {
-        history::preflight_unified_history(full_scan, None)
+    let _full_scan = full_scan.unwrap_or(true);
+    run_blocking("diagnose_conversation_history", || {
+        history::preflight_unified_history(false, None)
     })
     .await
 }

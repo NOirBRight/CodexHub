@@ -13,6 +13,7 @@ import { formatRestartDisclosure, runPersistentAction, type RestartTarget } from
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type {
   AppFlavorInfo,
+  AppStatus,
   GatewayClientContract,
   GatewayClientInfo,
   GatewayEvent,
@@ -47,8 +48,8 @@ interface GatewayPageProps {
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<string>;
   onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
-  onStartProxy: () => Promise<void>;
-  onStopProxy: () => Promise<void>;
+  onStartProxy: () => Promise<AppStatus | null>;
+  onStopProxy: () => Promise<AppStatus | null>;
   onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
@@ -292,6 +293,7 @@ function GatewayPageImpl({
         work: () => onApplySettings(next),
         success: (message) => ({
           text: message,
+          tone: message === t("runtime.gatewayRetirementCancelled") ? "info" : "success",
           restart: { kind: "none" },
         }),
         formatRestart: (target) =>
@@ -383,14 +385,18 @@ function GatewayPageImpl({
           ...settings,
           gateway_auto_retry_enabled: enabled,
         }),
-        success: (message) => ({
-          text: message === t("runtime.gatewayRetirementCancelled")
-            ? message
-            : enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
-          tone: message === t("runtime.gatewayRetirementCancelled") ? "info" : "success",
-          restart: { kind: "none" },
-        }),
-        formatRestart: () => "",
+        success: (message) => {
+          const cancelled = message === t("runtime.gatewayRetirementCancelled");
+          const restarted = message === t("gateway.gatewaySettingsSavedRestarted");
+          return {
+            text: cancelled
+              ? message
+              : enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
+            tone: cancelled ? "info" : "success",
+            restart: restarted ? { kind: "runtime", name: "Gateway" } : { kind: "none" },
+          };
+        },
+        formatRestart: (target) => target.kind === "runtime" ? t("gateway.restartGateway") : "",
       });
       setError(null);
     } catch {
@@ -462,10 +468,14 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: running ? t("runtime.stoppingRuntime") : t("runtime.startingRuntime"),
         work: () => (running ? onStopProxy() : onStartProxy()),
-        success: () => ({
-          text: running ? t("runtime.runtimeStopped") : t("runtime.runtimeStarted"),
+        success: (status) => ({
+          text: status === null
+            ? t("runtime.gatewayRetirementCancelled")
+            : running ? t("runtime.runtimeStopped") : t("runtime.runtimeStarted"),
+          tone: status === null ? "info" : "success",
           restart: { kind: "none" },
         }),
+        formatRestart: () => "",
       });
     } catch {
       // Toast already updated by runPersistentAction.

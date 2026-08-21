@@ -55,7 +55,11 @@ if [[ "$prefer_bundled" -eq 1 ]]; then
 else
   search=("${local_venv[@]}" "${host_names[@]}" "${bundled[@]}")
 fi
-candidates+=("${search[@]}")
+if [[ -n "$explicit" ]]; then
+  candidates=("$explicit")
+else
+  candidates=("${search[@]}")
+fi
 
 resolved=""
 for candidate in "${candidates[@]}"; do

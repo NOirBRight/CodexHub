@@ -82,7 +82,7 @@ type ProvidersPageProps = {
   onRefreshClients?: () => Promise<void>;
   onProvidersChanged?: (providers: Provider[]) => void;
   onSettingsChanged?: (settings: Settings) => void;
-  onStartProxy?: () => Promise<void>;
+  onStartProxy?: () => Promise<AppStatus | null>;
   onStatusChanged?: (status: AppStatus) => void;
 };
 

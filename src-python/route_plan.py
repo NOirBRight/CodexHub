@@ -115,12 +115,14 @@ def _emit_planning_event(event: str, **fields: Any) -> None:
 
 
 def _upstream_endpoint_root(base_url: str) -> str:
-    base = base_url.rstrip("/")
-    lowered_path = urlsplit(base).path.rstrip("/").lower()
+    parsed = urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    lowered_path = base_path.lower()
     for suffix in KNOWN_UPSTREAM_ENDPOINT_SUFFIXES:
         if lowered_path.endswith(suffix):
-            return base[: -len(suffix)].rstrip("/")
-    return base
+            base_path = base_path[: -len(suffix)].rstrip("/")
+            break
+    return urlunsplit((parsed.scheme, parsed.netloc, base_path, "", parsed.query))
 
 
 def _upstream_base_path_matches(base_url: str, path: str) -> bool:
@@ -139,17 +141,21 @@ def _upstream_base_has_version_suffix(base_url: str) -> bool:
 
 
 def _upstream_endpoint_url(upstream: Mapping[str, Any], path: str) -> str:
-    base = str(upstream["base_url"]).strip().rstrip("/")
-    if not path.startswith("/"):
-        path = "/" + path
-    if _upstream_base_path_matches(base, path):
-        return base
-    root = _upstream_endpoint_root(base)
-    if upstream.get("auth") == "codex_auth":
-        return root + path
-    if _upstream_base_has_version_suffix(root):
-        return root + path
-    return root + "/v1" + path
+    base = str(upstream["base_url"]).strip()
+    base_parts = urlsplit(base)
+    base_without_query = urlunsplit((base_parts.scheme, base_parts.netloc, base_parts.path.rstrip("/"), "", ""))
+    request_parts = urlsplit(path if path.startswith("/") else "/" + path)
+    request_path = request_parts.path or "/"
+    if _upstream_base_path_matches(base_without_query, request_path):
+        result = base_without_query
+    else:
+        root = _upstream_endpoint_root(base_without_query)
+        if upstream.get("auth") == "codex_auth" or _upstream_base_has_version_suffix(root):
+            result = root + request_path
+        else:
+            result = root + "/v1" + request_path
+    queries = [query for query in (base_parts.query, request_parts.query) if query]
+    return result + (("?" + "&".join(queries)) if queries else "")
 
 
 def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:

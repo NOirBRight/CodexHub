@@ -860,9 +860,9 @@ export default function App() {
     label: string,
     action: () => Promise<AppStatus>,
     options?: { toast?: boolean; warnBeforeGatewayRetirement?: boolean },
-  ) => {
+  ): Promise<AppStatus | null> => {
     if (options?.warnBeforeGatewayRetirement && !window.confirm(t("runtime.gatewayRetirementWarning"))) {
-      return;
+      return null;
     }
     setBusy(label);
     const toastId =
@@ -881,6 +881,7 @@ export default function App() {
         });
       }
       await refreshRuntimeStatus({ force: true });
+      return status;
     } catch (err) {
       const message = messageFromError(err);
       setBanner(message);
@@ -895,6 +896,7 @@ export default function App() {
       if (options?.toast === false) {
         throw err;
       }
+      return null;
     } finally {
       setBusy(null);
     }

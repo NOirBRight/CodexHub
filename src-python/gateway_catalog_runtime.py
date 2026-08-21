@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-import inspect
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -187,18 +186,6 @@ class CatalogRuntime:
     published_budget_reader: Callable[[Path], dict[str, Mapping[str, Any]]] | None = None
 
     def _resolved_catalog_path(self, path: Path) -> Path:
-        try:
-            parameters = inspect.signature(self.catalog_path_reader).parameters
-        except (TypeError, ValueError):
-            return self.catalog_path_reader(path)
-        positional = [
-            parameter
-            for parameter in parameters.values()
-            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(parameter.kind is parameter.VAR_POSITIONAL for parameter in parameters.values())
-        if not positional and not has_varargs:
-            return self.catalog_path_reader()  # type: ignore[call-arg]
         return self.catalog_path_reader(path)
 
     def official_prefixes(self) -> tuple[str, ...]:

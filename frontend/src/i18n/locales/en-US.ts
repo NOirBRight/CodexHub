@@ -279,6 +279,7 @@ const enUS = {
     switchClientDone: "Switched to {{routeName}}.",
     switchClientDoneRestart: "Switched to {{routeName}}; restart {{clientName}} to apply",
     restartClient: "Restart {{name}}.",
+    restartGateway: "Restart Gateway.",
     switching: "Switching",
     switchingRoute: "Switching {{name}} route...",
     takeover: "Take over",
