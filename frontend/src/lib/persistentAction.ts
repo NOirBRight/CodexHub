@@ -24,7 +24,7 @@ export type PersistentActionDeps = {
   disconnectedText?: string;
   formatRestart?: (target: RestartTarget) => string;
   isDisconnected?: (error: unknown) => boolean;
-  onStartGateway?: () => Promise<void> | void;
+  onStartGateway?: (toastId?: string) => Promise<void> | void;
   startGatewayLabel?: string;
 };
 
@@ -89,7 +89,7 @@ export async function runPersistentAction<T>(
           ? {
               label: spec.startGatewayLabel ?? "Start Gateway",
               onClick: () => {
-                void spec.onStartGateway?.();
+                void spec.onStartGateway?.(toastId);
               },
             }
           : null,

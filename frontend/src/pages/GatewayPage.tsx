@@ -101,7 +101,7 @@ function GatewayPageImpl({
       disconnectedText: t("gateway.backendNotConnected"),
       startGatewayLabel: t("gateway.startBackend"),
       isDisconnected: (error: unknown) => isBackendDisconnectedMessage(messageFromError(error)),
-      onStartGateway: () => startBackendFromToast(),
+      onStartGateway: (toastId) => startBackendFromToast(toastId),
       formatRestart: (target: RestartTarget) => {
         if (target.kind === "none") {
           return t("gateway.restartNone");

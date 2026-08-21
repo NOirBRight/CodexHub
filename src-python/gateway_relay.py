@@ -408,6 +408,7 @@ class RelaySymbols:
     _get_header: Callable[..., Any]
     decoded_request_body: Callable[..., Any]
     _sse_payload_bytes: Callable[..., Any]
+    _chat_function_name_from_response_item: Callable[[Mapping[str, Any]], str | None]
 
 
 class RelayHandler(Protocol):
@@ -982,7 +983,10 @@ def relay_upstream_response(
                         )
                     def decode_to_caller(payload: bytes) -> bytes:
                         try:
-                            return exchange.decode_response(payload)
+                            return exchange.decode_response(
+                                payload,
+                                function_name_from_response_item=relay_context.symbols._chat_function_name_from_response_item,
+                            )
                         except NonForwardable as exc:
                             raise UpstreamProtocolTranslationError(exc) from exc
                     if response_mutation_policy == MutationPolicy.TRANSPARENT:

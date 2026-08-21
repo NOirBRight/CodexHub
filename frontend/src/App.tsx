@@ -541,7 +541,17 @@ export default function App() {
       try {
         const status = await AppUpdater.install();
         if (!status) {
-          showToast(t("settings.desktopUpdatesUnavailable"), "info");
+          const unavailable = t("settings.desktopUpdatesUnavailable");
+          if (updateInstallToastId.current) {
+            updateToast(updateInstallToastId.current, {
+              action: null,
+              text: unavailable,
+              tone: "info",
+            });
+            updateInstallToastId.current = null;
+          } else {
+            showToast(unavailable, "info");
+          }
           return;
         }
         setUpdateInstallStatus(status);

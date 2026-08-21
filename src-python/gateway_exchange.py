@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import json
 from typing import Any, Protocol
@@ -396,40 +396,51 @@ class ExchangeHooks:
     runtime_attempt_key: str = "_runtime_tool_compatibility_attempt_generation"
 
 def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, hooks: ExchangeHooks) -> tuple[PreparedExchange, bytes]:
-    """Prepare protocol first, then apply exactly one planned mutation policy."""
-    try:
-        exchange = attempt.prepare_body(request.prepared_body)
-    except UnsupportedProtocolTranslationError as exc:
-        raise UpstreamProtocolTranslationError(exc) from exc
-    hooks.set_active_prepared_exchange(exchange)
-    body = exchange.upstream_body
+    """Canonicalize, adapt, then perform exactly one selected wire conversion."""
+    policy = attempt.request_mutation_policy
     upstream = dict(request.upstream)
     upstream["upstream_format"] = attempt.selected_upstream_format
-    policy = attempt.request_mutation_policy
-    if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
-        payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else hooks.safe_json_mapping(body)
-        return exchange, hooks.official_mutation(body, payload, upstream, model_id=request.inbound.model)
+    conversion_body = request.prepared_body
+    prepared_exchange: PreparedExchange | None = None
+    pre_compatibility_applied = False
+    caller_is_chat = request.inbound.inbound_format == "chat_completions"
+    attempt_is_responses = attempt.selected_upstream_format == "responses"
+    if policy in (MutationPolicy.TRANSPARENT, MutationPolicy.GATEWAY_COMPATIBILITY) and caller_is_chat and attempt_is_responses:
+        try:
+            prepared_exchange = attempt.prepare_body(conversion_body)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+        conversion_body = prepared_exchange.upstream_body
     if policy is MutationPolicy.TRANSPARENT:
-        body = hooks.transparent_mutation(body, hooks.safe_json_mapping(body), upstream, model_id=request.inbound.model)
-        body, developer_rewrites = hooks.rewrite_developer_roles(body, upstream)
+        mutation_upstream = dict(upstream)
+        mutation_upstream["upstream_format"] = attempt.selected_upstream_format if prepared_exchange is not None else request.inbound.inbound_format
+        conversion_body = hooks.transparent_mutation(conversion_body, hooks.safe_json_mapping(conversion_body), mutation_upstream, model_id=request.inbound.model)
+        conversion_body, developer_rewrites = hooks.rewrite_developer_roles(conversion_body, mutation_upstream)
         if developer_rewrites:
             request.proxy_request_context["developer_role_rewrites"] = developer_rewrites
-        body, schema_rewrites = hooks.normalize_tool_schema_booleans(body)
+        conversion_body, schema_rewrites = hooks.normalize_tool_schema_booleans(conversion_body)
         if schema_rewrites:
             request.proxy_request_context["tool_schema_rewrites"] = schema_rewrites
         if request.route_plan.transparent_tool_loop_guard:
-            hooks.validate_transparent_tool_loop(body, attempt.selected_upstream_format)
-        return exchange, body
-    if policy is MutationPolicy.GATEWAY_COMPATIBILITY:
-        return exchange, hooks.compatibility_mutation(
-            body, upstream, model_id=request.inbound.model,
-            event_context=request.event_context,
-            inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection,
-            tool_protocol_override=attempt.tool_protocol,
-            tool_surface_strategy_override=attempt.tool_surface_strategy,
-            native_responses_tool_codec_override=attempt.native_responses_tool_codec,
-        )
-    return exchange, body
+            hooks.validate_transparent_tool_loop(conversion_body, mutation_upstream["upstream_format"])
+    elif policy is MutationPolicy.GATEWAY_COMPATIBILITY and (prepared_exchange is not None or (not caller_is_chat and attempt.selected_upstream_format == "chat_completions")):
+        conversion_body = hooks.compatibility_mutation(conversion_body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
+        pre_compatibility_applied = True
+    if prepared_exchange is None:
+        try:
+            prepared_exchange = attempt.prepare_body(conversion_body)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+    else:
+        prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
+    hooks.set_active_prepared_exchange(prepared_exchange)
+    body = prepared_exchange.upstream_body
+    if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
+        payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else hooks.safe_json_mapping(body)
+        return prepared_exchange, hooks.official_mutation(body, payload, upstream, model_id=request.inbound.model)
+    if policy is MutationPolicy.GATEWAY_COMPATIBILITY and not pre_compatibility_applied:
+        body = hooks.compatibility_mutation(body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
+    return prepared_exchange, body
 
 def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress: ExchangeProgress | None = None) -> ExchangeResult:
     """Prepare and execute RoutePlanLike attempts through transport and relay hooks."""
@@ -455,6 +466,7 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
     generation = 0
 
     for attempt in request.route_plan.attempts:
+        attempt_request_kind = getattr(attempt.retry, "request_kind", request.inbound.request_kind)
         state.active_attempt = attempt
         state.upstream_format = attempt.selected_upstream_format
         hooks.activate_attempt(attempt)
@@ -536,13 +548,13 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                     safety = hooks.retry_safety_class(
                         retry_exc, request=upstream_request,
                         upstream_name=request.upstream_name,
-                        request_kind=request.inbound.request_kind,
+                        request_kind=attempt_request_kind,
                         downstream_exposed=hooks.downstream_exposed(),
                         model_access_path=hooks.model_access_path(request.event_context, request.upstream_name, state.upstream_format),
                         failure_phase=phase,
                     )
                     if safety in hooks.suppressed_retry_safety_classes:
-                        hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
+                        hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=attempt_request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
                         if isinstance(retry_exc, hooks.failure_types.upstream_empty_completed):
                             if not hooks.handle_empty_completed(retry_exc):
                                 hooks.finish_downstream_failure()
@@ -585,9 +597,9 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                             )
                         ):
                             raise retry_exc
-                    hooks.emit_retry(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
+                    hooks.emit_retry(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=attempt_request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, retry_safety_class=safety)
                     if emit_notice:
-                        payload = hooks.downstream_retry_payload(upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, redact_identity=hooks.retry_identity(request.event_context))
+                        payload = hooks.downstream_retry_payload(upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=attempt_request_kind, attempt=relay_attempt, max_attempts=retry_limit, exc=retry_exc, delay_seconds=delay, failure_class=failure_class, failure_phase=phase, redact_identity=hooks.retry_identity(request.event_context))
                         if not hooks.emit_downstream_retry(payload):
                             hooks.finish_downstream_failure()
                             return ExchangeResult(ExchangeDisposition.STOPPED, state, stop_reason="downstream_closed")
@@ -602,7 +614,7 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                 safety = hooks.retry_safety_class(
                     exc, request=upstream_request,
                     upstream_name=request.upstream_name,
-                    request_kind=request.inbound.request_kind,
+                    request_kind=attempt_request_kind,
                     downstream_exposed=hooks.downstream_exposed(),
                     model_access_path=hooks.model_access_path(request.event_context, request.upstream_name, state.upstream_format),
                     failure_phase="response_headers",
@@ -610,6 +622,6 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                 if safety not in hooks.suppressed_retry_safety_classes:
                     hooks.protocol_fallback(attempt, next_attempt, exc, state.request_observability)
                     continue
-                hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=request.inbound.request_kind, attempt=relay_attempt, max_attempts=relay_attempts, exc=exc, failure_class=hooks.failure_class(exc), failure_phase="response_headers", retry_safety_class=safety)
+                hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=attempt_request_kind, attempt=relay_attempt, max_attempts=relay_attempts, exc=exc, failure_class=hooks.failure_class(exc), failure_phase="response_headers", retry_safety_class=safety)
             raise
     raise RuntimeError("unreachable upstream protocol selection state")

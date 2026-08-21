@@ -167,7 +167,7 @@ def _responses_url(upstream: Mapping[str, Any], request_path: str) -> str:
         path = "/" + path
     url = _upstream_endpoint_url(upstream, path)
     if parsed.query:
-        url += "?" + parsed.query
+        url += ("&" if "?" in url else "?") + parsed.query
     return url
 
 

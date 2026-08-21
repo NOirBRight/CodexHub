@@ -51,6 +51,8 @@ $normalLinuxAppImage = Get-LinuxReleaseArtifactName -Flavor "normal" -Version $V
 $debugLinuxAppImage = Get-LinuxReleaseArtifactName -Flavor "debug" -Version $Version -Kind appimage
 $normalLinuxDeb = Get-LinuxReleaseArtifactName -Flavor "normal" -Version $Version -Kind deb
 $debugLinuxDeb = Get-LinuxReleaseArtifactName -Flavor "debug" -Version $Version -Kind deb
+$normalLinuxPortable = "CodexHub_{0}_linux_portable_{1}.tar.gz" -f $Version, $commitSha.Substring(0, 8)
+$debugLinuxPortable = "CodexHub_{0}_debug_linux_portable_{1}.tar.gz" -f $Version, $commitSha.Substring(0, 8)
 $plan = [ordered]@{
     flavor = $Flavor
     version = $Version
@@ -74,9 +76,11 @@ $plan = [ordered]@{
         )
     }
     linux_assets = @(
+        $normalLinuxPortable,
         $normalLinuxAppImage,
         "$normalLinuxAppImage.sig",
         $normalLinuxDeb,
+        $debugLinuxPortable,
         $debugLinuxAppImage,
         "$debugLinuxAppImage.sig",
         $debugLinuxDeb

@@ -17,7 +17,7 @@ if [[ ${#args[@]} -ge 2 && "${args[0]}" == "-m" && "${args[1]}" == "pytest" ]]; 
 fi
 
 unset PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX \
-  CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER PIPENV_ACTIVE CODEXHUB_RESOLVED_PYTHON
+  CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER PIPENV_ACTIVE CODEXHUB_RESOLVED_PYTHON PYTHONPATH
 
 supports_python() {
   local path="$1"
@@ -78,7 +78,11 @@ for candidate in "${candidates[@]}"; do
 done
 
 if [[ -z "$resolved" ]]; then
-  echo "CodexHub requires Python 3.13 or newer." >&2
+  if [[ "$require_pytest" -eq 1 ]]; then
+    echo "CodexHub requires Python 3.13 or newer with pytest installed." >&2
+  else
+    echo "CodexHub requires Python 3.13 or newer." >&2
+  fi
   echo "Run scripts/codexhub-python.sh ..." >&2
   exit 127
 fi

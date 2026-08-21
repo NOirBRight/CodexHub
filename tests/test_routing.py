@@ -9081,6 +9081,11 @@ class RoutingTests(unittest.TestCase):
             7,
         )
 
+    def test_responses_url_merges_base_and_request_queries(self):
+        upstream = {"base_url": "https://azure.example.test/v1?api-version=1"}
+        url = codex_proxy._responses_url(upstream, "/v1/responses?trace=1")
+        self.assertEqual(url, "https://azure.example.test/v1/responses?api-version=1&trace=1")
+
     def test_open_upstream_response_retries_pre_write_dns_tcp_refused_tls_cert_for_non_official_main_gen(self):
         request = codex_proxy.Request("https://ark.example.test/v1/responses", data=b"{}", method="POST")
         cases = [

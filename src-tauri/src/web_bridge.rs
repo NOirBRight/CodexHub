@@ -566,9 +566,9 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             ))
         }
         "diagnose_conversation_history" => {
-            let _full_scan =
+            let full_scan =
                 optional_bool_arg(&request.args, &["fullScan", "full_scan"]).unwrap_or(true);
-            to_value(history::preflight_unified_history(false, None))
+            to_value(history::diagnose_unified_history(full_scan))
         }
         "sync_catalog" => to_value(catalog::sync_catalog()),
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(

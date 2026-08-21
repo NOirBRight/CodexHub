@@ -909,7 +909,7 @@ test("backend unavailable errors stay short and can render toast actions", async
   assert.match(providersSource, /BACKEND_DISCONNECTED_TOAST_KEY/);
   assert.match(providersSource, /dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY/);
   assert.match(providersSource, /label: t\("gateway\.startBackend"\)/);
-  assert.match(providersSource, /onStartProxy\?: \(\) => Promise<void>;/);
+  assert.match(providersSource, /onStartProxy\?: \(\) => Promise<AppStatus \| null>;/);
   assert.match(gatewaySource, /showBackendDisconnectedToast/);
   assert.match(gatewaySource, /BACKEND_DISCONNECTED_TOAST_KEY/);
   assert.match(gatewaySource, /dedupeKey: BACKEND_DISCONNECTED_TOAST_KEY/);

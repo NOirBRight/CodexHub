@@ -11071,6 +11071,7 @@ def _relay_symbols() -> RelaySymbols:
             _get_header=_get_header,
             decoded_request_body=decoded_request_body,
             _sse_payload_bytes=_sse_payload_bytes,
+            _chat_function_name_from_response_item=_chat_function_name_from_response_item,
     )
 
 
@@ -11728,6 +11729,20 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
                 )
 
+            operational_authentication = (
+                materialize_operational_authentication(
+                    self.headers,
+                    upstream,
+                )
+            )
+            route_plan = bind_route_plan_operational_authentication(
+                route_plan,
+                self.headers,
+                upstream,
+                operational_authentication,
+                drop_content_encoding=content_decoded,
+            )
+            primary_route_attempt = route_plan.attempts[0]
             usage_capture: dict[str, Any] = {}
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value
@@ -11766,20 +11781,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
                     write_exc=seam.last_write_error() or OSError("downstream closed")
                 )
                 return
-            operational_authentication = (
-                materialize_operational_authentication(
-                    self.headers,
-                    upstream,
-                )
-            )
-            route_plan = bind_route_plan_operational_authentication(
-                route_plan,
-                self.headers,
-                upstream,
-                operational_authentication,
-                drop_content_encoding=content_decoded,
-            )
-            primary_route_attempt = route_plan.attempts[0]
             prepared_caller_body = body
 
             def request_observability_for_attempt(

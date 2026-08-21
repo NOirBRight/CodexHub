@@ -341,6 +341,15 @@ struct HistoryRepairPlan<'a> {
     inspection: &'a BucketInspection,
 }
 
+pub fn diagnose_unified_history(full_scan: bool) -> Result<UnifiedHistoryResult, String> {
+    let target_unified = if full_scan {
+        Some(config::get_settings()?.unified_codex_history)
+    } else {
+        None
+    };
+    preflight_unified_history(false, target_unified)
+}
+
 pub fn preflight_unified_history(
     apply_repairs: bool,
     target_unified: Option<bool>,

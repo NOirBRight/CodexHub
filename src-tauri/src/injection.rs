@@ -369,21 +369,29 @@ pub(crate) fn inject(
         injected_entry(descriptor, &request.base_url, &request.models),
     );
 
-    // Never touch the activation key: read-back only, asserted here so a
-    // future edit to this engine fails loudly instead of silently flipping
-    // the client's default-model selection.
-    let activation_before = read_path(&config, descriptor.activation_path).cloned();
-
-    let config_backup = backup_file(&config_path)?;
-    write_yaml_atomic(&config_path, &config, existing_unix_mode(&config_path).or(Some(0o600)))?;
-
+    // Read and validate credentials before mutating the client config. This keeps
+    // malformed/unreadable credential state fail-closed and atomic.
     let mut credentials = read_yaml_mapping(&credential_path)?;
     credentials.insert(
         Value::String(descriptor.credential.key.to_owned()),
         Value::String(request.api_key.reveal().to_owned()),
     );
+
+    // Never touch the activation key: read-back only, asserted here so a
+    // future edit to this engine fails loudly instead of silently flipping
+    // the client's default-model selection.
+    let activation_before = read_path(&config, descriptor.activation_path).cloned();
+    let config_backup = backup_file(&config_path)?;
     let credential_backup = backup_file(&credential_path)?;
-    write_yaml_atomic(&credential_path, &credentials, Some(0o600))?;
+    write_yaml_atomic(&config_path, &config, existing_unix_mode(&config_path).or(Some(0o600)))?;
+    if let Err(error) = write_yaml_atomic(&credential_path, &credentials, Some(0o600)) {
+        if let Some(backup) = config_backup.as_ref() {
+            let _ = fs::copy(backup, &config_path);
+        } else {
+            let _ = fs::remove_file(&config_path);
+        }
+        return Err(error);
+    }
 
     debug_assert_eq!(
         read_yaml_mapping(&config_path)
@@ -420,6 +428,13 @@ pub(crate) fn detach(
     let config_path = descriptor.config_file.resolve(client_root);
     let credential_path = descriptor.credential.file.resolve(client_root);
 
+    // Parse both files before mutating either one so malformed credential state
+    // cannot leave a half-detached Injected Block.
+    let mut credentials = if credential_path.exists() {
+        Some(read_yaml_mapping(&credential_path)?)
+    } else {
+        None
+    };
     let mut config_backup = None;
     let mut config_changed = false;
     if config_path.exists() {
@@ -443,8 +458,7 @@ pub(crate) fn detach(
     let mut credential_backup = None;
     let mut credential_changed = false;
     let mut credential_file_removed = false;
-    if credential_path.exists() {
-        let mut credentials = read_yaml_mapping(&credential_path)?;
+    if let Some(mut credentials) = credentials.take() {
         if credentials
             .remove(Value::String(descriptor.credential.key.to_owned()))
             .is_some()
@@ -1001,6 +1015,12 @@ pub(crate) fn dsh_connect(root: &Path, base_url: String, api_key: MaskedSecret, 
 
 pub(crate) fn dsh_disconnect(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
     let descriptor = dsh_descriptor();
+    let before = verify_readback(root, &descriptor, expectation)?;
+    if matches!(before.status, ReadbackStatus::Drift) {
+        let mut report = dsh_report(root, expectation)?;
+        report.connected = false;
+        return Ok(report);
+    }
     detach(root, &descriptor)?;
     let mut report = dsh_report(root, expectation)?;
     report.connected = false;

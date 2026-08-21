@@ -3300,6 +3300,7 @@ class PreparedExchange:
     outbound_format: str
     upstream_body: bytes
     stream: bool
+    function_name_from_response_item: FunctionNameFromResponseItem | None = None
 
     def decode_stream(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
         if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
@@ -3313,12 +3314,24 @@ class PreparedExchange:
 
     stream_decoder = decode_stream
 
-    def decode_response(self, body: bytes) -> bytes:
+    def decode_response(
+        self,
+        body: bytes,
+        *,
+        function_name_from_response_item: FunctionNameFromResponseItem | None = None,
+    ) -> bytes:
         if self.inbound_format == self.outbound_format:
             return body
         try:
             if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
-                return response_body_to_chat_completion_body(body)
+                return response_body_to_chat_completion_body(
+                    body,
+                    function_name_from_response_item=(
+                        function_name_from_response_item
+                        or self.function_name_from_response_item
+                        or _default_function_name_from_response_item
+                    ),
+                )
             if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
                 return chat_completion_to_response_body(body)
         except UnsupportedProtocolTranslationError as error:
