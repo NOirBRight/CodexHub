@@ -67,6 +67,11 @@ def test_matrix_covers_required_chat_and_v2_surface() -> None:
     assert rows["request.tools.custom"]["disposition"] == "reversibly_adapted"
     assert rows["request.tools.custom.unavailable"]["disposition"] == "unavailable"
     assert rows["request.tools.hosted"]["disposition"] == "unavailable"
+    assert rows["request.reasoning.controls"]["disposition"] == "consumed_locally"
+    assert all(
+        key in rows["request.reasoning.controls"]["responses"]
+        for key in ("effort", "summary", "generate_summary", "mode", "context")
+    )
     assert rows["v2.encrypted_fields"]["disposition"] == "unavailable"
     assert payload["invariants"]["fail_closed_unknown"] is True
     assert payload["invariants"]["not_keyed_by"] == ["model_name", "provider_name"]

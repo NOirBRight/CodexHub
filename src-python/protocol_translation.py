@@ -230,14 +230,20 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
 
     reasoning = payload.get("reasoning")
     if reasoning is not None:
-        # Codex Desktop may still send the Responses reasoning summary
-        # selector when it is using a catalog generated before the Chat
-        # capability flags were corrected.  Chat Completions has no portable
-        # response-summary representation, so consume the bounded selector
-        # locally rather than rejecting the otherwise valid request.  Unknown
-        # selectors remain fail-closed; this is compatibility handling, not a
-        # claim that Chat can return Responses reasoning summaries.
-        if not isinstance(reasoning, Mapping) or set(reasoning) - {"effort", "summary"}:
+        # Codex Desktop may still send Responses reasoning selectors when it
+        # is using a catalog generated before the Chat capability flags were
+        # corrected. Chat Completions has no portable representation for these
+        # controls, so consume the documented bounded selectors locally rather
+        # than rejecting the otherwise valid request. Unknown selectors remain
+        # fail-closed; this is compatibility handling, not a claim that Chat
+        # can return Responses reasoning controls or summaries.
+        if not isinstance(reasoning, Mapping) or set(reasoning) - {
+            "effort",
+            "summary",
+            "mode",
+            "context",
+            "generate_summary",
+        }:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning semantics.",
@@ -259,6 +265,33 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning summary.",
+            )
+        generate_summary = reasoning.get("generate_summary")
+        if generate_summary is not None and (
+            not isinstance(generate_summary, str)
+            or generate_summary not in {"auto", "concise", "detailed"}
+        ):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning generate_summary.",
+            )
+        mode = reasoning.get("mode")
+        if mode is not None and (
+            not isinstance(mode, str)
+            or mode not in {"standard", "pro"}
+        ):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning mode.",
+            )
+        context = reasoning.get("context")
+        if context is not None and (
+            not isinstance(context, str)
+            or context not in {"auto", "current_turn", "all_turns"}
+        ):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning context.",
             )
     payload.pop("reasoning", None)
 
