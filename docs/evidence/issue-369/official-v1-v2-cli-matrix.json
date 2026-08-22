@@ -2,7 +2,7 @@
   "schema": "codexhub.issue369.official-v1-v2-cli-matrix.v1",
   "evidence_status": "authenticated_cli_sanitized",
   "qualification_status": "partial_visible_rows_only",
-  "candidate_revision": "aa5382c9fe80b41a2d516fc196b7a76777c4cc39",
+  "candidate_revision": "43364d40c995cb4c6d45690ce8673356833985e8",
   "evidence_links": [
     "docs/research/2026-08-08-official-v1-v2-capability-matrix.md",
     "docs/evidence/issue-369/README.md",
