@@ -1404,6 +1404,23 @@ pub fn verify_apply_readback(
     Ok(())
 }
 
+fn gateway_client_route_model(
+    requested: Option<String>,
+    settings: &Settings,
+    providers: &[Provider],
+) -> Result<String, String> {
+    if let Some(requested) = requested
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(resolved) = resolve_gateway_client_model_id(settings, providers, requested) {
+            return Ok(resolved);
+        }
+    }
+    default_gateway_client_sync_model(settings, providers)
+}
+
 pub fn switch_gateway_client_route(
     client_id: String,
     mode: String,
@@ -1417,6 +1434,13 @@ pub fn switch_gateway_client_route(
         "beta" => RoutingOwner::Beta,
         "hub" => current_app_owner,
         other => return Err(format!("unsupported routing owner: {other}")),
+    };
+    let model = if next_owner == current_app_owner {
+        let settings = config::get_settings()?;
+        let providers = config::get_providers()?;
+        Some(gateway_client_route_model(model, &settings, &providers)?)
+    } else {
+        model
     };
     let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
@@ -3662,6 +3686,21 @@ fn gateway_client_status(installed: bool, route_mode: &str) -> String {
     }
 }
 
+fn zcode_app_data_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|path| path.join("ZCode"))
+            .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode"));
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(".zcode"))
+        .unwrap_or_else(|| PathBuf::from("~/.zcode"))
+}
+
 fn detect_zcode_config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEXHUB_ZCODE_CONFIG")
         .filter(|value| !value.is_empty())
@@ -3669,15 +3708,9 @@ fn detect_zcode_config_path() -> PathBuf {
     {
         return path;
     }
-    std::env::var_os("APPDATA")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join("ZCode")
-                .join("model-providers")
-                .join("codexhub.json")
-        })
-        .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode/model-providers/codexhub.json"))
+    zcode_app_data_root()
+        .join("model-providers")
+        .join("codexhub.json")
 }
 
 fn detect_zcode_config_targets() -> ZcodeConfigTargets {
@@ -3751,15 +3784,9 @@ fn zcode_v2_root_from_data_base_dir(data_base_dir: &Path) -> PathBuf {
 }
 
 fn detect_zcode_store_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            path.join("ZCode")
-                .join("rum-electron-store")
-                .join("ZGVmYXVsdA.json")
-        })
-        .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode/rum-electron-store/ZGVmYXVsdA.json"))
+    zcode_app_data_root()
+        .join("rum-electron-store")
+        .join("ZGVmYXVsdA.json")
 }
 
 fn detect_zcode_executable_path() -> Option<PathBuf> {
@@ -7247,6 +7274,40 @@ mod tests {
             .contains(&PathBuf::from("/opt/OpenCode/ai.opencode.desktop")));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn zcode_linux_defaults_are_home_relative_and_writable() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "codexhub-zcode-home-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&home).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_appdata = std::env::var_os("APPDATA");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("APPDATA");
+
+        let targets = super::detect_zcode_config_targets();
+        assert_eq!(
+            targets.catalog_path,
+            home.join(".zcode/model-providers/codexhub.json")
+        );
+        assert_eq!(targets.v2_config_path, home.join(".zcode/v2/config.json"));
+        assert_eq!(
+            super::detect_zcode_store_path(),
+            home.join(".zcode/rum-electron-store/ZGVmYXVsdA.json")
+        );
+
+        restore_env("HOME", previous_home);
+        restore_env("APPDATA", previous_appdata);
+        fs::remove_dir_all(home).unwrap();
+    }
+
     /// Force two restore/apply calls to overlap at the absent-baseline lock seam.
     /// `a_restore` acquires the lock first and pauses until `b_restore` has
     /// entered the lock acquisition; then A publishes and B re-reads the baseline.
@@ -7908,6 +7969,33 @@ mod tests {
         let model = result.expect("enabled fallback model");
 
         assert_eq!(model, "gpt-5.4");
+    }
+
+    #[test]
+    fn client_route_model_preserves_valid_selection_and_falls_back_from_stale_selection() {
+        let settings = Settings {
+            include_official_models: false,
+            ..Settings::default()
+        };
+        let providers = case_sensitive_client_export_test_providers();
+
+        assert_eq!(
+            super::gateway_client_route_model(
+                Some("volc/glm-5.2".to_string()),
+                &settings,
+                &providers,
+            )
+            .unwrap(),
+            "volc/glm-5.2"
+        );
+        let fallback = super::gateway_client_route_model(
+            Some("gpt-5.5".to_string()),
+            &settings,
+            &providers,
+        )
+        .unwrap();
+        assert_ne!(fallback, "gpt-5.5");
+        assert!(super::resolve_gateway_client_model_id(&settings, &providers, &fallback).is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -14254,7 +14342,9 @@ mod tests {
             readback_gateway_client_config_isolated, route_protocol_for_selection,
             validate_isolated_root, IsolatedClientApplyInput,
         };
-        use super::{case_sensitive_client_export_test_providers, unique_temp_dir, TEST_ENV_LOCK};
+        use super::{
+            case_sensitive_client_export_test_providers, stable_root, unique_temp_dir, TEST_ENV_LOCK,
+        };
         use crate::{Model, Provider, Settings, UpstreamFormat};
         use serde_json::json;
         use std::fs;
@@ -14458,6 +14548,79 @@ mod tests {
             let readback = readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
             assert!(readback.ok);
             assert_eq!(readback.client_id, "omp");
+        }
+
+        #[test]
+        fn isolated_five_client_switches_round_trip_without_host_writes() {
+            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let cases = [
+                ("opencode", UpstreamFormat::Responses),
+                ("zcode", UpstreamFormat::Responses),
+                ("pi", UpstreamFormat::ChatCompletions),
+                ("omp", UpstreamFormat::ChatCompletions),
+            ];
+
+            for (client_id, upstream) in cases {
+                let root = fresh_root(&format!("switch-{client_id}"));
+                let isolated = validate_isolated_root(&root).unwrap();
+                let inp = input(
+                    client_id,
+                    "volc/glm-5.2",
+                    settings_with_port(9099),
+                    volc_provider(upstream),
+                );
+                let initial_targets = isolated_client_apply_targets(&isolated, client_id).unwrap();
+                for path in initial_targets.writable_paths() {
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(path, "{}\n").unwrap();
+                }
+                let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+                assert!(apply.applied, "{client_id} connect did not apply");
+                assert!(readback_gateway_client_config_isolated(&isolated, &inp)
+                    .unwrap()
+                    .ok);
+
+                let targets = isolated_client_apply_targets(&isolated, client_id).unwrap();
+                let backup_roots = [stable_root(targets.backup_path().to_path_buf())];
+                let restored = super::super::with_rollback_provenance_dir_override(
+                    Some(root.join("rollback-provenance")),
+                    || match client_id {
+                        "opencode" => super::super::restore_opencode_config_with_backup_roots(
+                            &targets.writable_paths()[0],
+                            &backup_roots,
+                        ),
+                        "pi" => super::super::restore_pi_config_with_paths(
+                            &targets.writable_paths()[0],
+                            &targets.writable_paths()[1],
+                            &backup_roots,
+                        ),
+                        "omp" => super::super::restore_omp_config_with_paths(
+                            &targets.writable_paths()[0],
+                            &targets.writable_paths()[1],
+                            targets.backup_path(),
+                        ),
+                        "zcode" => {
+                            let zcode_targets =
+                                super::super::zcode_targets_from_writable(&targets).unwrap();
+                            super::super::restore_zcode_config_with_targets(
+                                &zcode_targets,
+                                targets.backup_path(),
+                            )
+                        }
+                        other => panic!("unexpected isolated client {other}"),
+                    },
+                )
+                .unwrap();
+                assert!(restored.applied, "{client_id} disconnect did not restore");
+                for path in targets.writable_paths() {
+                    let text = fs::read_to_string(path).unwrap_or_default();
+                    assert!(
+                        !text.to_ascii_lowercase().contains("codexhub"),
+                        "{client_id} disconnect left managed marker in {}",
+                        path.display()
+                    );
+                }
+            }
         }
 
         // F1: ZCode readback must be deterministic across wall-clock time. The

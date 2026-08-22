@@ -1238,6 +1238,34 @@ mod tests {
     // --- DSH inject ---
 
     #[test]
+    fn dsh_connect_disconnect_round_trips_in_an_isolated_root() {
+        let root = dsh_root("codexhub-dsh-switch");
+        let request = request();
+        let expectation = ReadbackExpectation {
+            base_url: request.base_url.clone(),
+            models: request.models.clone(),
+        };
+
+        let connected = dsh_connect(
+            &root,
+            request.base_url.clone(),
+            request.api_key.clone(),
+            request.models.clone(),
+        )
+        .unwrap();
+        assert!(connected.connected);
+        assert!(connected.block_present);
+        assert!(connected.config_path.starts_with(&root));
+        assert!(connected.credential_path.starts_with(&root));
+
+        let disconnected = dsh_disconnect(&root, &expectation).unwrap();
+        assert!(!disconnected.connected);
+        assert!(!disconnected.block_present);
+        assert!(disconnected.config_path.starts_with(&root));
+        assert!(disconnected.credential_path.starts_with(&root));
+    }
+
+    #[test]
     fn inject_creates_entry_and_credential_on_fresh_install() {
         let root = dsh_root("codexhub-injection-fresh");
         let descriptor = dsh_descriptor();
