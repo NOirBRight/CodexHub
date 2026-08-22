@@ -81,7 +81,13 @@ DIRECT_FIXTURE_PYTHON_ENTRYPOINTS = (
 )
 
 
+def _require_windows_host() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows cmd/PowerShell development launchers")
+
+
 def _powershell() -> str:
+    _require_windows_host()
     executable = shutil.which("pwsh") or shutil.which("powershell")
     if executable is None:
         pytest.skip("PowerShell is required for the repository Python launcher")
@@ -460,6 +466,7 @@ def test_repository_launcher_can_import_python_313_syntax_source() -> None:
 
 
 def test_repository_launcher_uses_the_development_runtime_for_tools() -> None:
+    _require_windows_host()
     bundled = ROOT / "src-tauri" / "resources" / "python" / "python.exe"
 
     child_env = os.environ.copy()
@@ -490,6 +497,8 @@ def test_repository_launcher_keeps_sys_executable_pytest_children_on_development
     tmp_path: Path,
 ) -> None:
     """A script invoking ``sys.executable -m pytest`` must not get the embedded runtime."""
+
+    _require_windows_host()
 
     script = tmp_path / "pytest-child.py"
     script.write_text(
@@ -531,6 +540,7 @@ def test_repository_launcher_exports_one_interpreter_to_all_children() -> None:
 def test_repository_launcher_removes_host_runtime_selection_variables(
     tmp_path: Path,
 ) -> None:
+    _require_windows_host()
     child_env = os.environ.copy()
     child_env.update(
         {
@@ -580,6 +590,7 @@ def test_repository_launcher_puts_selected_interpreter_first_on_child_path() -> 
 
 
 def test_cmd_launcher_puts_selected_interpreter_first_on_child_path() -> None:
+    _require_windows_host()
     child_env = os.environ.copy()
     for name in ("CODEXHUB_E2E_PYTHON", "CODEXHUB_PROXY_PYTHON"):
         child_env.pop(name, None)
@@ -607,6 +618,7 @@ def test_cmd_launcher_puts_selected_interpreter_first_on_child_path() -> None:
 
 
 def test_cmd_launcher_exports_one_interpreter_to_all_children() -> None:
+    _require_windows_host()
     result = subprocess.run(
         [
             str(CMD_LAUNCHER),
@@ -631,6 +643,7 @@ def test_cmd_launcher_exports_one_interpreter_to_all_children() -> None:
 def test_cmd_launcher_replaces_ambient_pythonpath_with_repository_import_root(
     tmp_path: Path,
 ) -> None:
+    _require_windows_host()
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(tmp_path / "hermes-3.11" / "site-packages")
     result = subprocess.run(
@@ -654,6 +667,7 @@ def test_pytest_command_rejects_a_compatible_interpreter_without_pytest(
 ) -> None:
     """A Python 3.13 executable without pytest must fail at the launcher boundary."""
 
+    _require_windows_host()
     wrapper = _write_python_without_pytest(tmp_path)
     child_env = os.environ.copy()
     child_env["CODEXHUB_PYTHON"] = str(wrapper)
@@ -819,6 +833,7 @@ def test_repository_launcher_preserves_a_script_path_as_the_first_argument(
 
 
 def test_cmd_launcher_preserves_separator_and_script_arguments(tmp_path: Path) -> None:
+    _require_windows_host()
     probe = tmp_path / "argument-probe.py"
     probe.write_text("import sys; print(sys.argv[1:])\n", encoding="utf-8")
     result = subprocess.run(
@@ -836,6 +851,7 @@ def test_cmd_launcher_preserves_separator_and_script_arguments(tmp_path: Path) -
 
 def test_watchdog_launcher_requires_a_pytest_capable_runtime() -> None:
     """The watchdog must bind a runtime that can execute its pytest child."""
+    _require_windows_host()
     watchdog = ROOT / "tests" / "fixtures" / "real_client_e2e" / "run-with-windows-watchdog.py"
     result = subprocess.run(
         [

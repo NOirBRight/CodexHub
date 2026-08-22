@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # One-shot Linux local verification: Python core suite + Rust tests + clippy.
 # Mirrors the Linux half of docs/agents/verification-policy.md.
+# Windows cmd/PowerShell launcher and release-script tests skip on this host;
+# they remain part of the Windows core suite.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

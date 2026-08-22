@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 from pathlib import Path
+import os
 import socket
 import struct
 import sys
@@ -716,7 +717,8 @@ def test_downstream_cancellation_fails_closed_and_cleans_partial(
                 b"Content-Length: 2\r\n"
                 b"Connection: close\r\n\r\n{}"
             )
-            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+            linger = struct.pack("ii" if os.name != "nt" else "hh", 1, 0)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
             client.close()
             record = _wait_for_record(config.output_dir)
 

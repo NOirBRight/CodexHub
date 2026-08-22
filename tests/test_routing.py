@@ -1153,6 +1153,7 @@ class RoutingTests(unittest.TestCase):
         }
 
         with (
+            patch.dict(os.environ, {"OLLAMA_API_KEY": "ollama-token"}, clear=False),
             patch("codex_proxy.choose_upstream", return_value=upstream),
             patch(
                 "codex_proxy._open_upstream_response",

@@ -1,11 +1,19 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tomllib
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _require_windows_powershell() -> None:
+    if os.name != "nt":
+        pytest.skip("Windows PowerShell release scripts")
 
 
 def test_build_revision_recompiles_when_symbolic_branch_head_moves():
@@ -132,6 +140,7 @@ def _portable_fixture(tmp_path: Path, version: str) -> Path:
 
 
 def _portable(repo: Path, flavor: str | None = None) -> subprocess.CompletedProcess[str]:
+    _require_windows_powershell()
     args = [
         "powershell",
         "-NoProfile",
@@ -145,6 +154,7 @@ def _portable(repo: Path, flavor: str | None = None) -> subprocess.CompletedProc
 
 
 def _replacement(repo: Path, version: str) -> subprocess.CompletedProcess[str]:
+    _require_windows_powershell()
     return subprocess.run(
         [
             "powershell",
@@ -223,6 +233,7 @@ def test_replacement_smoke_contract_uses_one_identity_and_gateway_owner(tmp_path
 
 
 def test_replacement_smoke_requires_explicit_installer_inputs(tmp_path):
+    _require_windows_powershell()
     repo = _portable_fixture(tmp_path, "0.1.5")
 
     result = subprocess.run(
@@ -250,6 +261,7 @@ def test_replacement_smoke_requires_explicit_installer_inputs(tmp_path):
 
 
 def _update_e2e_app_build_plan(flavor: str) -> subprocess.CompletedProcess[str]:
+    _require_windows_powershell()
     return subprocess.run(
         [
             "powershell",
@@ -320,6 +332,7 @@ def _release_repo(tmp_path: Path) -> tuple[Path, str, str]:
 
 
 def _plan(repo: Path, flavor: str, version: str, commit: str) -> subprocess.CompletedProcess[str]:
+    _require_windows_powershell()
     return subprocess.run(
         [
             "powershell",
@@ -482,6 +495,7 @@ def _validate_manifest(
     installer: Path,
     signature: Path,
 ) -> subprocess.CompletedProcess[str]:
+    _require_windows_powershell()
     return subprocess.run(
         [
             "powershell",

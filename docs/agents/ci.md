@@ -126,7 +126,8 @@ On a Linux host, `./scripts/verify-linux.sh` runs Python core (excluding
 `tests/test_real_client_e2e.py`), the Python partition completeness checker,
 `cargo test --locked`, and clippy. Use it whenever the changed boundary includes
 Gateway, process-lifecycle, packaging, or Rust code. The synthetic real-client
-partition remains Windows-watchdog-only.
+partition remains Windows-watchdog-only. Windows cmd/PowerShell launcher and
+release-script tests skip on Linux; they stay in the Windows core suite.
 
 ```bash
 ./scripts/verify-linux.sh
