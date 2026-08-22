@@ -13,6 +13,7 @@ import {
   applyProviderProbeResult,
   normalizeEndpointFormats,
   probeDetectedEndpointFormat,
+  probeSucceeded,
   shortProviderDiscoveryError,
   upstreamFormatLabel,
 } from "../lib/providerEndpoint";
@@ -89,6 +90,21 @@ export function useProviderCatalogActions({
       updateToast(toastId, {
         action: null,
         text: t("providers.probeModelRequired"),
+        tone: "error",
+      });
+      return;
+    }
+    if (result.inconclusive_reason) {
+      const messageKey = {
+        authentication_failed: "providers.probeAuthenticationFailed",
+        rate_limited: "providers.probeRateLimited",
+        network_error: "providers.probeNetworkError",
+        upstream_unavailable: "providers.probeUpstreamUnavailable",
+        request_failed: "providers.probeRequestFailed",
+      }[result.inconclusive_reason];
+      updateToast(toastId, {
+        action: null,
+        text: t(messageKey),
         tone: "error",
       });
       return;
@@ -412,6 +428,11 @@ export function useProviderCatalogActions({
     result: UpstreamFormatProbeResult,
     toastId: string,
   ) {
+    if (!probeSucceeded(result)) {
+      setError(null);
+      updateProbeToast(toastId, result);
+      return;
+    }
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
     );

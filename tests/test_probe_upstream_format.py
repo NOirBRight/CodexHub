@@ -520,6 +520,97 @@ class ProbeUpstreamFormatTests(unittest.TestCase):
         self.assertTrue(result["responses_text_ok"])
         self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_RESPONSES)
 
+    def test_probe_reports_rate_limit_as_inconclusive_without_running_tool_checks(self) -> None:
+        calls: list[str] = []
+
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            calls.append(path)
+            if path == "/models":
+                return True, 200, {"data": [{"id": "cooling-model"}]}, None
+            if path == "/chat/completions":
+                return False, 429, None, '{"error":"usage limit reached"}'
+            return False, 404, None, "not found"
+
+        with (
+            patch("probe_upstream_format.request_json", side_effect=fake_request_json),
+            patch("probe_upstream_format.time.sleep"),
+        ):
+            result = probe("https://example.test/v1", "test-key", "cooling-model", 2)
+
+        self.assertEqual(result["inconclusive_reason"], "rate_limited")
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_AUTO)
+        self.assertEqual(result["recommended_tool_protocol"], "none")
+        self.assertEqual(calls.count("/chat/completions"), 2)
+        self.assertEqual(calls, ["/models", "/responses", "/chat/completions", "/chat/completions", "/messages"])
+
+    def test_probe_reports_models_rate_limit_as_inconclusive_instead_of_model_required(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            self.assertEqual(path, "/models")
+            return False, 429, None, '{"error":"usage limit reached"}'
+
+        with patch("probe_upstream_format.request_json", side_effect=fake_request_json):
+            result = probe("https://example.test/v1", "test-key", None, 2)
+
+        self.assertFalse(result["model_required"])
+        self.assertEqual(result["inconclusive_reason"], "rate_limited")
+
+    def test_probe_does_not_report_tools_unavailable_when_tool_checks_are_rate_limited(self) -> None:
+        def fake_request_json(
+            base_url: str,
+            api_key: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+            timeout: int,
+        ):
+            if path == "/models":
+                return True, 200, {"data": [{"id": "model-a"}]}, None
+            if not payload or not payload.get("tools"):
+                if path == "/chat/completions":
+                    return True, 200, {"choices": [{"message": {"content": "OK"}}]}, None
+                return False, 404, None, "not found"
+            if path == "/chat/completions":
+                return False, 429, None, '{"error":"usage limit reached"}'
+            return False, 404, None, "not found"
+
+        def fake_request_sse_events(
+            base_url: str,
+            api_key: str,
+            path: str,
+            payload: dict,
+            timeout: int,
+        ):
+            if path == "/chat/completions":
+                return False, 429, [], "Too Many Requests"
+            return False, 404, [], "not found"
+
+        with (
+            patch("probe_upstream_format.request_json", side_effect=fake_request_json),
+            patch("probe_upstream_format.request_sse_events", side_effect=fake_request_sse_events),
+        ):
+            result = probe("https://example.test/v1", "test-key", "model-a", 2)
+
+        self.assertTrue(result["chat_text_ok"])
+        self.assertEqual(result["recommended_format"], UPSTREAM_FORMAT_CHAT)
+        self.assertEqual(result["inconclusive_reason"], "rate_limited")
+
 
 if __name__ == "__main__":
     unittest.main()

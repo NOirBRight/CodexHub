@@ -392,6 +392,32 @@ def responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
     return "\n".join(fragment for fragment in text_fragments if fragment)
 
 
+def responses_function_call_output_to_chat_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a non-string, non-list Responses function-call output to Chat Completions.",
+        )
+
+    text_fragments: list[str] = []
+    for part in value:
+        if not isinstance(part, Mapping):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a non-object Responses function-call output part to Chat Completions.",
+            )
+        if part.get("type") != "input_text" or not isinstance(part.get("text"), str):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                f"Cannot translate Responses function-call output part type {part.get('type')!r} to Chat Completions.",
+            )
+        _require_supported_fields(part, {"type", "text"}, "Responses function-call output text part")
+        text_fragments.append(part["text"])
+    return "\n".join(text_fragments)
+
+
 def responses_input_to_chat_messages(
     value: Any,
     *,
@@ -472,12 +498,7 @@ def responses_input_to_chat_messages(
                     "unpaired_tool_call",
                     "Cannot translate a function result without a non-empty call_id.",
                 )
-            output = item.get("output")
-            if not isinstance(output, str):
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot translate a non-string Responses function-call output to Chat Completions.",
-                )
+            output = responses_function_call_output_to_chat_content(item.get("output"))
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
             continue
         if item_type == "tool_search_call":

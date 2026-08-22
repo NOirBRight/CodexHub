@@ -812,7 +812,7 @@ fn window_toggle_maximize(window: Window) -> Result<(), String> {
 fn window_close_to_tray(window: Window) -> Result<(), String> {
     run_app_lifecycle_action(
         AppLifecycleAction::CloseToTray,
-        proxy::stop_session_owned_for_terminal_exit,
+        proxy::stop_for_app_close,
         || {
             window
                 .hide()
@@ -838,7 +838,10 @@ pub(crate) enum AppLifecycleAction {
 
 impl AppLifecycleAction {
     const fn requires_gateway_cleanup(self) -> bool {
-        matches!(self, Self::TrayExit | Self::UpdateRestart)
+        matches!(
+            self,
+            Self::CloseToTray | Self::TrayExit | Self::UpdateRestart
+        )
     }
 
     const fn label(self) -> &'static str {
@@ -862,15 +865,15 @@ where
     if lifecycle_action.requires_gateway_cleanup() {
         match cleanup_gateway() {
             Ok(true) => log::info!(
-                "{} stopped the current-session Gateway before the app transitioned",
+                "{} stopped the managed Gateway before the app transitioned",
                 lifecycle_action.label()
             ),
             Ok(false) => log::debug!(
-                "{} found no current-session Gateway to stop before the app transitioned",
+                "{} found no managed Gateway to stop before the app transitioned",
                 lifecycle_action.label()
             ),
             Err(error) => log::warn!(
-                "{} continued after bounded current-session Gateway cleanup failed: {error}",
+                "{} continued after bounded managed Gateway cleanup failed: {error}",
                 lifecycle_action.label()
             ),
         }
@@ -906,7 +909,7 @@ fn run_tray_action(app: &AppHandle, id: &str) {
         }
         TRAY_EXIT => run_app_lifecycle_action(
             AppLifecycleAction::TrayExit,
-            proxy::stop_session_owned_for_terminal_exit,
+            proxy::stop_for_app_close,
             || app.exit(0),
         ),
         _ => {}
@@ -1151,7 +1154,7 @@ fn run_gui() {
                 api.prevent_close();
                 let _ = run_app_lifecycle_action(
                     AppLifecycleAction::CloseToTray,
-                    proxy::stop_session_owned_for_terminal_exit,
+                    proxy::stop_for_app_close,
                     || window.hide(),
                 );
             }
@@ -1392,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn close_to_tray_preserves_the_current_session_gateway() {
+    fn close_to_tray_cleans_up_the_gateway_before_hiding() {
         let cleanup_calls = Cell::new(0);
         let action_calls = Cell::new(0);
 
@@ -1405,7 +1408,7 @@ mod tests {
             || action_calls.set(action_calls.get() + 1),
         );
 
-        assert_eq!(cleanup_calls.get(), 0);
+        assert_eq!(cleanup_calls.get(), 1);
         assert_eq!(action_calls.get(), 1);
     }
 
