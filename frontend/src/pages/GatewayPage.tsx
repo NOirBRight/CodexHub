@@ -483,8 +483,8 @@ function GatewayPageImpl({
   }
 
   return (
-    <main className="relative grid h-full min-h-0 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(300px,360px)] gap-4 overflow-hidden">
-      <section className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5">
+    <main className="relative grid h-full min-h-0 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3 overflow-hidden">
+      <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden">
         <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
@@ -506,8 +506,8 @@ function GatewayPageImpl({
             </label>
           </div>
 
-          <div className="grid min-w-0 grid-cols-[minmax(300px,1fr)_minmax(270px,0.95fr)] items-stretch gap-2">
-            <div className="grid min-w-0 content-start rounded-panel bg-panel p-2 shadow-card">
+          <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(220px,1fr))] items-stretch gap-2">
+            <div className="grid min-w-0 content-start rounded-inner bg-panel p-2">
               <div className="grid min-w-0 content-start gap-1.5 rounded-inner bg-surface p-2 shadow-control">
                 <label className="grid gap-1 text-xs font-semibold text-slate-600">
                   <span>{t("common.apiKey")}</span>
@@ -587,7 +587,7 @@ function GatewayPageImpl({
               </div>
             </div>
 
-            <div className="grid min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1.5 rounded-panel bg-panel p-2 pb-2.5 shadow-card">
+            <div className="grid min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1.5 rounded-inner bg-panel p-2 pb-2.5">
               <div className="flex items-center justify-between gap-3 whitespace-nowrap">
                 <h3 className="shrink-0 text-xs font-semibold text-ink">{t("gateway.copyConnection")}</h3>
               </div>
@@ -677,11 +677,12 @@ function GatewayPageImpl({
             </button>
           </div>
         </div>
-        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3 [scrollbar-gutter:stable]">
-          <div className="space-y-2.5">
+        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel">
+          <div className="flex min-h-full flex-col gap-2.5 p-3">
             {clients.map((client) => (
               <GatewayClientCard
                 key={client.id}
+                className="grow shrink-0"
                 client={client}
                 info={clientInfoById.get(client.id)}
                 busy={Boolean(clientBusy?.startsWith(client.id))}
@@ -803,7 +804,7 @@ function RecoveryActivityPanel({
 
       <div
         className={cx(
-          "grid min-w-0 grid-cols-[repeat(3,minmax(0,0.72fr))_minmax(210px,1.7fr)] gap-1.5",
+          "grid min-w-0 grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-1.5",
           !enabled && "opacity-45 grayscale",
         )}
       >
@@ -954,8 +955,9 @@ function RecoveryOverviewModal({
         ) : events.length === 0 ? (
           <div className="p-4 text-sm text-slate-500">{t("gateway.recoveryEmpty")}</div>
         ) : (
-          <div className="min-h-0 overflow-auto p-3">
-            <div className="min-w-[980px] overflow-hidden rounded-panel border border-line">
+          <div className="min-h-0 overflow-auto">
+            <div className="p-3">
+              <div className="min-w-[980px] overflow-hidden rounded-panel border border-line">
               <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
                 <span>{t("gateway.recoveryColumnTime")}</span>
                 <span>{t("gateway.recoveryColumnClient")}</span>
@@ -1001,6 +1003,7 @@ function RecoveryOverviewModal({
                   </div>
                 </div>
               ))}
+            </div>
             </div>
           </div>
         )}

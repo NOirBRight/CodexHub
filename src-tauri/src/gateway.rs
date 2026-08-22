@@ -713,11 +713,12 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
     let current_owner = crate::app_flavor::current().routing_owner();
     let pending_client_ids = read_pending_client_ids();
     let opencode_path = detect_opencode_config_path();
+    let opencode_executable = detect_opencode_executable_path();
     let opencode_installed = opencode_path
         .as_ref()
         .map(|path| path.exists())
         .unwrap_or(false)
-        || command_exists(&["opencode"]);
+        || opencode_executable.is_some();
     let generic_route_owner = current_owner;
     let mut clients = vec![GatewayClientInfo {
         id: "generic".to_string(),
@@ -774,9 +775,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         route_mode: opencode_route_mode.to_string(),
         status: "Managed overwrite with backup is supported when config exists.".to_string(),
         versions_checked: include_versions && opencode_installed,
-        current_version: include_versions
-            .then(|| command_version(&["opencode"]))
-            .flatten(),
+        current_version: include_versions.then(detect_opencode_version).flatten(),
         latest_version: (include_versions && opencode_installed)
             .then(|| npm_latest_version("opencode-ai"))
             .flatten(),
@@ -3016,13 +3015,16 @@ fn detect_opencode_config_path() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
         candidates.push(config_dir.join("opencode").join("opencode.json"));
+        candidates.push(config_dir.join("opencode").join("opencode.jsonc"));
     }
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join(".config").join("opencode").join("opencode.json"));
+        candidates.push(home.join(".config").join("opencode").join("opencode.jsonc"));
         candidates.push(home.join(".config").join("opencode").join("config.json"));
     }
     if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
         candidates.push(appdata.join("opencode").join("opencode.json"));
+        candidates.push(appdata.join("opencode").join("opencode.jsonc"));
         candidates.push(appdata.join("opencode").join("config.json"));
     }
     candidates
@@ -3810,24 +3812,57 @@ fn command_exists(commands: &[&str]) -> bool {
     commands.iter().any(|command| which::which(command).is_ok())
 }
 
-fn command_version(commands: &[&str]) -> Option<String> {
-    for command in commands {
-        let Ok(path) = which::which(command) else {
-            continue;
-        };
-        let Some(output) = version_output_for_path(&path) else {
-            continue;
-        };
-        let text = if output.stdout.is_empty() {
-            String::from_utf8_lossy(&output.stderr)
-        } else {
-            String::from_utf8_lossy(&output.stdout)
-        };
-        if let Some(version) = parse_version_output(&text) {
-            return Some(version);
-        }
+fn detect_opencode_executable_path() -> Option<PathBuf> {
+    which::which("opencode")
+        .ok()
+        .or_else(|| dirs::home_dir().and_then(|home| detect_opencode_executable_path_in_home(&home)))
+        .or_else(|| opencode_system_executable_candidates().into_iter().find(|path| path.is_file()))
+}
+
+fn detect_opencode_executable_path_in_home(home: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(windows) { "opencode.exe" } else { "opencode" };
+    [
+        home.join(".opencode").join("bin").join(executable),
+        home.join(".local").join("bin").join(executable),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn opencode_system_executable_candidates() -> Vec<PathBuf> {
+    if cfg!(target_os = "linux") {
+        vec![
+            PathBuf::from("/opt/OpenCode/ai.opencode.desktop"),
+            PathBuf::from("/opt/opencode/opencode"),
+        ]
+    } else {
+        Vec::new()
     }
-    None
+}
+
+fn detect_opencode_version() -> Option<String> {
+    which::which("opencode")
+        .ok()
+        .or_else(|| dirs::home_dir().and_then(|home| detect_opencode_executable_path_in_home(&home)))
+        .as_deref()
+        .and_then(executable_version)
+}
+
+fn command_version(commands: &[&str]) -> Option<String> {
+    commands
+        .iter()
+        .filter_map(|command| which::which(command).ok())
+        .find_map(|path| executable_version(&path))
+}
+
+fn executable_version(path: &Path) -> Option<String> {
+    let output = version_output_for_path(path)?;
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr)
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    parse_version_output(&text)
 }
 
 fn version_output_for_path(path: &Path) -> Option<std::process::Output> {
@@ -7151,6 +7186,65 @@ mod tests {
 
     fn beta_root(path: PathBuf) -> (PathBuf, super::BackupChannel) {
         (path, super::BackupChannel::Beta)
+    }
+
+    #[test]
+    fn opencode_well_known_binary_is_detected_without_path() {
+        let home = std::env::temp_dir().join(format!(
+            "codexhub-opencode-home-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let binary = home.join(".opencode").join("bin").join(if cfg!(windows) {
+            "opencode.exe"
+        } else {
+            "opencode"
+        });
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"opencode").unwrap();
+
+        assert_eq!(
+            super::detect_opencode_executable_path_in_home(&home),
+            Some(binary)
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn opencode_jsonc_config_is_detected() {
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "codexhub-opencode-jsonc-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let config = root.join("opencode").join("opencode.jsonc");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, br#"{"$schema":"https://opencode.ai/config.json"}"#).unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+
+        assert_eq!(super::detect_opencode_config_path(), Some(config));
+
+        if let Some(previous) = previous {
+            std::env::set_var("XDG_CONFIG_HOME", previous);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opencode_linux_desktop_install_path_is_a_known_candidate() {
+        assert!(super::opencode_system_executable_candidates()
+            .contains(&PathBuf::from("/opt/OpenCode/ai.opencode.desktop")));
     }
 
     /// Force two restore/apply calls to overlap at the absent-baseline lock seam.

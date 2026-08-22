@@ -243,7 +243,7 @@ export function useProviderCatalogActions({
         updateToast(activeToastId, {
           action: null,
           text: toastMessage ?? t("providers.providerCatalogUpdateFailed"),
-          tone: "error",
+          tone: "info",
         });
       } else {
         updateToast(activeToastId, {

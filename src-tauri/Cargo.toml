@@ -13,7 +13,7 @@ debug-diagnostics = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-ico"] }
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
@@ -35,6 +35,10 @@ log = "0.4"
 # credentials are YAML; the engine parses and re-serializes mappings while
 # preserving every user-owned key.
 serde_yaml = "0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", features = ["v3_24"] }
+glib = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

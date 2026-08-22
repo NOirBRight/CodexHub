@@ -14,6 +14,8 @@ mod gateway_lifecycle;
 mod gateway_transaction;
 mod history;
 mod injection;
+#[cfg(target_os = "linux")]
+mod linux_window;
 #[cfg(test)]
 mod lock_test_fixtures;
 mod models;
@@ -28,7 +30,11 @@ mod web_bridge;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, Window, WindowEvent};
+use std::sync::Mutex;
+use tauri::{
+    image::Image, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Window,
+    WindowEvent,
+};
 
 #[cfg(desktop)]
 use tauri::{
@@ -792,8 +798,24 @@ fn window_minimize(window: Window) -> Result<(), String> {
         .map_err(|error| format!("failed to minimize window: {error}"))
 }
 
+#[derive(Clone, Copy, Default)]
+struct LinuxWindowRestore {
+    maximized: bool,
+    size: Option<PhysicalSize<u32>>,
+    position: Option<PhysicalPosition<i32>>,
+}
+
+static LINUX_WINDOW_RESTORE: Mutex<LinuxWindowRestore> = Mutex::new(LinuxWindowRestore {
+    maximized: false,
+    size: None,
+    position: None,
+});
+
 #[tauri::command]
 fn window_toggle_maximize(window: Window) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        return toggle_linux_window_maximize(window);
+    }
     let maximized = window
         .is_maximized()
         .map_err(|error| format!("failed to read window state: {error}"))?;
@@ -806,6 +828,47 @@ fn window_toggle_maximize(window: Window) -> Result<(), String> {
             .maximize()
             .map_err(|error| format!("failed to maximize window: {error}"))
     }
+}
+
+fn toggle_linux_window_maximize(window: Window) -> Result<(), String> {
+    let (restore, size, position) = {
+        let mut state = LINUX_WINDOW_RESTORE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.maximized {
+            let size = state.size.take();
+            let position = state.position.take();
+            state.maximized = false;
+            (true, size, position)
+        } else {
+            state.size = window.inner_size().ok();
+            state.position = window.outer_position().ok();
+            state.maximized = true;
+            (false, None, None)
+        }
+    };
+    if !restore {
+        return window
+            .maximize()
+            .map_err(|error| format!("failed to maximize window: {error}"));
+    }
+    let unmaximize_error = window.unmaximize().err();
+    if let Some(size) = size {
+        window
+            .set_size(size)
+            .map_err(|error| format!("failed to restore window: {error}"))?;
+    }
+    if let Some(position) = position {
+        if let Err(error) = window.set_position(position) {
+            log::warn!("failed to restore window position: {error}");
+        }
+    }
+    if size.is_none() {
+        if let Some(error) = unmaximize_error {
+            return Err(format!("failed to restore window: {error}"));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -823,6 +886,8 @@ fn window_close_to_tray(window: Window) -> Result<(), String> {
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "linux")]
+        linux_window::reveal_on_taskbar(&window);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -1103,8 +1168,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .text(TRAY_EXIT, "Exit")
         .build()?;
 
-    let mut tray = TrayIconBuilder::with_id("codexhub")
+    let icon = Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
+    let tray = TrayIconBuilder::with_id("codexhub")
         .tooltip("CodexHub")
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| run_tray_action(app, event.id().as_ref()))
@@ -1121,10 +1188,6 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         });
 
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-
     tray.build(app)?;
     Ok(())
 }
@@ -1140,9 +1203,11 @@ fn run_gui() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 runtime_paths::set_resource_root(resource_dir);
             }
+            #[cfg(target_os = "linux")]
+            linux_window::install(app);
             #[cfg(desktop)]
             if let Err(error) = setup_tray(app) {
-                log::warn!("failed to setup tray icon: {error}");
+                log::error!("failed to setup tray icon: {error}");
             }
             gateway::start_telemetry_ingester();
             web_bridge::start_background(app.handle().clone())?;
@@ -1362,6 +1427,14 @@ mod tests {
 
         assert!(error.contains("safe Official snapshot"));
         assert_eq!(starts.get(), 1);
+    }
+
+    #[test]
+    fn linux_window_restore_defaults_to_windowed() {
+        let state = super::LinuxWindowRestore::default();
+        assert!(!state.maximized);
+        assert!(state.size.is_none());
+        assert!(state.position.is_none());
     }
 
     #[test]

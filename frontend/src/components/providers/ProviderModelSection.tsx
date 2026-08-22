@@ -139,7 +139,7 @@ export function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap text-xs text-slate-500">
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
         {modelCapabilityTags(model).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -262,15 +262,15 @@ export function ModelSection({
         interactionDisabled && "text-slate-400",
       )}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{t("common.models")}</h3>
           <p className="mt-1 text-xs text-slate-500">{t("providers.configured", { count: models.length })}</p>
-          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
+          <p className="mt-1 truncate text-xs leading-4 text-slate-500">
             {t("providers.appsMaySortModels")}
           </p>
         </div>
-        <div className="flex shrink-0 items-center justify-end gap-2 whitespace-nowrap">
+        <div className="flex shrink-0 items-center justify-end gap-2">
           {headerControl}
           {discoverError && (
             <span className="max-w-[260px] truncate text-xs font-medium text-danger" title={discoverError}>
@@ -285,16 +285,18 @@ export function ModelSection({
                 headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
               )}
               disabled={interactionDisabled || refreshBusy}
+              aria-label={t("common.refresh")}
+              title={t("common.refresh")}
               onClick={onRefresh}
             >
               <RefreshCcw size={16} />
-              {t("common.refresh")}
+              {!headerControl && t("common.refresh")}
             </button>
           )}
           {onDiscover && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
               disabled={discoverBusy || discoverDisabled}
               onClick={onDiscover}
             >
@@ -305,7 +307,7 @@ export function ModelSection({
           {!disabled && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
               onClick={addAndEdit}
             >
               <Plus size={16} />
@@ -319,7 +321,7 @@ export function ModelSection({
         className={cx(
           "min-h-0 overflow-auto",
           interactionDisabled && "opacity-60 grayscale",
-          modelListHasOverflow && "-mr-5 pr-1",
+          modelListHasOverflow && "-mr-5 pr-3",
         )}
       >
         {models.length === 0 ? (
@@ -337,7 +339,7 @@ export function ModelSection({
         ) : (
           <div className="space-y-2">
             {models.map((model) => (
-              <div key={model.id} className="rounded-md border border-line bg-white shadow-subtle">
+              <div key={model.id} className="rounded-control border border-line bg-white shadow-subtle">
                 {renderModelRow(model)}
               </div>
             ))}
@@ -490,7 +492,7 @@ function ModelEditorOverlay({
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
-      <div className="grid w-full max-w-[760px] overflow-hidden rounded-md border border-line bg-white shadow-xl">
+      <div className="grid w-full max-w-[760px] overflow-hidden rounded-overlay border border-line bg-white shadow-overlay">
         <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
             <h3 className="truncate text-base font-semibold">{t("providers.modelSettings")}</h3>
@@ -498,7 +500,7 @@ function ModelEditorOverlay({
           </div>
           <button
             type="button"
-            className="focus-ring grid h-8 w-8 place-items-center rounded-md border border-line bg-panel hover:bg-slate-100"
+            className="focus-ring grid h-8 w-8 place-items-center rounded-control border border-line bg-panel hover:bg-slate-100"
             onClick={onClose}
             aria-label={t("providers.closeModelSettings")}
           >
@@ -507,7 +509,7 @@ function ModelEditorOverlay({
         </div>
 
         <div className="grid gap-4 p-5">
-          <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
+          <section className="grid gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <h4 className="text-sm font-semibold">{t("providers.identity")}</h4>
               <p className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingModelName")}</p>
@@ -539,13 +541,13 @@ function ModelEditorOverlay({
             </Field>
           </section>
 
-          <section className="grid gap-3 rounded-md border border-line bg-panel p-3">
+          <section className="grid gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <div className="text-sm font-semibold">{t("providers.capabilities")}</div>
               <div className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingMetadata")}</div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex h-9 items-center justify-between rounded-md border border-line bg-white px-3 text-sm font-medium">
+              <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2">
                   <Eye size={15} />
                   {t("providers.vision")}
@@ -561,7 +563,7 @@ function ModelEditorOverlay({
                   }
                 />
               </label>
-              <label className="flex h-9 items-center justify-between rounded-md border border-line bg-white px-3 text-sm font-medium">
+              <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
                 <span className="inline-flex items-center gap-2">
                   <Brain size={15} />
                   {t("providers.thinking")}
@@ -574,14 +576,14 @@ function ModelEditorOverlay({
               </label>
             </div>
             {reasoningEnabled && (
-              <div className="grid gap-3 rounded-md border border-line bg-white p-3 lg:grid-cols-[minmax(0,1fr)_190px]">
+              <div className="grid gap-3 rounded-control border border-line bg-white p-3 lg:grid-cols-[minmax(0,1fr)_190px]">
                 <div className="grid gap-2">
                   <span className="text-xs font-semibold uppercase text-slate-500">{t("providers.reasoningLevels")}</span>
                   <div className="flex flex-wrap gap-2">
                     {reasoningLevelOptions.map((level) => (
                       <label
                         key={level}
-                        className="flex h-8 items-center gap-2 rounded-md border border-line bg-white px-2 text-xs font-medium"
+                        className="flex h-8 items-center gap-2 rounded-control border border-line bg-white px-2 text-xs font-medium"
                       >
                         <input
                           type="checkbox"
@@ -617,7 +619,7 @@ function ModelEditorOverlay({
           {onRemove ? (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-danger/40 bg-red-50 px-3 text-sm font-semibold text-danger"
+              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control border border-danger/40 bg-red-50 px-3 text-sm font-semibold text-danger"
               onClick={onRemove}
             >
               <Trash2 size={15} />
@@ -629,14 +631,14 @@ function ModelEditorOverlay({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+              className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
               onClick={onClose}
             >
               {t("common.cancel")}
             </button>
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center rounded-md bg-action px-3 text-sm font-semibold text-white"
+              className="focus-ring inline-flex h-9 items-center justify-center rounded-control bg-action px-3 text-sm font-semibold text-white"
               onClick={() => onApply(normalizeModel(draft))}
             >
               {t("common.apply")}

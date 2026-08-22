@@ -231,7 +231,8 @@ export function SettingsDrawer({
         </button>
       </div>
 
-      <div className="min-h-0 overflow-auto p-5">
+      <div className="min-h-0 overflow-auto">
+        <div className="p-5">
         {!draft ? (
           <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
             {t("common.loadingSettings")}
@@ -353,6 +354,7 @@ export function SettingsDrawer({
             </section>
           </div>
         )}
+        </div>
       </div>
 
       <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
@@ -571,7 +573,7 @@ export function SwitchControl({
     <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
       <input
         type="checkbox"
-        className="peer sr-only"
+        className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
         aria-label={ariaLabel}
         checked={checked}
         disabled={disabled}
@@ -579,11 +581,11 @@ export function SwitchControl({
       />
       <span
         className={cx(
-          "absolute inset-0 rounded-full shadow-control transition-colors peer-disabled:opacity-60",
-          checked ? (tone === "warn" ? "bg-warn" : "bg-action") : "bg-slate-200 peer-checked:bg-action",
+          "pointer-events-none absolute inset-0 rounded-full shadow-control transition-colors peer-disabled:opacity-60",
+          tone === "warn" ? "bg-warn" : checked ? "bg-action" : "bg-slate-200 peer-checked:bg-action",
         )}
       />
-      <span className="absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
+      <span className="pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
     </span>
   );
 }

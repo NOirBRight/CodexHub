@@ -497,6 +497,8 @@ name = "codexhub"
 version = "0.1.9-beta.3.4"
 dependencies = [
  "dirs 5.0.1",
+ "glib",
+ "gtk",
  "log",
  "reqwest 0.12.28",
  "rusqlite",

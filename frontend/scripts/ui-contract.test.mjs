@@ -5,6 +5,8 @@ import ts from "typescript";
 
 const contractPath = new URL("../src/lib/ui-contract.json", import.meta.url);
 const appPath = new URL("../src/App.tsx", import.meta.url);
+const confirmDialogPath = new URL("../src/components/ConfirmDialog.tsx", import.meta.url);
+const fitStagePath = new URL("../src/components/FitStage.tsx", import.meta.url);
 const runtimeStorePath = new URL("../src/lib/runtimeStore.ts", import.meta.url);
 const appUpdateE2ePath = new URL("../../scripts/e2e-app-update.ps1", import.meta.url);
 const buildWindowsReleasePath = new URL("../../scripts/build-windows-release.ps1", import.meta.url);
@@ -475,7 +477,9 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.deepEqual(capability.windows, ["main"]);
   assert.ok(capability.permissions.includes("core:default"));
   assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
+  assert.ok(capability.permissions.includes("core:window:allow-start-resize-dragging"));
   assert.ok(capability.permissions.includes("core:window:allow-internal-toggle-maximize"));
+  assert.ok(capability.permissions.includes("core:webview:allow-set-webview-zoom"));
   assert.match(runtimeSource, /t\("runtime\.closeToTray"\)/);
   assert.match(tauriSource, /WindowEvent::CloseRequested/);
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
@@ -497,6 +501,27 @@ test("runtime header treats SVG icon clicks inside controls as interactive", asy
   assert.match(settingsButton, /aria-label=\{t\("common\.settings"\)\}/);
 });
 
+test("undecorated window exposes edge resize handles", async () => {
+  const [appSource, handleSource, capabilitySource, enSource, zhSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(new URL("../src/components/WindowResizeHandles.tsx", import.meta.url), "utf8"),
+    readFile(tauriDefaultCapabilityPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
+  ]);
+  const capability = JSON.parse(capabilitySource);
+
+  assert.match(appSource, /<WindowResizeHandles \/?>/);
+  assert.match(handleSource, /startResizeDragging\(direction\)/);
+  assert.match(handleSource, /data-window-control/);
+  assert.match(handleSource, /bg-transparent/);
+  assert.doesNotMatch(handleSource, /bg-canvas/);
+  assert.match(handleSource, /top-4 left-4 h-3 w-3/);
+  assert.ok(capability.permissions.includes("core:window:allow-start-resize-dragging"));
+  assert.match(enSource, /resizeWindow: "Resize window"/);
+  assert.match(zhSource, /resizeWindow: "调整窗口大小"/);
+});
+
 test("runtime title area double-click toggles maximize without activating controls or drag", async () => {
   const runtimeSource = await readFile(runtimeBarPath, "utf8");
   const dragHandler = runtimeSource.match(/function startWindowDrag[\s\S]*?^}/m)?.[0] ?? "";
@@ -510,13 +535,45 @@ test("runtime title area double-click toggles maximize without activating contro
   assert.match(maximizeHandler, /api\.windowToggleMaximize\(\)/);
 });
 
+test("linux maximize toggle restores a saved size instead of trusting GTK is_maximized", async () => {
+  const mainSource = await readFile(tauriMainPath, "utf8");
+
+  assert.match(mainSource, /fn toggle_linux_window_maximize/);
+  assert.match(mainSource, /static LINUX_WINDOW_RESTORE/);
+  assert.match(mainSource, /if cfg!\(target_os = "linux"\)/);
+  assert.match(mainSource, /\.set_size\(size\)/);
+  assert.match(mainSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
+});
+
+test("linux window stays rounded, on the dock, and uses a real tray png", async () => {
+  const [mainSource, linuxWindowSource] = await Promise.all([
+    readFile(tauriMainPath, "utf8"),
+    readFile(new URL("../../src-tauri/src/linux_window.rs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(mainSource, /mod linux_window;/);
+  assert.match(mainSource, /linux_window::install\(app\)/);
+  assert.match(mainSource, /linux_window::reveal_on_taskbar/);
+  assert.match(mainSource, /fn setup_tray/);
+  assert.doesNotMatch(mainSource, /\.title\("CodexHub"\)/);
+  assert.match(mainSource, /show_menu_on_left_click\(false\)/);
+  assert.match(mainSource, /include_bytes!\("\.\.\/icons\/128x128\.png"\)/);
+  assert.match(linuxWindowSource, /com\.codexhub\.app\.desktop/);
+  assert.match(linuxWindowSource, /set_skip_taskbar_hint\(false\)/);
+  assert.match(linuxWindowSource, /WindowTypeHint::Normal/);
+  assert.match(linuxWindowSource, /install_hicolor_icon/);
+  assert.match(linuxWindowSource, /apply_transparent_rounded_css/);
+  assert.doesNotMatch(linuxWindowSource, /set_opaque_region/);
+});
+
 test("main desktop window opens at the release candidate height", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
   const mainWindow = tauriConfig.app.windows[0];
 
-  assert.equal(mainWindow.width, 1280);
-  assert.equal(mainWindow.height, 930);
-  assert.equal(mainWindow.minHeight, 800);
+  assert.equal(mainWindow.width, 1024);
+  assert.equal(mainWindow.height, 768);
+  assert.equal(mainWindow.minWidth, 800);
+  assert.equal(mainWindow.minHeight, 600);
 });
 
 test("tauri config enables cross-platform updater packaging", async () => {
@@ -687,7 +744,7 @@ test("visual system defines warm surfaces, concentric radii, and layered shadows
   assert.match(designDoc, /Scrollable regions/);
   assert.match(designDoc, /overflow-auto -mr-3 pr-1/);
   assert.match(designDoc, /normal panel padding when the content does not\s+overflow/);
-  assert.match(designDoc, /content\s+should gain\s+width when the scrollbar moves outward/);
+  assert.match(designDoc, /keep the scrollbar near the owning/);
   assert.match(designDoc, /sidebars,\s+drawers,\s+model\s+lists,\s+client\s+lists,\s+and\s+popovers/);
 });
 
@@ -700,6 +757,7 @@ test("global controls use polished radius, shadow, and exact transitions", async
   assert.match(css, /\.select-popover\s*\{[\s\S]*rounded-inner[\s\S]*shadow-floating/);
   assert.match(css, /\.select-option\s*\{[\s\S]*rounded-control[\s\S]*aria-selected:bg-action\/10/);
   assert.match(css, /\.vision-model-listbox::-webkit-scrollbar-button\s*\{[\s\S]*display:\s*none;[\s\S]*height:\s*0;[\s\S]*width:\s*0;/);
+  assert.doesNotMatch(css, /\.edge-scroller/);
   assert.match(css, /\.mini-button\s*\{[\s\S]*rounded-control[\s\S]*shadow-control[\s\S]*active:scale-\[0\.96\]/);
   assert.doesNotMatch(css, /\.field\s*\{[\s\S]*rounded-md[\s\S]*shadow-subtle/);
 });
@@ -1273,20 +1331,20 @@ test("gateway layout reserves space for the client rail", async () => {
     readFile(stackedUsagePath, "utf8"),
   ]);
 
-  assert.match(gatewaySource, /min-h-0 w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(300px,360px\)\] gap-4 overflow-hidden/);
-  assert.match(gatewaySource, /<section className="grid min-h-0 min-w-0/);
+  assert.match(gatewaySource, /min-h-0 w-full max-w-full min-w-0 grid-cols-\[minmax\(0,1fr\)_minmax\(220px,30%\)\] gap-3 overflow-hidden/);
+  assert.match(gatewaySource, /<section className="grid h-full min-h-0 min-w-0/);
   assert.match(gatewaySource, /grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2\.5/);
   assert.doesNotMatch(gatewaySource, /max-h-8 max-w-xl overflow-hidden text-xs leading-4/);
   assert.doesNotMatch(gatewaySource, /\[-webkit-line-clamp:2\]/);
   assert.doesNotMatch(gatewaySource, /Local API key, port, and timeout for OpenAI-compatible clients\./);
   assert.doesNotMatch(gatewaySource, /Clients discover models from/);
-  assert.match(gatewaySource, /grid-cols-\[minmax\(300px,1fr\)_minmax\(270px,0\.95fr\)\] items-stretch gap-2/);
+  assert.match(gatewaySource, /grid-cols-\[repeat\(auto-fit,minmax\(220px,1fr\)\)\] items-stretch gap-2/);
   assert.match(gatewaySource, /<Server size=\{15\} className="shrink-0 text-action" \/>/);
   assert.match(gatewaySource, /<SwitchControl/);
-  assert.match(gatewaySource, /grid min-w-0 content-start rounded-panel bg-panel p-2 shadow-card/);
+  assert.match(gatewaySource, /grid min-w-0 content-start rounded-inner bg-panel p-2/);
   assert.doesNotMatch(gatewaySource, /<div className="grid grid-cols-3 gap-1\.5">[\s\S]*label=\{t\("gateway\.gateway"\)\}/);
   assert.match(gatewaySource, /grid min-w-0 content-start gap-1\.5 rounded-inner bg-surface p-2 shadow-control/);
-  assert.match(gatewaySource, /grid min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\] gap-1\.5 rounded-panel bg-panel p-2 pb-2\.5 shadow-card/);
+  assert.match(gatewaySource, /grid min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\] gap-1\.5 rounded-inner bg-panel p-2 pb-2\.5/);
   assert.match(gatewaySource, /grid min-h-\[118px\] grid-rows-3 gap-1\.5/);
   assert.match(gatewaySource, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto_auto\] items-center gap-2/);
   assert.match(gatewaySource, /grid-cols-\[minmax\(64px,0\.75fr\)_minmax\(64px,0\.75fr\)_minmax\(112px,0\.9fr\)\] items-end gap-1\.5/);
@@ -1295,13 +1353,15 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.match(gatewaySource, /className="flex items-center justify-between gap-3 whitespace-nowrap"/);
   assert.match(gatewaySource, /<h3 className="shrink-0 text-xs font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
   assert.match(gatewaySource, /<aside className="grid h-full min-h-0 min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
-  assert.match(gatewaySource, /min-h-0 overflow-x-hidden overflow-y-auto bg-panel p-3/);
-  assert.match(gatewaySource, /space-y-2\.5/);
-  assert.match(gatewaySource, /scrollbar-gutter:stable/);
+  assert.match(gatewaySource, /min-h-0 overflow-x-hidden overflow-y-auto bg-panel/);
+  assert.match(gatewaySource, /flex min-h-full flex-col gap-2\.5 p-3/);
+  assert.match(gatewaySource, /className="grow shrink-0"/);
+  assert.doesNotMatch(gatewaySource, /scrollbar-gutter:stable/);
   assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
-  assert.match(usageSource, /<div className="flex min-w-0 items-center justify-between gap-3">/);
-  assert.match(usageSource, /<div className="flex shrink-0 items-center justify-end gap-1\.5">/);
-  assert.match(usageSource, /left-14 right-4 top-6/);
+  assert.match(usageSource, /<div className="flex min-w-0 flex-wrap items-center justify-between gap-2">/);
+  assert.match(usageSource, /<div className="flex min-w-0 flex-wrap items-center justify-end gap-1\.5">/);
+  assert.match(usageSource, /left-12 right-3 top-6 min-w-0/);
+  assert.match(usageSource, /bottom-2 left-12 right-3/);
   assert.doesNotMatch(usageSource, /inset-x-14/);
   assert.doesNotMatch(gatewaySource, /OpenAI-compatible routes/);
   assert.doesNotMatch(gatewaySource, /sm:grid-cols-\[minmax\(0,1fr\)_auto_auto\]/);
@@ -1315,7 +1375,7 @@ test("gateway recovery panel stays compact and labels actual observed requests",
 
   assert.match(gatewaySource, /<RecoveryActivityPanel/);
   assert.match(gatewaySource, /grid min-w-0 gap-1\.5 rounded-panel bg-surface px-2\.5 py-2 shadow-card/);
-  assert.match(gatewaySource, /grid-cols-\[repeat\(3,minmax\(0,0\.72fr\)\)_minmax\(210px,1\.7fr\)\]/);
+  assert.match(gatewaySource, /grid-cols-\[repeat\(auto-fit,minmax\(120px,1fr\)\)\]/);
   assert.match(gatewaySource, /const routeText = event \? \(client \? `\$\{client\} → \$\{provider\}` : provider\) : t\("gateway\.recoveryEmpty"\)/);
   assert.match(gatewaySource, /title=\{event \? recoveryEventTitle\(event\) : t\("gateway\.recoveryOverviewTitle"\)\}/);
   assert.match(gatewaySource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
@@ -1392,8 +1452,9 @@ test("gateway client route switching reports completion", async () => {
 });
 
 test("gateway client stale CodexHub route is shown as repair state", async () => {
-  const [cardSource, zhSource] = await Promise.all([
+  const [cardSource, drawerSource, zhSource] = await Promise.all([
     readFile(gatewayClientCardPath, "utf8"),
+    readFile(settingsDrawerPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
 
@@ -1403,7 +1464,48 @@ test("gateway client stale CodexHub route is shown as repair state", async () =>
   assert.match(zhSource, /connectionRepair: "需修复"/);
   assert.match(cardSource, /onRepair=\{\(\) => onToggle\(true\)\}/);
   assert.match(cardSource, /state === "unavailable" && "opacity-55"/);
+  assert.match(cardSource, /const checked = state === "connected" \|\| state === "busy"/);
+  assert.doesNotMatch(cardSource, /state === "busy" \|\| state === "drift"/);
+  assert.match(cardSource, /tone=\{state === "drift" \? "warn" : "action"\}/);
+  assert.match(cardSource, /<div className="flex shrink-0 items-center gap-2">/);
+  assert.match(drawerSource, /tone === "warn" \? "bg-warn"/);
   assert.doesNotMatch(cardSource, /gateway\.routeReady/);
+});
+
+test("desktop shell and confirmations use rounded Linux-safe surfaces", async () => {
+  const [appSource, providersSource, dialogSource, modelSource, cssSource, tauriConfigSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+    readFile(confirmDialogPath, "utf8"),
+    readFile(providerModelSectionPath, "utf8"),
+    readFile(indexCssPath, "utf8"),
+    readFile(tauriConfigPath, "utf8"),
+  ]);
+  const tauriConfig = JSON.parse(tauriConfigSource);
+
+  assert.ok(!appSource.includes("window.confirm"));
+  assert.ok(!providersSource.includes("window.confirm"));
+  assert.ok(appSource.includes("useConfirmDialog"));
+  assert.ok(providersSource.includes("useConfirmDialog"));
+  assert.ok(dialogSource.includes('role="dialog"'));
+  assert.ok(dialogSource.includes("rounded-overlay"));
+  assert.ok(providersSource.includes("max-w-[420px] gap-4 rounded-overlay"));
+  assert.ok(modelSource.includes("max-w-[760px] overflow-hidden rounded-overlay"));
+  assert.ok(cssSource.includes("background: transparent;"));
+  assert.ok(cssSource.includes("border-radius: 16px;"));
+  assert.equal(tauriConfig.app.windows[0].transparent, true);
+  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
+});
+
+test("provider persistence reports downstream client sync failures as non-blocking", async () => {
+  const source = await readFile(providerCatalogActionsPath, "utf8");
+  const start = source.indexOf("async function saveProviders");
+  const end = source.indexOf("async function refreshProviderModels", start);
+  const saveProviders = source.slice(start, end);
+
+  assert.ok(saveProviders.includes('if (syncResult?.failed)'));
+  assert.ok(saveProviders.includes('tone: "info"'));
+  assert.ok(!saveProviders.includes('tone: "error"'));
 });
 
 test("gateway client route switching refreshes without version probes", async () => {
@@ -1558,7 +1660,10 @@ test("settings drawer omits duplicated local endpoint controls", async () => {
 test("settings drawer uses switch toggles and exposes history repair as a settings action", async () => {
   const drawerSource = await readFile(settingsDrawerPath, "utf8");
 
-  assert.match(drawerSource, /className="peer sr-only"/);
+  assert.match(
+    drawerSource,
+    /className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"/,
+  );
   assert.match(drawerSource, /peer-checked:bg-action/);
   assert.match(drawerSource, /t\("settings\.unifiedCodexHistory"\)/);
   assert.match(drawerSource, /t\("settings\.repairHistoryBucket"\)/);
@@ -1680,6 +1785,8 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(providerLabelsSource, /labels\.set\(displayPrefix\.toLowerCase\(\), name\)/);
   assert.match(drawerSource, /function VisionModelValue/);
   assert.match(drawerSource, /w-\[min\(340px,calc\(100vw-2rem\)\)\] -translate-x-1\/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay/);
+  assert.match(drawerSource, /min-h-0 overflow-auto/);
+  assert.match(drawerSource, /<div className="p-5">/);
   assert.match(drawerSource, /vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1/);
   assert.match(drawerSource, /role="listbox"/);
   assert.doesNotMatch(drawerSource, /label=\{t\("common\.selectModel"\)\}/);
@@ -1751,7 +1858,7 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.doesNotMatch(toggleAction, /\.map\(\(result\) => result\.name\)/);
   assert.doesNotMatch(toggleAction, /message:\s*syncError/);
   assert.doesNotMatch(toggleAction, /tone:[\s\S]*?"info"/);
-  assert.match(providersSource, /label=\{t\("providers\.contextGuard"\)\}/);
+  assert.match(providersSource, /label=\{t\("providers\.contextGuardShort"\)\}/);
   assert.match(providersSource, /ariaDescribedBy="context-guard-tooltip"/);
   assert.match(providersSource, /aria-describedby=\{ariaDescribedBy\}/);
   assert.match(providersSource, /id="context-guard-tooltip"/);
@@ -1806,7 +1913,8 @@ test("settings save restarts running gateway when retry or image proxy runtime s
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
-  assert.match(cardSource, /currentVersion &&/);
+  assert.doesNotMatch(cardSource, /currentVersion &&/);
+  assert.doesNotMatch(cardSource, /truncate text-sm font-semibold text-ink/);
   assert.doesNotMatch(cardSource, /min-h-\[136px\]/);
   assert.doesNotMatch(cardSource, /manualUpdateAvailable/);
   assert.doesNotMatch(cardSource, /noUpdateAction/);
@@ -1825,14 +1933,35 @@ test("provider model removal persists through provider save path", async () => {
 test("providers page uses stable zero-min split columns", async () => {
   const providersSource = await readProviderContractSource();
 
-  assert.match(providersSource, /min-w-\[972px\] grid-cols-\[430px_minmax\(0,1fr\)\]/);
+  assert.match(providersSource, /min-w-0 grid-cols-\[minmax\(240px,32%\)_minmax\(0,1fr\)\]/);
   assert.match(
     providersSource,
-    /<main className="relative grid h-full min-h-0 min-w-\[972px\] grid-cols-\[430px_minmax\(0,1fr\)\] gap-4 overflow-hidden"/,
+    /<main className="relative grid h-full min-h-0 min-w-0 grid-cols-\[minmax\(240px,32%\)_minmax\(0,1fr\)\] gap-3 overflow-hidden"/,
   );
   assert.match(providersSource, /<aside className="min-h-0 min-w-0 overflow-hidden/);
   assert.match(providersSource, /<section className="min-h-0 min-w-0 overflow-hidden/);
   assert.doesNotMatch(providersSource, /grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
+});
+
+test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
+  const fitStageSource = await readFile(new URL("../src/components/FitStage.tsx", import.meta.url), "utf8");
+  const cssSource = await readFile(indexCssPath, "utf8");
+  const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
+
+  assert.match(fitStageSource, /export const FIT_STAGE_WIDTH = 1024/);
+  assert.match(fitStageSource, /export const FIT_STAGE_HEIGHT = 768/);
+  assert.match(fitStageSource, /export const FIT_STAGE_SCALE = 0\.93/);
+  assert.match(fitStageSource, /className="relative h-full w-full overflow-hidden bg-canvas"/);
+  assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
+  assert.match(fitStageSource, /setWebviewZoom\(1\)/);
+  assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
+  assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
+  assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
+  assert.match(cssSource, /#root \{[\s\S]*?background: #f8f8f7;/);
+  assert.match(cssSource, /#root \{[\s\S]*?border-radius: 16px;/);
+  assert.equal(tauriConfig.app.windows[0].transparent, true);
+  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
+  assert.equal(tauriConfig.app.windows[0].skipTaskbar, false);
 });
 
 test("app content region owns horizontal overflow for minimum-width pages", async () => {
@@ -1900,18 +2029,19 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.doesNotMatch(providersSource, /Saved:/);
   assert.doesNotMatch(providersSource, /Responses available/);
   assert.doesNotMatch(endpointFormatSelect, /<select/);
-  assert.match(headerRow, /className="grid grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3"/);
-  assert.match(headerRow, /flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap/);
+  assert.match(headerRow, /grid min-w-0 grid-cols-\[minmax\(0,1fr\)_auto\] items-start gap-3/);
+  assert.match(headerRow, /flex shrink-0 items-center justify-end gap-2/);
   assert.doesNotMatch(headerRow, /lg:grid-cols-\[minmax\(0,1fr\)_auto\]/);
-  assert.doesNotMatch(headerRow, /flex-wrap/);
 
   assert.match(verticalOverflowSource, /function useVerticalOverflow/);
   assert.match(verticalOverflowSource, /scrollHeight > element\.clientHeight \+ 1/);
   assert.match(codexHubProviderCard, /ref=\{providerListRef\}/);
-  assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-1"/);
+  assert.match(codexHubProviderCard, /min-h-0 overflow-auto/);
+  assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-3"/);
   assert.match(modelSection, /ref=\{modelListRef\}/);
-  assert.match(modelSection, /modelListHasOverflow && "-mr-5 pr-1"/);
-  assert.match(modelSection, /flex shrink-0 flex-nowrap items-center justify-end gap-2 whitespace-nowrap/);
+  assert.match(modelSection, /min-h-0 overflow-auto/);
+  assert.match(modelSection, /modelListHasOverflow && "-mr-5 pr-3"/);
+  assert.match(modelSection, /flex min-w-0 flex-wrap items-center justify-end gap-1\.5/);
   assert.match(modelSection, /grid min-h-\[52px\] grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3/);
   assert.match(modelSection, /onTestModel\?: \(model: Model\) => Promise<boolean>;/);
   assert.match(modelSection, /<ModelIdentity[\s\S]*onTest=\{onTestModel \? \(\) => void runModelTest\(model\) : undefined\}/);
@@ -2401,7 +2531,7 @@ test("official OpenAI source uses the same row card and toggle pattern as provid
   assert.match(officialCard, /enabled=\{included\}/);
   assert.match(officialCard, /onToggle=\{onToggleInclude\}/);
   assert.match(officialCard, /activeTone="neutral"/);
-  assert.match(officialCard, /border border-line bg-surface p-3 shadow-card/);
+  assert.match(officialCard, /rounded-inner border border-line bg-surface p-3/);
   assert.match(officialCard, /<div className="rounded-inner text-left">/);
   assert.doesNotMatch(officialCard, /<button type="button" className="focus-ring rounded-inner text-left"/);
   assert.doesNotMatch(officialCard, /<ConnectedSurfaceFlow \/>/);
@@ -2633,11 +2763,11 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.doesNotMatch(link, /border-dashed/);
 
   // Cards no longer reserve space for protruding wires or toast layout.
-  assert.match(providersSource, /rounded-panel border border-line bg-surface p-3 shadow-card/);
+  assert.match(providersSource, /rounded-inner border border-line bg-surface p-3/);
   assert.doesNotMatch(providersSource, /rounded-panel p-3 pb-8 shadow-card/);
   assert.doesNotMatch(providersSource, /toastVisible=\{Boolean\(toast\)\}/);
   assert.doesNotMatch(providersSource, /toastVisible: boolean;/);
-  assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 overflow-hidden rounded-panel border px-3 pt-3 shadow-card/);
+  assert.match(providersSource, /grid h-full min-h-0 grid-rows-\[auto_auto_minmax\(0,1fr\)_auto\] gap-3 rounded-inner border px-3 pt-3/);
   assert.doesNotMatch(providersSource, /px-3 pt-8 shadow-card/);
   assert.doesNotMatch(providersSource, /toastVisible \? "pb-16" : "pb-3"/);
   assert.doesNotMatch(providersSource, /pb-16/);
@@ -2673,7 +2803,7 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.match(bridge, /h-11/);
   assert.match(bridge, /!pendingMode && connected[\s\S]*\? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"[\s\S]*: !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised"/);
   assert.match(hubCard, /border-emerald-300\/70 bg-emerald-50\/55/);
-  assert.match(hubCard, /border-transparent bg-surface/);
+  assert.match(hubCard, /border-line bg-surface/);
   assert.match(providersSource, /return \{ label: t\("common\.unknown"\), tone: "pending" \};/);
   assert.doesNotMatch(providersSource, /Gateway unknown/);
   assert.match(providersSource, /rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline/);
@@ -3351,7 +3481,7 @@ test("debug diagnostics open from Recovery in a localized accessible overlay", a
 test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
   const leftColumn = gatewaySource.match(
-    /<section className="grid min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2\.5">[\s\S]*?<\/section>\s*<aside/,
+    /<section className="grid h-full min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\] gap-2\.5 overflow-hidden">[\s\S]*?<\/section>\s*<aside/,
   )?.[0] ?? "";
 
   assert.ok(leftColumn, "Gateway left column should restore three rows");

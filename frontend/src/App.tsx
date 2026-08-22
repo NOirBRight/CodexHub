@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
+import { useConfirmDialog } from "./components/ConfirmDialog";
 import { FitStage } from "./components/FitStage";
+import { WindowResizeHandles } from "./components/WindowResizeHandles";
 import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
@@ -236,6 +238,7 @@ function tabPaneClass(active: boolean) {
 
 export default function App() {
   const { t } = useTranslation();
+  const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const { dismissToast, showToast, updateToast } = useToasts();
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
   const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
@@ -520,7 +523,12 @@ export default function App() {
 
   const startAppUpdateInstall = useCallback(
     async (source: "settings" | "toast" = "settings") => {
-      if (!window.confirm(t("settings.updateInstallConfirm"))) {
+      if (!(await confirmAction({
+        cancelLabel: t("common.cancel"),
+        confirmLabel: t("common.confirm"),
+        message: t("settings.updateInstallConfirm"),
+        title: t("common.confirm"),
+      }))) {
         return;
       }
       const toastId = updateAvailableToastId.current;
@@ -569,7 +577,7 @@ export default function App() {
         updateInstallToast(failedStatus, source);
       }
     },
-    [dismissToast, showToast, t, updateInstallStatus, updateInstallToast],
+    [confirmAction, dismissToast, showToast, t, updateInstallStatus, updateInstallToast],
   );
 
   const checkForUpdates = useCallback(async () => {
@@ -866,7 +874,12 @@ export default function App() {
     action: () => Promise<AppStatus>,
     options?: { toast?: boolean; warnBeforeGatewayRetirement?: boolean },
   ): Promise<AppStatus | null> => {
-    if (options?.warnBeforeGatewayRetirement && !window.confirm(t("runtime.gatewayRetirementWarning"))) {
+    if (options?.warnBeforeGatewayRetirement && !(await confirmAction({
+      cancelLabel: t("common.cancel"),
+      confirmLabel: t("common.confirm"),
+      message: t("runtime.gatewayRetirementWarning"),
+      title: t("common.confirm"),
+    }))) {
       return null;
     }
     setBusy(label);
@@ -905,13 +918,18 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [refreshRuntimeStatus, setRuntimeCacheData, showToast, t, updateToast]);
+  }, [confirmAction, refreshRuntimeStatus, setRuntimeCacheData, showToast, t, updateToast]);
 
   const saveSettings = useCallback(async (next: Settings) => {
     setBusy("settings");
     try {
       const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
-      if (restartGateway && !window.confirm(t("runtime.gatewayRetirementWarning"))) {
+      if (restartGateway && !(await confirmAction({
+        cancelLabel: t("common.cancel"),
+        confirmLabel: t("common.confirm"),
+        message: t("runtime.gatewayRetirementWarning"),
+        title: t("common.confirm"),
+      }))) {
         return t("runtime.gatewayRetirementCancelled");
       }
       if (settings && next.auto_start_software !== settings.auto_start_software) {
@@ -940,7 +958,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [gatewayStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
+  }, [confirmAction, gatewayStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
 
   const syncHistory = useCallback(async (targetProvider: string) => {
     setBusy("history");
@@ -1004,7 +1022,8 @@ export default function App() {
 
   return (
     <FitStage>
-    <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+    <div className="relative grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
+      <WindowResizeHandles />
       <RuntimeBar
         appFlavor={appFlavor}
         busy={busy}
@@ -1033,7 +1052,7 @@ export default function App() {
             )}
           </button>
         ))}
-        <span className="ml-auto hidden truncate text-xs text-slate-400 lg:block">
+        <span className="ml-auto hidden truncate text-xs text-slate-400 xl:block">
           {t("runtime.gatewayHint")}
         </span>
       </nav>
@@ -1095,6 +1114,7 @@ export default function App() {
         )}
       </div>
 
+      {confirmDialog}
       <SettingsDrawer
         busy={busy}
         appVersion={runtime.appVersion.data}
