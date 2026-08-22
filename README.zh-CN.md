@@ -28,7 +28,7 @@ CodexHub Desktop App
 
 连接 Codex 后，Gateway 需要保持运行，因为 Codex 的模型请求会发到本地端点。对官方 GPT 模型，CodexHub 尽量作为透明代理：复用本机 Codex 登录态转发请求，只做必要的鉴权注入、请求兼容、用量记录和健康检查。对第三方模型，Gateway 会根据 Provider 配置选择最接近的上游协议，并在能力不一致时做最小必要转换。
 
-桌面 App 和 Gateway 是独立生命周期。关闭窗口会最小化到托盘，不会自动停止 Gateway；你也可以在 UI、托盘菜单或 CLI 中手动启动、停止、重启 Gateway。
+桌面 App 在关闭窗口并隐藏到托盘或退出前，会先停止它所管理的 Gateway。需要继续使用 CodexHub 模式请求时，可在 UI、托盘菜单或 CLI 中重新启动 Gateway。
 
 **图 1：真实账号的 Provider 目录与连接状态**
 

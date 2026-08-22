@@ -28,7 +28,7 @@ CodexHub Desktop App
 
 After Codex is connected to CodexHub, the Gateway must keep running because Codex sends model requests to the local endpoint. For official GPT models, CodexHub behaves as a transparent proxy whenever possible: it reuses the local Codex login, forwards requests, and only adds the authentication injection, compatibility handling, usage capture, and health checks required for the route. For third-party models, the Gateway chooses the best upstream protocol from the Provider configuration and performs minimal conversion when client and provider capabilities do not line up.
 
-The desktop app and Gateway have independent lifecycles. Closing the window hides it to the tray; it does not stop the Gateway. You can also start, stop, or restart the Gateway from the UI, tray menu, or CLI.
+The desktop app stops its managed Gateway before closing the window to the tray or exiting. Start the Gateway again from the UI, tray menu, or CLI when you need to resume CodexHub-mode requests.
 
 **Figure 1: Real-account Provider catalog and connection state**
 

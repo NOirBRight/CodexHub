@@ -103,6 +103,23 @@ pub fn stop() -> Result<AppStatus, String> {
     gateway_lifecycle().stop(&backend)
 }
 
+/// Stops the managed Gateway before the desktop app hides or exits.
+///
+/// App transitions use the ordinary durable-identity stop path so a Gateway
+/// recovered from a previous app session is retired as well. The same
+/// process/listener fencing still applies before any shutdown request or kill.
+pub(crate) fn stop_for_app_close() -> Result<bool, String> {
+    // Reconcile first only when the durable PID is missing. This lets an exact
+    // listener whose PID file was lost by a previous app session be retired,
+    // without turning a temporarily unhealthy but still managed process into a
+    // status error before the normal bounded stop path can force-close it.
+    let paths = ProxyPaths::runtime()?;
+    if read_pid_record(&paths)?.is_none() {
+        let _ = status()?;
+    }
+    stop().map(|_| true)
+}
+
 pub fn restart_after<Prepare>(prepare: Prepare) -> Result<AppStatus, String>
 where
     Prepare: FnOnce() -> Result<(), String>,
@@ -115,21 +132,10 @@ where
         .map(|snapshot| snapshot.status)
 }
 
-/// Stops the Gateway only when this application session owns its exact verified identity.
+/// Returns the exact Gateway identity spawned by this application session.
 ///
-/// Terminal application actions use this instead of [`stop`] so a Gateway that predates the
-/// current session, or one whose identity has changed, is never asked to shut down.
-pub(crate) fn stop_session_owned_for_terminal_exit() -> Result<bool, String> {
-    let Some(session_owned_identity) = gateway_lifecycle().session_owned_identity() else {
-        return Ok(false);
-    };
-    let backend =
-        ProxyLifecycleBackend::runtime_for_terminal_session_owned_identity(session_owned_identity)?;
-    gateway_lifecycle().stop(&backend).map(|_| true)
-}
-
-/// Ownership-safe handoff for #112 terminal-exit cleanup. #139 intentionally
-/// exposes the identity without acting on application exit or update restart.
+/// Kept as an ownership-safe handoff for lifecycle diagnostics and tests; app
+/// shutdown uses the durable identity reconciled by [`stop_for_app_close`].
 #[allow(dead_code)]
 pub(crate) fn session_owned_identity() -> Option<GatewayIdentity> {
     gateway_lifecycle().session_owned_identity()
@@ -218,12 +224,6 @@ impl ProxyLifecycleBackend {
         session_owned_identity: Option<GatewayIdentity>,
     ) -> Result<Self, String> {
         Self::runtime_with_shutdown_identity(session_owned_identity, false)
-    }
-
-    fn runtime_for_terminal_session_owned_identity(
-        session_owned_identity: GatewayIdentity,
-    ) -> Result<Self, String> {
-        Self::runtime_with_shutdown_identity(Some(session_owned_identity), true)
     }
 
     fn runtime_with_shutdown_identity(
@@ -483,11 +483,47 @@ fn reconciled_snapshot_with_controls(
         });
     };
 
-    let Some(mut pid_record) = pid_record else {
-        return Err(format!(
-            "Gateway health responds on port {}, but no managed PID identity exists; refusing to claim or replace the external listener",
-            reconciliation_port
-        ));
+    let mut pid_record = match pid_record {
+        Some(record) => record,
+        None => {
+            let Some(listener_pid) = listener_inspector.listening_pid(reconciliation_port)? else {
+                return Err(format!(
+                    "Gateway health responds on port {}, but no managed PID identity exists; refusing to claim or replace the external listener",
+                    reconciliation_port
+                ));
+            };
+            let process = inspector.inspect(listener_pid).map_err(|error| {
+                format!(
+                    "Gateway health responds on port {reconciliation_port}, but listener PID {listener_pid} inspection is unavailable ({error}); refusing to claim or replace the external listener"
+                )
+            })?;
+            let InspectedProcess::Running(info) = process else {
+                return Err(format!(
+                    "Gateway health responds on port {reconciliation_port}, but listener PID {listener_pid} no longer exists; refusing to claim or replace the external listener"
+                ));
+            };
+            let Some(process_start_id) = info.process_start_id.clone() else {
+                return Err(format!(
+                    "Gateway health responds on port {reconciliation_port}, but listener PID {listener_pid} has no process creation identity; refusing to claim or replace the external listener"
+                ));
+            };
+            let candidate = ProxyPidRecord::Managed(ProxyPidMetadata::with_identity(
+                listener_pid,
+                reconciliation_port,
+                &paths.proxy_script_path(),
+                Some(process_start_id),
+                false,
+            ));
+            if let Err(reason) =
+                verify_proxy_command_shape(&candidate, paths, settings.proxy_port, &info)
+            {
+                return Err(format!(
+                    "Gateway health responds on port {reconciliation_port}, but listener PID {listener_pid} is not the CodexHub Gateway ({reason}); refusing to claim or replace the external listener"
+                ));
+            }
+            write_pid_record(paths, &candidate)?;
+            candidate
+        }
     };
     let pid = pid_record.pid();
     let recovery_pending = matches!(
@@ -3625,6 +3661,59 @@ mod tests {
             snapshot.status.message,
             format!("Gateway running with PID {pid}")
         );
+    }
+
+    #[test]
+    fn reconciled_snapshot_recovers_exact_gateway_listener_without_pid() {
+        let root = temp_root("reconciled-orphaned-listener");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        let inspector = RecordingInspector::new(fake_proxy_process(&paths, port));
+        let listener = FixedListenerInspector::new(Some(pid));
+
+        let snapshot = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &inspector,
+            &listener,
+        )
+        .expect("exact Gateway listener should be recoverable without a PID file");
+
+        assert!(snapshot.status.proxy_running);
+        assert_eq!(snapshot.identity.as_ref().map(|identity| identity.pid), Some(pid));
+        assert_eq!(read_pid(&paths).expect("recovered PID"), Some(pid));
+    }
+
+    #[test]
+    fn reconciled_snapshot_keeps_external_listener_unclaimed_without_pid() {
+        let root = temp_root("reconciled-external-listener");
+        let paths = test_paths(&root);
+        let port = free_port();
+        let pid = 12_345;
+        write_settings(&paths, port);
+        write_fake_proxy_script(&paths, "print('test')");
+        let mut external = ProcessInfo::from_args(vec![
+            "python".to_string(),
+            "other_gateway.py".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ]);
+        external.process_start_id = Some(super::test_process_start_id(pid));
+        let inspector = RecordingInspector::new(InspectedProcess::Running(external));
+
+        let error = reconciled_snapshot_with_controls(
+            &paths,
+            &|_| Ok(Some(healthy_response())),
+            &inspector,
+            &FixedListenerInspector::new(Some(pid)),
+        )
+        .expect_err("external listener must remain unclaimed");
+
+        assert!(error.contains("not the CodexHub Gateway"));
+        assert_eq!(read_pid(&paths).expect("PID remains absent"), None);
     }
 
     #[test]
