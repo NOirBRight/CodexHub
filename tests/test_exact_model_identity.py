@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_plan
 from providers_config import ModelConfig, ProviderConfig, build_external_model_index, build_ollama_cloud_model_index
 from test_routing import post_handler
 
@@ -497,7 +498,7 @@ def test_ollama_provider_index_failure_is_catalog_inconsistency_before_io():
 
 def test_route_plan_rejects_missing_upstream_identity_without_substitution():
     with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
-        codex_proxy.route_plan_for_request(
+        route_plan.route_plan_for_request(
             {"name": "official", "auth": "codex_auth"},
             {"client_id": "unknown"},
             inbound_format="responses",
@@ -510,7 +511,7 @@ def test_route_plan_rejects_missing_upstream_identity_without_substitution():
 
 
 def test_route_plan_retains_exact_provider_id_and_model_slug():
-    plan = codex_proxy.route_plan_for_request(
+    plan = route_plan.route_plan_for_request(
         {
             "name": "volcengine",
             "provider_id": "volc",
@@ -532,7 +533,7 @@ def test_route_plan_retains_exact_provider_id_and_model_slug():
 
 
 def test_route_plan_preserves_explicit_provider_id_underscores():
-    plan = codex_proxy.route_plan_for_request(
+    plan = route_plan.route_plan_for_request(
         {
             "name": "custom_transport",
             "provider_id": "foo_bar",
@@ -553,7 +554,7 @@ def test_route_plan_preserves_explicit_provider_id_underscores():
 def test_route_plan_rejects_mismatched_upstream_without_model_id():
     with patch("codex_proxy.urlopen") as urlopen:
         with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
-            codex_proxy.route_plan_for_request(
+            route_plan.route_plan_for_request(
                 {
                     "name": "volcengine",
                     "provider_id": "volc",

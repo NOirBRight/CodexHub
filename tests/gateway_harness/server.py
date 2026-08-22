@@ -149,6 +149,13 @@ class GatewayHarness:
         self._stack.enter_context(
             patch.object(
                 codex_proxy,
+                "official_upstream",
+                side_effect=self._official_upstream,
+            )
+        )
+        self._stack.enter_context(
+            patch.object(
+                codex_proxy,
                 "current_catalog_data",
                 return_value={
                     "models": [
@@ -175,6 +182,15 @@ class GatewayHarness:
         self._stack.close()
         self.stub = None
         self.gateway = None
+
+    def _official_upstream(self) -> dict[str, Any]:
+        return {
+            "name": "official",
+            "provider_id": "openai",
+            "base_url": self.stub_base_url,
+            "auth": "codex_auth",
+            "reports_cached_input_tokens": True,
+        }
 
     def _choose_upstream(self, model_id: str) -> dict[str, Any]:
         slug = str(model_id)

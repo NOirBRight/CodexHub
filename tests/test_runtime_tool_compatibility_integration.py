@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_primitives
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
 
@@ -493,13 +494,13 @@ def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespace
         body,
         {"name": "official"},
         event_context=first_context,
-        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     )
     second = codex_proxy.compatible_request_body(
         body,
         {"name": "official"},
         event_context=second_context,
-        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     )
 
     assert first == second
@@ -787,7 +788,7 @@ Execution constraints:
 1. The coordinator may read the plan once with node_repl.
 2. Spawn exactly one implementer, wait for it, close it, then spawn exactly one spec reviewer, wait for it, close it, then spawn exactly one code-quality reviewer, wait for it, and close it.
 """
-    context = {"request_id": "req-diagnostics", "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT}
+    context = {"request_id": "req-diagnostics", "repair_policy": route_primitives.REPAIR_CODEX_SUBAGENT}
     with monkeypatch.context() as patches:
         # Keep both declarations on the synthetic surface so the required-tool
         # restriction itself (rather than coordinator filtering) is exercised.
@@ -959,7 +960,7 @@ def test_custom_sse_is_not_forwarded_until_the_complete_envelope_is_valid():
 def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     context: dict = {
         "request_id": "req",
-        "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+        "repair_policy": route_primitives.REPAIR_CODEX_SUBAGENT,
     }
     tools = [_collaboration_namespace(COLLABORATION_V2)]
     history = [

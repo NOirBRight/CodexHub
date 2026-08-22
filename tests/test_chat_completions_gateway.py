@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 import route_plan
+import route_primitives
 from protocol_translation import prepare_exchange as _real_prepare_exchange
 
 
@@ -355,7 +356,7 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
                 body,
                 upstream,
                 model_id="glm-5.2",
-                behavior_profile=codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+                behavior_profile=route_primitives.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
             )
         )
 
@@ -1032,7 +1033,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "unsupported_protocol_semantics")
         self.assertEqual(
             result["codexhub_error"]["details"]["failure_class"],
-            codex_proxy.RETRY_FAILURE_PERMANENT,
+            route_primitives.RETRY_FAILURE_PERMANENT,
         )
         self.assertFalse(result["codexhub_error"]["retryable"])
 
@@ -1069,7 +1070,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(fields["request_kind"], "main_generation")
             self.assertEqual(fields["client_request_kind"], "turn")
             self.assertEqual(fields["turn_id"], "turn-meta")
-            self.assertEqual(fields["behavior_profile"], codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
+            self.assertEqual(fields["behavior_profile"], route_primitives.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
 
     def test_post_chat_completions_retries_official_connect_error_before_relaying(self):
         body = json.dumps({
@@ -1833,9 +1834,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
-        self.assertEqual(request_start["wire_format_adapter"], codex_proxy.WIRE_TRANSPARENT)
-        self.assertEqual(request_start["codex_semantic_adapter"], codex_proxy.CODEX_SEMANTIC_NONE)
+        self.assertEqual(request_start["behavior_profile"], route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["wire_format_adapter"], route_primitives.WIRE_TRANSPARENT)
+        self.assertEqual(request_start["codex_semantic_adapter"], route_primitives.CODEX_SEMANTIC_NONE)
 
     def test_provider_scoped_transparent_http_error_keeps_real_upstream_header(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -1960,7 +1961,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["request_kind"], codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
+        self.assertEqual(request_start["request_kind"], route_primitives.RETRY_REQUEST_MAIN_GENERATION)
         self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_chat_transparent_vision_proxy_overlay_replaces_images_when_enabled(self):
@@ -2065,21 +2066,21 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertEqual(
             request_start["vision_action"],
-            codex_proxy.VisionAction.PROXY.value,
+            route_primitives.VisionAction.PROXY.value,
         )
         self.assertEqual(
             request_start["vision_network_action"],
-            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+            route_primitives.VisionNetworkAction.IMAGE_PROXY.value,
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            route_primitives.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
             request_start["mutation_summary"],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            route_primitives.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
             request_start["route_attempt_mutation_summary"],
         )
 
@@ -2154,18 +2155,18 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
         self.assertEqual(
             request_error["vision_action"],
-            codex_proxy.VisionAction.REJECT.value,
+            route_primitives.VisionAction.REJECT.value,
         )
         self.assertEqual(
             request_error["vision_network_action"],
-            codex_proxy.VisionNetworkAction.NONE.value,
+            route_primitives.VisionNetworkAction.NONE.value,
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            route_primitives.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
             request_error["mutation_summary"],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            route_primitives.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
             request_error["route_attempt_mutation_summary"],
         )
 
@@ -2273,14 +2274,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertEqual(
             request_start["vision_action"],
-            codex_proxy.VisionAction.PROXY.value,
+            route_primitives.VisionAction.PROXY.value,
         )
         self.assertEqual(
             request_start["vision_network_action"],
-            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+            route_primitives.VisionNetworkAction.IMAGE_PROXY.value,
         )
 
     def test_transparent_vision_proxy_failure_still_records_request_start(self):
@@ -2357,7 +2358,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertIn("caller_request_body_hmac", request_start)
         self.assertEqual(handler._fake.status, 502)
 
@@ -2632,7 +2633,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["behavior_profile"], route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
 
     def test_provider_scoped_chat_to_responses_upstream_uses_lightweight_fallback_without_codex_adapter(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2847,7 +2848,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_complete = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
         )
-        self.assertEqual(request_complete["usage_policy"], codex_proxy.USAGE_ASYNC_TAP)
+        self.assertEqual(request_complete["usage_policy"], route_primitives.USAGE_ASYNC_TAP)
         self.assertEqual(request_complete["usage_source"], "missing")
         self.assertEqual(request_complete["usage_missing_reason"], "async_usage_pending")
         self.assertNotIn("usage_input_tokens", request_complete)
@@ -4030,7 +4031,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
         self.assertEqual(request_start["client_id"], "zcode")
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
 
     def test_provider_scoped_chat_completions_image_proxy_supports_chat_completions_vision(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -4588,7 +4589,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(event["route_attempt_index"], 0)
             self.assertEqual(event["route_attempt_protocol"], "responses")
             self.assertIn(
-                codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+                route_primitives.RouteMutation.WIRE_CONVERSION.value,
                 event["route_attempt_mutation_summary"],
             )
 
@@ -4653,7 +4654,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             [404, 405, 415, 422],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            route_primitives.RouteMutation.WIRE_CONVERSION.value,
             suppressed["route_attempt_mutation_summary"],
         )
         result = json.loads(b"".join(handler.wfile.writes))

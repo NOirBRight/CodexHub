@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_primitives
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import (
     COLLABORATION_V1,
@@ -913,7 +914,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
         body,
         {"name": "official", "auth": "codex_auth"},
         event_context={"request_id": "issue198-official"},
-        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     )
 
     payload = json.loads(transformed)

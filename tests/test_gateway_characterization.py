@@ -184,6 +184,33 @@ def test_official_nonstreaming_responses_round_trip(harness: GatewayHarness) -> 
     assert GATEWAY_CLIENT_KEY not in captured.headers.get("authorization", "")
 
 
+def test_official_control_get_is_passthrough_to_upstream(harness: GatewayHarness) -> None:
+    harness.set_json_response({"id": "resp_control", "status": "completed"})
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "GET",
+        "/v1/responses/resp_control",
+        headers=_auth_headers(
+            extra={
+                "x-codex-client-metadata": json.dumps(
+                    {"request_kind": "poll", "thread_id": "thread-control"}
+                )
+            }
+        ),
+    )
+    assert response.status == 200
+    payload = json.loads(response.body)
+    assert payload["id"] == "resp_control"
+    assert harness.stub is not None
+    assert len(harness.stub.captures) == 1
+    captured = harness.stub.captures[0]
+    assert captured.method == "GET"
+    assert captured.path.endswith("/responses/resp_control")
+    assert captured.headers["authorization"] == "Bearer synthetic-official-token"
+    assert GATEWAY_CLIENT_KEY not in captured.headers.get("authorization", "")
+
+
 def test_official_streaming_responses_has_one_terminal(harness: GatewayHarness) -> None:
     harness.set_sse_response(_official_sse_chunks())
     response = request_gateway(

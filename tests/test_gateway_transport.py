@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import ssl
 from email.utils import formatdate
 from io import BytesIO
 from pathlib import Path
@@ -78,6 +79,11 @@ def test_gateway_transport_source_does_not_import_facade_or_sse() -> None:
         assert marker not in source
     assert "class GatewayTransport" in source
     assert "class TransportFacts" in source
+
+
+def test_transport_failure_phase_classifies_ssl_eof() -> None:
+    error = ssl.SSLEOFError("EOF occurred in violation of protocol")
+    assert gateway_transport.transport_failure_phase(error) == "tls_handshake"
 
 
 def test_typed_transport_seam_is_gateway_transport() -> None:
