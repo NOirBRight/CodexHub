@@ -3,12 +3,11 @@ use super::clients::opencode::opencode_config_text;
 use super::clients::pi::pi_models_text;
 use super::clients::zcode::{
     persisted_zcode_collection_timestamp, zcode_provider_collection_text_with_now,
-    zcode_v2_config_text,
+    zcode_v2_config_text, ZcodeProviderFileKind,
 };
 use super::{
     gateway_client_model_selector, gateway_exported_model_default_reasoning_effort,
     gateway_exported_model_supports_image, reject_hard_link, timestamp_millis,
-    ZcodeProviderFileKind,
 };
 use crate::{Provider, Settings};
 use serde_json::Value;

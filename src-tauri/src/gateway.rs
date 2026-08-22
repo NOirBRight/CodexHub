@@ -1,6 +1,6 @@
 use crate::{
-    app_flavor::RoutingOwner, config, models, official_refresh, runtime_paths, safe_file,
-    Provider, Settings, UpstreamFormat,
+    app_flavor::RoutingOwner, config, models, official_refresh, runtime_paths, safe_file, Provider,
+    Settings, UpstreamFormat,
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -15,10 +15,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-mod telemetry;
 mod clients;
 mod providers;
 mod readback;
+mod telemetry;
 
 pub use clients::dsh::{
     detect_dsh_client, dsh_client_connect, dsh_client_disconnect, dsh_client_readback,
@@ -27,15 +27,38 @@ pub use clients::dsh::{
 pub use providers::provider_probe_upstream_format;
 pub use readback::verify_apply_readback;
 
-use clients::omp::{omp_config_text, omp_models_yml_text};
-use clients::opencode::opencode_config_text;
-use clients::pi::{pi_models_text, pi_settings_text};
-use clients::zcode::{
-    zcode_catalog_text, zcode_provider_endpoint, zcode_v2_cache_text, zcode_v2_config_text,
+use clients::codex::{
+    isolated_apply_unsupported, isolated_preview_text, isolated_readback_unsupported,
+    read_codex_auth_status,
 };
-
+use clients::omp::{
+    apply_omp_config_with_paths, detect_omp_config_paths, detect_omp_route_details,
+    omp_config_text, omp_models_yml_text, omp_route_mode, preview_omp_config_with_paths,
+    restore_omp_config_with_paths, OmpConfigPaths,
+};
+use clients::opencode::{
+    adopt_legacy_opencode_snapshot_files, apply_opencode_config_with_paths,
+    detect_opencode_config_path, detect_opencode_executable_path,
+    detect_opencode_executable_path_in_home, detect_opencode_version, is_opencode_codexhub_config,
+    opencode_config_text, opencode_ownership_bounded_cleanup,
+    opencode_system_executable_candidates, preview_opencode_config_with_path,
+    restore_opencode_config_with_backup_roots,
+};
 #[cfg(test)]
-use clients::opencode::opencode_reasoning_variants;
+use clients::opencode::{opencode_reasoning_variants, restore_latest_backup};
+use clients::pi::{
+    adopt_legacy_pi_snapshot_files, apply_pi_config_with_paths, detect_pi_config_paths,
+    detect_pi_route_details, pi_models_text, pi_ownership_bounded_cleanup, pi_settings_text,
+    preview_pi_config_with_paths, restore_pi_config_with_paths,
+};
+use clients::zcode::{
+    apply_zcode_config_with_targets, detect_zcode_config_targets, detect_zcode_executable_path,
+    detect_zcode_route_details, detect_zcode_store_path, is_managed_zcode_catalog_provider_entry,
+    preview_zcode_config_with_targets, restore_zcode_config_with_targets, zcode_catalog_text,
+    zcode_latest_version, zcode_route_mode, zcode_route_mode_with_expected,
+    zcode_targets_from_writable, zcode_v2_cache_text, zcode_v2_config_text,
+    zcode_v2_root_from_catalog_path, zcode_v2_root_from_settings_path, ZcodeConfigTargets,
+};
 
 #[cfg(test)]
 pub(crate) use telemetry::{
@@ -382,25 +405,6 @@ struct GatewayClientSyncState {
     pending_client_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct PiConfigPaths {
-    settings_path: PathBuf,
-    models_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct OmpConfigPaths {
-    config_path: PathBuf,
-    models_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct ZcodeConfigTargets {
-    catalog_path: PathBuf,
-    v2_config_path: PathBuf,
-    v2_cache_path: PathBuf,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayEvent {
     pub ts: Option<String>,
@@ -643,7 +647,6 @@ pub fn gateway_copy_client_config(
     })
 }
 
-
 pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientInfo>, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
@@ -853,7 +856,9 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
     };
     let dsh_unreadable = dsh.installed && dsh_report.is_none();
     let dsh_connected = dsh_report.as_ref().is_some_and(|report| report.connected);
-    let dsh_block_present = dsh_report.as_ref().is_some_and(|report| report.block_present);
+    let dsh_block_present = dsh_report
+        .as_ref()
+        .is_some_and(|report| report.block_present);
     let dsh_route_mode = if !dsh.installed {
         "official"
     } else if dsh_connected {
@@ -984,7 +989,13 @@ fn apply_gateway_client_config_locked(
                 &model,
             )?;
             if result.applied {
-                verify_apply_readback("opencode", std::slice::from_ref(&path), &settings, &providers, &model)?;
+                verify_apply_readback(
+                    "opencode",
+                    std::slice::from_ref(&path),
+                    &settings,
+                    &providers,
+                    &model,
+                )?;
             }
             Ok(result)
         }
@@ -1099,20 +1110,12 @@ fn restore_gateway_client_config_locked(
         }
         "pi" => {
             let paths = detect_pi_config_paths();
-            restore_pi_config_with_paths(
-                &paths.settings_path,
-                &paths.models_path,
-                &backup_roots,
-            )
+            restore_pi_config_with_paths(&paths.settings_path, &paths.models_path, &backup_roots)
         }
         "omp" => {
             let paths = detect_omp_config_paths();
             restore_with_backup_roots(&backup_roots, |backup_root| {
-                restore_omp_config_with_paths(
-                    &paths.config_path,
-                    &paths.models_path,
-                    backup_root,
-                )
+                restore_omp_config_with_paths(&paths.config_path, &paths.models_path, backup_root)
             })
         }
         "zcode" => {
@@ -1177,12 +1180,16 @@ pub(crate) fn reject_hard_link(path: &Path) -> Result<(), String> {
             file_index_low: u32,
         }
         extern "system" {
-            fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut ByHandleFileInformation) -> i32;
+            fn GetFileInformationByHandle(
+                handle: *mut std::ffi::c_void,
+                info: *mut ByHandleFileInformation,
+            ) -> i32;
         }
         let file = File::open(path)
             .map_err(|error| format!("readback failed: cannot open {}: {error}", path.display()))?;
         let mut info = ByHandleFileInformation::default();
-        let result = unsafe { GetFileInformationByHandle(file.as_raw_handle() as *mut _, &mut info) };
+        let result =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle() as *mut _, &mut info) };
         if result == 0 || info.number_of_links != 1 {
             return Err(format!(
                 "readback failed: {} is a hard link (nlink={}); refusing single-owner namespace violation",
@@ -1197,7 +1204,6 @@ pub(crate) fn reject_hard_link(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 fn gateway_client_route_model(
     requested: Option<String>,
@@ -1525,11 +1531,7 @@ where
     if !gateway_client_has_existing_config(&client_id) {
         return operation(client_id, current_target_owner);
     }
-    ensure_route_owner_mutation_allowed(
-        current_app_owner,
-        current_target_owner,
-        force_takeover,
-    )?;
+    ensure_route_owner_mutation_allowed(current_app_owner, current_target_owner, force_takeover)?;
     operation(client_id, current_target_owner)
 }
 
@@ -1557,16 +1559,11 @@ fn gateway_client_has_existing_config(client_id: &str) -> bool {
     }
 }
 
-
 pub fn subagent_matrix_status() -> Result<SubagentMatrixStatus, String> {
     let status = gateway_status()?;
     let readiness = subagent_readiness(&status.features);
-    let recent_events = telemetry::read_recent_events(
-        runtime_home(),
-        20,
-        Some(subagent_event_filter),
-        None,
-    );
+    let recent_events =
+        telemetry::read_recent_events(runtime_home(), 20, Some(subagent_event_filter), None);
     let rows = OFFICIAL_MODELS
         .iter()
         .map(|(id, _, _)| SubagentMatrixRow {
@@ -1735,7 +1732,10 @@ fn local_gateway_client_key_for_endpoint<'a>(
     }
     let host = url.host_str()?;
     if !host.eq_ignore_ascii_case("localhost")
-        && host.parse::<std::net::IpAddr>().ok().is_none_or(|host| !host.is_loopback())
+        && host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .is_none_or(|host| !host.is_loopback())
     {
         return None;
     }
@@ -1775,121 +1775,6 @@ fn read_health(port: u16, timeout: Duration) -> Result<Option<HealthResponse>, S
     Ok(response.json::<HealthResponse>().ok())
 }
 
-fn read_codex_auth_status() -> CodexAuthStatus {
-    let path = codex_home().join("auth.json");
-    if !path.exists() {
-        return CodexAuthStatus {
-            auth_file_present: false,
-            logged_in: false,
-            auth_mode: None,
-            account_id_present: false,
-            access_token_present: false,
-            refresh_token_present: false,
-            token_refresh_status: "missing".to_string(),
-            last_refresh: None,
-            issue: Some(
-                "Codex auth file is missing; log in with Codex CLI or Codex App first.".to_string(),
-            ),
-        };
-    }
-
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            return CodexAuthStatus {
-                auth_file_present: true,
-                logged_in: false,
-                auth_mode: None,
-                account_id_present: false,
-                access_token_present: false,
-                refresh_token_present: false,
-                token_refresh_status: "read_error".to_string(),
-                last_refresh: None,
-                issue: Some(format!("Codex auth file could not be read: {error}")),
-            }
-        }
-    };
-    let data: Value = match serde_json::from_str(&text) {
-        Ok(data) => data,
-        Err(error) => {
-            return CodexAuthStatus {
-                auth_file_present: true,
-                logged_in: false,
-                auth_mode: None,
-                account_id_present: false,
-                access_token_present: false,
-                refresh_token_present: false,
-                token_refresh_status: "invalid_json".to_string(),
-                last_refresh: None,
-                issue: Some(format!("Codex auth file is invalid JSON: {error}")),
-            }
-        }
-    };
-
-    let auth_mode = data
-        .get("auth_mode")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let tokens = data.get("tokens").and_then(Value::as_object);
-    let access_token_present = tokens
-        .and_then(|value| value.get("access_token"))
-        .and_then(Value::as_str)
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-    let refresh_token_present = tokens
-        .and_then(|value| value.get("refresh_token"))
-        .and_then(Value::as_str)
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-    let account_id_present = tokens
-        .and_then(|value| value.get("account_id"))
-        .and_then(Value::as_str)
-        .map(|value| !value.is_empty())
-        .unwrap_or(false);
-    let last_refresh = data
-        .get("last_refresh")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let logged_in = auth_mode.as_deref() == Some("chatgpt") && access_token_present;
-    let token_refresh_status = if last_refresh.is_some() {
-        "last_refresh_recorded"
-    } else if refresh_token_present {
-        "refresh_token_available"
-    } else {
-        "unknown"
-    }
-    .to_string();
-    let issue = if auth_mode.as_deref() != Some("chatgpt") {
-        Some(
-            "Codex auth mode is not chatgpt; Gateway requires local Codex/ChatGPT auth."
-                .to_string(),
-        )
-    } else if !access_token_present {
-        Some("Codex auth file has no access token.".to_string())
-    } else if !account_id_present {
-        Some("Codex auth exists, but account id is missing.".to_string())
-    } else {
-        None
-    };
-
-    CodexAuthStatus {
-        auth_file_present: true,
-        logged_in,
-        auth_mode,
-        account_id_present,
-        access_token_present,
-        refresh_token_present,
-        token_refresh_status,
-        last_refresh,
-        issue,
-    }
-}
-
-fn codex_home() -> PathBuf {
-    crate::runtime_paths::codex_target_home_dir()
-        .unwrap_or_else(|_| PathBuf::from(".codex"))
-}
-
 fn runtime_home() -> PathBuf {
     crate::runtime_paths::runtime_home_dir()
         .unwrap_or_else(|_| PathBuf::from(crate::app_flavor::current().runtime_home_suffix()))
@@ -1903,8 +1788,8 @@ fn official_models(settings: &Settings) -> Vec<GatewayModel> {
     // Numeric limits are only trustworthy after the catalog publication fence
     // has resolved them. Subscription metadata remains useful for identity and
     // descriptive fields, but must never reintroduce a builtin fallback limit.
-    let published_context_windows = official_refresh::published_official_context_windows()
-        .unwrap_or_default();
+    let published_context_windows =
+        official_refresh::published_official_context_windows().unwrap_or_default();
     let source_models = match models::list_cached_official_subscription_models_with_presence() {
         Ok(Some(models)) => Some(models),
         Ok(None) | Err(_) => models::list_models_with_presence().ok().flatten(),
@@ -1923,52 +1808,51 @@ fn official_models_from_metadata(
     if published_context_windows.is_empty() {
         return Vec::new();
     }
-    let mut models: Vec<GatewayModel> =
-        match subscription_models {
-            Some(source_models) => {
-                let mut models = Vec::<GatewayModel>::new();
-                let mut positions = HashMap::<String, usize>::new();
-                let mut bare_sources = HashMap::<String, bool>::new();
-                let mut enabled_by_id = HashMap::<String, bool>::new();
-                for model in source_models {
-                    if !models::model_is_catalog_visible(&model) {
-                        continue;
-                    }
-                    let source_is_bare = !model.id.trim().starts_with("openai/");
-                    let source_enabled = model.enabled;
-                    let Some(gateway_model) = official_gateway_model_from_metadata(
-                        settings,
-                        model,
-                        published_context_windows,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(position) = positions.get(&gateway_model.id).copied() {
-                        enabled_by_id
-                            .entry(gateway_model.id.clone())
-                            .and_modify(|enabled| *enabled = *enabled || source_enabled);
-                        let existing_is_bare = bare_sources
-                            .get(&gateway_model.id)
-                            .copied()
-                            .unwrap_or(false);
-                        if source_is_bare || !existing_is_bare {
-                            let id = gateway_model.id.clone();
-                            models[position] = gateway_model;
-                            bare_sources.insert(id, source_is_bare);
-                        }
-                        continue;
-                    }
-                    let id = gateway_model.id.clone();
-                    positions.insert(id.clone(), models.len());
-                    bare_sources.insert(id, source_is_bare);
-                    enabled_by_id.insert(gateway_model.id.clone(), source_enabled);
-                    models.push(gateway_model);
+    let mut models: Vec<GatewayModel> = match subscription_models {
+        Some(source_models) => {
+            let mut models = Vec::<GatewayModel>::new();
+            let mut positions = HashMap::<String, usize>::new();
+            let mut bare_sources = HashMap::<String, bool>::new();
+            let mut enabled_by_id = HashMap::<String, bool>::new();
+            for model in source_models {
+                if !models::model_is_catalog_visible(&model) {
+                    continue;
                 }
-                models.retain(|model| enabled_by_id.get(&model.id).copied().unwrap_or(true));
-                models
+                let source_is_bare = !model.id.trim().starts_with("openai/");
+                let source_enabled = model.enabled;
+                let Some(gateway_model) = official_gateway_model_from_metadata(
+                    settings,
+                    model,
+                    published_context_windows,
+                ) else {
+                    continue;
+                };
+                if let Some(position) = positions.get(&gateway_model.id).copied() {
+                    enabled_by_id
+                        .entry(gateway_model.id.clone())
+                        .and_modify(|enabled| *enabled = *enabled || source_enabled);
+                    let existing_is_bare = bare_sources
+                        .get(&gateway_model.id)
+                        .copied()
+                        .unwrap_or(false);
+                    if source_is_bare || !existing_is_bare {
+                        let id = gateway_model.id.clone();
+                        models[position] = gateway_model;
+                        bare_sources.insert(id, source_is_bare);
+                    }
+                    continue;
+                }
+                let id = gateway_model.id.clone();
+                positions.insert(id.clone(), models.len());
+                bare_sources.insert(id, source_is_bare);
+                enabled_by_id.insert(gateway_model.id.clone(), source_enabled);
+                models.push(gateway_model);
             }
-            None => fallback_official_gateway_models(settings, published_context_windows),
-        };
+            models.retain(|model| enabled_by_id.get(&model.id).copied().unwrap_or(true));
+            models
+        }
+        None => fallback_official_gateway_models(settings, published_context_windows),
+    };
 
     let base_ids = models
         .iter()
@@ -2576,7 +2460,10 @@ fn gateway_client_provider_endpoint_selection(
     }
 }
 
-fn gateway_client_provider_supports_developer_role(provider_id: &str, providers: &[Provider]) -> bool {
+fn gateway_client_provider_supports_developer_role(
+    provider_id: &str,
+    providers: &[Provider],
+) -> bool {
     providers
         .iter()
         .find(|provider| provider.id == provider_id)
@@ -2735,7 +2622,7 @@ fn gateway_diagnostics(
             message: "Gateway prerequisites are present.".to_string(),
         });
     }
-   diagnostics
+    diagnostics
 }
 fn subagent_event_filter(event: &GatewayEvent) -> bool {
     matches!(
@@ -2795,92 +2682,6 @@ fn sanitize_text(text: &str) -> String {
 
 fn normalize_client_id(client_id: &str) -> String {
     client_id.trim().to_ascii_lowercase().replace('_', "-")
-}
-
-fn detect_opencode_config_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CODEXHUB_OPENCODE_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return Some(path);
-    }
-    let mut candidates = Vec::new();
-    if let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        candidates.push(config_dir.join("opencode").join("opencode.json"));
-        candidates.push(config_dir.join("opencode").join("opencode.jsonc"));
-    }
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".config").join("opencode").join("opencode.json"));
-        candidates.push(home.join(".config").join("opencode").join("opencode.jsonc"));
-        candidates.push(home.join(".config").join("opencode").join("config.json"));
-    }
-    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
-        candidates.push(appdata.join("opencode").join("opencode.json"));
-        candidates.push(appdata.join("opencode").join("opencode.jsonc"));
-        candidates.push(appdata.join("opencode").join("config.json"));
-    }
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .or_else(|| {
-            dirs::home_dir().map(|home| home.join(".config").join("opencode").join("opencode.json"))
-        })
-}
-
-fn detect_pi_config_paths() -> PiConfigPaths {
-    let agent_dir = if let Some(path) = std::env::var_os("CODEXHUB_PI_AGENT_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        path
-    } else if let Some(path) = std::env::var_os("CODEXHUB_PI_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return PiConfigPaths {
-            models_path: path
-                .parent()
-                .map(|parent| parent.join("models.json"))
-                .unwrap_or_else(|| PathBuf::from("models.json")),
-            settings_path: path,
-        };
-    } else {
-        dirs::home_dir()
-            .map(|home| home.join(".pi").join("agent"))
-            .unwrap_or_else(|| PathBuf::from("~/.pi/agent"))
-    };
-    PiConfigPaths {
-        settings_path: agent_dir.join("settings.json"),
-        models_path: agent_dir.join("models.json"),
-    }
-}
-
-fn detect_omp_config_paths() -> OmpConfigPaths {
-    let agent_dir = if let Some(path) = std::env::var_os("CODEXHUB_OMP_AGENT_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        path
-    } else if let Some(path) = std::env::var_os("CODEXHUB_OMP_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return OmpConfigPaths {
-            models_path: path
-                .parent()
-                .map(|parent| parent.join("models.yml"))
-                .unwrap_or_else(|| PathBuf::from("models.yml")),
-            config_path: path,
-        };
-    } else {
-        dirs::home_dir()
-            .map(|home| home.join(".omp").join("agent"))
-            .unwrap_or_else(|| PathBuf::from("~/.omp/agent"))
-    };
-    OmpConfigPaths {
-        config_path: agent_dir.join("config.yml"),
-        models_path: agent_dir.join("models.yml"),
-    }
 }
 
 fn route_mode_from_text_file(path: &Path, is_hub: fn(&str) -> bool) -> &'static str {
@@ -3057,389 +2858,6 @@ fn detect_route_details_from_json_provider_array(
     (route_owner, route_endpoint)
 }
 
-fn detect_pi_route_details(
-    paths: &PiConfigPaths,
-    current_owner: RoutingOwner,
-    current_port: u16,
-) -> (RoutingOwner, Option<String>) {
-    let settings_text = fs::read_to_string(&paths.settings_path).ok();
-    let models_text = fs::read_to_string(&paths.models_path).ok();
-    let managed = pi_route_mode(paths) == "hub";
-    let route_endpoint = models_text
-        .as_deref()
-        .and_then(|text| {
-            managed_provider_base_url_from_json_object_text(text, "/providers").unwrap_or_else(
-                || first_provider_base_url_from_json_object_text(text, "/providers"),
-            )
-        });
-    let existing_config = settings_text.is_some() || models_text.is_some();
-    (
-        route_owner_from_endpoint(
-            route_endpoint.as_deref(),
-            managed,
-            existing_config,
-            current_owner,
-            current_port,
-        ),
-        route_endpoint,
-    )
-}
-
-fn detect_omp_route_details(
-    paths: &OmpConfigPaths,
-    current_owner: RoutingOwner,
-    current_port: u16,
-) -> (RoutingOwner, Option<String>) {
-    let config_text = fs::read_to_string(&paths.config_path).ok();
-    let models_text = fs::read_to_string(&paths.models_path).ok();
-    let managed = omp_route_mode(paths) == "hub";
-    let route_endpoint = models_text
-        .as_deref()
-        .and_then(|text| {
-            managed_omp_provider_base_url(text).unwrap_or_else(|| first_omp_provider_base_url(text))
-        });
-    let existing_config = config_text.is_some() || models_text.is_some();
-    (
-        route_owner_from_endpoint(
-            route_endpoint.as_deref(),
-            managed,
-            existing_config,
-            current_owner,
-            current_port,
-        ),
-        route_endpoint,
-    )
-}
-
-fn first_omp_provider_base_url(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("baseUrl:")
-            .map(str::trim)
-            .map(ToOwned::to_owned)
-    })
-}
-
-fn managed_omp_provider_base_url(text: &str) -> Option<Option<String>> {
-    let mut current_provider_id: Option<String> = None;
-    let mut current_base_url: Option<String> = None;
-    let mut current_has_local_gateway_url = false;
-    let mut current_has_codexhub_name = false;
-
-    let finalize = |provider_id: &Option<String>,
-                    base_url: &Option<String>,
-                    has_local_gateway_url: bool,
-                    has_codexhub_name: bool|
-     -> Option<Option<String>> {
-        provider_id
-            .as_deref()
-            .filter(|provider_id| is_codexhub_client_provider_id(provider_id))
-            .filter(|_| has_local_gateway_url || has_codexhub_name)
-            .map(|_| base_url.clone())
-    };
-
-    for line in text.lines() {
-        let starts_provider_entry =
-            line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':');
-        if starts_provider_entry {
-            if let Some(endpoint) = finalize(
-                &current_provider_id,
-                &current_base_url,
-                current_has_local_gateway_url,
-                current_has_codexhub_name,
-            ) {
-                return Some(endpoint);
-            }
-            current_provider_id = Some(line.trim().trim_end_matches(':').to_string());
-            current_base_url = None;
-            current_has_local_gateway_url = false;
-            current_has_codexhub_name = false;
-            continue;
-        }
-
-        if current_provider_id.is_some() {
-            let trimmed = line.trim();
-            if let Some(url) = trimmed.strip_prefix("baseUrl:") {
-                let url = url.trim().to_string();
-                current_has_local_gateway_url = is_local_gateway_url(&url)
-                    && (url.contains("/v1/providers/")
-                        || url.trim().trim_end_matches('/').ends_with("/v1"));
-                current_base_url = Some(url);
-            }
-            if trimmed.contains("CodexHub Gateway") || trimmed.contains("CodexHub ") {
-                current_has_codexhub_name = true;
-            }
-        }
-    }
-
-    finalize(
-        &current_provider_id,
-        &current_base_url,
-        current_has_local_gateway_url,
-        current_has_codexhub_name,
-    )
-}
-
-fn detect_zcode_route_details(
-    targets: &ZcodeConfigTargets,
-    current_owner: RoutingOwner,
-    current_port: u16,
-) -> (RoutingOwner, Option<String>) {
-    let v2_text = fs::read_to_string(&targets.v2_config_path).ok();
-    if let Some(text) = v2_text.as_deref() {
-        return detect_route_details_from_json_provider_object(
-            text,
-            "/provider",
-            is_zcode_v2_codexhub_config(text),
-            true,
-            current_owner,
-            current_port,
-        );
-    }
-    if let Ok(text) = fs::read_to_string(&targets.catalog_path) {
-        return detect_route_details_from_json_provider_array(
-            &text,
-            "/providers",
-            is_zcode_codexhub_config(&text),
-            true,
-            current_owner,
-            current_port,
-        );
-    }
-    if let Ok(text) = fs::read_to_string(&targets.v2_cache_path) {
-        return detect_route_details_from_json_provider_array(
-            &text,
-            "/providers",
-            is_zcode_codexhub_config(&text),
-            true,
-            current_owner,
-            current_port,
-        );
-    }
-    (RoutingOwner::UnknownExternal, None)
-}
-
-fn zcode_route_mode(targets: &ZcodeConfigTargets) -> &'static str {
-    if targets.v2_config_path.exists() {
-        return route_mode_from_text_file(&targets.v2_config_path, is_zcode_v2_codexhub_config);
-    }
-    route_mode_from_text_file(&targets.catalog_path, is_zcode_codexhub_config)
-}
-
-fn zcode_route_mode_with_expected(
-    targets: &ZcodeConfigTargets,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> &'static str {
-    let route_mode = zcode_route_mode(targets);
-    if route_mode != "hub" {
-        return route_mode;
-    }
-    match zcode_targets_match_expected(targets, settings, providers, model) {
-        Ok(true) => "hub",
-        Ok(false) | Err(_) => "stale",
-    }
-}
-
-fn zcode_targets_match_expected(
-    targets: &ZcodeConfigTargets,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<bool, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    Ok(
-        zcode_v2_config_matches_expected(&targets.v2_config_path, &groups)
-            && zcode_catalog_matches_expected(
-                &targets.catalog_path,
-                settings,
-                &groups,
-                ZcodeProviderFileKind::Catalog,
-            )
-            && zcode_catalog_matches_expected(
-                &targets.v2_cache_path,
-                settings,
-                &groups,
-                ZcodeProviderFileKind::V2Cache,
-            ),
-    )
-}
-
-fn zcode_v2_config_matches_expected(path: &Path, groups: &GatewayClientProviderGroups) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    let Some(providers) = value.get("provider").and_then(Value::as_object) else {
-        return false;
-    };
-    groups.providers.iter().all(|group| {
-        providers
-            .get(&group.client_provider_id)
-            .is_some_and(|provider| zcode_v2_provider_matches_expected(provider, group))
-    })
-}
-
-fn zcode_v2_provider_matches_expected(
-    provider: &Value,
-    group: &GatewayClientProviderGroup,
-) -> bool {
-    let kind = group.endpoint_selection.zcode_kind();
-    let (expected_base_url, expected_path) =
-        zcode_provider_endpoint(&Settings::default(), group, ZcodeProviderFileKind::V2Cache);
-    let api_format_matches = provider
-        .get("apiFormat")
-        .and_then(Value::as_str)
-        .map(|value| value == group.endpoint_selection.zcode_api_format())
-        .unwrap_or(true);
-    let endpoints_match = if provider.get("endpoints").is_some() {
-        provider
-            .pointer("/endpoints/baseURL")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_base_url)
-            && provider
-                .pointer(&format!("/endpoints/paths/{kind}"))
-                .and_then(Value::as_str)
-                .is_some_and(|value| value == expected_path)
-    } else {
-        true
-    };
-    provider
-        .get("kind")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == kind)
-        && api_format_matches
-        && endpoints_match
-        && provider
-            .pointer("/options/baseURL")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == group.base_url.as_str())
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ZcodeProviderFileKind {
-    Catalog,
-    V2Cache,
-}
-
-fn zcode_catalog_matches_expected(
-    path: &Path,
-    settings: &Settings,
-    groups: &GatewayClientProviderGroups,
-    file_kind: ZcodeProviderFileKind,
-) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    let Some(providers) = value.get("providers").and_then(Value::as_array) else {
-        return false;
-    };
-    groups.providers.iter().all(|group| {
-        providers
-            .iter()
-            .find(|provider| {
-                provider
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == group.client_provider_id)
-            })
-            .is_some_and(|provider| {
-                zcode_catalog_provider_matches_expected(provider, settings, group, file_kind)
-            })
-    })
-}
-
-fn zcode_catalog_provider_matches_expected(
-    provider: &Value,
-    settings: &Settings,
-    group: &GatewayClientProviderGroup,
-    file_kind: ZcodeProviderFileKind,
-) -> bool {
-    let (expected_base_url, expected_path) = zcode_provider_endpoint(settings, group, file_kind);
-    let kind = group.endpoint_selection.zcode_kind();
-    let path_pointer = format!("/endpoints/paths/{kind}");
-    provider
-        .get("apiFormat")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == group.endpoint_selection.zcode_api_format())
-        && provider
-            .get("defaultKind")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == kind)
-        && provider
-            .pointer("/endpoints/baseURL")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_base_url)
-        && provider
-            .pointer(&path_pointer)
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == expected_path)
-}
-
-fn pi_route_mode(paths: &PiConfigPaths) -> &'static str {
-    let settings = fs::read_to_string(&paths.settings_path).ok();
-    let models = fs::read_to_string(&paths.models_path).ok();
-    match (settings.as_deref(), models.as_deref()) {
-        (Some(settings), Some(models)) => {
-            if is_pi_codexhub_config(settings, models) {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (Some(settings), None) => {
-            if is_pi_settings_codexhub_config(settings) {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (None, Some(models)) => {
-            if is_pi_models_codexhub_config(models) {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (None, None) => "unknown",
-    }
-}
-
-fn omp_route_mode(paths: &OmpConfigPaths) -> &'static str {
-    let config = fs::read_to_string(&paths.config_path).ok();
-    let models = fs::read_to_string(&paths.models_path).ok();
-    match (config.as_deref(), models.as_deref()) {
-        (Some(config), Some(models)) => {
-            if is_omp_codexhub_config(config, models) {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (Some(config), None) => {
-            if is_omp_codexhub_config(config, "") {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (None, Some(models)) => {
-            if is_omp_models_codexhub_config(models) {
-                "hub"
-            } else {
-                "official"
-            }
-        }
-        (None, None) => "unknown",
-    }
-}
-
 fn gateway_client_status(installed: bool, route_mode: &str) -> String {
     if !installed {
         return "Not installed.".to_string();
@@ -3454,193 +2872,8 @@ fn gateway_client_status(installed: bool, route_mode: &str) -> String {
     }
 }
 
-fn zcode_app_data_root() -> PathBuf {
-    #[cfg(windows)]
-    {
-        return std::env::var_os("APPDATA")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|path| path.join("ZCode"))
-            .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode"));
-    }
-
-    dirs::home_dir()
-        .map(|home| home.join(".zcode"))
-        .unwrap_or_else(|| PathBuf::from("~/.zcode"))
-}
-
-fn detect_zcode_config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CODEXHUB_ZCODE_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return path;
-    }
-    zcode_app_data_root()
-        .join("model-providers")
-        .join("codexhub.json")
-}
-
-fn detect_zcode_config_targets() -> ZcodeConfigTargets {
-    let catalog_override = std::env::var_os("CODEXHUB_ZCODE_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let catalog_path = catalog_override
-        .clone()
-        .unwrap_or_else(detect_zcode_config_path);
-    let v2_root = std::env::var_os("CODEXHUB_ZCODE_V2_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            catalog_override
-                .as_ref()
-                .and_then(|path| zcode_v2_root_from_catalog_path(path))
-        })
-        .or_else(|| zcode_v2_root_from_settings_path(&default_zcode_settings_path()))
-        .unwrap_or_else(default_zcode_v2_root);
-    ZcodeConfigTargets {
-        catalog_path,
-        v2_config_path: v2_root.join("config.json"),
-        v2_cache_path: v2_root.join("bots-model-cache.v2.json"),
-    }
-}
-
-fn default_zcode_v2_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("~"))
-        .join(".zcode")
-        .join("v2")
-}
-
-fn default_zcode_settings_path() -> PathBuf {
-    default_zcode_v2_root().join("setting.json")
-}
-
-fn zcode_v2_root_from_catalog_path(catalog_path: &Path) -> Option<PathBuf> {
-    catalog_path.parent()?.parent().map(|root| root.join("v2"))
-}
-
-fn zcode_v2_root_from_settings_path(settings_path: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(settings_path).ok()?;
-    let value = serde_json::from_str::<Value>(&text).ok()?;
-    let data_base_dir = value
-        .get("dataBaseDir")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(zcode_v2_root_from_data_base_dir(&PathBuf::from(
-        data_base_dir,
-    )))
-}
-
-fn zcode_v2_root_from_data_base_dir(data_base_dir: &Path) -> PathBuf {
-    if data_base_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("v2"))
-    {
-        return data_base_dir.to_path_buf();
-    }
-    if data_base_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case(".zcode"))
-    {
-        return data_base_dir.join("v2");
-    }
-    data_base_dir.join(".zcode").join("v2")
-}
-
-fn detect_zcode_store_path() -> PathBuf {
-    zcode_app_data_root()
-        .join("rum-electron-store")
-        .join("ZGVmYXVsdA.json")
-}
-
-fn detect_zcode_executable_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("CODEXHUB_ZCODE_EXE")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        candidates.push(path);
-    }
-    if let Ok(path) = which::which("zcode") {
-        candidates.push(path);
-    }
-    if let Ok(path) = which::which("ZCode") {
-        candidates.push(path);
-    }
-    if let Ok(path) = which::which("ZCode.exe") {
-        candidates.push(path);
-    }
-    candidates.push(std::path::PathBuf::from("/opt/ZCode/zcode"));
-    if let Some(path) = windows_app_path("ZCode.exe") {
-        candidates.push(path);
-    }
-    if let Some(program_files) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
-        candidates.push(program_files.join("ZCode").join("ZCode.exe"));
-    }
-    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from) {
-        candidates.push(program_files_x86.join("ZCode").join("ZCode.exe"));
-    }
-    if let Some(system_drive) = std::env::var_os("SystemDrive").map(PathBuf::from) {
-        candidates.push(
-            system_drive
-                .join("Program Files")
-                .join("ZCode")
-                .join("ZCode.exe"),
-        );
-    }
-    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        candidates.push(
-            local_appdata
-                .join("Programs")
-                .join("ZCode")
-                .join("ZCode.exe"),
-        );
-    }
-    candidates.into_iter().find(|path| path.exists())
-}
-
 fn command_exists(commands: &[&str]) -> bool {
     commands.iter().any(|command| which::which(command).is_ok())
-}
-
-fn detect_opencode_executable_path() -> Option<PathBuf> {
-    which::which("opencode")
-        .ok()
-        .or_else(|| dirs::home_dir().and_then(|home| detect_opencode_executable_path_in_home(&home)))
-        .or_else(|| opencode_system_executable_candidates().into_iter().find(|path| path.is_file()))
-}
-
-fn detect_opencode_executable_path_in_home(home: &Path) -> Option<PathBuf> {
-    let executable = if cfg!(windows) { "opencode.exe" } else { "opencode" };
-    [
-        home.join(".opencode").join("bin").join(executable),
-        home.join(".local").join("bin").join(executable),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-}
-
-fn opencode_system_executable_candidates() -> Vec<PathBuf> {
-    if cfg!(target_os = "linux") {
-        vec![
-            PathBuf::from("/opt/OpenCode/ai.opencode.desktop"),
-            PathBuf::from("/opt/opencode/opencode"),
-        ]
-    } else {
-        Vec::new()
-    }
-}
-
-fn detect_opencode_version() -> Option<String> {
-    which::which("opencode")
-        .ok()
-        .or_else(|| dirs::home_dir().and_then(|home| detect_opencode_executable_path_in_home(&home)))
-        .as_deref()
-        .and_then(executable_version)
 }
 
 fn command_version(commands: &[&str]) -> Option<String> {
@@ -3765,38 +2998,6 @@ fn npm_latest_version(package_name: &str) -> Option<String> {
         .get("version")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-}
-
-fn zcode_latest_version() -> Option<String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(8))
-        .user_agent("Mozilla/5.0 CodexHub/0.1")
-        .build()
-        .ok()?;
-    let text = client
-        .get("https://zcode.z.ai/en/changelog")
-        .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .text()
-        .ok()?;
-    zcode_changelog_release_version(&text)
-}
-
-fn zcode_changelog_release_version(text: &str) -> Option<String> {
-    let marker = "font-mono text-sm\">";
-    let mut offset = 0;
-    while let Some(relative_start) = text[offset..].find(marker) {
-        let start = offset + relative_start + marker.len();
-        let end = start + text[start..].find('<')?;
-        let candidate = text[start..end].trim();
-        if is_exact_semver_like(candidate) {
-            return Some(candidate.to_string());
-        }
-        offset = end;
-    }
-    None
 }
 
 fn is_exact_semver_like(value: &str) -> bool {
@@ -3937,7 +3138,10 @@ fn client_backup_roots_for_apply(client_id: &str) -> Vec<(PathBuf, BackupChannel
     let primary_root = client_backup_root_for_owner(client_id, current_owner);
     let primary_channel = owner_to_backup_channel(current_owner);
     roots.push((primary_root, primary_channel));
-    for (owner, channel) in [(RoutingOwner::Release, BackupChannel::Stable), (RoutingOwner::Beta, BackupChannel::Beta)] {
+    for (owner, channel) in [
+        (RoutingOwner::Release, BackupChannel::Stable),
+        (RoutingOwner::Beta, BackupChannel::Beta),
+    ] {
         let root = client_backup_root_for_owner(client_id, owner);
         if !roots.iter().any(|(existing, _)| existing == &root) {
             roots.push((root, channel));
@@ -4051,9 +3255,9 @@ fn write_rollback_baseline_atomic(
         return Err("unsupported rollback baseline version".to_string());
     }
     let path = client_rollback_baseline_path(client_id);
-    let parent = path.parent().ok_or_else(|| {
-        format!("failed to resolve rollback baseline parent for {client_id}")
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("failed to resolve rollback baseline parent for {client_id}"))?;
     fs::create_dir_all(parent).map_err(|error| {
         format!("failed to create rollback baseline directory for {client_id}: {error}")
     })?;
@@ -4070,171 +3274,6 @@ fn create_baseline_dir(client_id: &str) -> Result<PathBuf, String> {
         })?;
     }
     Ok(baseline_path)
-}
-
-fn is_valid_opencode_legacy_shape(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    object.get("model").is_none_or(Value::is_string)
-        && object.get("small_model").is_none_or(Value::is_string)
-        && object.get("provider").is_none_or(Value::is_object)
-        && object
-            .get("provider")
-            .and_then(Value::as_object)
-            .is_none_or(|providers| providers.values().all(Value::is_object))
-        && (object.contains_key("model")
-            || object.contains_key("small_model")
-            || object.contains_key("provider"))
-}
-
-fn is_valid_pi_settings_legacy_shape(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    object.get("defaultProvider").is_none_or(Value::is_string)
-        && object.get("defaultModel").is_none_or(Value::is_string)
-        && object.get("enabledModels").is_none_or(Value::is_array)
-        && object
-            .get("enabledModels")
-            .and_then(Value::as_array)
-            .is_none_or(|models| models.iter().all(Value::is_string))
-        && (object.contains_key("defaultProvider")
-            || object.contains_key("defaultModel")
-            || object.contains_key("enabledModels"))
-}
-
-fn is_valid_pi_models_legacy_shape(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    object.get("providers").is_some_and(Value::is_object)
-        && object
-            .get("providers")
-            .and_then(Value::as_object)
-            .is_some_and(|providers| providers.values().all(Value::is_object))
-}
-
-fn adopt_legacy_opencode_snapshot_files(
-    backup_root: &Path,
-    channel: BackupChannel,
-) -> Result<Vec<LegacySnapshotCandidate>, String> {
-    let entries = match fs::read_dir(backup_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err("failed to read legacy OpenCode backup directory".to_string()),
-    };
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|_| "failed to read legacy OpenCode backup entry".to_string())?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&path)
-            .map_err(|_| "failed to read legacy OpenCode backup".to_string())?;
-        if !is_valid_opencode_legacy_shape(&text) {
-            return Err("legacy OpenCode backup has unexpected shape".to_string());
-        }
-        if is_opencode_codexhub_config(&text) {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .map_err(|_| "failed to read legacy OpenCode backup metadata".to_string())?;
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_string();
-        let mut files = HashMap::new();
-        files.insert(
-            "opencode.json".to_string(),
-            BaselineFile::Snapshot { content: text },
-        );
-        candidates.push(LegacySnapshotCandidate {
-            modified,
-            channel,
-            name,
-            files,
-        });
-    }
-    Ok(candidates)
-}
-
-fn adopt_legacy_pi_snapshot_files(
-    backup_root: &Path,
-    channel: BackupChannel,
-) -> Result<Vec<LegacySnapshotCandidate>, String> {
-    let entries = match fs::read_dir(backup_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err("failed to read legacy Pi backup directory".to_string()),
-    };
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|_| "failed to read legacy Pi backup entry".to_string())?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let settings_path = path.join("settings.json");
-        let models_path = path.join("models.json");
-        if !settings_path.exists() || !models_path.exists() {
-            return Err("legacy Pi snapshot is incomplete".to_string());
-        }
-        let settings = fs::read_to_string(&settings_path)
-            .map_err(|_| "failed to read legacy Pi settings backup".to_string())?;
-        let models = fs::read_to_string(&models_path)
-            .map_err(|_| "failed to read legacy Pi models backup".to_string())?;
-        if !is_valid_pi_settings_legacy_shape(&settings) {
-            return Err("legacy Pi settings backup has unexpected shape".to_string());
-        }
-        if !is_valid_pi_models_legacy_shape(&models) {
-            return Err("legacy Pi models backup has unexpected shape".to_string());
-        }
-        if is_pi_codexhub_config(&settings, &models) {
-            continue;
-        }
-        let settings_modified = fs::metadata(&settings_path)
-            .and_then(|metadata| metadata.modified())
-            .map_err(|_| "failed to read legacy Pi settings metadata".to_string())?;
-        let models_modified = fs::metadata(&models_path)
-            .and_then(|metadata| metadata.modified())
-            .map_err(|_| "failed to read legacy Pi models metadata".to_string())?;
-        let modified = std::cmp::max(settings_modified, models_modified);
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_string();
-        let mut files = HashMap::new();
-        files.insert(
-            "settings.json".to_string(),
-            BaselineFile::Snapshot { content: settings },
-        );
-        files.insert(
-            "models.json".to_string(),
-            BaselineFile::Snapshot { content: models },
-        );
-        candidates.push(LegacySnapshotCandidate {
-            modified,
-            channel,
-            name,
-            files,
-        });
-    }
-    Ok(candidates)
 }
 
 fn adopt_legacy_snapshot_files(
@@ -4360,420 +3399,6 @@ fn ensure_rollback_baseline(
         .map_err(|_| "failed to write rollback baseline".to_string())
 }
 
-fn record_opencode_rollback_baseline(
-    config_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-) -> Result<(), String> {
-    ensure_rollback_baseline(
-        "opencode",
-        backup_roots,
-        &[("opencode.json", config_path)],
-        |_, text| is_opencode_codexhub_config(text),
-    )
-}
-
-fn record_pi_rollback_baseline(
-    settings_path: &Path,
-    models_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-) -> Result<(), String> {
-    ensure_rollback_baseline(
-        "pi",
-        backup_roots,
-        &[("settings.json", settings_path), ("models.json", models_path)],
-        |name, text| match name {
-            "settings.json" => is_pi_settings_codexhub_config(text),
-            "models.json" => is_pi_models_codexhub_config(text),
-            _ => false,
-        },
-    )
-}
-
-fn restore_opencode_from_baseline(
-    config_path: &Path,
-    file: &BaselineFile,
-) -> Result<GatewayClientApplyResult, String> {
-    match file {
-        BaselineFile::Snapshot { content } => {
-            write_text_replace(config_path, content)
-                .map_err(|_| "failed to restore OpenCode config from baseline".to_string())?;
-            Ok(GatewayClientApplyResult {
-                client_id: "opencode".to_string(),
-                applied: true,
-                config_path: None,
-                backup_path: None,
-                message: "OpenCode official config restored from canonical baseline.".to_string(),
-            })
-        }
-        BaselineFile::Absent => {
-            if config_path.exists() {
-                let text = fs::read_to_string(config_path).unwrap_or_default();
-                if !is_opencode_codexhub_config(&text) {
-                    return Err(
-                        "OpenCode config exists but is not managed by CodexHub; refusing removal."
-                            .to_string(),
-                    );
-                }
-                fs::remove_file(config_path).map_err(|_| {
-                    "failed to remove restored-absent OpenCode config".to_string()
-                })?;
-            }
-            Ok(GatewayClientApplyResult {
-                client_id: "opencode".to_string(),
-                applied: true,
-                config_path: None,
-                backup_path: None,
-                message: "OpenCode config removed; original baseline recorded it as absent."
-                    .to_string(),
-            })
-        }
-    }
-}
-
-fn restore_pi_from_baseline(
-    settings_path: &Path,
-    models_path: &Path,
-    baseline: &RollbackBaseline,
-) -> Result<GatewayClientApplyResult, String> {
-    let targets = [
-        ("settings.json", settings_path),
-        ("models.json", models_path),
-    ];
-    for (name, _) in targets {
-        if !baseline.files.contains_key(name) {
-            return Err("rollback baseline is incomplete".to_string());
-        }
-    }
-    let mut restored_any = false;
-    let mut removed_any = false;
-    for (name, path) in targets {
-        match baseline.files.get(name) {
-            Some(BaselineFile::Snapshot { content }) => {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|_| "failed to create directory for Pi restore".to_string())?;
-                }
-                write_text_replace(path, content)
-                    .map_err(|_| "failed to restore Pi config from baseline".to_string())?;
-                restored_any = true;
-            }
-            Some(BaselineFile::Absent) if path.exists() => {
-                let text = fs::read_to_string(path).unwrap_or_default();
-                let managed = match name {
-                    "settings.json" => is_pi_settings_codexhub_config(&text),
-                    "models.json" => is_pi_models_codexhub_config(&text),
-                    _ => false,
-                };
-                if !managed {
-                    return Err(
-                        "Pi target exists but is not managed by CodexHub; refusing removal."
-                            .to_string(),
-                    );
-                }
-                fs::remove_file(path)
-                    .map_err(|_| "failed to remove restored-absent Pi target".to_string())?;
-                removed_any = true;
-            }
-            Some(BaselineFile::Absent) | None => {}
-        }
-    }
-    Ok(GatewayClientApplyResult {
-        client_id: "pi".to_string(),
-        applied: true,
-        config_path: None,
-        backup_path: None,
-        message: match (restored_any, removed_any) {
-            (true, true) => {
-                "Pi official config restored from canonical baseline; absent targets removed."
-                    .to_string()
-            }
-            (false, true) => "Pi config removed; original baseline recorded targets as absent."
-                .to_string(),
-            _ => "Pi official config restored from canonical baseline.".to_string(),
-        },
-    })
-}
-
-fn opencode_ownership_bounded_cleanup(
-    config_path: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    if !config_path.exists() {
-        return Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "OpenCode config was already absent.".to_string(),
-        });
-    }
-    let text = fs::read_to_string(config_path)
-        .map_err(|_| "failed to read OpenCode config for cleanup.".to_string())?;
-    if !is_opencode_codexhub_config(&text) {
-        return Err(
-            "OpenCode config is not managed by CodexHub; refusing cleanup.".to_string(),
-        );
-    }
-    let mut value = serde_json::from_str::<Value>(&text)
-        .map_err(|_| "OpenCode config is not valid JSON; refusing cleanup.".to_string())?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        "OpenCode config root must be a JSON object; refusing cleanup.".to_string()
-    })?;
-
-    // Validate exact shapes before any mutation.
-    if object
-        .get("model")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err("OpenCode model has an unexpected shape; refusing cleanup.".to_string());
-    }
-    if object
-        .get("small_model")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err("OpenCode small_model has an unexpected shape; refusing cleanup.".to_string());
-    }
-    if object
-        .get("provider")
-        .is_some_and(|value| !value.is_object())
-    {
-        return Err("OpenCode provider has an unexpected shape; refusing cleanup.".to_string());
-    }
-    if object
-        .get("provider")
-        .and_then(Value::as_object)
-        .is_some_and(|providers| providers.values().any(|value| !value.is_object()))
-    {
-        return Err(
-            "OpenCode provider map contains malformed entries; refusing cleanup.".to_string(),
-        );
-    }
-
-    let model_managed = object
-        .get("model")
-        .is_none_or(|value| value.as_str().is_some_and(is_codexhub_client_model_selector));
-    let small_model_managed = object
-        .get("small_model")
-        .is_none_or(|value| value.as_str().is_some_and(is_codexhub_client_model_selector));
-    let providers_managed = object.get("provider").is_none_or(|value| {
-        value.as_object().is_some_and(|providers| {
-            providers.is_empty()
-                || providers
-                    .iter()
-                    .all(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-        })
-    });
-
-    let allowed_keys: HashSet<&str> =
-        ["$schema", "model", "small_model", "provider", "codexhub_managed"]
-            .iter()
-            .copied()
-            .collect();
-    let only_allowed_keys = object.keys().all(|key| allowed_keys.contains(key.as_str()));
-    let all_present_managed = model_managed && small_model_managed && providers_managed;
-
-    if only_allowed_keys && all_present_managed {
-        fs::remove_file(config_path)
-            .map_err(|_| "failed to remove CodexHub-owned OpenCode config.".to_string())?;
-        return Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "OpenCode CodexHub config removed.".to_string(),
-        });
-    }
-
-    object.remove("codexhub_managed");
-    if model_managed {
-        object.remove("model");
-    }
-    if small_model_managed {
-        object.remove("small_model");
-    }
-    if let Some(providers) = object.get_mut("provider").and_then(Value::as_object_mut) {
-        remove_codexhub_client_provider_entries(providers);
-        if providers.is_empty() {
-            object.remove("provider");
-        }
-    }
-
-    if object.is_empty() {
-        fs::remove_file(config_path)
-            .map_err(|_| "failed to remove cleaned OpenCode config.".to_string())?;
-        Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "OpenCode CodexHub config removed.".to_string(),
-        })
-    } else {
-        let next = serde_json::to_string_pretty(&value)
-            .map(|text| format!("{text}\n"))
-            .map_err(|error| format!("failed to serialize cleaned OpenCode config: {error}"))?;
-        write_text_replace(config_path, &next)
-            .map_err(|_| "failed to write cleaned OpenCode config".to_string())?;
-        Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "OpenCode CodexHub entries removed while preserving unrelated config."
-                .to_string(),
-        })
-    }
-}
-
-fn pi_ownership_bounded_cleanup(
-    settings_path: &Path,
-    models_path: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    // settings.json is user-owned under Provider Injection; detach never
-    // reads or mutates it. The Injected Block lives only in models.json.
-    let _ = settings_path;
-    let models_exists = models_path.exists();
-    if !models_exists {
-        return Ok(GatewayClientApplyResult {
-            client_id: "pi".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "Pi config was already absent.".to_string(),
-        });
-    }
-
-    let models_text = fs::read_to_string(models_path)
-        .map_err(|_| "failed to read Pi models for cleanup.".to_string())?;
-    let mut models_value: Value = serde_json::from_str(&models_text)
-        .map_err(|_| "Pi models is not valid JSON; refusing cleanup.".to_string())?;
-
-    let models_object = models_value.as_object().ok_or_else(|| {
-        "Pi models root must be a JSON object; refusing cleanup.".to_string()
-    })?;
-
-    if models_object
-        .get("providers")
-        .is_some_and(|value| !value.is_object() && !value.is_null())
-    {
-        return Err("Pi providers has an unexpected shape; refusing cleanup.".to_string());
-    }
-    if models_object
-        .get("providers")
-        .and_then(Value::as_object)
-        .is_some_and(|providers| providers.values().any(|value| !value.is_object()))
-    {
-        return Err("Pi providers map contains malformed entries; refusing cleanup.".to_string());
-    }
-
-    let providers_object = models_object.get("providers").and_then(Value::as_object);
-    let providers_has_managed = providers_object.is_some_and(|providers| {
-        providers
-            .iter()
-            .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-    });
-
-    if !providers_has_managed {
-        return Ok(GatewayClientApplyResult {
-            client_id: "pi".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "Pi CodexHub config was already absent.".to_string(),
-        });
-    }
-
-    let models_object = models_value.as_object_mut().unwrap();
-    if let Some(providers) = models_object.get_mut("providers").and_then(Value::as_object_mut) {
-        remove_codexhub_client_provider_entries(providers);
-        if providers.is_empty() {
-            models_object.remove("providers");
-        }
-    }
-
-    let mut mutated = false;
-    if models_object.is_empty() {
-        if models_exists {
-            fs::remove_file(models_path)
-                .map_err(|_| "failed to remove cleaned Pi models.".to_string())?;
-            mutated = true;
-        }
-    } else {
-        let next = serde_json::to_string_pretty(&models_value)
-            .map(|text| format!("{text}\n"))
-            .map_err(|error| format!("failed to serialize cleaned Pi models: {error}"))?;
-        write_text_replace(models_path, &next)
-            .map_err(|_| "failed to write cleaned Pi models".to_string())?;
-        mutated = true;
-    }
-
-    Ok(GatewayClientApplyResult {
-        client_id: "pi".to_string(),
-        applied: true,
-        config_path: None,
-        backup_path: None,
-        message: if mutated {
-            "Pi CodexHub entries removed while preserving unrelated config.".to_string()
-        } else {
-            "Pi CodexHub config was already absent.".to_string()
-        },
-    })
-}
-
-fn preview_opencode_config_with_path(
-    config_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientConfigPreview, String> {
-    let current = fs::read_to_string(config_path)
-        .ok()
-        .map(|text| sanitize_text(&text));
-    let next = opencode_config_text(settings, providers, model)?;
-    Ok(GatewayClientConfigPreview {
-        client_id: "opencode".to_string(),
-        can_apply: config_path.exists(),
-        strategy: "managed_overwrite".to_string(),
-        config_path: Some(config_path.to_path_buf()),
-        current_redacted: current,
-        next_redacted: sanitize_text(&next),
-        backup_required: true,
-        message: if config_path.exists() {
-            "Apply will back up the current OpenCode config, then overwrite it with CodexHub managed config.".to_string()
-        } else {
-            "OpenCode config does not exist yet; auto-apply is disabled until there is an official config to back up.".to_string()
-        },
-    })
-}
-
-fn preview_pi_config_with_paths(
-    settings_path: &Path,
-    models_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientConfigPreview, String> {
-    let current = combined_current_preview(&[
-        ("settings.json", settings_path),
-        ("models.json", models_path),
-    ]);
-    let next_settings = pi_settings_text(settings_path, settings, providers, model)?;
-    let next_models = pi_models_text(models_path, settings, providers, model)?;
-    Ok(GatewayClientConfigPreview {
-        client_id: "pi".to_string(),
-        can_apply: true,
-        strategy: "managed_native_config".to_string(),
-        config_path: Some(settings_path.to_path_buf()),
-        current_redacted: current.map(|text| sanitize_text(&text)),
-        next_redacted: sanitize_text(&combined_named_text(&[
-            ("settings.json", &next_settings),
-            ("models.json", &next_models),
-        ])),
-        backup_required: settings_path.exists() || models_path.exists(),
-        message: "Apply will inject the CodexHub provider into Pi models.json without changing model selection."
-            .to_string(),
-    })
-}
-
 fn gateway_exported_model_supports_image(
     settings: &Settings,
     providers: &[Provider],
@@ -4804,310 +3429,6 @@ fn gateway_exported_model_default_reasoning_effort(
         })
 }
 
-fn preview_omp_config_with_paths(
-    config_path: &Path,
-    models_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientConfigPreview, String> {
-    let current =
-        combined_current_preview(&[("config.yml", config_path), ("models.yml", models_path)]);
-    let current_config = fs::read_to_string(config_path).ok();
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
-        Some(selector.as_str())
-    } else {
-        None
-    };
-    let default_reasoning_effort =
-        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
-    let next_config = omp_config_text(
-        current_config.as_deref(),
-        &selector,
-        vision_selector,
-        default_reasoning_effort.as_deref(),
-    );
-    let next_models = omp_models_yml_text(settings, providers, &model)?;
-    let mut message =
-        "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
-            .to_string();
-    if vision_selector.is_none() {
-        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
-    }
-    Ok(GatewayClientConfigPreview {
-        client_id: "omp".to_string(),
-        can_apply: true,
-        strategy: "managed_native_config".to_string(),
-        config_path: Some(config_path.to_path_buf()),
-        current_redacted: current.map(|text| sanitize_text(&text)),
-        next_redacted: sanitize_text(&combined_named_text(&[
-            ("config.yml", &next_config),
-            ("models.yml", &next_models),
-        ])),
-        backup_required: config_path.exists() || models_path.exists(),
-        message,
-    })
-}
-
-fn preview_zcode_config_with_targets(
-    targets: &ZcodeConfigTargets,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientConfigPreview, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let current = combined_current_preview(&[
-        ("config.json", &targets.v2_config_path),
-        ("codexhub.json", &targets.catalog_path),
-        ("bots-model-cache.v2.json", &targets.v2_cache_path),
-    ])
-    .map(|text| sanitize_text(&text));
-    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
-    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
-    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
-    Ok(GatewayClientConfigPreview {
-        client_id: "zcode".to_string(),
-        can_apply: true,
-        strategy: "managed_native_config".to_string(),
-        config_path: Some(targets.v2_config_path.clone()),
-        current_redacted: current,
-        next_redacted: sanitize_text(&combined_named_text(&[
-            ("config.json", &next_config),
-            ("codexhub.json", &next_catalog),
-            ("bots-model-cache.v2.json", &next_cache),
-        ])),
-        backup_required: targets.v2_config_path.exists()
-            || targets.catalog_path.exists()
-            || targets.v2_cache_path.exists(),
-        message:
-            "Apply will snapshot ZCode v2 config/cache/catalog, then route ZCode through CodexHub Gateway."
-                .to_string(),
-    })
-}
-
-fn apply_opencode_config_with_paths(
-    config_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    if !config_path.exists() {
-        return Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: false,
-            config_path: Some(config_path.to_path_buf()),
-            backup_path: None,
-            message: "OpenCode config was not found; refusing managed overwrite without an official config backup.".to_string(),
-        });
-    }
-    let (backup_root, _) = backup_roots.first().ok_or_else(|| {
-        "OpenCode apply requires at least one backup root".to_string()
-    })?;
-    fs::create_dir_all(backup_root)
-        .map_err(|error| format!("failed to create OpenCode backup directory: {error}"))?;
-    let current = fs::read_to_string(config_path)
-        .map_err(|error| format!("failed to read OpenCode config: {error}"))?;
-    let backup_path = if is_opencode_codexhub_config(&current) {
-        None
-    } else {
-        let path = backup_root.join(format!("opencode-{}.json", timestamp_millis()));
-        fs::copy(config_path, &path)
-            .map_err(|error| format!("failed to back up OpenCode config: {error}"))?;
-        Some(path)
-    };
-    record_opencode_rollback_baseline(config_path, backup_roots)?;
-    let next = opencode_config_text(settings, providers, &model)?;
-    write_text_replace(config_path, &next)
-        .map_err(|_| "failed to write managed OpenCode config".to_string())?;
-    Ok(GatewayClientApplyResult {
-        client_id: "opencode".to_string(),
-        applied: true,
-        config_path: Some(config_path.to_path_buf()),
-        backup_path,
-        message: "OpenCode now routes through CodexHub Gateway.".to_string(),
-    })
-}
-
-fn apply_pi_config_with_paths(
-    settings_path: &Path,
-    models_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let (backup_root, _) = backup_roots.first().ok_or_else(|| {
-        "Pi apply requires at least one backup root".to_string()
-    })?;
-    let current_settings = fs::read_to_string(settings_path).unwrap_or_default();
-    let current_models = fs::read_to_string(models_path).unwrap_or_default();
-    let backup_path = create_snapshot_backup(
-        "pi",
-        backup_root,
-        &[
-            ("settings.json", settings_path),
-            ("models.json", models_path),
-        ],
-        is_pi_codexhub_config(&current_settings, &current_models),
-    )
-    .map_err(|_| "failed to create Pi backup snapshot".to_string())?;
-    record_pi_rollback_baseline(settings_path, models_path, backup_roots)?;
-    let next_models = pi_models_text(models_path, settings, providers, &model)?;
-    write_text_replace(models_path, &next_models)
-        .map_err(|_| "failed to write managed Pi models".to_string())?;
-    Ok(GatewayClientApplyResult {
-        client_id: "pi".to_string(),
-        applied: true,
-        config_path: Some(models_path.to_path_buf()),
-        backup_path,
-        message: "Pi now has the CodexHub provider available. Model selection is unchanged."
-            .to_string(),
-    })
-}
-
-fn apply_omp_config_with_paths(
-    config_path: &Path,
-    models_path: &Path,
-    backup_root: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let current_config = fs::read_to_string(config_path).unwrap_or_default();
-    let current_models = fs::read_to_string(models_path).unwrap_or_default();
-    let backup_path = create_snapshot_backup(
-        "omp",
-        backup_root,
-        &[("config.yml", config_path), ("models.yml", models_path)],
-        is_omp_codexhub_config(&current_config, &current_models),
-    )?;
-    let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
-        Some(selector.as_str())
-    } else {
-        None
-    };
-    let default_reasoning_effort =
-        gateway_exported_model_default_reasoning_effort(settings, providers, &model);
-    let next_config = omp_config_text(
-        Some(&current_config),
-        &selector,
-        vision_selector,
-        default_reasoning_effort.as_deref(),
-    );
-    let next_models = omp_models_yml_text(settings, providers, &model)?;
-    write_text_replace(config_path, &next_config)?;
-    write_text_replace(models_path, &next_models)?;
-    let mut message = "OMP now routes through CodexHub Gateway.".to_string();
-    if vision_selector.is_none() {
-        message.push_str(" OMP modelRoles.vision is omitted because the selected model is exported text-only.");
-    }
-    Ok(GatewayClientApplyResult {
-        client_id: "omp".to_string(),
-        applied: true,
-        config_path: Some(config_path.to_path_buf()),
-        backup_path,
-        message,
-    })
-}
-
-fn apply_zcode_config_with_targets(
-    targets: &ZcodeConfigTargets,
-    backup_root: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    let backup_path = create_snapshot_backup(
-        "zcode",
-        backup_root,
-        &zcode_target_files(targets),
-        zcode_targets_current_is_managed(targets),
-    )?;
-    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
-    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
-    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
-    write_text_replace(&targets.catalog_path, &next_catalog)?;
-    write_text_replace(&targets.v2_config_path, &next_config)?;
-    write_text_replace(&targets.v2_cache_path, &next_cache)?;
-    Ok(GatewayClientApplyResult {
-        client_id: "zcode".to_string(),
-        applied: true,
-        config_path: Some(targets.v2_config_path.clone()),
-        backup_path,
-        message: "ZCode now routes through CodexHub Gateway.".to_string(),
-    })
-}
-
-#[cfg(test)]
-fn restore_latest_backup(
-    client_id: &str,
-    config_path: &Path,
-    backup_root: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    let latest = fs::read_dir(backup_root)
-        .map_err(|error| {
-            format!(
-                "failed to read backup directory {}: {error}",
-                backup_root.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            let modified = metadata.modified().ok()?;
-            let path = entry.path();
-            let text = fs::read_to_string(&path).ok()?;
-            (!is_opencode_codexhub_config(&text)).then_some((modified, path))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)
-        .ok_or_else(|| format!("no clean official backup is available for {client_id}"))?;
-    let text = fs::read_to_string(&latest)
-        .map_err(|error| format!("failed to read backup {}: {error}", latest.display()))?;
-    let clean_text = strip_opencode_invalid_keys(&text)?;
-    write_text_replace(config_path, &clean_text)?;
-    Ok(GatewayClientApplyResult {
-        client_id: client_id.to_string(),
-        applied: true,
-        config_path: Some(config_path.to_path_buf()),
-        backup_path: Some(latest),
-        message: "OpenCode official config restored.".to_string(),
-    })
-}
-
-fn restore_opencode_config_with_backup_roots(
-    config_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-) -> Result<GatewayClientApplyResult, String> {
-    if let Some(baseline) = read_rollback_baseline("opencode")? {
-        return match baseline.files.get("opencode.json") {
-            Some(file) => restore_opencode_from_baseline(config_path, file),
-            None => Err("rollback baseline is incomplete".to_string()),
-        };
-    }
-    let _ = adopt_legacy_baseline_locked("opencode", backup_roots)?;
-    if let Some(baseline) = read_rollback_baseline("opencode")? {
-        return match baseline.files.get("opencode.json") {
-            Some(file) => {
-                let mut result = restore_opencode_from_baseline(config_path, file)?;
-                result.message =
-                    "OpenCode official config restored from legacy-adopted baseline.".to_string();
-                Ok(result)
-            }
-            None => Err("rollback baseline is incomplete".to_string()),
-        };
-    }
-    opencode_ownership_bounded_cleanup(config_path)
-}
-
 fn restore_with_backup_roots<F>(
     backup_roots: &[(PathBuf, BackupChannel)],
     mut restore: F,
@@ -5127,524 +3448,6 @@ where
     } else {
         errors.join("; ")
     })
-}
-
-fn restore_pi_config_with_paths(
-    settings_path: &Path,
-    models_path: &Path,
-    backup_roots: &[(PathBuf, BackupChannel)],
-) -> Result<GatewayClientApplyResult, String> {
-    if let Some(baseline) = read_rollback_baseline("pi")? {
-        return restore_pi_from_baseline(settings_path, models_path, &baseline);
-    }
-    let _ = adopt_legacy_baseline_locked("pi", backup_roots)?;
-    if let Some(baseline) = read_rollback_baseline("pi")? {
-        let mut result = restore_pi_from_baseline(settings_path, models_path, &baseline)?;
-        result.message = "Pi official config restored from legacy-adopted baseline.".to_string();
-        return Ok(result);
-    }
-    pi_ownership_bounded_cleanup(settings_path, models_path)
-}
-
-fn restore_omp_config_with_paths(
-    config_path: &Path,
-    models_path: &Path,
-    backup_root: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    let latest = restore_latest_snapshot_backup(
-        "omp",
-        backup_root,
-        &[("config.yml", config_path), ("models.yml", models_path)],
-        |path| {
-            let config = fs::read_to_string(path.join("config.yml")).unwrap_or_default();
-            let models = fs::read_to_string(path.join("models.yml")).unwrap_or_default();
-            is_omp_codexhub_config(&config, &models)
-        },
-    )?;
-    Ok(GatewayClientApplyResult {
-        client_id: "omp".to_string(),
-        applied: true,
-        config_path: Some(config_path.to_path_buf()),
-        backup_path: Some(latest),
-        message: "OMP official config restored.".to_string(),
-    })
-}
-
-fn restore_zcode_config_with_targets(
-    targets: &ZcodeConfigTargets,
-    backup_root: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    let latest = latest_clean_snapshot_backup("zcode", backup_root, |path| {
-        zcode_snapshot_contains_managed(path)
-    });
-    match latest {
-        Ok(path) => {
-            restore_zcode_sanitized_snapshot_files(&path, targets)?;
-            Ok(GatewayClientApplyResult {
-                client_id: "zcode".to_string(),
-                applied: true,
-                config_path: Some(targets.v2_config_path.clone()),
-                backup_path: Some(path),
-                message: "ZCode official config restored.".to_string(),
-            })
-        }
-        Err(clean_error) => {
-            if let Ok(path) = latest_zcode_official_config_snapshot(backup_root) {
-                restore_zcode_sanitized_snapshot_files(&path, targets)?;
-                return Ok(GatewayClientApplyResult {
-                    client_id: "zcode".to_string(),
-                    applied: true,
-                    config_path: Some(targets.v2_config_path.clone()),
-                    backup_path: Some(path),
-                    message: "ZCode official config restored.".to_string(),
-                });
-            }
-            if !zcode_targets_contain_managed(targets) {
-                return Err(clean_error);
-            }
-            let mut removed_any = false;
-            if targets.catalog_path.exists()
-                && is_zcode_codexhub_config(
-                    &fs::read_to_string(&targets.catalog_path).unwrap_or_default(),
-                )
-            {
-                fs::remove_file(&targets.catalog_path).map_err(|error| {
-                    format!(
-                        "failed to remove ZCode CodexHub catalog {}: {error}",
-                        targets.catalog_path.display()
-                    )
-                })?;
-                removed_any = true;
-            }
-            if targets.v2_cache_path.exists()
-                && is_zcode_codexhub_config(
-                    &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
-                )
-            {
-                fs::remove_file(&targets.v2_cache_path).map_err(|error| {
-                    format!(
-                        "failed to remove ZCode CodexHub cache {}: {error}",
-                        targets.v2_cache_path.display()
-                    )
-                })?;
-                removed_any = true;
-            }
-            removed_any |= remove_zcode_v2_codexhub_provider(&targets.v2_config_path)?;
-            removed_any |= remove_zcode_coding_plan_cache(targets)?;
-            Ok(GatewayClientApplyResult {
-                client_id: "zcode".to_string(),
-                applied: true,
-                config_path: Some(targets.v2_config_path.clone()),
-                backup_path: None,
-                message: if removed_any {
-                    "ZCode CodexHub config removed.".to_string()
-                } else {
-                    "ZCode CodexHub config was already absent.".to_string()
-                },
-            })
-        }
-    }
-}
-
-fn zcode_target_files(targets: &ZcodeConfigTargets) -> [(&'static str, &Path); 3] {
-    [
-        ("codexhub.json", targets.catalog_path.as_path()),
-        ("config.json", targets.v2_config_path.as_path()),
-        ("bots-model-cache.v2.json", targets.v2_cache_path.as_path()),
-    ]
-}
-
-fn zcode_targets_current_is_managed(targets: &ZcodeConfigTargets) -> bool {
-    let mut saw_existing = false;
-    let mut all_managed = true;
-    if targets.catalog_path.exists() {
-        saw_existing = true;
-        all_managed &= is_zcode_codexhub_config(
-            &fs::read_to_string(&targets.catalog_path).unwrap_or_default(),
-        );
-    }
-    if targets.v2_config_path.exists() {
-        saw_existing = true;
-        all_managed &= is_zcode_v2_codexhub_config(
-            &fs::read_to_string(&targets.v2_config_path).unwrap_or_default(),
-        );
-    }
-    if targets.v2_cache_path.exists() {
-        saw_existing = true;
-        all_managed &= is_zcode_codexhub_config(
-            &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
-        );
-    }
-    saw_existing && all_managed
-}
-
-fn zcode_targets_contain_managed(targets: &ZcodeConfigTargets) -> bool {
-    (targets.catalog_path.exists()
-        && is_zcode_codexhub_config(&fs::read_to_string(&targets.catalog_path).unwrap_or_default()))
-        || (targets.v2_config_path.exists()
-            && is_zcode_v2_codexhub_config(
-                &fs::read_to_string(&targets.v2_config_path).unwrap_or_default(),
-            ))
-        || (targets.v2_cache_path.exists()
-            && is_zcode_codexhub_config(
-                &fs::read_to_string(&targets.v2_cache_path).unwrap_or_default(),
-            ))
-}
-
-fn zcode_snapshot_contains_managed(snapshot_path: &Path) -> bool {
-    let catalog_path = snapshot_path.join("codexhub.json");
-    let v2_config_path = snapshot_path.join("config.json");
-    let v2_cache_path = snapshot_path.join("bots-model-cache.v2.json");
-    let targets = ZcodeConfigTargets {
-        catalog_path,
-        v2_config_path,
-        v2_cache_path,
-    };
-    zcode_targets_contain_managed(&targets)
-}
-
-fn latest_zcode_official_config_snapshot(backup_root: &Path) -> Result<PathBuf, String> {
-    fs::read_dir(backup_root)
-        .map_err(|error| {
-            format!(
-                "failed to read backup directory {}: {error}",
-                backup_root.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_dir() {
-                return None;
-            }
-            let modified = metadata.modified().ok()?;
-            let path = entry.path();
-            zcode_cleaned_v2_config_snapshot_text(&path)
-                .ok()
-                .flatten()
-                .map(|_| (modified, path))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)
-        .ok_or_else(|| "no ZCode snapshot with official v2 config is available".to_string())
-}
-
-fn restore_zcode_sanitized_snapshot_files(
-    snapshot_path: &Path,
-    targets: &ZcodeConfigTargets,
-) -> Result<(), String> {
-    if let Some(text) = zcode_cleaned_v2_config_snapshot_text(snapshot_path)? {
-        write_text_replace(&targets.v2_config_path, &text)?;
-    } else if targets.v2_config_path.exists() {
-        fs::remove_file(&targets.v2_config_path).map_err(|error| {
-            format!(
-                "failed to remove restored-absent config {}: {error}",
-                targets.v2_config_path.display()
-            )
-        })?;
-    }
-
-    restore_zcode_sanitized_provider_collection_file(
-        &snapshot_path.join("codexhub.json"),
-        &targets.catalog_path,
-    )?;
-    restore_zcode_sanitized_provider_collection_file(
-        &snapshot_path.join("bots-model-cache.v2.json"),
-        &targets.v2_cache_path,
-    )?;
-    remove_zcode_coding_plan_cache(targets)?;
-    Ok(())
-}
-
-fn zcode_cleaned_v2_config_snapshot_text(snapshot_path: &Path) -> Result<Option<String>, String> {
-    let path = snapshot_path.join("config.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read ZCode snapshot {}: {error}", path.display()))?;
-    sanitize_zcode_v2_config_text(&text)
-}
-
-fn restore_zcode_sanitized_provider_collection_file(
-    source: &Path,
-    target: &Path,
-) -> Result<(), String> {
-    let clean_text = if source.exists() {
-        let text = fs::read_to_string(source).map_err(|error| {
-            format!(
-                "failed to read ZCode snapshot {}: {error}",
-                source.display()
-            )
-        })?;
-        sanitize_zcode_provider_collection_text(&text)?
-    } else {
-        None
-    };
-    if let Some(text) = clean_text {
-        write_text_replace(target, &text)?;
-    } else if target.exists() {
-        fs::remove_file(target).map_err(|error| {
-            format!(
-                "failed to remove restored-absent config {}: {error}",
-                target.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn zcode_coding_plan_cache_path(targets: &ZcodeConfigTargets) -> PathBuf {
-    targets
-        .v2_cache_path
-        .with_file_name("coding-plan-cache.json")
-}
-
-fn remove_zcode_coding_plan_cache(targets: &ZcodeConfigTargets) -> Result<bool, String> {
-    let path = zcode_coding_plan_cache_path(targets);
-    if !path.exists() {
-        return Ok(false);
-    }
-    fs::remove_file(&path).map_err(|error| {
-        format!(
-            "failed to remove ZCode coding plan cache {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(true)
-}
-
-fn sanitize_zcode_v2_provider_entry(provider: &mut Value) {
-    if let Some(provider) = provider.as_object_mut() {
-        provider.remove("systemDisabledReason");
-    }
-}
-
-fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String> {
-    if !config_path.exists() {
-        return Ok(false);
-    }
-    let text = fs::read_to_string(config_path).map_err(|error| {
-        format!(
-            "failed to read ZCode v2 config {}: {error}",
-            config_path.display()
-        )
-    })?;
-    if !is_zcode_v2_codexhub_config(&text) {
-        return Ok(false);
-    }
-    let mut value = serde_json::from_str::<Value>(&text).map_err(|error| {
-        format!(
-            "failed to parse ZCode v2 config {}: {error}",
-            config_path.display()
-        )
-    })?;
-    let removed = value
-        .get_mut("provider")
-        .and_then(Value::as_object_mut)
-        .is_some_and(remove_codexhub_client_provider_entries);
-    if removed {
-        let next = serde_json::to_string_pretty(&value)
-            .map(|text| format!("{text}\n"))
-            .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))?;
-        write_text_replace(config_path, &next)?;
-    }
-    Ok(removed)
-}
-
-
-fn is_opencode_codexhub_config(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub_managed\"")
-            || text.contains("\"codexhub\"")
-            || text.contains("\"codexhub-");
-    };
-    value
-        .get("codexhub_managed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || value
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(is_codexhub_client_model_selector)
-        || value
-            .get("small_model")
-            .and_then(Value::as_str)
-            .is_some_and(is_codexhub_client_model_selector)
-        || value
-            .get("provider")
-            .and_then(Value::as_object)
-            .is_some_and(|providers| {
-                providers
-                    .iter()
-                    .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-            })
-}
-
-#[cfg(test)]
-fn strip_opencode_invalid_keys(text: &str) -> Result<String, String> {
-    let mut value = serde_json::from_str::<Value>(text)
-        .map_err(|error| format!("failed to parse OpenCode config backup: {error}"))?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("codexhub_managed");
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize cleaned OpenCode config: {error}"))
-}
-
-fn is_pi_codexhub_config(settings_text: &str, models_text: &str) -> bool {
-    is_pi_settings_codexhub_config(settings_text) || is_pi_models_codexhub_config(models_text)
-}
-
-fn is_pi_settings_codexhub_config(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"") || text.contains("\"codexhub-");
-    };
-    value
-        .get("defaultProvider")
-        .and_then(Value::as_str)
-        .is_some_and(is_recognized_codexhub_client_provider_id)
-        || value
-            .get("enabledModels")
-            .and_then(Value::as_array)
-            .is_some_and(|models| {
-                models
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(is_codexhub_client_model_selector)
-            })
-}
-
-fn is_pi_models_codexhub_config(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"") || text.contains("\"codexhub-");
-    };
-    value
-        .get("providers")
-        .and_then(Value::as_object)
-        .is_some_and(|providers| {
-            providers
-                .iter()
-                .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-        })
-}
-
-fn is_omp_codexhub_config(config_text: &str, models_text: &str) -> bool {
-    config_text
-        .lines()
-        .filter_map(|line| line.split_once(':').map(|(_, value)| value.trim()))
-        .any(is_codexhub_client_model_selector)
-        || is_omp_models_codexhub_config(models_text)
-}
-
-fn is_omp_models_codexhub_config(text: &str) -> bool {
-    let mut in_candidate = false;
-    let mut has_local_gateway_url = false;
-    for line in text.lines() {
-        let starts_provider_entry =
-            line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':');
-        if starts_provider_entry {
-            if in_candidate && has_local_gateway_url {
-                return true;
-            }
-            let provider_id = line.trim().trim_end_matches(':');
-            in_candidate = is_codexhub_client_provider_id(provider_id);
-            has_local_gateway_url = false;
-            continue;
-        }
-        if in_candidate {
-            let trimmed = line.trim();
-            if let Some(url) = trimmed.strip_prefix("baseUrl:") {
-                has_local_gateway_url = is_local_gateway_url(url.trim())
-                    && (url.contains("/v1/providers/")
-                        || url.trim().trim_end_matches('/').ends_with("/v1"));
-            }
-            if trimmed.contains("CodexHub Gateway") || trimmed.contains("CodexHub ") {
-                return true;
-            }
-        }
-    }
-    in_candidate && has_local_gateway_url
-}
-
-fn is_zcode_codexhub_config(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"")
-            || text.contains("\"codexhub-")
-            || text.contains("CodexHub");
-    };
-    value
-        .get("providers")
-        .and_then(Value::as_array)
-        .is_some_and(|providers| {
-            providers
-                .iter()
-                .any(is_managed_zcode_catalog_provider_entry)
-        })
-}
-
-fn is_zcode_v2_codexhub_config(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return text.contains("\"codexhub\"")
-            || text.contains("\"codexhub-")
-            || text.contains("CodexHub");
-    };
-    value
-        .get("provider")
-        .and_then(Value::as_object)
-        .is_some_and(|providers| {
-            providers
-                .iter()
-                .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-        })
-}
-
-fn is_managed_zcode_catalog_provider_entry(provider: &Value) -> bool {
-    provider
-        .get("id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| {
-            is_managed_codexhub_provider_entry(id, provider)
-                || (is_builtin_codexhub_client_provider_id(id)
-                    && provider_entry_base_url(provider).is_none())
-        })
-        || (provider_entry_has_codexhub_name(provider)
-            && provider_entry_base_url(provider).is_some_and(is_local_gateway_url)
-            && provider_entry_has_gateway_path(provider))
-}
-
-fn sanitize_zcode_v2_config_text(text: &str) -> Result<Option<String>, String> {
-    let mut value = serde_json::from_str::<Value>(text)
-        .map_err(|error| format!("failed to parse ZCode v2 config backup: {error}"))?;
-    let Some(providers) = value.get_mut("provider").and_then(Value::as_object_mut) else {
-        return Ok(None);
-    };
-    remove_codexhub_client_provider_entries(providers);
-    for provider in providers.values_mut() {
-        sanitize_zcode_v2_provider_entry(provider);
-    }
-    if providers.is_empty() {
-        return Ok(None);
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| Some(format!("{text}\n")))
-        .map_err(|error| format!("failed to serialize cleaned ZCode v2 config: {error}"))
-}
-
-fn sanitize_zcode_provider_collection_text(text: &str) -> Result<Option<String>, String> {
-    let mut value = serde_json::from_str::<Value>(text)
-        .map_err(|error| format!("failed to parse ZCode provider collection backup: {error}"))?;
-    let Some(providers) = value.get_mut("providers").and_then(Value::as_array_mut) else {
-        return Ok(None);
-    };
-    providers.retain(|provider| !is_managed_zcode_catalog_provider_entry(provider));
-    if providers.is_empty() {
-        return Ok(None);
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| Some(format!("{text}\n")))
-        .map_err(|error| format!("failed to serialize cleaned ZCode provider collection: {error}"))
 }
 
 fn read_json_file_or_empty(path: &Path, label: &str) -> Result<Value, String> {
@@ -5877,7 +3680,10 @@ impl IsolatedClientRoot {
 }
 
 pub fn isolated_managed_client_ids() -> Vec<String> {
-    ISOLATED_CLIENTS.iter().map(|id| (*id).to_string()).collect()
+    ISOLATED_CLIENTS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect()
 }
 
 pub fn validate_isolated_root(root: &Path) -> Result<IsolatedClientRoot, String> {
@@ -5898,7 +3704,10 @@ enum RequireFresh {
     No,
 }
 
-fn validate_isolated_root_inner(root: &Path, fresh: RequireFresh) -> Result<IsolatedClientRoot, String> {
+fn validate_isolated_root_inner(
+    root: &Path,
+    fresh: RequireFresh,
+) -> Result<IsolatedClientRoot, String> {
     if root.as_os_str().is_empty() {
         return Err("isolated root path is empty".to_string());
     }
@@ -5917,7 +3726,10 @@ fn validate_isolated_root_inner(root: &Path, fresh: RequireFresh) -> Result<Isol
         match component {
             Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
             Component::ParentDir => {
-                return Err("isolated root must not contain relative parent-dir (..) components".to_string());
+                return Err(
+                    "isolated root must not contain relative parent-dir (..) components"
+                        .to_string(),
+                );
             }
             Component::Normal(_) => {}
         }
@@ -5936,8 +3748,9 @@ fn validate_isolated_root_inner(root: &Path, fresh: RequireFresh) -> Result<Isol
         // Reject reparse points / symlinks / junctions on the existing root.
         reject_reparse_or_link(root)?;
     } else {
-        fs::create_dir_all(root)
-            .map_err(|error| format!("failed to create isolated root {}: {error}", root.display()))?;
+        fs::create_dir_all(root).map_err(|error| {
+            format!("failed to create isolated root {}: {error}", root.display())
+        })?;
     }
     Ok(IsolatedClientRoot {
         root: root.to_path_buf(),
@@ -5994,7 +3807,10 @@ fn ensure_path_beneath_root(root: &Path, path: &Path) -> Result<PathBuf, String>
                     root.display()
                 ));
             }
-            Component::CurDir | Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {}
+            Component::CurDir
+            | Component::Normal(_)
+            | Component::RootDir
+            | Component::Prefix(_) => {}
         }
     }
     let root_canonical = fs::canonicalize(root).map_err(|error| {
@@ -6134,10 +3950,7 @@ fn normalized_client_id(client_id: &str) -> String {
     normalize_client_id(client_id)
 }
 
-pub fn route_protocol_for_selection(
-    provider_id: &str,
-    providers: &[Provider],
-) -> String {
+pub fn route_protocol_for_selection(provider_id: &str, providers: &[Provider]) -> String {
     match gateway_client_provider_endpoint_selection(provider_id, providers) {
         GatewayClientEndpointSelection::Responses => "responses".to_string(),
         GatewayClientEndpointSelection::ChatCompletions => "chat_completions".to_string(),
@@ -6188,39 +4001,67 @@ pub fn isolated_client_preview(
     let (selector, resolved_model, protocol) =
         selector_and_route(&input.settings, &input.providers, &model)?;
     let next_redacted = match client_id.as_str() {
-        "opencode" => {
-            sanitize_text(&opencode_config_text(&input.settings, &input.providers, &model)?)
-        }
+        "opencode" => sanitize_text(&opencode_config_text(
+            &input.settings,
+            &input.providers,
+            &model,
+        )?),
         "pi" => {
-            let s = pi_settings_text(&targets.writable_paths[0], &input.settings, &input.providers, &model)?;
-            let m = pi_models_text(&targets.writable_paths[1], &input.settings, &input.providers, &model)?;
-            sanitize_text(&combined_named_text(&[("settings.json", &s), ("models.json", &m)]))
+            let s = pi_settings_text(
+                &targets.writable_paths[0],
+                &input.settings,
+                &input.providers,
+                &model,
+            )?;
+            let m = pi_models_text(
+                &targets.writable_paths[1],
+                &input.settings,
+                &input.providers,
+                &model,
+            )?;
+            sanitize_text(&combined_named_text(&[
+                ("settings.json", &s),
+                ("models.json", &m),
+            ]))
         }
         "omp" => {
-            let selector = gateway_client_model_selector(&input.settings, &input.providers, &model)?;
-            let vision = if gateway_exported_model_supports_image(&input.settings, &input.providers, &model) {
-                Some(selector.as_str())
-            } else {
-                None
-            };
-            let reasoning =
-                gateway_exported_model_default_reasoning_effort(&input.settings, &input.providers, &model);
+            let selector =
+                gateway_client_model_selector(&input.settings, &input.providers, &model)?;
+            let vision =
+                if gateway_exported_model_supports_image(&input.settings, &input.providers, &model)
+                {
+                    Some(selector.as_str())
+                } else {
+                    None
+                };
+            let reasoning = gateway_exported_model_default_reasoning_effort(
+                &input.settings,
+                &input.providers,
+                &model,
+            );
             let cfg = omp_config_text(None, &selector, vision, reasoning.as_deref());
             let models = omp_models_yml_text(&input.settings, &input.providers, &model)?;
-            sanitize_text(&combined_named_text(&[("config.yml", &cfg), ("models.yml", &models)]))
+            sanitize_text(&combined_named_text(&[
+                ("config.yml", &cfg),
+                ("models.yml", &models),
+            ]))
         }
         "zcode" => {
             let catalog = zcode_catalog_text(&input.settings, &input.providers, &model)?;
             let cache = zcode_v2_cache_text(&input.settings, &input.providers, &model)?;
-            let config =
-                zcode_v2_config_text(&targets.writable_paths[1], &input.settings, &input.providers, &model)?;
+            let config = zcode_v2_config_text(
+                &targets.writable_paths[1],
+                &input.settings,
+                &input.providers,
+                &model,
+            )?;
             sanitize_text(&combined_named_text(&[
                 ("codexhub.json", &catalog),
                 ("config.json", &config),
                 ("bots-model-cache.v2.json", &cache),
             ]))
         }
-        "codex" => String::new(),
+        "codex" => isolated_preview_text(),
         other => return Err(format!("unsupported managed client for preview: {other}")),
     };
     Ok(IsolatedClientPreview {
@@ -6258,10 +4099,12 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
     if let Some(catalog_path) = &input.catalog_path {
         ensure_path_beneath_root(root, catalog_path)?;
     }
-    let provenance_root = provenance_root.map(|provenance| {
-        let resolved = root.join(provenance);
-        ensure_path_beneath_root(root, &resolved).map(|_| resolved)
-    }).transpose()?;
+    let provenance_root = provenance_root
+        .map(|provenance| {
+            let resolved = root.join(provenance);
+            ensure_path_beneath_root(root, &resolved).map(|_| resolved)
+        })
+        .transpose()?;
     let targets = isolated_client_apply_targets(isolated, &client_id)?;
     let model = input
         .model
@@ -6283,63 +4126,59 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
             backup_root.display()
         )
     })?;
-    let applied = with_rollback_provenance_dir_override(provenance_root, || -> Result<
-        GatewayClientApplyResult,
-        String,
-    > {
-        let labeled_backup_root = (backup_root.clone(), BackupChannel::Stable);
-        match client_id.as_str() {
-            "opencode" => {
-                let path = &targets.writable_paths[0];
-                fs::create_dir_all(path.parent().unwrap()).map_err(|error| {
-                    format!("failed to create opencode dir: {error}")
-                })?;
-                // Write a non-managed baseline so the apply path creates a backup.
-                if !path.exists() {
-                    fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
-                        .map_err(|error| format!("failed to seed opencode config: {error}"))?;
+    let applied = with_rollback_provenance_dir_override(
+        provenance_root,
+        || -> Result<GatewayClientApplyResult, String> {
+            let labeled_backup_root = (backup_root.clone(), BackupChannel::Stable);
+            match client_id.as_str() {
+                "opencode" => {
+                    let path = &targets.writable_paths[0];
+                    fs::create_dir_all(path.parent().unwrap())
+                        .map_err(|error| format!("failed to create opencode dir: {error}"))?;
+                    // Write a non-managed baseline so the apply path creates a backup.
+                    if !path.exists() {
+                        fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
+                            .map_err(|error| format!("failed to seed opencode config: {error}"))?;
+                    }
+                    apply_opencode_config_with_paths(
+                        path,
+                        std::slice::from_ref(&labeled_backup_root),
+                        &input.settings,
+                        &input.providers,
+                        &model,
+                    )
                 }
-                apply_opencode_config_with_paths(
-                    path,
+                "pi" => apply_pi_config_with_paths(
+                    &targets.writable_paths[0],
+                    &targets.writable_paths[1],
                     std::slice::from_ref(&labeled_backup_root),
                     &input.settings,
                     &input.providers,
                     &model,
-                )
-            }
-            "pi" => apply_pi_config_with_paths(
-                &targets.writable_paths[0],
-                &targets.writable_paths[1],
-                std::slice::from_ref(&labeled_backup_root),
-                &input.settings,
-                &input.providers,
-                &model,
-            ),
-            "omp" => apply_omp_config_with_paths(
-                &targets.writable_paths[0],
-                &targets.writable_paths[1],
-                &backup_root,
-                &input.settings,
-                &input.providers,
-                &model,
-            ),
-            "zcode" => {
-                let zcode_targets = zcode_targets_from_writable(&targets)?;
-                apply_zcode_config_with_targets(
-                    &zcode_targets,
+                ),
+                "omp" => apply_omp_config_with_paths(
+                    &targets.writable_paths[0],
+                    &targets.writable_paths[1],
                     &backup_root,
                     &input.settings,
                     &input.providers,
                     &model,
-                )
+                ),
+                "zcode" => {
+                    let zcode_targets = zcode_targets_from_writable(&targets)?;
+                    apply_zcode_config_with_targets(
+                        &zcode_targets,
+                        &backup_root,
+                        &input.settings,
+                        &input.providers,
+                        &model,
+                    )
+                }
+                "codex" => isolated_apply_unsupported(),
+                other => Err(format!("unsupported managed client for apply: {other}")),
             }
-            "codex" => Err(
-                "codex apply must be invoked through config::apply_codex_config_isolated"
-                    .to_string(),
-            ),
-            other => Err(format!("unsupported managed client for apply: {other}")),
-        }
-    })?;
+        },
+    )?;
     // F2: the isolated CLI apply path must run the same fail-closed readback
     // verifier as the production GUI/Web Bridge entrypoint, so a partial or
     // tampered write is rejected before reporting success. This shares the
@@ -6366,18 +4205,6 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         route_protocol: protocol,
         target_names: target_relative_names(&targets, root),
         backup_dir_relative,
-    })
-}
-
-fn zcode_targets_from_writable(targets: &IsolatedClientApplyTargets) -> Result<ZcodeConfigTargets, String> {
-    let writable = targets.writable_paths();
-    if writable.len() < 3 {
-        return Err("zcode isolated targets are missing files".to_string());
-    }
-    Ok(ZcodeConfigTargets {
-        catalog_path: writable[0].clone(),
-        v2_config_path: writable[1].clone(),
-        v2_cache_path: writable[2].clone(),
     })
 }
 
@@ -6415,10 +4242,7 @@ pub fn readback_gateway_client_config_isolated(
             )?;
         }
         "codex" => {
-            return Err(
-                "codex readback must be invoked through config::readback_codex_config_isolated"
-                    .to_string(),
-            );
+            return isolated_readback_unsupported();
         }
         other => return Err(format!("unsupported managed client for readback: {other}")),
     }
@@ -6455,9 +4279,9 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
     #[cfg(target_os = "windows")]
     use std::time::{Duration, Instant};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -6503,7 +4327,10 @@ mod tests {
 
     #[test]
     fn opencode_jsonc_config_is_detected() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!(
             "codexhub-opencode-jsonc-{}-{}",
             std::process::id(),
@@ -6538,7 +4365,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn zcode_linux_defaults_are_home_relative_and_writable() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "codexhub-zcode-home-{}-{}",
             std::process::id(),
@@ -6743,7 +4573,10 @@ mod tests {
         assert_eq!(request_path(&requests[1]), "/v1/chat/completions");
         assert_eq!(request_path(&requests[2]), "/v1/responses");
         for request in requests {
-            assert_eq!(header_value(&request, "authorization"), Some("Bearer local-test-key"));
+            assert_eq!(
+                header_value(&request, "authorization"),
+                Some("Bearer local-test-key")
+            );
         }
     }
 
@@ -6843,7 +4676,13 @@ mod tests {
     }
 
     fn request_path(request: &str) -> &str {
-        request.lines().next().unwrap().split_whitespace().nth(1).unwrap()
+        request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
     }
 
     fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
@@ -7171,7 +5010,10 @@ mod tests {
 
     #[test]
     fn gateway_client_sync_default_model_skips_disabled_default_model() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
         let root = unique_temp_dir("codexhub-client-sync-official-catalog");
@@ -7249,12 +5091,9 @@ mod tests {
             .unwrap(),
             "volc/glm-5.2"
         );
-        let fallback = super::gateway_client_route_model(
-            Some("gpt-5.5".to_string()),
-            &settings,
-            &providers,
-        )
-        .unwrap();
+        let fallback =
+            super::gateway_client_route_model(Some("gpt-5.5".to_string()), &settings, &providers)
+                .unwrap();
         assert_ne!(fallback, "gpt-5.5");
         assert!(super::resolve_gateway_client_model_id(&settings, &providers, &fallback).is_ok());
     }
@@ -7262,7 +5101,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn command_version_reads_supported_cmd_shim_from_path() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_path = std::env::var_os("PATH");
         let root = unique_temp_dir("codexhub-version-probe-cmd");
         fs::create_dir_all(&root).unwrap();
@@ -7502,7 +5344,8 @@ mod tests {
     }
 
     #[test]
-    fn published_official_context_limit_bounds_stale_subscription_metadata_for_status_and_exports() {
+    fn published_official_context_limit_bounds_stale_subscription_metadata_for_status_and_exports()
+    {
         // The raw subscription record omitted its numeric context field; the
         // metadata projection supplied this stale builtin fallback instead.
         // A safely published Official catalog limit must still bound every
@@ -8150,7 +5993,10 @@ mod tests {
 
     #[test]
     fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
         let root = unique_temp_dir("codexhub-official-fast-selection");
@@ -8537,11 +6383,9 @@ mod tests {
             Some(&serde_json::json!(["text"]))
         );
         // The projection has no output-modality source; omit rather than fabricate.
-        assert!(
-            value
-                .pointer("/provider/codexhub-volc/models/glm-5.2/modalities/output")
-                .is_none()
-        );
+        assert!(value
+            .pointer("/provider/codexhub-volc/models/glm-5.2/modalities/output")
+            .is_none());
     }
 
     #[test]
@@ -8583,11 +6427,9 @@ mod tests {
             zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.2/reasoning"),
             Some(&expected_reasoning)
         );
-        assert!(
-            zcode_v2_value
-                .pointer("/provider/codexhub-volc/models/glm-5.2-flash/reasoning")
-                .is_none()
-        );
+        assert!(zcode_v2_value
+            .pointer("/provider/codexhub-volc/models/glm-5.2-flash/reasoning")
+            .is_none());
 
         let opencode_text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
         let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
@@ -8614,8 +6456,7 @@ mod tests {
         assert!(incapable.get("options").is_none());
         assert!(incapable.get("variants").is_none());
 
-        let pi_text =
-            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
         let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
         let pi_models = pi_value
             .pointer("/providers/codexhub-volc/models")
@@ -8750,8 +6591,7 @@ mod tests {
         let providers = image_capability_client_export_test_providers();
 
         let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
-        let pi_text =
-            pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
+        let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
         let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
         let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
         let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
@@ -8804,7 +6644,10 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| panic!("missing ZCode catalog entry for {model_id}"))
         };
-        assert_eq!(zcode_inputs("glm-5.2"), serde_json::json!(["text", "image"]));
+        assert_eq!(
+            zcode_inputs("glm-5.2"),
+            serde_json::json!(["text", "image"])
+        );
         assert_eq!(zcode_inputs("glm-5.2-coder"), serde_json::json!(["text"]));
         assert_eq!(zcode_inputs("glm-5.2-air"), serde_json::json!(["text"]));
 
@@ -9718,7 +7561,10 @@ mod tests {
 
     #[test]
     fn opencode_official_restore_survives_stable_then_beta_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cross-channel-restore");
         let config_path = root.join("opencode.json");
@@ -9748,7 +7594,10 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            &[
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         )
         .unwrap();
 
@@ -9761,7 +7610,10 @@ mod tests {
 
     #[test]
     fn opencode_stable_takeover_adopts_beta_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-stable-adopts-beta");
         let config_path = root.join("opencode.json");
@@ -9772,11 +7624,7 @@ mod tests {
         fs::create_dir_all(&beta_backups).unwrap();
         fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         let beta_file = beta_backups.join("opencode-beta.json");
-        fs::write(
-            &beta_file,
-            r#"{"model":"anthropic/claude-sonnet-4-beta"}"#,
-        )
-        .unwrap();
+        fs::write(&beta_file, r#"{"model":"anthropic/claude-sonnet-4-beta"}"#).unwrap();
         let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         std::fs::OpenOptions::new()
             .write(true)
@@ -9789,7 +7637,10 @@ mod tests {
 
         apply_opencode_config_with_paths(
             &config_path,
-            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            &[
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -9806,7 +7657,10 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            &[
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
         )
         .unwrap();
 
@@ -9819,7 +7673,10 @@ mod tests {
 
     #[test]
     fn opencode_beta_takeover_adopts_stable_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-beta-adopts-stable");
         let config_path = root.join("opencode.json");
@@ -9847,7 +7704,10 @@ mod tests {
 
         apply_opencode_config_with_paths(
             &config_path,
-            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            &[
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -9864,7 +7724,10 @@ mod tests {
 
         let result = super::restore_opencode_config_with_backup_roots(
             &config_path,
-            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            &[
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         )
         .unwrap();
 
@@ -10012,16 +7875,23 @@ mod tests {
             Some(vec!["anthropic/*"])
         );
         assert!(connected_models.pointer("/providers/ollama").is_some());
-        assert!(connected_models.pointer("/providers/codexhub-openai").is_some());
+        assert!(connected_models
+            .pointer("/providers/codexhub-openai")
+            .is_some());
 
         let detach = super::pi_ownership_bounded_cleanup(&settings_path, &models_path).unwrap();
         assert!(detach.applied);
 
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         let detached_models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
         assert!(detached_models.pointer("/providers/ollama").is_some());
-        assert!(detached_models.pointer("/providers/codexhub-openai").is_none());
+        assert!(detached_models
+            .pointer("/providers/codexhub-openai")
+            .is_none());
         assert_eq!(
             detached_models
                 .pointer("/providers/ollama/models/0/id")
@@ -10077,7 +7947,9 @@ mod tests {
             Some("gpt-5.5")
         );
         assert!(written_models.pointer("/providers/ollama").is_some());
-        assert!(written_models.pointer("/providers/codexhub-openai").is_some());
+        assert!(written_models
+            .pointer("/providers/codexhub-openai")
+            .is_some());
     }
 
     #[test]
@@ -10123,7 +7995,10 @@ mod tests {
 
     #[test]
     fn pi_restore_skips_managed_snapshot_and_restores_clean_pair() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-restore");
         let settings_path = root.join("settings.json");
@@ -10166,9 +8041,12 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            super::restore_pi_config_with_paths(&settings_path, &models_path, &[stable_root(backup_root.clone())])
-                .unwrap();
+        let result = super::restore_pi_config_with_paths(
+            &settings_path,
+            &models_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         assert!(result.applied);
         // Restore results are sanitized: no absolute legacy backup path is exposed.
@@ -10184,7 +8062,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_empty_legacy_roots_removes_managed_config() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-empty-legacy-cleanup");
         let config_path = root.join("opencode.json");
@@ -10211,8 +8092,11 @@ mod tests {
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10229,7 +8113,10 @@ mod tests {
 
     #[test]
     fn pi_restore_missing_legacy_roots_removes_managed_config() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-missing-legacy-cleanup");
         let settings_path = root.join("settings.json");
@@ -10274,7 +8161,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_prefers_canonical_baseline_over_empty_legacy_roots() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-restore");
         let config_path = root.join("opencode.json");
@@ -10315,8 +8205,11 @@ mod tests {
         };
         super::write_rollback_baseline_atomic("opencode", &baseline).unwrap();
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10333,7 +8226,10 @@ mod tests {
 
     #[test]
     fn pi_restore_prefers_canonical_baseline_over_missing_legacy_roots() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-restore");
         let settings_path = root.join("settings.json");
@@ -10388,7 +8284,9 @@ mod tests {
             settings.get("theme").and_then(serde_json::Value::as_str),
             Some("dark")
         );
-        assert!(!fs::read_to_string(&models_path).unwrap().contains("codexhub"));
+        assert!(!fs::read_to_string(&models_path)
+            .unwrap()
+            .contains("codexhub"));
         assert_eq!(result.backup_path, None);
         assert_eq!(
             result.message,
@@ -10398,17 +8296,16 @@ mod tests {
 
     #[test]
     fn opencode_reapply_preserves_original_canonical_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-reapply-baseline");
         let config_path = root.join("opencode.json");
         let backup_root = root.join("backups");
         fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"anthropic/claude-sonnet-4"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
         let settings = Settings::default();
 
@@ -10429,8 +8326,11 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10445,7 +8345,10 @@ mod tests {
 
     #[test]
     fn pi_reapply_preserves_original_canonical_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-reapply-baseline");
         let settings_path = root.join("settings.json");
@@ -10513,7 +8416,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_adopts_eligible_legacy_snapshot_into_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-legacy-adoption");
         let config_path = root.join("opencode.json");
@@ -10521,20 +8427,15 @@ mod tests {
         let official_backup = backup_root.join("opencode-official.json");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&backup_root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"codexhub/openai/gpt-5.5"}"#,
-        )
-        .unwrap();
-        fs::write(
-            &official_backup,
-            r#"{"model":"anthropic/claude-sonnet-4"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
+        fs::write(&official_backup, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -10551,7 +8452,10 @@ mod tests {
 
     #[test]
     fn pi_restore_adopts_eligible_legacy_snapshot_into_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-legacy-adoption");
         let settings_path = root.join("settings.json");
@@ -10591,12 +8495,12 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
-        assert!(
-            fs::read_to_string(&settings_path)
-                .unwrap()
-                .contains("anthropic")
-        );
-        assert!(!fs::read_to_string(&models_path).unwrap().contains("codexhub"));
+        assert!(fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("anthropic"));
+        assert!(!fs::read_to_string(&models_path)
+            .unwrap()
+            .contains("codexhub"));
         assert_eq!(
             result.message,
             "Pi official config restored from legacy-adopted baseline."
@@ -10606,7 +8510,10 @@ mod tests {
 
     #[test]
     fn pi_stable_takeover_adopts_beta_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-stable-adopts-beta");
         let settings_path = root.join("settings.json");
@@ -10656,7 +8563,10 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            &[
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10675,7 +8585,10 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
+            &[
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
         )
         .unwrap();
 
@@ -10688,7 +8601,10 @@ mod tests {
 
     #[test]
     fn pi_beta_takeover_adopts_stable_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-beta-adopts-stable");
         let settings_path = root.join("settings.json");
@@ -10737,7 +8653,10 @@ mod tests {
         super::apply_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            &[
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
             &settings,
             &[],
             "openai/gpt-5.5",
@@ -10756,7 +8675,10 @@ mod tests {
         let result = super::restore_pi_config_with_paths(
             &settings_path,
             &models_path,
-            &[beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            &[
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         )
         .unwrap();
 
@@ -10769,7 +8691,10 @@ mod tests {
 
     #[test]
     fn opencode_equal_mtime_adoption_is_independent_of_caller() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-equal-mtime");
         let config_path = root.join("opencode.json");
@@ -10791,7 +8716,10 @@ mod tests {
         .unwrap();
         // Deliberately equal mtimes: channel/name must break the tie, not caller order.
         let shared_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-        for path in [stable_backups.join("opencode-stable.json"), beta_backups.join("opencode-beta.json")] {
+        for path in [
+            stable_backups.join("opencode-stable.json"),
+            beta_backups.join("opencode-beta.json"),
+        ] {
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(&path)
@@ -10802,8 +8730,14 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         for caller_roots in [
-            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
-            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            vec![
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
+            vec![
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -10839,7 +8773,10 @@ mod tests {
 
     #[test]
     fn pi_equal_mtime_adoption_is_independent_of_caller() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-equal-mtime");
         let settings_path = root.join("settings.json");
@@ -10895,8 +8832,14 @@ mod tests {
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
         for caller_roots in [
-            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
-            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            vec![
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
+            vec![
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -10933,7 +8876,10 @@ mod tests {
 
     #[test]
     fn opencode_equal_mtime_adoption_ignores_parent_path_channel_names() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-misleading-parent");
         let config_path = root.join("opencode.json");
@@ -10968,8 +8914,14 @@ mod tests {
         }
 
         for caller_roots in [
-            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
-            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            vec![
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
+            vec![
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -11005,7 +8957,10 @@ mod tests {
 
     #[test]
     fn pi_equal_mtime_adoption_ignores_parent_path_channel_names() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-misleading-parent");
         let settings_path = root.join("settings.json");
@@ -11061,8 +9016,14 @@ mod tests {
         }
 
         for caller_roots in [
-            vec![stable_root(stable_backups.clone()), beta_root(beta_backups.clone())],
-            vec![beta_root(beta_backups.clone()), stable_root(stable_backups.clone())],
+            vec![
+                stable_root(stable_backups.clone()),
+                beta_root(beta_backups.clone()),
+            ],
+            vec![
+                beta_root(beta_backups.clone()),
+                stable_root(stable_backups.clone()),
+            ],
         ] {
             let provenance_dir = root.join(format!(
                 "provenance-{}-{}-{}",
@@ -11099,7 +9060,10 @@ mod tests {
 
     #[test]
     fn pi_restore_absent_tombstone_removes_only_owned_targets() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-absent-tombstone");
         let settings_path = root.join("settings.json");
@@ -11148,7 +9112,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_malformed_config_fails_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed");
         let config_path = root.join("opencode.json");
@@ -11156,8 +9123,10 @@ mod tests {
         fs::write(&config_path, "not json").unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(root.join("backups"))]);
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(root.join("backups"))],
+        );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11166,7 +9135,10 @@ mod tests {
 
     #[test]
     fn pi_restore_ignores_malformed_settings_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-malformed");
         let settings_path = root.join("settings.json");
@@ -11195,17 +9167,16 @@ mod tests {
 
     #[test]
     fn opencode_apply_records_baseline_before_first_managed_write() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-first-apply-baseline");
         let config_path = root.join("opencode.json");
         let backup_root = root.join("backups");
         fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"anthropic/claude-sonnet-4"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
         let settings = Settings::default();
 
@@ -11231,7 +9202,10 @@ mod tests {
 
     #[test]
     fn pi_apply_records_absence_tombstone_before_first_managed_write() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-first-apply-tombstone");
         let settings_path = root.join("settings.json");
@@ -11268,17 +9242,16 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_corrupt_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-corrupt-baseline");
         let config_path = root.join("opencode.json");
         let provenance_dir = root.join("provenance");
         fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"codexhub/openai/gpt-5.5"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         fs::create_dir_all(provenance_dir.join("opencode")).unwrap();
         fs::write(
             provenance_dir.join("opencode").join("baseline.json"),
@@ -11308,17 +9281,16 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_unsupported_baseline_version() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-version");
         let config_path = root.join("opencode.json");
         let provenance_dir = root.join("provenance");
         fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"codexhub/openai/gpt-5.5"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
         fs::create_dir_all(provenance_dir.join("opencode")).unwrap();
         fs::write(
@@ -11348,7 +9320,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_corrupt_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-corrupt-baseline");
         let settings_path = root.join("settings.json");
@@ -11387,7 +9362,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_unsupported_baseline_version() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-version");
         let settings_path = root.join("settings.json");
@@ -11430,7 +9408,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_incomplete_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-incomplete-baseline");
         let settings_path = root.join("settings.json");
@@ -11481,7 +9462,10 @@ mod tests {
 
     #[test]
     fn opencode_canonical_restore_preserves_exact_bytes() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-byte-for-byte");
         let config_path = root.join("opencode.json");
@@ -11489,11 +9473,7 @@ mod tests {
         let provenance_dir = root.join("provenance");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&backup_root).unwrap();
-        fs::write(
-            &config_path,
-            r#"{"model":"codexhub/openai/gpt-5.5"}"#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
         let original_snapshot =
             r#"{"model":"anthropic/claude-sonnet-4","codexhub_managed":false,"extra":1}"#;
@@ -11511,8 +9491,11 @@ mod tests {
         };
         super::write_rollback_baseline_atomic("opencode", &baseline).unwrap();
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -11525,7 +9508,10 @@ mod tests {
 
     #[test]
     fn pi_cleanup_preserves_unrelated_enabled_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-enabled");
         let settings_path = root.join("settings.json");
@@ -11555,14 +9541,21 @@ mod tests {
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         assert_eq!(
-            settings.get("defaultProvider").and_then(serde_json::Value::as_str),
+            settings
+                .get("defaultProvider")
+                .and_then(serde_json::Value::as_str),
             Some("codexhub-openai")
         );
         assert_eq!(
-            settings.get("defaultModel").and_then(serde_json::Value::as_str),
+            settings
+                .get("defaultModel")
+                .and_then(serde_json::Value::as_str),
             Some("gpt-5.5")
         );
-        assert_eq!(settings.get("theme").and_then(serde_json::Value::as_str), Some("dark"));
+        assert_eq!(
+            settings.get("theme").and_then(serde_json::Value::as_str),
+            Some("dark")
+        );
         let enabled = settings
             .get("enabledModels")
             .and_then(serde_json::Value::as_array)
@@ -11575,7 +9568,10 @@ mod tests {
 
     #[test]
     fn pi_cleanup_detaches_models_without_requiring_managed_settings() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-unmanaged-settings");
         let settings_path = root.join("settings.json");
@@ -11600,13 +9596,19 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert!(!models_path.exists());
     }
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_enabled_models_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-shape");
         let settings_path = root.join("settings.json");
@@ -11631,13 +9633,19 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert!(!models_path.exists());
     }
 
     #[test]
     fn opencode_cleanup_rejects_malformed_provider_entries_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-provider-entries");
         let config_path = root.join("opencode.json");
@@ -11656,7 +9664,10 @@ mod tests {
 
     #[test]
     fn pi_cleanup_leaves_user_activation_even_when_enabled_models_are_heterogeneous() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-heterogeneous-enabled");
         let settings_path = root.join("settings.json");
@@ -11676,7 +9687,10 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.unwrap().applied);
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         let models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
         assert!(models.pointer("/providers/codexhub-openai").is_none());
@@ -11685,17 +9699,18 @@ mod tests {
 
     #[test]
     fn pi_cleanup_rejects_malformed_provider_entries_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-provider-entries");
         let settings_path = root.join("settings.json");
         let models_path = root.join("models.json");
         fs::create_dir_all(&root).unwrap();
-        let original_settings =
-            r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#;
+        let original_settings = r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#;
         fs::write(&settings_path, original_settings).unwrap();
-        let original_models =
-            r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]},"unrelated":"not-an-object"}}"#;
+        let original_models = r#"{"providers":{"codexhub-openai":{"models":[{"id":"gpt-5.5"}]},"unrelated":"not-an-object"}}"#;
         fs::write(&models_path, original_models).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
@@ -11704,13 +9719,19 @@ mod tests {
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("malformed entries"));
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
     }
 
     #[test]
     fn opencode_cleanup_rejects_wrong_shaped_model_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-model-shape");
         let config_path = root.join("opencode.json");
@@ -11729,7 +9750,10 @@ mod tests {
 
     #[test]
     fn opencode_cleanup_rejects_wrong_shaped_provider_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-provider-shape");
         let config_path = root.join("opencode.json");
@@ -11748,13 +9772,17 @@ mod tests {
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_default_provider_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-provider-shape");
         let settings_path = root.join("settings.json");
         let models_path = root.join("models.json");
         fs::create_dir_all(&root).unwrap();
-        let original_settings = r#"{"defaultProvider":["codexhub-openai"],"defaultModel":"gpt-5.5"}"#;
+        let original_settings =
+            r#"{"defaultProvider":["codexhub-openai"],"defaultModel":"gpt-5.5"}"#;
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
@@ -11767,19 +9795,26 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.unwrap().applied);
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert!(!models_path.exists());
     }
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_default_model_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-model-shape");
         let settings_path = root.join("settings.json");
         let models_path = root.join("models.json");
         fs::create_dir_all(&root).unwrap();
-        let original_settings = r#"{"defaultProvider":"codexhub-openai","defaultModel":{"id":"gpt-5.5"}}"#;
+        let original_settings =
+            r#"{"defaultProvider":"codexhub-openai","defaultModel":{"id":"gpt-5.5"}}"#;
         fs::write(&settings_path, original_settings).unwrap();
         fs::write(
             &models_path,
@@ -11792,13 +9827,19 @@ mod tests {
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.unwrap().applied);
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert!(!models_path.exists());
     }
 
     #[test]
     fn opencode_cleanup_write_failure_has_no_absolute_paths() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-write-fail");
         let config_path = root.join("opencode.json");
@@ -11827,7 +9868,10 @@ mod tests {
 
     #[test]
     fn pi_cleanup_write_failure_has_no_absolute_paths() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-write-fail");
         let settings_path = root.join("settings.json");
@@ -11862,7 +9906,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_malformed_legacy_snapshot() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed-legacy");
         let config_path = root.join("opencode.json");
@@ -11873,7 +9920,10 @@ mod tests {
         fs::write(backup_root.join("opencode-official.json"), "not json").unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]);
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11887,7 +9937,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_incomplete_legacy_snapshot() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-incomplete-legacy");
         let settings_path = root.join("settings.json");
@@ -11932,7 +9985,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_legacy_snapshot_with_malformed_provider_entries() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed-provider-legacy");
         let config_path = root.join("opencode.json");
@@ -11947,7 +10003,10 @@ mod tests {
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result = super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]);
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        );
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.is_err());
@@ -11957,7 +10016,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_legacy_snapshot_with_heterogeneous_enabled_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-heterogeneous-enabled-legacy");
         let settings_path = root.join("settings.json");
@@ -12002,7 +10064,10 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_legacy_snapshot_with_malformed_provider_entries() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-malformed-provider-legacy");
         let settings_path = root.join("settings.json");
@@ -12047,7 +10112,10 @@ mod tests {
 
     #[test]
     fn opencode_restore_result_has_no_absolute_paths_or_contents() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-sanitized-restore");
         let config_path = root.join("opencode.json");
@@ -12058,8 +10126,11 @@ mod tests {
         fs::write(&config_path, r#"{"model":"codexhub/openai/gpt-5.5"}"#).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         let json = serde_json::to_string(&result).unwrap();
@@ -12067,13 +10138,19 @@ mod tests {
             !json.contains(&root.to_string_lossy().to_string()),
             "absolute path leaked: {json}"
         );
-        assert!(!json.contains("codexhub/openai/gpt-5.5"), "config content leaked: {json}");
+        assert!(
+            !json.contains("codexhub/openai/gpt-5.5"),
+            "config content leaked: {json}"
+        );
         assert!(json.contains("OpenCode"));
     }
 
     #[test]
     fn opencode_concurrent_legacy_adoption_yields_one_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-concurrent-legacy-adoption");
         let config_path = root.join("opencode.json");
@@ -12087,7 +10164,11 @@ mod tests {
         let stable_file = stable_backups.join("opencode-stable.json");
         let beta_file = beta_backups.join("opencode-beta.json");
         // Baseline A from Stable, baseline B from Beta; both are complete and eligible.
-        fs::write(&stable_file, r#"{"model":"anthropic/claude-sonnet-4-stable"}"#).unwrap();
+        fs::write(
+            &stable_file,
+            r#"{"model":"anthropic/claude-sonnet-4-stable"}"#,
+        )
+        .unwrap();
         fs::write(&beta_file, r#"{"model":"anthropic/claude-sonnet-4-beta"}"#).unwrap();
         // Beta candidate is strictly newer, but the first publisher still wins.
         let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
@@ -12103,7 +10184,9 @@ mod tests {
             {
                 let config_path = config_path.clone();
                 let stable_roots = vec![stable_root(stable_backups.clone())];
-                move || super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+                move || {
+                    super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+                }
             },
             {
                 let config_path = config_path.clone();
@@ -12135,7 +10218,10 @@ mod tests {
 
     #[test]
     fn pi_concurrent_legacy_adoption_yields_one_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-concurrent-legacy-adoption");
         let settings_path = root.join("settings.json");
@@ -12200,13 +10286,17 @@ mod tests {
                 let settings_path = settings_path.clone();
                 let models_path = models_path.clone();
                 let stable_roots = vec![stable_root(stable_backups.clone())];
-                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+                move || {
+                    super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+                }
             },
             {
                 let settings_path = settings_path.clone();
                 let models_path = models_path.clone();
                 let beta_roots = vec![beta_root(beta_backups.clone())];
-                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+                move || {
+                    super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+                }
             },
         );
 
@@ -12240,7 +10330,10 @@ mod tests {
 
     #[test]
     fn opencode_concurrent_legacy_adoption_preserves_first_winner() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-immutability-race");
         let config_path = root.join("opencode.json");
@@ -12275,7 +10368,9 @@ mod tests {
             {
                 let config_path = config_path.clone();
                 let stable_roots = vec![stable_root(stable_backups.clone())];
-                move || super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+                move || {
+                    super::restore_opencode_config_with_backup_roots(&config_path, &stable_roots)
+                }
             },
             {
                 let config_path = config_path.clone();
@@ -12307,7 +10402,10 @@ mod tests {
 
     #[test]
     fn pi_concurrent_legacy_adoption_preserves_first_winner() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-immutability-race");
         let settings_path = root.join("settings.json");
@@ -12369,13 +10467,17 @@ mod tests {
                 let settings_path = settings_path.clone();
                 let models_path = models_path.clone();
                 let stable_roots = vec![stable_root(stable_backups.clone())];
-                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+                move || {
+                    super::restore_pi_config_with_paths(&settings_path, &models_path, &stable_roots)
+                }
             },
             {
                 let settings_path = settings_path.clone();
                 let models_path = models_path.clone();
                 let beta_roots = vec![beta_root(beta_backups.clone())];
-                move || super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+                move || {
+                    super::restore_pi_config_with_paths(&settings_path, &models_path, &beta_roots)
+                }
             },
         );
 
@@ -12412,7 +10514,10 @@ mod tests {
         use super::{
             apply_gateway_client_config_isolated, validate_isolated_root, IsolatedClientApplyInput,
         };
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = unique_temp_dir("isolated-default-provenance");
         let isolated = validate_isolated_root(&root).unwrap();
         let settings = Settings {
@@ -12434,7 +10539,10 @@ mod tests {
         let result = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
         assert!(result.applied);
 
-        let default_provenance = root.join("rollback-provenance").join("opencode").join("baseline.json");
+        let default_provenance = root
+            .join("rollback-provenance")
+            .join("opencode")
+            .join("baseline.json");
         assert!(
             default_provenance.exists(),
             "default isolated apply must write provenance beneath the isolated root"
@@ -12443,7 +10551,10 @@ mod tests {
 
     #[test]
     fn opencode_first_baseline_creation_is_process_atomic() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-concurrent-baseline");
         let config_path = root.join("opencode.json");
@@ -12492,7 +10603,10 @@ mod tests {
 
     #[test]
     fn pi_first_baseline_creation_is_process_atomic() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-concurrent-baseline");
         let settings_path = root.join("settings.json");
@@ -12503,8 +10617,7 @@ mod tests {
         fs::create_dir_all(&backup_root).unwrap();
         let clean_settings =
             r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4","theme":"dark"}"#;
-        let clean_models =
-            r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4"}]}}}"#;
+        let clean_models = r#"{"providers":{"anthropic":{"models":[{"id":"claude-sonnet-4"}]}}}"#;
         fs::write(&settings_path, clean_settings).unwrap();
         fs::write(&models_path, clean_models).unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
@@ -12552,7 +10665,10 @@ mod tests {
 
     #[test]
     fn opencode_baseline_write_failure_leaves_targets_intact() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-failure");
         let config_path = root.join("opencode.json");
@@ -12589,7 +10705,10 @@ mod tests {
 
     #[test]
     fn pi_baseline_write_failure_leaves_targets_intact() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-failure");
         let settings_path = root.join("settings.json");
@@ -12626,14 +10745,20 @@ mod tests {
             !error.contains(&root.to_string_lossy().to_string()),
             "absolute path leaked in error: {error}"
         );
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            original_settings
+        );
         assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
         assert!(!blocker.join("provenance").exists());
     }
 
     #[test]
     fn opencode_restore_empty_legacy_roots_classifies_bounded_cleanup() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-classification");
         let config_path = root.join("opencode.json");
@@ -12660,8 +10785,11 @@ mod tests {
         .unwrap();
         std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
-        let result =
-            super::restore_opencode_config_with_backup_roots(&config_path, &[stable_root(backup_root.clone())]).unwrap();
+        let result = super::restore_opencode_config_with_backup_roots(
+            &config_path,
+            &[stable_root(backup_root.clone())],
+        )
+        .unwrap();
 
         restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
         assert!(result.applied);
@@ -13067,7 +11195,10 @@ mod tests {
 
     #[test]
     fn public_apply_rejects_other_channel_managed_config_without_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
         let root = unique_temp_dir("codexhub-opencode-public-apply-owner");
         let config_path = root.join("opencode.json");
@@ -13086,7 +11217,10 @@ mod tests {
 
     #[test]
     fn public_restore_rejects_other_channel_managed_config_without_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
         let root = unique_temp_dir("codexhub-opencode-public-restore-owner");
         let config_path = root.join("opencode.json");
@@ -13551,8 +11685,10 @@ mod tests {
             .unwrap()
             .as_millis();
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir()
-            .join(format!("{prefix}-{millis}-{}-{counter}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "{prefix}-{millis}-{}-{counter}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -13561,9 +11697,18 @@ mod tests {
         let b = unique_temp_dir("codexhub-test");
         let name_a = a.file_name().unwrap().to_string_lossy();
         let name_b = b.file_name().unwrap().to_string_lossy();
-        assert!(name_a.starts_with("codexhub-test-"), "unexpected name: {name_a}");
-        assert!(name_a.contains(&format!("-{}-", std::process::id())), "missing pid: {name_a}");
-        assert_ne!(name_a, name_b, "consecutive dirs must differ: {name_a} == {name_b}");
+        assert!(
+            name_a.starts_with("codexhub-test-"),
+            "unexpected name: {name_a}"
+        );
+        assert!(
+            name_a.contains(&format!("-{}-", std::process::id())),
+            "missing pid: {name_a}"
+        );
+        assert_ne!(
+            name_a, name_b,
+            "consecutive dirs must differ: {name_a} == {name_b}"
+        );
     }
 
     fn write_beta_owned_opencode_config(path: &PathBuf) {
@@ -13604,7 +11749,8 @@ mod tests {
             validate_isolated_root, IsolatedClientApplyInput,
         };
         use super::{
-            case_sensitive_client_export_test_providers, stable_root, unique_temp_dir, TEST_ENV_LOCK,
+            case_sensitive_client_export_test_providers, stable_root, unique_temp_dir,
+            TEST_ENV_LOCK,
         };
         use crate::{Model, Provider, Settings, UpstreamFormat};
         use serde_json::json;
@@ -13670,7 +11816,12 @@ mod tests {
             providers
         }
 
-        fn input(client_id: &str, model: &str, settings: Settings, providers: Vec<Provider>) -> IsolatedClientApplyInput {
+        fn input(
+            client_id: &str,
+            model: &str,
+            settings: Settings,
+            providers: Vec<Provider>,
+        ) -> IsolatedClientApplyInput {
             IsolatedClientApplyInput {
                 client_id: client_id.to_string(),
                 model: Some(model.to_string()),
@@ -13795,7 +11946,10 @@ mod tests {
 
         #[test]
         fn isolated_apply_then_readback_round_trips_for_omp() {
-            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = TEST_ENV_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let root = fresh_root("apply-omp");
             let isolated = validate_isolated_root(&root).unwrap();
             let settings = settings_with_port(9099);
@@ -13804,7 +11958,9 @@ mod tests {
 
             let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
             assert!(apply.applied);
-            assert!(!serde_json::to_string(&apply).unwrap().contains("isolated-key"));
+            assert!(!serde_json::to_string(&apply)
+                .unwrap()
+                .contains("isolated-key"));
 
             let readback = readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
             assert!(readback.ok);
@@ -13813,7 +11969,10 @@ mod tests {
 
         #[test]
         fn isolated_five_client_switches_round_trip_without_host_writes() {
-            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = TEST_ENV_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let cases = [
                 ("opencode", UpstreamFormat::Responses),
                 ("zcode", UpstreamFormat::Responses),
@@ -13837,9 +11996,11 @@ mod tests {
                 }
                 let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
                 assert!(apply.applied, "{client_id} connect did not apply");
-                assert!(readback_gateway_client_config_isolated(&isolated, &inp)
-                    .unwrap()
-                    .ok);
+                assert!(
+                    readback_gateway_client_config_isolated(&isolated, &inp)
+                        .unwrap()
+                        .ok
+                );
 
                 let targets = isolated_client_apply_targets(&isolated, client_id).unwrap();
                 let backup_roots = [stable_root(targets.backup_path().to_path_buf())];
@@ -13892,7 +12053,8 @@ mod tests {
         // then rewrites the provider id to a real contradiction and confirms
         // readback still fails closed.
         #[test]
-        fn zcode_readback_tolerates_arbitrary_persisted_timestamps_but_fails_on_real_contradiction() {
+        fn zcode_readback_tolerates_arbitrary_persisted_timestamps_but_fails_on_real_contradiction()
+        {
             let root = fresh_root("zcode-deterministic-readback");
             let isolated = validate_isolated_root(&root).unwrap();
             let settings = settings_with_port(9099);
@@ -13907,13 +12069,19 @@ mod tests {
             // readback could regenerate. Readback must reuse these persisted
             // values, not regenerate timestamp_millis().
             let targets = isolated_client_apply_targets(&isolated, "zcode").unwrap();
-            for path in [targets.writable_paths()[0].clone(), targets.writable_paths()[2].clone()] {
+            for path in [
+                targets.writable_paths()[0].clone(),
+                targets.writable_paths()[2].clone(),
+            ] {
                 let text = fs::read_to_string(&path).unwrap();
                 let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
                 let providers_arr = value
-                    .as_object_mut().unwrap()
-                    .get_mut("providers").unwrap()
-                    .as_array_mut().unwrap();
+                    .as_object_mut()
+                    .unwrap()
+                    .get_mut("providers")
+                    .unwrap()
+                    .as_array_mut()
+                    .unwrap();
                 for provider in providers_arr.iter_mut() {
                     provider["createdAt"] = json!(1_700_000_000_000_u64);
                     provider["updatedAt"] = json!(1_700_000_000_000_u64);
@@ -13931,10 +12099,17 @@ mod tests {
             let text = fs::read_to_string(&catalog_path).unwrap();
             let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
             value
-                .as_object_mut().unwrap()
-                .get_mut("providers").unwrap()
-                .as_array_mut().unwrap()[0]["id"] = json!("tampered-provider");
-            fs::write(&catalog_path, serde_json::to_string_pretty(&value).unwrap() + "\n").unwrap();
+                .as_object_mut()
+                .unwrap()
+                .get_mut("providers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap()[0]["id"] = json!("tampered-provider");
+            fs::write(
+                &catalog_path,
+                serde_json::to_string_pretty(&value).unwrap() + "\n",
+            )
+            .unwrap();
 
             let error = readback_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
             assert!(
@@ -14060,7 +12235,11 @@ mod tests {
         fn table_driven_all_native_clients_round_trip_across_route_selections() {
             let cases: &[(&str, UpstreamFormat, &str)] = &[
                 ("opencode", UpstreamFormat::Responses, "responses"),
-                ("opencode", UpstreamFormat::ChatCompletions, "chat_completions"),
+                (
+                    "opencode",
+                    UpstreamFormat::ChatCompletions,
+                    "chat_completions",
+                ),
                 ("pi", UpstreamFormat::Responses, "responses"),
                 ("pi", UpstreamFormat::ChatCompletions, "chat_completions"),
                 ("omp", UpstreamFormat::Responses, "responses"),
@@ -14078,11 +12257,19 @@ mod tests {
 
                 let preview = isolated_client_preview(&isolated, &inp).unwrap();
                 assert_eq!(preview.client_id, *client_id, "{label}: client_id");
-                assert_eq!(preview.route_protocol, *expected_protocol, "{label}: route_protocol");
-                assert!(!preview.next_redacted.contains("isolated-key"), "{label}: secret leaked in preview");
+                assert_eq!(
+                    preview.route_protocol, *expected_protocol,
+                    "{label}: route_protocol"
+                );
+                assert!(
+                    !preview.next_redacted.contains("isolated-key"),
+                    "{label}: secret leaked in preview"
+                );
                 for target in &preview.target_names {
                     assert!(
-                        !target.contains(':') && !target.starts_with('/') && !target.starts_with('\\'),
+                        !target.contains(':')
+                            && !target.starts_with('/')
+                            && !target.starts_with('\\'),
                         "{label}: absolute path leaked: {target}"
                     );
                 }
@@ -14090,18 +12277,30 @@ mod tests {
                 let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
                 assert!(apply.applied, "{label}: apply.applied");
                 let apply_json = serde_json::to_string(&apply).unwrap();
-                assert!(!apply_json.contains("isolated-key"), "{label}: secret leaked in apply");
+                assert!(
+                    !apply_json.contains("isolated-key"),
+                    "{label}: secret leaked in apply"
+                );
                 assert!(
                     !apply_json.contains(&root.to_string_lossy().to_string()),
                     "{label}: absolute path leaked in apply"
                 );
-                assert_eq!(apply.route_protocol, *expected_protocol, "{label}: apply route_protocol");
+                assert_eq!(
+                    apply.route_protocol, *expected_protocol,
+                    "{label}: apply route_protocol"
+                );
 
                 let readback = readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
                 assert!(readback.ok, "{label}: readback.ok");
-                assert_eq!(readback.route_protocol, *expected_protocol, "{label}: readback route_protocol");
+                assert_eq!(
+                    readback.route_protocol, *expected_protocol,
+                    "{label}: readback route_protocol"
+                );
                 let readback_json = serde_json::to_string(&readback).unwrap();
-                assert!(!readback_json.contains("isolated-key"), "{label}: secret leaked in readback");
+                assert!(
+                    !readback_json.contains("isolated-key"),
+                    "{label}: secret leaked in readback"
+                );
             }
         }
 
@@ -14251,14 +12450,24 @@ mod tests {
 
             let preview_responses = isolated_client_preview(
                 &isolated,
-                &input("opencode", "volc/glm-5.2", settings.clone(), volc_provider(UpstreamFormat::Responses)),
+                &input(
+                    "opencode",
+                    "volc/glm-5.2",
+                    settings.clone(),
+                    volc_provider(UpstreamFormat::Responses),
+                ),
             )
             .unwrap();
             assert_eq!(preview_responses.route_protocol, "responses");
 
             let preview_chat = isolated_client_preview(
                 &isolated,
-                &input("opencode", "volc/glm-5.2", settings, volc_provider(UpstreamFormat::ChatCompletions)),
+                &input(
+                    "opencode",
+                    "volc/glm-5.2",
+                    settings,
+                    volc_provider(UpstreamFormat::ChatCompletions),
+                ),
             )
             .unwrap();
             assert_eq!(preview_chat.route_protocol, "chat_completions");
@@ -14330,21 +12539,41 @@ mod tests {
 
             // Missing file.
             let missing = root.join("opencode").join("opencode.json");
-            let err = verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2")
-                .unwrap_err();
+            let err = verify_apply_readback(
+                "opencode",
+                std::slice::from_ref(&missing),
+                &settings,
+                &providers,
+                "volc/glm-5.2",
+            )
+            .unwrap_err();
             assert!(err.contains("missing"), "{err}");
 
             // Malformed + non-round-tripping: write a non-managed config.
             fs::create_dir_all(missing.parent().unwrap()).unwrap();
             fs::write(&missing, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
-            let err = verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2")
-                .unwrap_err();
+            let err = verify_apply_readback(
+                "opencode",
+                std::slice::from_ref(&missing),
+                &settings,
+                &providers,
+                "volc/glm-5.2",
+            )
+            .unwrap_err();
             assert!(err.contains("round-trip"), "{err}");
 
             // Correct production output round-trips.
-            let expected = super::super::opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+            let expected =
+                super::super::opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
             fs::write(&missing, &expected).unwrap();
-            verify_apply_readback("opencode", std::slice::from_ref(&missing), &settings, &providers, "volc/glm-5.2").unwrap();
+            verify_apply_readback(
+                "opencode",
+                std::slice::from_ref(&missing),
+                &settings,
+                &providers,
+                "volc/glm-5.2",
+            )
+            .unwrap();
         }
 
         #[test]
@@ -14365,7 +12594,9 @@ mod tests {
                 // assertion when the platform refuses, since the junction test
                 // below covers the reparse-point path deterministically.
                 if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
-                    eprintln!("skipped symlink_root test: Windows symlink creation needs Developer Mode");
+                    eprintln!(
+                        "skipped symlink_root test: Windows symlink creation needs Developer Mode"
+                    );
                     return;
                 }
             }
@@ -14388,10 +12619,19 @@ mod tests {
             // Directory junctions do not require admin/Developer Mode and are
             // the canonical reparse-point fixture on Windows CI.
             let status = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &real.to_string_lossy(),
+                ])
                 .status()
                 .unwrap();
-            assert!(status.success(), "CI must provide a directory junction fixture");
+            assert!(
+                status.success(),
+                "CI must provide a directory junction fixture"
+            );
 
             let err = validate_isolated_root(&link).unwrap_err();
             assert!(
@@ -14409,10 +12649,19 @@ mod tests {
             fs::create_dir_all(&real).unwrap();
             let link = parent.join("junction-existing");
             let status = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &real.to_string_lossy(),
+                ])
                 .status()
                 .unwrap();
-            assert!(status.success(), "CI must provide a directory junction fixture");
+            assert!(
+                status.success(),
+                "CI must provide a directory junction fixture"
+            );
 
             let err = super::super::validate_existing_isolated_root(&link).unwrap_err();
             assert!(
@@ -14530,7 +12779,13 @@ mod tests {
             {
                 std::fs::hard_link(&real_file, &link_file).unwrap();
                 use std::os::windows::fs::MetadataExt;
-                assert_eq!(std::fs::symlink_metadata(&link_file).unwrap().file_attributes() & 0x400, 0);
+                assert_eq!(
+                    std::fs::symlink_metadata(&link_file)
+                        .unwrap()
+                        .file_attributes()
+                        & 0x400,
+                    0
+                );
             }
             // Sanity: the hard link fixture exists; the directory-root guard
             // is covered by the symlink/junction tests above.

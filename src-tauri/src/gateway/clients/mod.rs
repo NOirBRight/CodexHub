@@ -1,3 +1,4 @@
+pub(super) mod codex;
 pub(super) mod dsh;
 pub(super) mod omp;
 pub(super) mod opencode;
