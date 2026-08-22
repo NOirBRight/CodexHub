@@ -11,15 +11,12 @@
     "windows": [
       {
         "title": "CodexHub",
-        "width": 1024,
-        "height": 768,
-        "minWidth": 800,
-        "minHeight": 600,
+        "width": 1280,
+        "height": 930,
+        "minWidth": 1024,
+        "minHeight": 800,
         "decorations": false,
-        "resizable": true,
-        "transparent": true,
-        "backgroundColor": "#00000000",
-        "skipTaskbar": false
+        "resizable": true
       }
     ],
     "security": {

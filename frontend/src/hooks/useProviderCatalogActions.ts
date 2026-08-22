@@ -233,7 +233,20 @@ export function useProviderCatalogActions({
       onProvidersChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
+        try {
+          syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
+        } catch (err) {
+          updateToast(activeToastId, {
+            action: null,
+            text: t("providers.providerSavedCatalogWarning", {
+              saved: successMessage ?? t("providers.providerDataSaved"),
+              message: messageFromError(err),
+            }),
+            tone: "success",
+          });
+          setError(null);
+          return saved;
+        }
       }
       const toastMessage = catalogSyncToastMessage(
         successMessage ?? t("providers.providerCatalogUpdated"),

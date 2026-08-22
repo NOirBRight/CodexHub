@@ -479,6 +479,8 @@ const enUS = {
     pricingPartial: "Pricing partial",
     pricingUnknown: "Pricing unknown",
     providerCatalogUpdated: "Provider catalog updated",
+    providerDataSaved: "Provider data saved",
+    providerSavedCatalogWarning: "{{saved}}; provider data is saved, but catalog/client refresh needs attention: {{message}}",
     providerCatalogUpdateFailed: "Provider catalog update failed",
     catalogOverrideDiagnostics: "Catalog overrides: {{accepted}} accepted, {{migrated}} migrated, {{rejected}} rejected. {{restart}}",
     catalogOverrideRestartCodex: "Restart Codex App to apply",

@@ -47,6 +47,7 @@ const designPath = new URL("../../DESIGN.md", import.meta.url);
 const userFeedbackStandardPath = new URL("../../docs/agents/user-feedback.md", import.meta.url);
 const preparePythonRuntimePath = new URL("../../scripts/Prepare-PythonRuntime.ps1", import.meta.url);
 const tauriConfigPath = new URL("../../src-tauri/tauri.conf.json", import.meta.url);
+const tauriLinuxConfigPath = new URL("../../src-tauri/tauri.linux.conf.json", import.meta.url);
 const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default.json", import.meta.url);
 const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
 const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
@@ -566,14 +567,20 @@ test("linux window stays rounded, on the dock, and uses a real tray png", async 
   assert.doesNotMatch(linuxWindowSource, /set_opaque_region/);
 });
 
-test("main desktop window opens at the release candidate height", async () => {
+test("Linux desktop window opens at the release candidate height without changing other platforms", async () => {
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
-  const mainWindow = tauriConfig.app.windows[0];
+  const linuxConfig = JSON.parse(await readFile(tauriLinuxConfigPath, "utf8"));
+  const defaultWindow = tauriConfig.app.windows[0];
+  const linuxWindow = linuxConfig.app.windows[0];
 
-  assert.equal(mainWindow.width, 1024);
-  assert.equal(mainWindow.height, 768);
-  assert.equal(mainWindow.minWidth, 800);
-  assert.equal(mainWindow.minHeight, 600);
+  assert.equal(defaultWindow.width, 1280);
+  assert.equal(defaultWindow.height, 930);
+  assert.equal(defaultWindow.minWidth, 1024);
+  assert.equal(defaultWindow.minHeight, 800);
+  assert.equal(linuxWindow.width, 1024);
+  assert.equal(linuxWindow.height, 768);
+  assert.equal(linuxWindow.minWidth, 800);
+  assert.equal(linuxWindow.minHeight, 600);
 });
 
 test("tauri config enables cross-platform updater packaging", async () => {
@@ -1479,7 +1486,7 @@ test("desktop shell and confirmations use rounded Linux-safe surfaces", async ()
     readFile(confirmDialogPath, "utf8"),
     readFile(providerModelSectionPath, "utf8"),
     readFile(indexCssPath, "utf8"),
-    readFile(tauriConfigPath, "utf8"),
+    readFile(tauriLinuxConfigPath, "utf8"),
   ]);
   const tauriConfig = JSON.parse(tauriConfigSource);
 
@@ -1489,6 +1496,8 @@ test("desktop shell and confirmations use rounded Linux-safe surfaces", async ()
   assert.ok(providersSource.includes("useConfirmDialog"));
   assert.ok(dialogSource.includes('role="dialog"'));
   assert.ok(dialogSource.includes("rounded-overlay"));
+  assert.ok(dialogSource.includes('document.getElementById("root")'));
+  assert.ok(!dialogSource.includes("document.body"));
   assert.ok(providersSource.includes("max-w-[420px] gap-4 rounded-overlay"));
   assert.ok(modelSource.includes("max-w-[760px] overflow-hidden rounded-overlay"));
   assert.ok(cssSource.includes("background: transparent;"));
@@ -1503,8 +1512,16 @@ test("provider persistence reports downstream client sync failures as non-blocki
   const end = source.indexOf("async function refreshProviderModels", start);
   const saveProviders = source.slice(start, end);
 
+  const persistenceIndex = saveProviders.indexOf("const saved = await api.saveProviders(next)");
+  const publicationGuardIndex = saveProviders.indexOf("try {", persistenceIndex + 1);
+  const publicationWarningIndex = saveProviders.indexOf('t("providers.providerSavedCatalogWarning"');
+
+  assert.ok(persistenceIndex >= 0);
+  assert.ok(publicationGuardIndex > persistenceIndex);
+  assert.ok(publicationWarningIndex > publicationGuardIndex);
   assert.ok(saveProviders.includes('if (syncResult?.failed)'));
   assert.ok(saveProviders.includes('tone: "success"'));
+  assert.ok(saveProviders.includes("return saved;"));
   assert.ok(!saveProviders.includes('tone: "error"'));
 });
 
@@ -1943,14 +1960,20 @@ test("providers page uses stable zero-min split columns", async () => {
   assert.doesNotMatch(providersSource, /grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
 });
 
-test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
+test("fit stage uses the compact 0.93 scale only on Linux", async () => {
   const fitStageSource = await readFile(new URL("../src/components/FitStage.tsx", import.meta.url), "utf8");
   const cssSource = await readFile(indexCssPath, "utf8");
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
+  const linuxConfig = JSON.parse(await readFile(tauriLinuxConfigPath, "utf8"));
 
   assert.match(fitStageSource, /export const FIT_STAGE_WIDTH = 1024/);
   assert.match(fitStageSource, /export const FIT_STAGE_HEIGHT = 768/);
   assert.match(fitStageSource, /export const FIT_STAGE_SCALE = 0\.93/);
+  assert.match(fitStageSource, /DEFAULT_FIT_STAGE_WIDTH = 1280/);
+  assert.match(fitStageSource, /DEFAULT_FIT_STAGE_HEIGHT = 960/);
+  assert.match(fitStageSource, /const linuxViewport = isLinuxViewport\(\)/);
+  assert.match(fitStageSource, /if \(!linuxViewport\)/);
+  assert.match(fitStageSource, /syncLinuxViewportMetrics/);
   assert.match(fitStageSource, /className="relative h-full w-full overflow-hidden bg-canvas"/);
   assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
   assert.match(fitStageSource, /setWebviewZoom\(1\)/);
@@ -1959,9 +1982,11 @@ test("fit stage uses a slight 0.93 scale over a 1024x768 window", async () => {
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
   assert.match(cssSource, /#root \{[\s\S]*?background: #f8f8f7;/);
   assert.match(cssSource, /#root \{[\s\S]*?border-radius: 16px;/);
-  assert.equal(tauriConfig.app.windows[0].transparent, true);
-  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
-  assert.equal(tauriConfig.app.windows[0].skipTaskbar, false);
+  assert.equal(tauriConfig.app.windows[0].width, 1280);
+  assert.equal("transparent" in tauriConfig.app.windows[0], false);
+  assert.equal(linuxConfig.app.windows[0].transparent, true);
+  assert.equal(linuxConfig.app.windows[0].backgroundColor, "#00000000");
+  assert.equal(linuxConfig.app.windows[0].skipTaskbar, false);
 });
 
 test("app content region owns horizontal overflow for minimum-width pages", async () => {

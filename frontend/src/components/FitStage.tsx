@@ -1,24 +1,59 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useLayoutEffect, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-/** Default window is 1024x768. Layout is slightly smaller than 1:1 so type stays readable without clipping. */
+/** Linux uses the compact 1024x768 shell; other platforms retain the beta3 desktop geometry. */
 export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
 export const FIT_STAGE_SCALE = 0.93;
+const DEFAULT_FIT_STAGE_WIDTH = 1280;
+const DEFAULT_FIT_STAGE_HEIGHT = 960;
 
 export function FitStage({ children }: { children: ReactNode }) {
-  const [metrics, setMetrics] = useState({
-    scale: FIT_STAGE_SCALE,
-    width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
-    height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
-  });
+  const hostRef = useRef<HTMLDivElement>(null);
+  const linuxViewport = isLinuxViewport();
+  const [metrics, setMetrics] = useState(() => linuxViewport
+    ? {
+      scale: FIT_STAGE_SCALE,
+      width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
+      height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
+    }
+    : {
+      scale: 1,
+      width: DEFAULT_FIT_STAGE_WIDTH,
+      height: DEFAULT_FIT_STAGE_HEIGHT,
+    });
 
   useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    if (!linuxViewport) {
+      const measureDefaultViewport = () => {
+        const viewportWidth = host.clientWidth;
+        const viewportHeight = host.clientHeight;
+        if (viewportWidth <= 0 || viewportHeight <= 0) return;
+        const scale = Math.min(
+          1,
+          viewportWidth / DEFAULT_FIT_STAGE_WIDTH,
+          viewportHeight / DEFAULT_FIT_STAGE_HEIGHT,
+        );
+        setMetrics({
+          scale,
+          width: viewportWidth / scale,
+          height: viewportHeight / scale,
+        });
+      };
+      measureDefaultViewport();
+      const observer = new ResizeObserver(measureDefaultViewport);
+      observer.observe(host);
+      return () => observer.disconnect();
+    }
+
     let cancelled = false;
     let stopListening: (() => void) | undefined;
 
-    const apply = async () => {
+    const syncLinuxViewportMetrics = async () => {
       const viewport = await readLogicalViewportSize();
       if (cancelled || viewport.width <= 0 || viewport.height <= 0) {
         return;
@@ -30,13 +65,12 @@ export function FitStage({ children }: { children: ReactNode }) {
         height: viewport.height / scale,
       });
       // WebKitGTK setZoom != 1 letterboxes a frame around the UI.
-      // Click-through is handled by the Linux GTK input-region guard.
       await setWebviewZoom(1);
     };
 
-    void apply();
+    void syncLinuxViewportMetrics();
     void listenForViewportChanges(() => {
-      void apply();
+      void syncLinuxViewportMetrics();
     }).then((stop) => {
       if (cancelled) {
         stop();
@@ -50,10 +84,10 @@ export function FitStage({ children }: { children: ReactNode }) {
       stopListening?.();
       void setWebviewZoom(1);
     };
-  }, []);
+  }, [linuxViewport]);
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-canvas">
+    <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-canvas">
       <div
         className="relative origin-top-left"
         style={{
@@ -66,6 +100,10 @@ export function FitStage({ children }: { children: ReactNode }) {
       </div>
     </div>
   );
+}
+
+function isLinuxViewport() {
+  return typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent);
 }
 
 async function readLogicalViewportSize() {

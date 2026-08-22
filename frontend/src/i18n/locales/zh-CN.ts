@@ -478,6 +478,8 @@ const zhCN = {
     pricingPartial: "价格信息不完整",
     pricingUnknown: "价格未知",
     providerCatalogUpdated: "供应商目录已更新",
+    providerDataSaved: "供应商数据已保存",
+    providerSavedCatalogWarning: "{{saved}}；供应商数据已保存，但目录/客户端刷新需要处理：{{message}}",
     providerCatalogUpdateFailed: "供应商目录更新失败",
     catalogOverrideDiagnostics: "模型目录覆盖：接受 {{accepted}} 项，迁移 {{migrated}} 项，拒绝 {{rejected}} 项。{{restart}}",
     catalogOverrideRestartCodex: "请重启 Codex App 使其生效",

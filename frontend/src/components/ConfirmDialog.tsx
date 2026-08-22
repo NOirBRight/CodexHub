@@ -65,6 +65,9 @@ function ConfirmDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  const portalHost = document.getElementById("root");
+  if (!portalHost) return null;
+
   return createPortal(
     <div
       className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
@@ -110,6 +113,6 @@ function ConfirmDialog({
         </div>
       </section>
     </div>,
-    document.body,
+    portalHost,
   );
 }
