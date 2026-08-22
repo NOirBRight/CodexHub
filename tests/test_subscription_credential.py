@@ -66,15 +66,16 @@ def test_simple_api_keys_stay_out_of_the_registry() -> None:
     assert credential_for("incoming") is None
 
 
-def test_builtin_adapters_register_codex_auth_only() -> None:
+def test_builtin_adapters_register_codex_and_xai() -> None:
     unregister("codex_auth")
     unregister("xai_oauth")
     try:
         register_builtin_adapters()
         assert isinstance(credential_for("codex_auth"), CodexAuthAdapter)
-        assert credential_for("xai_oauth") is None
+        assert credential_for("xai_oauth") is not None
         register_builtin_adapters()
         assert credential_for("codex_auth") is not None
+        assert credential_for("xai_oauth") is not None
     finally:
         register_builtin_adapters()
 

@@ -96,6 +96,10 @@ def register_builtin_adapters() -> None:
     """Idempotent registration of built-in subscription adapters."""
     if credential_for("codex_auth") is None:
         register("codex_auth", CodexAuthAdapter())
+    if credential_for("xai_oauth") is None:
+        from xai_auth import register_default
+
+        register_default()
 
 
 register_builtin_adapters()

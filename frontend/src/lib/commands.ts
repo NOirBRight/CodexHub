@@ -73,6 +73,10 @@ export const COMMANDS = {
   windowMinimize: "window_minimize",
   windowToggleMaximize: "window_toggle_maximize",
   windowCloseToTray: "window_close_to_tray",
+  xaiAuthStatus: "xai_auth_status",
+  xaiStartDeviceLogin: "xai_start_device_login",
+  xaiPollDeviceLogin: "xai_poll_device_login",
+  xaiLogout: "xai_logout",
 } as const;
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];

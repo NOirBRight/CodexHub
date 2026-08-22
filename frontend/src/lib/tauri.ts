@@ -40,6 +40,8 @@ import type {
   UpstreamFormatProbeResult,
   UnifiedHistoryResult,
   UsageQueryWindow,
+  XaiAuthStatus,
+  XaiDeviceLogin,
 } from "./types";
 import { normalizeSettings } from "./settings";
 
@@ -348,6 +350,16 @@ export const api = {
   windowMinimize: () => desktopCall<void>(COMMANDS.windowMinimize),
   windowToggleMaximize: () => desktopCall<void>(COMMANDS.windowToggleMaximize),
   windowCloseToTray: () => desktopCall<void>(COMMANDS.windowCloseToTray),
+  xaiAuthStatus: () => call<XaiAuthStatus>(COMMANDS.xaiAuthStatus),
+  xaiStartDeviceLogin: () => call<XaiDeviceLogin>(COMMANDS.xaiStartDeviceLogin),
+  xaiPollDeviceLogin: (device: XaiDeviceLogin) => {
+    const deviceJson = JSON.stringify(device);
+    return call<{ ok: boolean }>(COMMANDS.xaiPollDeviceLogin, {
+      deviceJson,
+      device_json: deviceJson,
+    });
+  },
+  xaiLogout: () => call<{ ok: boolean }>(COMMANDS.xaiLogout),
 };
 
 export function messageFromError(error: unknown): string {

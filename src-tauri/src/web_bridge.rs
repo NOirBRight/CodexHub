@@ -1,6 +1,6 @@
 use crate::{
     app_updates, autostart, catalog, config, gateway, history, models, official_refresh,
-    openai_usage, proxy,
+    openai_usage, proxy, xai_auth,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -578,6 +578,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "remove_autostart" => to_value(autostart::remove_autostart()),
         "get_autostart_status" => to_value(autostart::get_autostart_status()),
         "open_codex_app" => to_value(crate::open_codex_app()),
+        "xai_auth_status" => to_value(xai_auth::xai_auth_status()),
+        "xai_start_device_login" => to_value(xai_auth::xai_start_device_login()),
+        "xai_poll_device_login" => {
+            let device_json = optional_string_arg(&request.args, &["deviceJson", "device_json"])
+                .ok_or_else(|| "deviceJson argument is required".to_string())?;
+            to_value(xai_auth::xai_poll_device_login(device_json))
+        }
+        "xai_logout" => to_value(xai_auth::xai_logout()),
         command => Err(format!("unknown CodexHub command: {command}")),
     }
 }
