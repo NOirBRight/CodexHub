@@ -24,9 +24,9 @@ Run targeted tests freely while implementing. At the candidate commit,
 
 | Changed boundary | Relevant local full suite |
 |---|---|
-| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | `.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py` plus `.\scripts\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- .\scripts\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py` when the changed paths touch the real-client E2E contract surface |
+| Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | Windows: `.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py` plus the watchdog-bounded synthetic suite when the real-client E2E contract surface changed. Linux: `./scripts/codexhub-python.sh -m pytest -q --ignore=tests/test_real_client_e2e.py` (or `./scripts/verify-linux.sh` for Python core + Rust tests + clippy) |
 | Frontend source, UI contracts, frontend configuration, or frontend dependencies | `npm run build` and `npm run test:ui-contract` in `frontend/` |
-| Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/` |
+| Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | Windows or Linux: `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`. On Linux the same pair is included in `./scripts/verify-linux.sh`. |
 | Shared frontend/Tauri command or persisted-settings contract | Frontend and Rust suites |
 | Shared Python/Rust Gateway, process-lifecycle, catalog, packaging, updater, release, or installer boundary | Every suite touched by the contract; release instructions may add an explicit build matrix |
 
