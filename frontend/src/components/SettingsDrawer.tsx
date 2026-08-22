@@ -232,7 +232,7 @@ export function SettingsDrawer({
       </div>
 
       <div className="min-h-0 overflow-auto">
-        <div className="p-5">
+        <div className="py-5 pl-5 pr-2">
         {!draft ? (
           <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
             {t("common.loadingSettings")}

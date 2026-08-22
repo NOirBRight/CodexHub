@@ -1248,7 +1248,7 @@ function HubConnectionBridge({
       <button
         type="button"
         className={cx(
-          "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
+          "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 overflow-hidden whitespace-nowrap rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
           pendingMode && "animate-pulse bg-slate-200/85 text-slate-600",
           !pendingMode && foreignOwner
             ? "border border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:shadow-raised"
@@ -1270,8 +1270,8 @@ function HubConnectionBridge({
                 : t("providers.connectToHubTitle")
         }
       >
-        {icon}
-        {label}
+        <span className="shrink-0">{icon}</span>
+        <span className="min-w-0 truncate">{label}</span>
       </button>
     </div>
   );
@@ -1342,7 +1342,7 @@ function CodexHubProviderCard({
 
       <div
         ref={providerListRef}
-        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-3")}
+        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-1")}
       >
         {items.length ? (
           <SortableList

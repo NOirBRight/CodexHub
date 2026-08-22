@@ -678,7 +678,7 @@ function GatewayPageImpl({
           </div>
         </div>
         <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel">
-          <div className="flex min-h-full flex-col gap-2.5 p-3">
+          <div className="flex min-h-full flex-col gap-2.5 py-3 pl-3 pr-1">
             {clients.map((client) => (
               <GatewayClientCard
                 key={client.id}

@@ -1354,7 +1354,7 @@ test("gateway layout reserves space for the client rail", async () => {
   assert.match(gatewaySource, /<h3 className="shrink-0 text-xs font-semibold text-ink">\{t\("gateway\.copyConnection"\)\}<\/h3>/);
   assert.match(gatewaySource, /<aside className="grid h-full min-h-0 min-w-0 grid-rows-\[auto_minmax\(0,1fr\)\]/);
   assert.match(gatewaySource, /min-h-0 overflow-x-hidden overflow-y-auto bg-panel/);
-  assert.match(gatewaySource, /flex min-h-full flex-col gap-2\.5 p-3/);
+  assert.match(gatewaySource, /flex min-h-full flex-col gap-2\.5 py-3 pl-3 pr-1/);
   assert.match(gatewaySource, /className="grow shrink-0"/);
   assert.doesNotMatch(gatewaySource, /scrollbar-gutter:stable/);
   assert.match(usageSource, /min-h-0 min-w-0 grid-rows-\[auto_auto_minmax\(0,1fr\)\].*overflow-hidden rounded-panel bg-surface/);
@@ -1504,7 +1504,7 @@ test("provider persistence reports downstream client sync failures as non-blocki
   const saveProviders = source.slice(start, end);
 
   assert.ok(saveProviders.includes('if (syncResult?.failed)'));
-  assert.ok(saveProviders.includes('tone: "info"'));
+  assert.ok(saveProviders.includes('tone: "success"'));
   assert.ok(!saveProviders.includes('tone: "error"'));
 });
 
@@ -1786,7 +1786,7 @@ test("settings drawer exposes gateway retry and image proxy controls", async () 
   assert.match(drawerSource, /function VisionModelValue/);
   assert.match(drawerSource, /w-\[min\(340px,calc\(100vw-2rem\)\)\] -translate-x-1\/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay/);
   assert.match(drawerSource, /min-h-0 overflow-auto/);
-  assert.match(drawerSource, /<div className="p-5">/);
+  assert.match(drawerSource, /<div className="py-5 pl-5 pr-2">/);
   assert.match(drawerSource, /vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1/);
   assert.match(drawerSource, /role="listbox"/);
   assert.doesNotMatch(drawerSource, /label=\{t\("common\.selectModel"\)\}/);
@@ -2037,7 +2037,7 @@ test("provider detail keeps model area tall and moves the scrollbar outside card
   assert.match(verticalOverflowSource, /scrollHeight > element\.clientHeight \+ 1/);
   assert.match(codexHubProviderCard, /ref=\{providerListRef\}/);
   assert.match(codexHubProviderCard, /min-h-0 overflow-auto/);
-  assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-3"/);
+  assert.match(codexHubProviderCard, /providerListHasOverflow && "-mr-3 pr-1"/);
   assert.match(modelSection, /ref=\{modelListRef\}/);
   assert.match(modelSection, /min-h-0 overflow-auto/);
   assert.match(modelSection, /modelListHasOverflow && "-mr-5 pr-3"/);
@@ -2800,7 +2800,8 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.doesNotMatch(bridge, /bg-emerald-50\/55/);
   assert.match(bridge, /pendingMode && "animate-pulse bg-slate-200\/85 text-slate-600"/);
   assert.match(bridge, /\{icon\}/);
-  assert.match(bridge, /h-11/);
+  assert.match(bridge, /h-11[^"]*whitespace-nowrap/);
+  assert.ok(bridge.includes('<span className="min-w-0 truncate">{label}</span>'));
   assert.match(bridge, /!pendingMode && connected[\s\S]*\? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"[\s\S]*: !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised"/);
   assert.match(hubCard, /border-emerald-300\/70 bg-emerald-50\/55/);
   assert.match(hubCard, /border-line bg-surface/);
