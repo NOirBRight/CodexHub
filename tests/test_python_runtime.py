@@ -750,6 +750,7 @@ def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:
 def test_interactive_activation_accepts_relative_dot_source(shell_name: str) -> None:
     """The documented relative activation command must bind the caller shell."""
 
+    _require_windows_host()
     shell = shutil.which(shell_name)
     if shell is None:
         pytest.skip(f"{shell_name} is required for the activation check")
