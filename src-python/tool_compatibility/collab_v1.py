@@ -1,4 +1,7 @@
-"""Collaboration V1 names, forbidden fields, and field validation."""
+"""Collaboration V1 repair: names, forbidden fields, and flattened-name identity.
+
+This module must not import the V2 adapter. V1 repair cannot execute V2 paths.
+"""
 
 from __future__ import annotations
 
@@ -31,4 +34,35 @@ def is_opaque_v1_history_item(item: Mapping[str, Any]) -> bool:
             and name.startswith(V1_FLAT_PREFIX)
             and name.removeprefix(V1_FLAT_PREFIX) in V1_NAMES
         )
+    )
+
+
+def matches_flattened_native_identity(
+    item: Mapping[str, Any],
+    original_name: str | None,
+) -> bool:
+    """Return whether a namespaced call matches a flattened V1-style native name."""
+
+    namespace = item.get("namespace")
+    name = item.get("name")
+    return (
+        isinstance(namespace, str)
+        and namespace
+        and isinstance(name, str)
+        and name
+        and f"{namespace}__{name}" == original_name
+    )
+
+
+def is_legacy_flattened_spawn(
+    item: Mapping[str, Any],
+    original_name: str | None,
+) -> bool:
+    """Recognize the flattened V1 spawn item emitted without an ``added`` event."""
+
+    return (
+        original_name == f"{V1_FLAT_PREFIX}spawn_agent"
+        and item.get("type") == "function_call"
+        and item.get("namespace") == V1_NAMESPACE
+        and item.get("name") == "spawn_agent"
     )

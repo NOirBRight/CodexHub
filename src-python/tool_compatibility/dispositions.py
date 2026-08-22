@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from collaboration_runtime_contract import (
+    COLLABORATION_V1,
+    COLLABORATION_V2,
+    CollaborationContractError,
+    classify_collaboration_request,
+)
+
+from .contracts import (
+    ProtocolCapabilities,
+    RequiredToolUnavailableError,
+    ToolCompatibilityError,
+    _MalformedDeclaration,
+    _copy_mapping,
+    _freeze,
+    _protocol_capabilities,
+    _provider_hosted,
+)
 
 
 NATIVE = "native"
@@ -229,3 +247,328 @@ def _is_unsupported_hosted_stream_event(event_type: Any) -> bool:
     # unknown provider-specific hosted lifecycle.  Neither can be safely
     # passed through without an explicit lifecycle contract.
     return "_call." in suffix
+
+
+def _tool_choice_matches_declaration(
+    declaration: Mapping[str, Any],
+    tool_choice: Any,
+) -> bool:
+    """Return whether an explicit choice identifies this declaration exactly."""
+    family = classify_declaration(declaration)
+    name = _name_of(declaration)
+    namespace, children, _version, _valid = _namespace_details(declaration)
+
+    if isinstance(tool_choice, str):
+        if tool_choice in {"auto", "none", "required"}:
+            return False
+        if family == NAMESPACE:
+            return tool_choice == namespace or any(
+                tool_choice == f"{namespace}__{child.get('name')}" for child in children
+            )
+        if family == TOOL_SEARCH and tool_choice == "tool_search":
+            return True
+        return tool_choice == name
+
+    if not isinstance(tool_choice, Mapping):
+        return False
+    choice_type = tool_choice.get("type")
+    choice_name = tool_choice.get("name")
+    if choice_type in (None, "function"):
+        if not isinstance(choice_name, str):
+            return False
+        if family == PLAIN_FUNCTION:
+            return choice_name == name
+        if family == TOOL_SEARCH and choice_name == "tool_search":
+            return True
+        if family == NAMESPACE:
+            choice_namespace = tool_choice.get("namespace")
+            return (
+                choice_namespace == namespace and choice_name in {child.get("name") for child in children}
+            ) or (
+                choice_namespace is None
+                and any(choice_name == f"{namespace}__{child.get('name')}" for child in children)
+            )
+        return False
+    if choice_type == "namespace":
+        return family == NAMESPACE and choice_name in {None, namespace}
+    if choice_type == "custom":
+        return family == CUSTOM_FREEFORM and choice_name == name
+    if choice_type == "tool_search":
+        return family == TOOL_SEARCH
+    if isinstance(choice_type, str) and choice_type == declaration.get("type"):
+        return choice_name in {None, name}
+    return False
+
+
+def _has_explicit_named_tool_choice(tool_choice: Any) -> bool:
+    if isinstance(tool_choice, str):
+        return tool_choice not in {"auto", "none", "required"}
+    if not isinstance(tool_choice, Mapping):
+        return False
+    if isinstance(tool_choice.get("name"), str):
+        return True
+    return tool_choice.get("type") in {
+        "namespace",
+        "custom",
+        "tool_search",
+        *_KNOWN_HOSTED_TYPES,
+    }
+
+
+def _required_by_rule(
+    declaration: Mapping[str, Any],
+    index: int,
+    *,
+    required: Any,
+    tool_choice: Any,
+) -> bool:
+    names = {_name_of(declaration), declaration.get("type"), declaration.get("name")}
+    names.discard(None)
+    namespace, children, _version, valid = _namespace_details(declaration)
+    if namespace:
+        names.add(namespace)
+        names.update(child.get("name") for child in children if isinstance(child.get("name"), str))
+
+    result = False
+    if isinstance(required, bool):
+        result = required
+    elif isinstance(required, Mapping):
+        for key in (index, str(index), declaration.get("type"), declaration.get("name"), namespace):
+            if key in required and isinstance(required[key], bool):
+                result = result or required[key]
+        for key, enabled in required.items():
+            if enabled is True and key in names:
+                result = True
+    elif isinstance(required, str):
+        result = required in names
+    elif isinstance(required, Iterable):
+        required_values = {str(item) for item in required}
+        result = bool(required_values.intersection({str(item) for item in names}))
+
+    if tool_choice in ("required", True):
+        return result
+    if not isinstance(tool_choice, Mapping):
+        if isinstance(tool_choice, str) and tool_choice not in {"auto", "none"}:
+            return result or _tool_choice_matches_declaration(declaration, tool_choice)
+        return result
+    return result or _tool_choice_matches_declaration(declaration, tool_choice)
+
+
+
+def build_tool_compatibility_plan(
+    runtime_declarations: Iterable[Mapping[str, Any]] | Mapping[str, Any],
+    *,
+    selected_protocol: str,
+    provider_hosted_capabilities: Any = None,
+    required: Any = None,
+    tool_choice: Any = None,
+    protocol_capabilities: ProtocolCapabilities | Mapping[str, Any] | None = None,
+    request_token: str = "request",
+    native_names: Iterable[str] = (),
+    collaboration_protocol: str | None = None,
+) -> "ToolCompatibilityPlan":
+    from .plan import ToolCompatibilityEntry, ToolCompatibilityPlan
+    from .registry import CompatibilityDiagnostics, RequestScopedToolAliasRegistry
+
+    if isinstance(runtime_declarations, Mapping):
+        candidate = runtime_declarations.get("tools", ())
+    else:
+        candidate = runtime_declarations
+    if isinstance(candidate, (str, bytes, bytearray)) or not isinstance(candidate, Iterable):
+        raise _MalformedDeclaration()
+    declarations: list[Mapping[str, Any]] = []
+    for item in candidate:
+        if not isinstance(item, Mapping):
+            raise _MalformedDeclaration()
+        declarations.append(item)
+    try:
+        declared_collaboration_protocol = classify_collaboration_request(
+            {"tools": declarations, "tool_choice": tool_choice}
+        )
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            exc.classification,
+            surface="request",
+        ) from exc
+    if collaboration_protocol not in {None, COLLABORATION_V1, COLLABORATION_V2}:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "unknown_state",
+            surface="request",
+        )
+    if (
+        declared_collaboration_protocol is not None
+        and collaboration_protocol is not None
+        and declared_collaboration_protocol != collaboration_protocol
+    ):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "conflicting_selection",
+            surface="request",
+        )
+    effective_collaboration_protocol = (
+        declared_collaboration_protocol or collaboration_protocol
+    )
+    capabilities = _protocol_capabilities(selected_protocol, protocol_capabilities)
+    if (
+        declared_collaboration_protocol == COLLABORATION_V2
+        and selected_protocol != "responses_structured"
+        and not (
+            capabilities.function_lifecycle
+            and capabilities.accepts_namespace_adapter
+        )
+    ):
+        raise RequiredToolUnavailableError(family=NAMESPACE)
+    hosted = _provider_hosted(provider_hosted_capabilities)
+
+    all_native_names: set[str] = {str(name) for name in native_names if isinstance(name, str)}
+    for declaration in declarations:
+        family = classify_declaration(declaration)
+        declaration_name = declaration.get("name")
+        if isinstance(declaration_name, str) and declaration_name:
+            all_native_names.add(declaration_name)
+        if family in {PLAIN_FUNCTION, CUSTOM_FREEFORM} and _name_of(declaration):
+            all_native_names.add(str(_name_of(declaration)))
+        if family == NAMESPACE:
+            _namespace, children, _version, _valid = _namespace_details(declaration)
+            all_native_names.update(
+                str(child.get("name")) for child in children if isinstance(child.get("name"), str)
+            )
+
+    registry = RequestScopedToolAliasRegistry(
+        request_token=request_token,
+        native_names=all_native_names,
+        max_tool_name_length=capabilities.max_tool_name_length,
+        max_alias_attempts=capabilities.max_alias_attempts,
+    )
+    preliminary: list[ToolCompatibilityEntry] = []
+    for index, declaration in enumerate(declarations):
+        family = classify_declaration(declaration)
+        is_required = _required_by_rule(
+            declaration,
+            index,
+            required=required,
+            tool_choice=tool_choice,
+        )
+        valid = _declaration_valid_for_family(declaration, family)
+        if not valid:
+            raise _MalformedDeclaration()
+        namespace, children, version, namespace_valid = _namespace_details(declaration)
+        if (
+            effective_collaboration_protocol == COLLABORATION_V2
+            and family == NAMESPACE
+            and namespace == "collaboration"
+        ):
+            is_required = True
+        reason = "native_lifecycle"
+        disposition = OMIT
+        aliases: list[str] = []
+
+        if family == PLAIN_FUNCTION:
+            if valid and capabilities.function_lifecycle:
+                disposition, reason = NATIVE, "native_function_lifecycle"
+            else:
+                reason = "function_lifecycle_unavailable"
+        elif family == NAMESPACE:
+            if valid and capabilities.namespace_lifecycle:
+                disposition, reason = NATIVE, "native_namespace_lifecycle"
+            elif valid and capabilities.function_lifecycle and capabilities.accepts_namespace_adapter:
+                disposition, reason = ADAPT, "namespace_function_adapter"
+                for child_index, child in enumerate(children):
+                    child_name = str(child.get("name"))
+                    aliases.append(
+                        registry.allocate_namespace(
+                            declaration_index=index,
+                            namespace=str(namespace),
+                            child_index=child_index,
+                            child_name=child_name,
+                            version=version,
+                        )
+                    )
+            else:
+                reason = "namespace_lifecycle_unavailable"
+        elif family == CUSTOM_FREEFORM:
+            if valid and capabilities.custom_lifecycle:
+                disposition, reason = NATIVE, "native_custom_lifecycle"
+            elif valid and capabilities.function_lifecycle and capabilities.accepts_custom_adapter:
+                disposition, reason = ADAPT, "custom_function_envelope"
+                aliases.append(
+                    registry.allocate_custom(
+                        declaration_index=index,
+                        original_name=str(_name_of(declaration)),
+                        version=None,
+                    )
+                )
+            else:
+                reason = "custom_lifecycle_unavailable"
+        elif family == TOOL_SEARCH:
+            if valid and capabilities.tool_search_lifecycle:
+                disposition, reason = NATIVE, "native_client_tool_search"
+            elif valid and capabilities.function_lifecycle and capabilities.accepts_tool_search_adapter:
+                disposition, reason = ADAPT, "tool_search_function_envelope"
+                aliases.append(registry.allocate_tool_search(declaration_index=index))
+            else:
+                reason = "client_tool_search_lifecycle_unavailable"
+        elif family == SELECTED_PROVIDER_HOSTED:
+            kind = declaration.get("type")
+            has_static_contract = _hosted_event_spec_for_declaration_kind(kind) is not None
+            if (
+                valid
+                and isinstance(kind, str)
+                and has_static_contract
+                and kind in hosted.supported_kinds
+                and kind in capabilities.hosted_lifecycles
+            ):
+                disposition, reason = NATIVE, "selected_provider_hosted_lifecycle"
+            else:
+                reason = "selected_provider_hosted_lifecycle_unavailable"
+        else:
+            kind = declaration.get("type")
+            provider_hosted = declaration.get("executor") == "selected_provider"
+            if provider_hosted and (not isinstance(kind, str) or kind not in hosted.supported_kinds):
+                reason = "selected_provider_hosted_lifecycle_unavailable"
+            else:
+                reason = "unknown_lifecycle_contract_unavailable"
+
+        if disposition == OMIT and is_required:
+            disposition = REQUIRED_BUT_UNAVAILABLE
+        preliminary.append(
+            ToolCompatibilityEntry(
+                declaration_index=index,
+                family=family,
+                disposition=disposition,
+                required=is_required,
+                declaration=_freeze(_copy_mapping(declaration)),
+                reason=reason,
+                aliases=tuple(aliases),
+                namespace=namespace,
+                version=version,
+                child_names=tuple(str(child.get("name")) for child in children if isinstance(child.get("name"), str)),
+            )
+        )
+
+    if _has_explicit_named_tool_choice(tool_choice) and not any(
+        _tool_choice_matches_declaration(declaration, tool_choice)
+        for declaration in declarations
+    ):
+        raise RequiredToolUnavailableError()
+    if tool_choice in ("required", True) and not any(
+        entry.disposition in {NATIVE, ADAPT} for entry in preliminary
+    ):
+        raise RequiredToolUnavailableError()
+    diagnostics = CompatibilityDiagnostics.from_entries(preliminary)
+    unavailable = [entry for entry in preliminary if entry.disposition == REQUIRED_BUT_UNAVAILABLE]
+    if unavailable:
+        raise RequiredToolUnavailableError(family=unavailable[0].family)
+    return ToolCompatibilityPlan(
+        selected_protocol=str(selected_protocol),
+        capabilities=capabilities,
+        entries=tuple(preliminary),
+        registry=registry,
+        diagnostics=diagnostics,
+        collaboration_protocol=effective_collaboration_protocol,
+        tool_choice=_freeze(tool_choice),
+        provider_hosted_kinds=hosted.supported_kinds,
+    )
+

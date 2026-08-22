@@ -33,7 +33,6 @@ from .plan import (
     AliasRecord,
     AliasRegistry,
     CompatibilityDiagnostics,
-    CompatibilityStreamState,
     RequestScopedToolAliasRegistry,
     ToolCompatibilityEntry,
     ToolCompatibilityPlan,
@@ -41,6 +40,7 @@ from .plan import (
     build_plan,
     build_tool_compatibility_plan,
 )
+from .stream import CompatibilityStreamState
 
 __all__ = [
     "ADAPT",

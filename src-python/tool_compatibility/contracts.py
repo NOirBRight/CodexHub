@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 
@@ -175,3 +176,30 @@ def _protocol_capabilities(
 
 def _provider_hosted(value: Any) -> HostedCapabilityFacts:
     return HostedCapabilityFacts.from_value(value)
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    if isinstance(value, frozenset):
+        return {_thaw(item) for item in value}
+    return value
+
+
+def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    return _thaw(_freeze(value))
+
