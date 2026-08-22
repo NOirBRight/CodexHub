@@ -1931,7 +1931,12 @@ class ToolCompatibilityPlan:
                         "name": alias,
                         "parameters": {
                             "type": "object",
-                            "properties": {CUSTOM_INPUT_KEY: {}},
+                            # The Responses custom/freeform contract is a
+                            # text format.  Keep the adapter envelope
+                            # explicit so Chat models do not infer an object
+                            # value for the freeform input and trip the
+                            # stream decoder's string boundary.
+                            "properties": {CUSTOM_INPUT_KEY: {"type": "string"}},
                             "required": [CUSTOM_INPUT_KEY],
                             "additionalProperties": False,
                         },

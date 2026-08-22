@@ -37,9 +37,11 @@ remain `unavailable` and fail closed.
 
 The real Codex transport defaults are classified by exact value before Chat
 sampling: lifecycle `client_metadata`, cache identity, the encrypted-reasoning
-include request, bounded verbosity, and bounded reasoning effort are consumed
-locally. Opaque `client_metadata` objects remain local; unknown top-level
-transport fields and unapproved include/text/reasoning shapes still fail closed.
+include request, bounded verbosity, and bounded reasoning controls (including a
+legacy reasoning-summary selector) are consumed locally. Opaque
+`client_metadata` objects remain local; Chat cannot return Responses reasoning
+summaries, and unknown top-level transport fields or unapproved
+include/text/reasoning shapes still fail closed.
 
 ## Regenerate
 

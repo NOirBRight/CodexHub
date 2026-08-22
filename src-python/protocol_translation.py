@@ -230,7 +230,14 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
 
     reasoning = payload.get("reasoning")
     if reasoning is not None:
-        if not isinstance(reasoning, Mapping) or set(reasoning) - {"effort"}:
+        # Codex Desktop may still send the Responses reasoning summary
+        # selector when it is using a catalog generated before the Chat
+        # capability flags were corrected.  Chat Completions has no portable
+        # response-summary representation, so consume the bounded selector
+        # locally rather than rejecting the otherwise valid request.  Unknown
+        # selectors remain fail-closed; this is compatibility handling, not a
+        # claim that Chat can return Responses reasoning summaries.
+        if not isinstance(reasoning, Mapping) or set(reasoning) - {"effort", "summary"}:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning semantics.",
@@ -238,11 +245,20 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
         effort = reasoning.get("effort")
         if effort is not None and (
             not isinstance(effort, str)
-            or effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}
+            or effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         ):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning effort.",
+            )
+        summary = reasoning.get("summary")
+        if summary is not None and (
+            not isinstance(summary, str)
+            or summary not in {"auto", "concise", "detailed"}
+        ):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot consume unknown Responses reasoning summary.",
             )
     payload.pop("reasoning", None)
 

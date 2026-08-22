@@ -2873,6 +2873,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         body = json.dumps({
             "model": "glm-5.2",
             "input": "Hello",
+            "reasoning": {"effort": "max", "summary": "auto"},
+            "text": {"verbosity": "low"},
             "stream": False,
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
@@ -2920,6 +2922,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(sent_payload["model"], "glm-5.2-chat")
         self.assertIn("messages", sent_payload)
         self.assertNotIn("input", sent_payload)
+        self.assertNotIn("reasoning", sent_payload)
+        self.assertNotIn("text", sent_payload)
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )

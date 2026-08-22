@@ -1910,6 +1910,10 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
         if isinstance(input_modalities, (list, tuple)) and input_modalities:
             entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
 
+        upstream_format = model.get("upstream_format")
+        if isinstance(upstream_format, str) and upstream_format.strip():
+            entry["upstream_format"] = upstream_format.strip().lower()
+
         multi_agent_version = model.get("multi_agent_version")
         if multi_agent_version in {"v1", "v2"}:
             entry["multi_agent_version"] = multi_agent_version
@@ -2340,6 +2344,10 @@ def build_ollama_model(
         }
     )
     model["codex_proxy_metadata"] = safe_metadata
+    _disable_responses_only_capabilities_for_chat(
+        model,
+        (model_metadata or {}).get(slug, {}).get("upstream_format"),
+    )
     stamp_catalog_owner_metadata(model)
     return model
 
@@ -2506,8 +2514,33 @@ def build_external_provider_model(
         effective_context_window = model.get("context_window")
         if isinstance(effective_context_window, int) and effective_context_window > 0:
             model["max_output_tokens"] = effective_context_window
+    _disable_responses_only_capabilities_for_chat(
+        model,
+        external_model.get("upstream_format"),
+    )
     stamp_catalog_owner_metadata(model)
     return model
+
+
+def _disable_responses_only_capabilities_for_chat(
+    model: dict[str, Any],
+    upstream_format: Any,
+) -> None:
+    """Do not advertise Responses-only controls on Chat-capable routes.
+
+    Codex uses these catalog flags to decide whether it may send
+    ``reasoning.summary`` and ``text.verbosity``.  The Chat bridge can consume
+    those legacy request selectors for compatibility, but it cannot preserve
+    their Responses output semantics, so Chat and auto (which may fall back to
+    Chat) must advertise the conservative intersection instead.
+    """
+
+    if str(upstream_format or "").strip().lower() not in {"chat_completions", "auto"}:
+        return
+    model["supports_reasoning_summaries"] = False
+    model["default_reasoning_summary"] = "none"
+    model["support_verbosity"] = False
+    model.pop("default_verbosity", None)
 
 
 def build_codex_catalog(

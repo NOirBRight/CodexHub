@@ -73,6 +73,23 @@ def test_prepare_exchange_consumes_real_codex_transport_defaults() -> None:
     assert chat["stream"] is True
 
 
+def test_prepare_exchange_consumes_desktop_reasoning_summary_selector_for_chat() -> None:
+    """Legacy Desktop catalogs must not turn a valid Chat request into a 400."""
+
+    exchange = prepare_exchange(
+        _responses_body(
+            reasoning={"effort": "max", "summary": "auto"},
+            stream=True,
+        ),
+        inbound_format="responses",
+        outbound_format="chat_completions",
+    )
+
+    chat = json.loads(exchange.upstream_body)
+    assert chat["messages"] == [{"role": "user", "content": "hi"}]
+    assert "reasoning" not in chat
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -82,7 +99,7 @@ def test_prepare_exchange_consumes_real_codex_transport_defaults() -> None:
         ("text", {"format": {"type": "json_schema"}}),
         ("text", {"verbosity": "maximum"}),
         ("text", {"verbosity": {"invalid": True}}),
-        ("reasoning", {"summary": "auto"}),
+        ("reasoning", {"summary": "verbose"}),
         ("reasoning", {"effort": "extreme"}),
         ("reasoning", {"effort": {"invalid": True}}),
     ],

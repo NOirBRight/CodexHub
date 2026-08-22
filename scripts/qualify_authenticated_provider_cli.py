@@ -48,6 +48,7 @@ QUALIFICATION_KEY_ENV = "CODEXHUB_AUTH_QUAL_KEY"
 DEFAULT_CREDENTIAL_SOURCE = Path.home() / ".codex" / "proxy" / "config" / "providers.toml"
 DEFAULT_OUTPUT_DIR = Path("docs/evidence/authenticated-provider")
 EXPECTED_V2_TOOLS = frozenset(V2_TOOLS)
+ALLOWED_FAILURE_CATEGORIES = frozenset({"client_cancellation"})
 EXPECTED_V2_SEQUENCE = (
     "spawn_agent",
     "wait_agent",
@@ -336,16 +337,26 @@ def _session_tool_evidence(home: Path) -> dict[str, Any]:
             if isinstance(call_id, str) and call_id not in outputs:
                 outputs[call_id] = item.get("output")
 
-    def lifecycle(name: str, namespace: str | None = None) -> tuple[list[str], bool]:
+    def lifecycle(
+        names: str | tuple[str, ...], namespace: str | None = None
+    ) -> tuple[list[str], bool]:
+        accepted_names = {names} if isinstance(names, str) else set(names)
         matching = [
             call_id
             for call_id in call_order
-            if calls[call_id] == (name, namespace)
-            or (namespace is None and calls[call_id][0] == name)
+            if (
+                calls[call_id][0] in accepted_names
+                and calls[call_id][1] == namespace
+            )
+            or (namespace is None and calls[call_id][0] in accepted_names)
         ]
         return matching, bool(matching) and all(call_id in outputs for call_id in matching)
 
-    exec_calls, exec_identity = lifecycle("exec_command")
+    # Codex CLI 0.146+ exposes the standard shell tool on the wire as
+    # ``shell_command``; older evidence and some clients call it
+    # ``exec_command``.  Both are the same standard function lifecycle for
+    # this qualification and must retain exact call/result pairing.
+    exec_calls, exec_identity = lifecycle(("exec_command", "shell_command"))
     patch_calls, patch_identity = lifecycle("apply_patch")
     collaboration_ids = [
         call_id for call_id in call_order if calls[call_id][1] == "collaboration"
@@ -567,6 +578,26 @@ def _gateway_summary(path: Path) -> dict[str, Any]:
         "has_v1_observation": analyzed.get("has_v1_observation", False),
         "has_v2_observation": analyzed.get("has_v2_observation", False),
     }
+
+
+def _gateway_failures_are_acceptable(gateway: Mapping[str, Any]) -> bool:
+    """Return true only when the run has no upstream or Gateway failures.
+
+    A qualification may intentionally cancel a streamed turn while exercising
+    lifecycle/restart behavior, but a 4xx (including a protocol translation
+    400) or any 5xx is a failed primary path and must not be converted into
+    passing evidence merely because another request succeeded.
+    """
+
+    failures = gateway.get("failures")
+    if not isinstance(failures, list):
+        return False
+    return all(
+        isinstance(failure, Mapping)
+        and failure.get("category") in ALLOWED_FAILURE_CATEGORIES
+        and failure.get("status") == 499
+        for failure in failures
+    )
 
 
 def _run_identity(home: Path, port: int, workspace: Path) -> dict[str, Any]:
@@ -962,7 +993,7 @@ def _run_cell(
             gateway["streaming"]["progressive_text_stream_count"] >= 1
             and gateway["streaming"]["text_delta_source_count"] >= 2
             and gateway["reasoning_policies"] == ["explicit"]
-            and all(failure.get("category") for failure in gateway["failures"])
+            and _gateway_failures_are_acceptable(gateway)
         )
         if "collaboration" in scenarios:
             protocol_observations = protocol_observations and (

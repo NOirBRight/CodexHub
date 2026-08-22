@@ -2839,6 +2839,39 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertEqual(model["default_reasoning_level"], "max")
 
+    def test_chat_external_catalog_does_not_advertise_responses_only_controls(self):
+        external_model = {
+            "alias": "ollama-e2e-chat/deepseek-v4-flash:0731",
+            "provider_alias": "ollama-e2e-chat",
+            "upstream_name": "ollama_cloud",
+            "upstream_model": "deepseek-v4-flash:0731",
+            "upstream_format": "chat_completions",
+        }
+
+        model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
+
+        self.assertIs(model["supports_reasoning_summaries"], False)
+        self.assertEqual(model["default_reasoning_summary"], "none")
+        self.assertIs(model["support_verbosity"], False)
+        self.assertNotIn("default_verbosity", model)
+
+    def test_ollama_chat_catalog_uses_conservative_control_flags(self):
+        model = catalog_sync.build_ollama_model(
+            "deepseek-v4-flash:0731",
+            self.policy,
+            {},
+            None,
+            {
+                "deepseek-v4-flash:0731": {
+                    "upstream_format": "chat_completions",
+                }
+            },
+        )
+
+        self.assertIs(model["supports_reasoning_summaries"], False)
+        self.assertIs(model["support_verbosity"], False)
+        self.assertNotIn("default_verbosity", model)
+
     def test_external_model_defaults_missing_output_limit_to_context_window(self):
         external_model = {
             "alias": "volc/deepseek-v4-flash:0731",
