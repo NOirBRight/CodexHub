@@ -322,6 +322,27 @@ def test_unknown_model_fails_before_upstream(harness: GatewayHarness) -> None:
     assert harness.stub.captures == []
     payload = json.loads(response.body)
     assert payload["codexhub_error"]["code"] == "gateway.model_resolution"
+    rendered = response.body.decode("utf-8")
+    assert "SECRET" not in rendered
+    assert "Bearer " not in rendered
+
+
+def test_provider_scoped_responses_reach_external_chat_upstream(harness: GatewayHarness) -> None:
+    harness.set_json_response(_chat_completion_json())
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/providers/volc/responses",
+        body=_responses_request("glm-5.2", stream=False),
+        headers=_auth_headers(),
+    )
+    assert response.status == 200
+    assert harness.stub is not None
+    captured = harness.stub.captures[0]
+    assert captured.path.endswith("/chat/completions")
+    sent = json.loads(captured.body)
+    assert sent["model"] == "glm-5.2"
 
 
 def test_cancellation_during_stream_uses_shutdown_outcome(harness: GatewayHarness) -> None:
