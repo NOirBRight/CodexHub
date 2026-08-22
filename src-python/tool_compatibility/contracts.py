@@ -1,8 +1,9 @@
-"""Capability tables and bounded compatibility errors."""
+"""Capability tables, envelope keys, and bounded compatibility errors."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
@@ -202,4 +203,98 @@ def _thaw(value: Any) -> Any:
 
 def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     return _thaw(_freeze(value))
+
+
+CUSTOM_INPUT_KEY = "__codexhub_custom_input"
+CUSTOM_OUTPUT_KEY = "__codexhub_custom_output"
+TOOL_SEARCH_INPUT_KEY = "__codexhub_tool_search_input"
+TOOL_SEARCH_OUTPUT_KEY = "__codexhub_tool_search_output"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCompatibilityEntry:
+    declaration_index: int
+    family: str
+    disposition: str
+    required: bool
+    declaration: Mapping[str, Any]
+    reason: str
+    aliases: tuple[str, ...] = ()
+    namespace: str | None = None
+    version: str | None = None
+    child_names: tuple[str, ...] = ()
+
+    @property
+    def original_name(self) -> str | None:
+        name = self.declaration.get("name")
+        return name if isinstance(name, str) else None
+
+
+def _json_object_with_key(value: Any, key: str) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        parsed = _copy_mapping(value)
+    elif isinstance(value, str):
+        def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for item_key, item in items:
+                if item_key in result:
+                    raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_envelope_key")
+                result[item_key] = item
+            return result
+
+        try:
+            parsed = json.loads(value, object_pairs_hook=pairs)
+        except ToolCompatibilityError:
+            raise
+        except (TypeError, ValueError):
+            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope") from None
+    else:
+        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
+    if not isinstance(parsed, dict) or set(parsed) != {key}:
+        raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
+    return parsed
+
+
+def _json_object_exact(value: Any, *, output: bool = False) -> dict[str, Any]:
+    expected = CUSTOM_OUTPUT_KEY if output else CUSTOM_INPUT_KEY
+    return _json_object_with_key(value, expected)
+
+
+def _dump_envelope(key: str, value: Any) -> str:
+    return json.dumps({key: _thaw(_freeze(value))}, ensure_ascii=True, separators=(",", ":"))
+
+
+def _item_identity(item: Mapping[str, Any]) -> str | None:
+    item_id = item.get("item_id")
+    plain_id = item.get("id")
+    if (
+        isinstance(item_id, str)
+        and item_id
+        and isinstance(plain_id, str)
+        and plain_id
+        and item_id != plain_id
+    ):
+        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
+    for key in ("item_id", "id"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _is_legacy_message_identity(value: str) -> bool:
+    """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
+
+    prefix = "message_"
+    return value.startswith(prefix) and value[len(prefix) :].isdigit()
+
+
+def _provider_function_declaration(child: Mapping[str, Any], alias: str) -> dict[str, Any]:
+    """Return the plain-function shape exposed to a non-Codex provider."""
+
+    function = _copy_mapping(child)
+    function["type"] = "function"
+    function["name"] = alias
+    function.pop("namespace", None)
+    return function
 

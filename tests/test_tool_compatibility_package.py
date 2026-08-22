@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src-python" / "tool_compatibility"
 COLLAB_V1 = PACKAGE / "collab_v1.py"
 COLLAB_V2 = PACKAGE / "collab_v2.py"
-MAX_PACKAGE_FILE_LINES = 2300
+MAX_PACKAGE_FILE_LINES = 2100
 
 
 def test_collab_v1_source_does_not_import_v2() -> None:

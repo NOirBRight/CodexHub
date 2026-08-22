@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .contracts import ToolCompatibilityError
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError
+from .dispositions import NATIVE, NAMESPACE, PLAIN_FUNCTION
 
 
 V1_NAMES = frozenset(
@@ -66,3 +67,93 @@ def is_legacy_flattened_spawn(
         and item.get("namespace") == V1_NAMESPACE
         and item.get("name") == "spawn_agent"
     )
+
+
+def flattened_plain_name(item: Mapping[str, Any]) -> str | None:
+    namespace = item.get("namespace")
+    child_name = item.get("name")
+    if isinstance(namespace, str) and namespace and isinstance(child_name, str) and child_name:
+        return f"{namespace}__{child_name}"
+    return None
+
+
+class CollaborationV1PlanMixin:
+    """V1 flattened-name repair mixed into ``ToolCompatibilityPlan``."""
+
+    __slots__ = ()
+
+    def _flattened_native_plain_entry(
+        self,
+        item: Mapping[str, Any],
+    ) -> ToolCompatibilityEntry | None:
+        flattened_name = flattened_plain_name(item)
+        if flattened_name is None:
+            return None
+        flattened_matches = [
+            candidate
+            for candidate in self.entries
+            if candidate.family == PLAIN_FUNCTION
+            and candidate.disposition == NATIVE
+            and candidate.original_name == flattened_name
+        ]
+        if len(flattened_matches) > 1:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "ambiguous_native_identity",
+            )
+        return flattened_matches[0] if flattened_matches else None
+
+    def _reject_unknown_flattened_identity(
+        self,
+        item: Mapping[str, Any],
+        *,
+        surface: str,
+    ) -> bool:
+        """Return True when a flattened native plain owner already resolved the item."""
+
+        if item.get("type") != "function_call" or flattened_plain_name(item) is None:
+            return False
+        flattened_name = flattened_plain_name(item)
+        flattened_matches = [
+            entry
+            for entry in self.entries
+            if entry.family == PLAIN_FUNCTION
+            and entry.original_name == flattened_name
+        ]
+        if any(entry.disposition == NATIVE for entry in flattened_matches):
+            return True
+        if flattened_matches:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_native_identity",
+                surface=surface,
+            )
+        if any(entry.family == NAMESPACE for entry in self.entries) and self._entry_for_name(
+            item.get("name"),
+            item.get("namespace"),
+            item_type=item.get("type"),
+        ) is None:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "unknown_native_identity",
+                surface=surface,
+            )
+        return False
+
+
+def validate_plain_native_item(
+    item: Mapping[str, Any],
+    entry: ToolCompatibilityEntry,
+    *,
+    surface: str,
+) -> None:
+    item_type = item.get("type")
+    namespace = item.get("namespace")
+    plain_shape = namespace is None and item.get("name") == entry.original_name
+    flattened_shape = matches_flattened_native_identity(item, entry.original_name)
+    if item_type != "function_call" or not (plain_shape or flattened_shape):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "unknown_native_identity",
+            surface=surface,
+        )

@@ -13,21 +13,13 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Iterable, Mapping
 
-from collaboration_runtime_contract import (
-    COLLABORATION_V1,
-    COLLABORATION_V2,
-    CollaborationContractError,
-    classify_collaboration_request,
-    validate_collaboration_arguments,
-)
-
 from .collab_v1 import (
+    CollaborationV1PlanMixin,
     is_opaque_v1_history_item,
-    matches_flattened_native_identity,
+    validate_plain_native_item,
     validate_v1_fields,
 )
 from .collab_v2 import (
-    V2_NAMESPACE,
     CollaborationV2PlanMixin,
     apply_v2_namespace_decode,
     is_opaque_v2_history_item,
@@ -36,15 +28,23 @@ from .collab_v2 import (
     validate_v2_native_arguments,
 )
 from .contracts import (
+    CUSTOM_INPUT_KEY,
+    CUSTOM_OUTPUT_KEY,
+    TOOL_SEARCH_INPUT_KEY,
+    TOOL_SEARCH_OUTPUT_KEY,
     HostedCapabilityFacts,
     ProtocolCapabilities,
     RequiredToolUnavailableError,
+    ToolCompatibilityEntry,
     ToolCompatibilityError,
-    _MalformedDeclaration,
     _copy_mapping,
+    _dump_envelope,
     _freeze,
-    _protocol_capabilities,
-    _provider_hosted,
+    _is_legacy_message_identity,
+    _item_identity,
+    _json_object_exact,
+    _json_object_with_key,
+    _provider_function_declaration,
     _thaw,
 )
 from .dispositions import (
@@ -58,20 +58,22 @@ from .dispositions import (
     SELECTED_PROVIDER_HOSTED,
     TOOL_SEARCH,
     UNKNOWN_FUTURE_KIND,
-    _KNOWN_HOSTED_TYPES,
+    _declaration_key,
     _declaration_valid_for_family,
+    _family_for_item_type,
     _has_explicit_named_tool_choice,
-    _hosted_event_spec,
+    _history_output_type_for_entry,
+    _hosted_entry_item_kind,
     _hosted_event_spec_for_declaration_kind,
     _hosted_event_spec_for_item_type,
     _hosted_history_item_key,
     _hosted_kind_for_item_type,
     _hosted_output_kind_for_item_type,
-    _is_unsupported_hosted_stream_event,
     _name_of,
     _namespace_details,
     _required_by_rule,
     _tool_choice_matches_declaration,
+    _unknown_response_item_kind,
     build_tool_compatibility_plan,
     classify_declaration,
 )
@@ -81,141 +83,10 @@ from .registry import (
     RequestScopedToolAliasRegistry,
 )
 
-CUSTOM_INPUT_KEY = "__codexhub_custom_input"
-CUSTOM_OUTPUT_KEY = "__codexhub_custom_output"
-TOOL_SEARCH_INPUT_KEY = "__codexhub_tool_search_input"
-TOOL_SEARCH_OUTPUT_KEY = "__codexhub_tool_search_output"
-
 def _is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
     if item.get("type") != "function_call":
         return False
     return is_opaque_v1_history_item(item) or is_opaque_v2_history_item(item)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCompatibilityEntry:
-    declaration_index: int
-    family: str
-    disposition: str
-    required: bool
-    declaration: Mapping[str, Any]
-    reason: str
-    aliases: tuple[str, ...] = ()
-    namespace: str | None = None
-    version: str | None = None
-    child_names: tuple[str, ...] = ()
-
-    @property
-    def original_name(self) -> str | None:
-        name = self.declaration.get("name")
-        return name if isinstance(name, str) else None
-
-
-def _provider_function_declaration(
-    child: Mapping[str, Any],
-    alias: str,
-    *,
-    strip_encrypted_annotations: bool = False,
-) -> dict[str, Any]:
-    """Return the plain-function shape exposed to a non-Codex provider.
-
-    Collaboration V2 marks message fields as ``encrypted`` for the Codex
-    client contract. That annotation is not part of an ordinary provider
-    JSON-schema function contract: the value is already an opaque string at
-    this boundary, so forwarding the marker would ask a third party to
-    understand an Official-only schema extension. Keep all other declaration
-    fields and remove only that nested annotation.
-    """
-
-    function = _copy_mapping(child)
-    function["type"] = "function"
-    function["name"] = alias
-    function.pop("namespace", None)
-    return strip_v2_encrypted_annotations(function) if strip_encrypted_annotations else function
-
-
-def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
-    family = classify_declaration(declaration)
-    # ``tool_search`` has two equivalent declaration spellings in the
-    # Responses/Chat boundary: the native client-owned item and the explicit
-    # function-shaped fallback used by older providers.  Treat those
-    # spellings as one request declaration so finalization cannot inject a
-    # second search entry with a different alias.
-    if family == TOOL_SEARCH:
-        return (family, "tool_search")
-    if family == NAMESPACE:
-        namespace, children, version, _valid = _namespace_details(_copy_mapping(declaration))
-        return (
-            family,
-            declaration.get("type"),
-            declaration.get("name"),
-            declaration.get("namespace"),
-            namespace,
-            version,
-            tuple(str(child.get("name")) for child in children),
-        )
-    return (
-        family,
-        declaration.get("type"),
-        declaration.get("name"),
-        declaration.get("namespace"),
-    )
-
-
-
-def _json_object_exact(value: Any, *, output: bool = False) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        parsed = _copy_mapping(value)
-    elif isinstance(value, str):
-        def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-            result: dict[str, Any] = {}
-            for key, item in items:
-                if key in result:
-                    raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_envelope_key")
-                result[key] = item
-            return result
-
-        try:
-            parsed = json.loads(value, object_pairs_hook=pairs)
-        except ToolCompatibilityError:
-            raise
-        except (TypeError, ValueError):
-            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope") from None
-    else:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
-    expected = CUSTOM_OUTPUT_KEY if output else CUSTOM_INPUT_KEY
-    if not isinstance(parsed, dict) or set(parsed) != {expected}:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
-    return parsed
-
-
-def _json_object_with_key(value: Any, key: str) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        parsed = _copy_mapping(value)
-    elif isinstance(value, str):
-        def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-            result: dict[str, Any] = {}
-            for item_key, item in items:
-                if item_key in result:
-                    raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_envelope_key")
-                result[item_key] = item
-            return result
-
-        try:
-            parsed = json.loads(value, object_pairs_hook=pairs)
-        except ToolCompatibilityError:
-            raise
-        except (TypeError, ValueError):
-            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope") from None
-    else:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
-    if not isinstance(parsed, dict) or set(parsed) != {key}:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
-    return parsed
-
-
-def _dump_envelope(key: str, value: Any) -> str:
-    return json.dumps({key: _thaw(_freeze(value))}, ensure_ascii=True, separators=(",", ":"))
 
 
 def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> None:
@@ -243,33 +114,8 @@ def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> No
         validate_v2_fields(parsed)
 
 
-def _item_identity(item: Mapping[str, Any]) -> str | None:
-    item_id = item.get("item_id")
-    plain_id = item.get("id")
-    if (
-        isinstance(item_id, str)
-        and item_id
-        and isinstance(plain_id, str)
-        and plain_id
-        and item_id != plain_id
-    ):
-        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
-    for key in ("item_id", "id"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _is_legacy_message_identity(value: str) -> bool:
-    """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
-
-    prefix = "message_"
-    return value.startswith(prefix) and value[len(prefix) :].isdigit()
-
-
 @dataclass(frozen=True, slots=True)
-class ToolCompatibilityPlan(CollaborationV2PlanMixin):
+class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
     selected_protocol: str
     capabilities: ProtocolCapabilities
     entries: tuple[ToolCompatibilityEntry, ...]
@@ -474,20 +320,6 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
         occurrence[key] = offset + 1
         return matching[offset] if offset < len(matching) else None
 
-    @staticmethod
-    def _family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
-        if item_type == "function_call":
-            return NAMESPACE if namespace is not None else PLAIN_FUNCTION
-        if item_type == "custom_tool_call":
-            return CUSTOM_FREEFORM
-        if item_type in {"tool_search_call", "tool_search_output"}:
-            return TOOL_SEARCH
-        if isinstance(item_type, str) and item_type.endswith("_call"):
-            kind = item_type[: -len("_call")]
-            if kind in _KNOWN_HOSTED_TYPES:
-                return SELECTED_PROVIDER_HOSTED
-        return None
-
     def _entry_for_name(
         self,
         name: Any,
@@ -498,7 +330,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
     ) -> ToolCompatibilityEntry | None:
         if not isinstance(name, str):
             return None
-        expected_family = expected_family or self._family_for_item_type(item_type, namespace)
+        expected_family = expected_family or _family_for_item_type(item_type, namespace)
         matches: list[ToolCompatibilityEntry] = []
         if namespace is not None:
             matches = [
@@ -547,7 +379,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
     ) -> list[ToolCompatibilityEntry]:
         if not isinstance(name, str):
             return []
-        expected_family = expected_family or self._family_for_item_type(item_type, namespace)
+        expected_family = expected_family or _family_for_item_type(item_type, namespace)
         matches: list[ToolCompatibilityEntry] = []
         for entry in self.entries:
             if entry.family == NAMESPACE:
@@ -635,7 +467,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
         if self._entry_for_name(
             name,
             namespace,
-            expected_family=self._family_for_item_type(item_type, namespace),
+            expected_family=_family_for_item_type(item_type, namespace),
             item_type=item_type,
         ) is not None:
             return True
@@ -666,12 +498,14 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                 if not valid:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_declaration")
                 for child_index, child in enumerate(children):
-                    function = _provider_function_declaration(
-                        child,
-                        entry.aliases[child_index],
-                        strip_encrypted_annotations=namespace == "collaboration",
+                    child = (
+                        strip_v2_encrypted_annotations(child)
+                        if namespace == "collaboration"
+                        else child
                     )
-                    encoded.append(function)
+                    encoded.append(
+                        _provider_function_declaration(child, entry.aliases[child_index])
+                    )
                 changed = True
                 continue
             if entry.family == CUSTOM_FREEFORM:
@@ -898,22 +732,6 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
             return item, False
         return item, False
 
-    @staticmethod
-    def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
-        declaration_type = entry.declaration.get("type")
-        if entry.family == SELECTED_PROVIDER_HOSTED:
-            declaration_spec = _hosted_event_spec_for_declaration_kind(declaration_type)
-            if declaration_spec is not None:
-                return declaration_spec[0]
-            return declaration_type if isinstance(declaration_type, str) else None
-        if (
-            entry.family == UNKNOWN_FUTURE_KIND
-            and entry.declaration.get("executor") == "selected_provider"
-            and isinstance(declaration_type, str)
-        ):
-            return declaration_type
-        return None
-
     def _hosted_history_item_key(self, item_type: Any) -> tuple[str, bool] | None:
         # Standard Responses tool lifecycles are resolved by their declaration
         # family (and, for adapted calls, the request-scoped alias registry).
@@ -937,7 +755,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
         for entry in self.entries:
             if entry.disposition not in {NATIVE, OMIT}:
                 continue
-            hosted_kind = self._hosted_entry_item_kind(entry)
+            hosted_kind = _hosted_entry_item_kind(entry)
             if hosted_kind is None:
                 continue
             if item_type == f"{hosted_kind}_call":
@@ -946,25 +764,13 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                 return hosted_kind, True
         return None
 
-    @staticmethod
-    def _unknown_response_item_kind(item_type: Any) -> str | None:
-        if not isinstance(item_type, str):
-            return None
-        if item_type.endswith("_call_output"):
-            kind = item_type[: -len("_call_output")]
-            return kind if kind else None
-        if item_type.endswith("_call"):
-            kind = item_type[: -len("_call")]
-            return kind if kind else None
-        return None
-
     def _unknown_entry_for_item(
         self,
         item: Mapping[str, Any],
         *,
         surface: str,
     ) -> ToolCompatibilityEntry | None:
-        unknown_kind = self._unknown_response_item_kind(item.get("type"))
+        unknown_kind = _unknown_response_item_kind(item.get("type"))
         if unknown_kind is None:
             return None
         matches = [
@@ -995,22 +801,8 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
             )
         return matches[0] if matches else None
 
-    @staticmethod
-    def _history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
-        if entry.family in {PLAIN_FUNCTION, NAMESPACE}:
-            return "function_call_output"
-        if entry.family == CUSTOM_FREEFORM:
-            return "custom_tool_call_output"
-        if entry.family == TOOL_SEARCH:
-            return "tool_search_output"
-        if entry.family == UNKNOWN_FUTURE_KIND:
-            declaration_type = entry.declaration.get("type")
-            if isinstance(declaration_type, str):
-                return f"{declaration_type}_call_output"
-        return None
-
     def _expected_response_output_type(self, entry: ToolCompatibilityEntry) -> str | None:
-        expected = self._history_output_type_for_entry(entry)
+        expected = _history_output_type_for_entry(entry)
         if entry.disposition == ADAPT and entry.family in {NAMESPACE, CUSTOM_FREEFORM, TOOL_SEARCH}:
             return "function_call_output"
         return expected
@@ -1084,36 +876,8 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                     "unknown_native_identity",
                     surface=surface,
                 )
-        if (
-            item.get("type") == "function_call"
-            and item.get("namespace") is not None
-            and isinstance(item.get("name"), str)
-        ):
-            flattened_name = f"{item.get('namespace')}__{item.get('name')}"
-            flattened_matches = [
-                entry
-                for entry in self.entries
-                if entry.family == PLAIN_FUNCTION
-                and entry.original_name == flattened_name
-            ]
-            if any(entry.disposition == NATIVE for entry in flattened_matches):
-                return
-            if flattened_matches:
-                raise ToolCompatibilityError(
-                    "tool_compatibility_boundary",
-                    "unknown_native_identity",
-                    surface=surface,
-                )
-            if any(entry.family == NAMESPACE for entry in self.entries) and self._entry_for_name(
-                item.get("name"),
-                item.get("namespace"),
-                item_type=item.get("type"),
-            ) is None:
-                raise ToolCompatibilityError(
-                    "tool_compatibility_boundary",
-                    "unknown_native_identity",
-                    surface=surface,
-                )
+        if self._reject_unknown_flattened_identity(item, surface=surface):
+            return
         if not self._has_standard_contract_for_item(item):
             return
         if self._standard_entry_for_item(item, surface=surface) is None:
@@ -1207,7 +971,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                 expected_output_type = (
                     self._expected_response_output_type(owner)
                     if surface == "response"
-                    else self._history_output_type_for_entry(owner)
+                    else _history_output_type_for_entry(owner)
                 )
                 if item_type != expected_output_type:
                     raise ToolCompatibilityError(
@@ -1282,7 +1046,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
         if owner is None:
             return
         expected = (
-            self._history_output_type_for_entry(owner)
+            _history_output_type_for_entry(owner)
             if surface == "history"
             else self._expected_response_output_type(owner)
         )
@@ -1315,7 +1079,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                 entry
                 for entry in self.entries
                 if entry.disposition in {NATIVE, OMIT}
-                and self._hosted_entry_item_kind(entry) == hosted_item_kind
+                and _hosted_entry_item_kind(entry) == hosted_item_kind
             ]
             if len(matches) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="response")
@@ -1340,7 +1104,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
                 entry
                 for entry in self.entries
                 if entry.disposition in {NATIVE, OMIT}
-                and self._hosted_entry_item_kind(entry) == hosted_item_kind
+                and _hosted_entry_item_kind(entry) == hosted_item_kind
             ]
             if len(matches) > 1:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity", surface="history")
@@ -1837,24 +1601,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
             # injective ``namespace__child`` spelling; arbitrary namespace
             # decoration must remain an unknown identity.
             if item_type == "function_call":
-                namespace = item.get("namespace")
-                child_name = item.get("name")
-                if isinstance(namespace, str) and namespace and isinstance(child_name, str) and child_name:
-                    flattened_name = f"{namespace}__{child_name}"
-                    flattened_matches = [
-                        candidate
-                        for candidate in self.entries
-                        if candidate.family == PLAIN_FUNCTION
-                        and candidate.disposition == NATIVE
-                        and candidate.original_name == flattened_name
-                    ]
-                    if len(flattened_matches) > 1:
-                        raise ToolCompatibilityError(
-                            "tool_compatibility_boundary",
-                            "ambiguous_native_identity",
-                        )
-                    if flattened_matches:
-                        return flattened_matches[0]
+                return self._flattened_native_plain_entry(item)
             return None
         if item_type in {"tool_search_call", "tool_search_output"}:
             matches = [
@@ -1919,11 +1666,7 @@ class ToolCompatibilityPlan(CollaborationV2PlanMixin):
             validate_v2_native_arguments(item, surface=surface)
         item_type = item.get("type")
         if entry.family == PLAIN_FUNCTION:
-            namespace = item.get("namespace")
-            plain_shape = namespace is None and item.get("name") == entry.original_name
-            flattened_shape = matches_flattened_native_identity(item, entry.original_name)
-            if item_type != "function_call" or not (plain_shape or flattened_shape):
-                raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
+            validate_plain_native_item(item, entry, surface=surface)
         elif entry.family == NAMESPACE:
             if (
                 item_type != "function_call"

@@ -27,6 +27,7 @@ from .dispositions import (
     PLAIN_FUNCTION,
     SELECTED_PROVIDER_HOSTED,
     TOOL_SEARCH,
+    _history_output_type_for_entry,
     _hosted_event_spec,
     _hosted_event_spec_for_declaration_kind,
     _hosted_kind_for_item_type,
@@ -442,7 +443,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         )
         if native_pending is not None:
             _item_id, (_call_id, entry) = native_pending
-            expected = self.plan._history_output_type_for_entry(entry)
+            expected = _history_output_type_for_entry(entry)
             if expected is not None and item.get("type") != expected:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",

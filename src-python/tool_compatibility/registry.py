@@ -8,7 +8,7 @@ import hashlib
 from typing import Any, Iterable, Mapping
 
 from .collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
-from .contracts import ToolCompatibilityError, _copy_mapping
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, _copy_mapping
 from .dispositions import CUSTOM_FREEFORM, NAMESPACE, TOOL_SEARCH
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
@@ -21,7 +21,7 @@ class CompatibilityDiagnostics:
     failures: tuple[str, ...] = ()
 
     @classmethod
-    def from_entries(cls, entries: Iterable["ToolCompatibilityEntry"]) -> "CompatibilityDiagnostics":
+    def from_entries(cls, entries: Iterable[ToolCompatibilityEntry]) -> "CompatibilityDiagnostics":
         counts = Counter((entry.family, entry.disposition) for entry in entries)
         return cls(
             counts=tuple(

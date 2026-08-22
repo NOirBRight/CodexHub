@@ -16,7 +16,7 @@ from collaboration_runtime_contract import (
     validate_collaboration_result,
 )
 
-from .contracts import ToolCompatibilityError, _copy_mapping, _freeze
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, _copy_mapping, _freeze
 from .dispositions import ADAPT, NAMESPACE
 
 
@@ -75,6 +75,8 @@ def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> No
 
 class CollaborationV2PlanMixin:
     """V2 namespace adaptation mixed into ``ToolCompatibilityPlan``."""
+
+    __slots__ = ()
 
     def _collaboration_v2_entry(self) -> ToolCompatibilityEntry | None:
         matches = [
@@ -422,6 +424,8 @@ class CollaborationV2PlanMixin:
 
 class CollaborationV2StreamMixin:
     """V2 stream-ledger operations mixed into ``CompatibilityStreamState``."""
+
+    __slots__ = ()
 
     @staticmethod
     def _agent_message_output_index(event: Mapping[str, Any]) -> int:

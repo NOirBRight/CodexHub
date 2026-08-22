@@ -14,6 +14,7 @@ from collaboration_runtime_contract import (
 from .contracts import (
     ProtocolCapabilities,
     RequiredToolUnavailableError,
+    ToolCompatibilityEntry,
     ToolCompatibilityError,
     _MalformedDeclaration,
     _copy_mapping,
@@ -212,6 +213,90 @@ def _hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
     return None
 
 
+def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
+    family = classify_declaration(declaration)
+    # ``tool_search`` has two equivalent declaration spellings in the
+    # Responses/Chat boundary: the native client-owned item and the explicit
+    # function-shaped fallback used by older providers.  Treat those
+    # spellings as one request declaration so finalization cannot inject a
+    # second search entry with a different alias.
+    if family == TOOL_SEARCH:
+        return (family, "tool_search")
+    if family == NAMESPACE:
+        namespace, children, version, _valid = _namespace_details(_copy_mapping(declaration))
+        return (
+            family,
+            declaration.get("type"),
+            declaration.get("name"),
+            declaration.get("namespace"),
+            namespace,
+            version,
+            tuple(str(child.get("name")) for child in children),
+        )
+    return (
+        family,
+        declaration.get("type"),
+        declaration.get("name"),
+        declaration.get("namespace"),
+    )
+
+
+def _family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
+    if item_type == "function_call":
+        return NAMESPACE if namespace is not None else PLAIN_FUNCTION
+    if item_type == "custom_tool_call":
+        return CUSTOM_FREEFORM
+    if item_type in {"tool_search_call", "tool_search_output"}:
+        return TOOL_SEARCH
+    if isinstance(item_type, str) and item_type.endswith("_call"):
+        kind = item_type[: -len("_call")]
+        if kind in _KNOWN_HOSTED_TYPES:
+            return SELECTED_PROVIDER_HOSTED
+    return None
+
+
+def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
+    declaration_type = entry.declaration.get("type")
+    if entry.family == SELECTED_PROVIDER_HOSTED:
+        declaration_spec = _hosted_event_spec_for_declaration_kind(declaration_type)
+        if declaration_spec is not None:
+            return declaration_spec[0]
+        return declaration_type if isinstance(declaration_type, str) else None
+    if (
+        entry.family == UNKNOWN_FUTURE_KIND
+        and entry.declaration.get("executor") == "selected_provider"
+        and isinstance(declaration_type, str)
+    ):
+        return declaration_type
+    return None
+
+
+def _unknown_response_item_kind(item_type: Any) -> str | None:
+    if not isinstance(item_type, str):
+        return None
+    if item_type.endswith("_call_output"):
+        kind = item_type[: -len("_call_output")]
+        return kind if kind else None
+    if item_type.endswith("_call"):
+        kind = item_type[: -len("_call")]
+        return kind if kind else None
+    return None
+
+
+def _history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
+    if entry.family in {PLAIN_FUNCTION, NAMESPACE}:
+        return "function_call_output"
+    if entry.family == CUSTOM_FREEFORM:
+        return "custom_tool_call_output"
+    if entry.family == TOOL_SEARCH:
+        return "tool_search_output"
+    if entry.family == UNKNOWN_FUTURE_KIND:
+        declaration_type = entry.declaration.get("type")
+        if isinstance(declaration_type, str):
+            return f"{declaration_type}_call_output"
+    return None
+
+
 def _hosted_event_spec(event_type: Any) -> tuple[str, str, tuple[str, ...]] | None:
     if not isinstance(event_type, str) or not event_type.startswith("response."):
         return None
@@ -367,7 +452,7 @@ def build_tool_compatibility_plan(
     native_names: Iterable[str] = (),
     collaboration_protocol: str | None = None,
 ) -> "ToolCompatibilityPlan":
-    from .plan import ToolCompatibilityEntry, ToolCompatibilityPlan
+    from .plan import ToolCompatibilityPlan
     from .registry import CompatibilityDiagnostics, RequestScopedToolAliasRegistry
 
     if isinstance(runtime_declarations, Mapping):
