@@ -15,6 +15,58 @@ def _exchange_payload(body: bytes, *, inbound: str, outbound: str) -> dict:
 
 
 class ProtocolTranslationTests(unittest.TestCase):
+    def test_responses_function_call_output_text_parts_translate_to_chat_tool_message(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {"type": "input_text", "text": "first line"},
+                        {"type": "input_text", "text": "second line"},
+                    ],
+                },
+            ],
+        }
+
+        translated = _exchange_payload(
+            json.dumps(body).encode("utf-8"),
+            inbound="responses",
+            outbound="chat_completions",
+        )
+
+        self.assertEqual(
+            translated["messages"][1],
+            {"role": "tool", "tool_call_id": "call_123", "content": "first line\nsecond line"},
+        )
+
+    def test_responses_function_call_output_media_parts_still_fail_closed(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}],
+                }
+            ],
+        }
+
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8")
+            )
+
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+        self.assertIn("input_image", str(raised.exception))
+
     def test_responses_client_tool_search_output_loads_chat_tools(self):
         body = {
             "model": "example-model",

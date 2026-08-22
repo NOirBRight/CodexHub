@@ -2944,6 +2944,96 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["object"], "response")
         self.assertEqual(result["output"][0]["content"][0]["text"], "Hi from chat")
 
+    def test_provider_scoped_responses_to_chat_accepts_codex_text_tool_output_parts(self):
+        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        external_model = {
+            "alias": "chat-only/glm-5.2",
+            "provider_alias": "chat-only",
+            "upstream_name": "chat_only_provider",
+            "display_prefix": "ChatOnly",
+            "base_url": "https://chat-only.example.test/v1",
+            "api_key": "chat-only-token",
+            "upstream_model": "glm-5.2-chat",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps(
+            {
+                "model": "glm-5.2",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Use the fixture tool."},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_fixture",
+                        "name": "fixture_tool",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_fixture",
+                        "output": [
+                            {"type": "input_text", "text": "first line"},
+                            {"type": "input_text", "text": "second line"},
+                        ],
+                    },
+                ],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/chat-only/responses")
+        upstream_body = json.dumps(
+            {
+                "id": "chatcmpl_text_tool_output",
+                "object": "chat.completion",
+                "model": "glm-5.2-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Tool output received."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        with (
+            patch(
+                "codex_proxy.generated_catalog_slugs",
+                return_value={"gpt-5.5", "chat-only/glm-5.2"},
+            ),
+            patch(
+                "codex_proxy.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "codex_proxy.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
+                ),
+            ),
+            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 200)
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(
+            sent_payload["messages"][2],
+            {"role": "tool", "tool_call_id": "call_fixture", "content": "first line\nsecond line"},
+        )
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(result["output"][0]["content"][0]["text"], "Tool output received.")
+
     def test_provider_scoped_responses_to_chat_streaming_fallback_skips_codex_response_repairs(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
         external_model = {
