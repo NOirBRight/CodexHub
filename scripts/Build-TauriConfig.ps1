@@ -22,6 +22,7 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 
 $manifestPath = Join-Path $RepoRoot "config\build-flavors.json"
 $baseConfigPath = Join-Path $RepoRoot "src-tauri\tauri.conf.json"
+$linuxConfigPath = Join-Path $RepoRoot "src-tauri\tauri.linux.conf.json"
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $flavorConfig = $manifest.$Flavor
 if ($null -eq $flavorConfig) {
@@ -29,6 +30,13 @@ if ($null -eq $flavorConfig) {
 }
 
 $config = Get-Content -Raw -LiteralPath $baseConfigPath | ConvertFrom-Json
+$isLinuxHost = $PSVersionTable.PSEdition -eq "Core" -and $IsLinux
+if ($isLinuxHost) {
+    $linuxConfig = Get-Content -Raw -LiteralPath $linuxConfigPath | ConvertFrom-Json
+    foreach ($property in $linuxConfig.app.windows[0].PSObject.Properties) {
+        $config.app.windows[0] | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
+    }
+}
 $config.productName = [string]$flavorConfig.productName
 $config.identifier = [string]$flavorConfig.identifier
 $config.build.devUrl = "http://localhost:$($flavorConfig.frontendPort)"

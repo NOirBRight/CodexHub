@@ -16,6 +16,14 @@ def test_build_revision_recompiles_when_symbolic_branch_head_moves():
     assert "cargo:rerun-if-changed={}" in build_script
 
 
+def test_generated_tauri_config_applies_linux_platform_overlay():
+    script = (ROOT / "scripts" / "Build-TauriConfig.ps1").read_text(encoding="utf-8")
+
+    assert "tauri.linux.conf.json" in script
+    assert "$IsLinux" in script
+    assert "Add-Member -NotePropertyName" in script
+
+
 def test_official_transport_wheel_is_pinned_and_packaged():
     wheel = ROOT / "src-python" / "vendor" / "urllib3-2.7.0-py3-none-any.whl"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
