@@ -75,6 +75,13 @@ export interface UpstreamFormatProbeResult {
   base_url: string;
   model: string | null;
   model_required: boolean;
+  inconclusive_reason?:
+    | "authentication_failed"
+    | "rate_limited"
+    | "network_error"
+    | "upstream_unavailable"
+    | "request_failed"
+    | null;
   models_ok: boolean;
   responses_text_ok: boolean;
   responses_tool_ok: boolean;

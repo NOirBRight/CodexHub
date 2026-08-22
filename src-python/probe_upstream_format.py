@@ -286,6 +286,21 @@ def transient_probe_failure(status: int | None, detail: str | None) -> bool:
     return bool(detail and ("timed out" in detail.lower() or "timeout" in detail.lower()))
 
 
+def probe_inconclusive_reason(failures: list[tuple[int | None, str | None]]) -> str | None:
+    statuses = {status for status, _detail in failures}
+    if statuses & {401, 403}:
+        return "authentication_failed"
+    if statuses & {402, 429}:
+        return "rate_limited"
+    if None in statuses:
+        return "network_error"
+    if statuses & {408, 409, 425, 500, 502, 503, 504}:
+        return "upstream_unavailable"
+    if any(status not in {404, 405, 501} for status in statuses):
+        return "request_failed"
+    return None
+
+
 def request_sse_events(
     base_url: str,
     api_key: str,
@@ -479,6 +494,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         "base_url": base_url,
         "model": requested_model.strip() if requested_model and requested_model.strip() else None,
         "model_required": False,
+        "inconclusive_reason": None,
         "models_ok": False,
         "responses_text_ok": False,
         "responses_tool_ok": False,
@@ -505,6 +521,12 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
 
     model = result["model"]
     if not isinstance(model, str) or not model.strip():
+        reason = None if ok else probe_inconclusive_reason([(status, detail)])
+        if reason:
+            result["inconclusive_reason"] = reason
+            notes.append(f"Probe inconclusive: {reason.replace('_', ' ')}.")
+            result["duration_ms"] = int((time.monotonic() - started) * 1000)
+            return result
         notes.append("No model is available for POST probes.")
         result["model_required"] = True
         result["duration_ms"] = int((time.monotonic() - started) * 1000)
@@ -515,6 +537,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         ("chat_text_ok", "/chat/completions", chat_text_payload(model), lambda value: isinstance(value, dict)),
         ("anthropic_text_ok", "/messages", anthropic_text_payload(model), anthropic_text_ok),
     ]
+    text_failures: list[tuple[int | None, str | None]] = []
     for key, path, body, validator in checks:
         ok, status, payload, detail, attempts = request_json_with_retries(
             base_url,
@@ -529,15 +552,25 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         if result[key]:
             notes.append(f"{label}: OK")
         else:
+            text_failures.append((status, detail))
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
         if attempts > 1:
             notes.append(f"{label}: retried after transient failure")
+
+    if not any(result[key] for key, _path, _body, _validator in checks):
+        reason = probe_inconclusive_reason(text_failures)
+        if reason:
+            result["inconclusive_reason"] = reason
+            notes.append(f"Probe inconclusive: {reason.replace('_', ' ')}.")
+            result["duration_ms"] = int((time.monotonic() - started) * 1000)
+            return result
 
     tool_checks = [
         ("responses_tool_ok", "/responses", responses_tool_payload(model, stream=False), responses_tool_ok),
         ("chat_tool_ok", "/chat/completions", chat_tool_payload(model, stream=False), chat_tool_ok),
         ("chat_tool_history_ok", "/chat/completions", chat_tool_history_payload(model), chat_tool_ok),
     ]
+    tool_failures: list[tuple[int | None, str | None]] = []
     for key, path, body, validator in tool_checks:
         ok, status, payload, detail = request_json(
             base_url,
@@ -552,6 +585,7 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         if result[key]:
             notes.append(f"{label}: OK")
         else:
+            tool_failures.append((status, detail))
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid response shape'}")
 
     stream_tool_checks = [
@@ -581,7 +615,15 @@ def probe(base_url: str, api_key: str, requested_model: str | None, timeout: int
         if result[key]:
             notes.append(f"{label}: OK")
         else:
+            tool_failures.append((status, detail))
             notes.append(f"{label}: failed ({status or 'no status'}): {detail or 'invalid SSE response shape'}")
+
+    tool_keys = [key for key, _path, _body, _validator in tool_checks + stream_tool_checks]
+    if not any(result[key] for key in tool_keys):
+        reason = probe_inconclusive_reason(tool_failures)
+        if reason and reason != "request_failed":
+            result["inconclusive_reason"] = reason
+            notes.append(f"Tool probe inconclusive: {reason.replace('_', ' ')}.")
 
     result["recommended_format"] = recommended_format(result)
     if result["recommended_format"] == UPSTREAM_FORMAT_RESPONSES:

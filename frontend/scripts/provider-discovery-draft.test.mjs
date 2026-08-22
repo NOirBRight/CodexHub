@@ -233,3 +233,41 @@ test("model-required probe cannot be marked successful by a suggested format", a
     false,
   );
 });
+
+test("inconclusive probe preserves existing endpoint capabilities", async () => {
+  const { applyAddProviderProbeResult, applyProviderProbeResult, probeSucceeded } = await readEndpointModule();
+  const provider = {
+    id: "provider-a",
+    name: "Provider A",
+    base_url: "https://example.test/v1",
+    api_key: "secret",
+    upstream_format: "chat_completions",
+    available_upstream_formats: ["chat_completions"],
+    tool_protocol: "chat_tools",
+    enabled: true,
+    models: [],
+  };
+  const form = { ...provider, id: "", name: "" };
+  const rateLimited = {
+    base_url: provider.base_url,
+    model: "model-a",
+    model_required: false,
+    inconclusive_reason: "rate_limited",
+    models_ok: true,
+    responses_text_ok: false,
+    responses_tool_ok: false,
+    responses_tool_stream_ok: false,
+    chat_text_ok: false,
+    chat_tool_ok: false,
+    chat_tool_stream_ok: false,
+    chat_tool_history_ok: false,
+    anthropic_text_ok: false,
+    recommended_format: "auto",
+    recommended_tool_protocol: "none",
+    notes: ["chat text: failed (429)"],
+  };
+
+  assert.equal(probeSucceeded(rateLimited), false);
+  assert.deepEqual(applyProviderProbeResult(provider, rateLimited), provider);
+  assert.deepEqual(applyAddProviderProbeResult(form, rateLimited), form);
+});
