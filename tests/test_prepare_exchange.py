@@ -90,6 +90,29 @@ def test_prepare_exchange_consumes_desktop_reasoning_summary_selector_for_chat()
     assert "reasoning" not in chat
 
 
+def test_prepare_exchange_consumes_full_desktop_reasoning_controls_for_chat() -> None:
+    """Stale Desktop catalogs may send every documented Responses selector."""
+
+    exchange = prepare_exchange(
+        _responses_body(
+            reasoning={
+                "effort": "max",
+                "summary": "auto",
+                "generate_summary": "auto",
+                "mode": "standard",
+                "context": "all_turns",
+            },
+            stream=True,
+        ),
+        inbound_format="responses",
+        outbound_format="chat_completions",
+    )
+
+    chat = json.loads(exchange.upstream_body)
+    assert chat["messages"] == [{"role": "user", "content": "hi"}]
+    assert "reasoning" not in chat
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -100,6 +123,9 @@ def test_prepare_exchange_consumes_desktop_reasoning_summary_selector_for_chat()
         ("text", {"verbosity": "maximum"}),
         ("text", {"verbosity": {"invalid": True}}),
         ("reasoning", {"summary": "verbose"}),
+        ("reasoning", {"generate_summary": "verbose"}),
+        ("reasoning", {"mode": "experimental"}),
+        ("reasoning", {"context": "future_turn"}),
         ("reasoning", {"effort": "extreme"}),
         ("reasoning", {"effort": {"invalid": True}}),
     ],

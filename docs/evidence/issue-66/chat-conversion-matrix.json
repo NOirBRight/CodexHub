@@ -7,7 +7,7 @@
     },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "224a841a547e6683210331d448498ee2c06d72ea560f7fbcf57ab9705093697a"
+      "sha256": "a1bab10e1600bb565d816304ed53f96331ec491402e0ff8832d21704fd08821d"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
@@ -187,11 +187,11 @@
       "disposition": "consumed_locally",
       "execution_owner": "gateway",
       "fail_closed": false,
-      "id": "request.reasoning.effort",
+      "id": "request.reasoning.controls",
       "implementation": "protocol_translation",
       "key": "reasoning",
-      "notes": "Chat cannot return a Responses reasoning summary. The Gateway consumes known effort/summary selectors locally for compatibility; unknown keys or values fail closed.",
-      "responses": "{effort: none|minimal|low|medium|high|xhigh|max, summary?: auto|concise|detailed}",
+      "notes": "Chat cannot return Responses reasoning controls or summaries. The Gateway consumes documented effort, summary, generate_summary, mode, and context selectors locally for stale Desktop compatibility; unknown keys or values fail closed.",
+      "responses": "{effort?: none|minimal|low|medium|high|xhigh|max, summary?: auto|concise|detailed, generate_summary?: auto|concise|detailed, mode?: standard|pro, context?: auto|current_turn|all_turns}",
       "when": "exact bounded Codex reasoning-control object"
     },
     {
@@ -294,7 +294,7 @@
       "id": "request.transport.invalid",
       "implementation": "protocol_translation",
       "key": "client_metadata|include|prompt_cache_key|reasoning|text",
-      "notes": "Known Codex defaults are consumed by value; all other transport semantics fail closed.",
+      "notes": "Known Codex defaults and documented reasoning selectors are consumed by value; all other transport semantics fail closed.",
       "responses": "wrong type, unknown key, or unknown value",
       "when": "outside the bounded locally-consumed shapes above"
     },

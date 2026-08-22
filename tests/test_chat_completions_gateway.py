@@ -2873,7 +2873,13 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         body = json.dumps({
             "model": "glm-5.2",
             "input": "Hello",
-            "reasoning": {"effort": "max", "summary": "auto"},
+            "reasoning": {
+                "effort": "max",
+                "summary": "auto",
+                "generate_summary": "auto",
+                "mode": "standard",
+                "context": "all_turns",
+            },
             "text": {"verbosity": "low"},
             "stream": False,
         }).encode("utf-8")
