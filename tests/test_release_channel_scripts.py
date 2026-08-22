@@ -445,6 +445,20 @@ def test_linux_release_builder_writes_and_merges_the_signed_flavor_manifest():
     assert "python3" not in script
 
 
+def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
+    script = (ROOT / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
+
+    cleanup = 'rm -rf "$bundle_root/appimage" "$bundle_root/deb"'
+    build = 'cargo "${tauri_args[@]}"'
+    assert cleanup in script
+    assert script.index(cleanup) < script.index(build)
+    assert "head -n 1" not in script
+    assert "expected exactly one AppImage" in script
+    assert "expected exactly one deb" in script
+    assert 'dpkg-deb -f "$deb_dst" Version' in script
+    assert "deb package version mismatch" in script
+
+
 def _validate_manifest(
     flavor: str,
     version: str,

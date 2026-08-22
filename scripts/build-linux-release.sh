@@ -83,6 +83,9 @@ export CODEXHUB_BUILD_FLAVOR="$flavor"
 export TAURI_CONFIG="$generated_config"
 export CARGO_TARGET_DIR="$targetRoot"
 
+bundle_root="$targetRoot/release/bundle"
+rm -rf "$bundle_root/appimage" "$bundle_root/deb"
+
 tauri_args=(tauri build --config "$generated_config" --bundles appimage --bundles deb --ci)
 if [[ "$flavor" == "debug" ]]; then
   tauri_args+=(--features debug-diagnostics)
@@ -92,13 +95,20 @@ fi
   cargo "${tauri_args[@]}"
 )
 
-bundle_root="$targetRoot/release/bundle"
-appimage_src="$(find "$bundle_root/appimage" -maxdepth 1 -name '*.AppImage' -type f | head -n 1 || true)"
-deb_src="$(find "$bundle_root/deb" -maxdepth 1 -name '*.deb' -type f | head -n 1 || true)"
-if [[ -z "$appimage_src" || -z "$deb_src" ]]; then
-  echo "expected AppImage and deb were not generated under $bundle_root" >&2
+mapfile -t appimage_candidates < <(find "$bundle_root/appimage" -maxdepth 1 -name '*.AppImage' -type f -print)
+mapfile -t deb_candidates < <(find "$bundle_root/deb" -maxdepth 1 -name '*.deb' -type f -print)
+if [[ "${#appimage_candidates[@]}" -ne 1 ]]; then
+  echo "expected exactly one AppImage under $bundle_root/appimage; found ${#appimage_candidates[@]}" >&2
+  printf '  %s\n' "${appimage_candidates[@]}" >&2
   exit 1
 fi
+if [[ "${#deb_candidates[@]}" -ne 1 ]]; then
+  echo "expected exactly one deb under $bundle_root/deb; found ${#deb_candidates[@]}" >&2
+  printf '  %s\n' "${deb_candidates[@]}" >&2
+  exit 1
+fi
+appimage_src="${appimage_candidates[0]}"
+deb_src="${deb_candidates[0]}"
 
 appimage_dst="$bundle_root/appimage/$appimageName"
 deb_dst="$bundle_root/deb/$debName"
@@ -110,6 +120,12 @@ if [[ "$appimage_src" != "$appimage_dst" ]]; then
 fi
 if [[ "$deb_src" != "$deb_dst" ]]; then
   mv -f "$deb_src" "$deb_dst"
+fi
+
+deb_version="$(dpkg-deb -f "$deb_dst" Version)"
+if [[ "$deb_version" != "$version" ]]; then
+  echo "deb package version mismatch: expected $version, found $deb_version in $deb_dst" >&2
+  exit 1
 fi
 
 if [[ ! -f "$appimage_dst.sig" ]]; then
