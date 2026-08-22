@@ -1,0 +1,112 @@
+"""SubscriptionCredential seam (ADR-0005)."""
+
+from __future__ import annotations
+
+from typing import Mapping
+
+import pytest
+
+from subscription_credential import (
+    AUTH_REQUIRED,
+    CodexAuthAdapter,
+    SubscriptionAuthError,
+    credential_for,
+    register,
+    register_builtin_adapters,
+    registered_modes,
+    unregister,
+)
+
+
+class _StubCredential:
+    def __init__(self, token: str = "tok") -> None:
+        self._token = token
+
+    def access_token(self) -> str:
+        return self._token
+
+    def account_headers(self) -> Mapping[str, str]:
+        return {"Chatgpt-account-id": "acct-1"}
+
+    def refresh(self) -> str:
+        self._token = "tok-refreshed"
+        return self._token
+
+
+def test_register_and_lookup_round_trip() -> None:
+    unregister("stub")
+    register("stub", _StubCredential())
+    try:
+        adapter = credential_for("stub")
+        assert adapter is not None
+        assert adapter.access_token() == "tok"
+        assert adapter.account_headers()["Chatgpt-account-id"] == "acct-1"
+        assert adapter.refresh() == "tok-refreshed"
+        assert "stub" in registered_modes()
+    finally:
+        unregister("stub")
+
+
+def test_unknown_mode_is_none() -> None:
+    assert credential_for("not-a-subscription") is None
+    assert credential_for(None) is None
+
+
+def test_error_taxonomy_is_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        SubscriptionAuthError("nope", classification="expired")
+    err = SubscriptionAuthError("login", classification=AUTH_REQUIRED)
+    assert err.classification == AUTH_REQUIRED
+
+
+def test_simple_api_keys_stay_out_of_the_registry() -> None:
+    register_builtin_adapters()
+    assert credential_for("api_key") is None
+    assert credential_for("ollama_api_key") is None
+    assert credential_for("incoming") is None
+
+
+def test_builtin_adapters_register_codex_auth_only() -> None:
+    unregister("codex_auth")
+    unregister("xai_oauth")
+    try:
+        register_builtin_adapters()
+        assert isinstance(credential_for("codex_auth"), CodexAuthAdapter)
+        assert credential_for("xai_oauth") is None
+        register_builtin_adapters()
+        assert credential_for("codex_auth") is not None
+    finally:
+        register_builtin_adapters()
+
+
+def test_codex_adapter_maps_missing_auth_to_auth_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    from codex_auth import CodexAuthError
+
+    monkeypatch.setattr(
+        "codex_auth.access_token",
+        lambda: (_ for _ in ()).throw(CodexAuthError("missing auth.json")),
+    )
+    with pytest.raises(SubscriptionAuthError) as exc:
+        CodexAuthAdapter().access_token()
+    assert exc.value.classification == AUTH_REQUIRED
+
+
+def test_codex_adapter_refresh_maps_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from codex_auth import CodexAuthError
+
+    monkeypatch.setattr(
+        "codex_auth.load_auth_json",
+        lambda: (_ for _ in ()).throw(CodexAuthError("missing auth.json")),
+    )
+    with pytest.raises(SubscriptionAuthError) as missing:
+        CodexAuthAdapter().refresh()
+    assert missing.value.classification == AUTH_REQUIRED
+
+    monkeypatch.setattr("codex_auth.load_auth_json", lambda: {"tokens": {"refresh_token": "r"}})
+    monkeypatch.setattr(
+        "codex_auth.refresh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(CodexAuthError("refresh broke")),
+    )
+    with pytest.raises(SubscriptionAuthError) as failed:
+        CodexAuthAdapter().refresh()
+    assert failed.value.classification == "refresh-failed"

@@ -226,6 +226,34 @@ def test_module_level_header_helpers_match_injected_adapter() -> None:
     assert auth.authorization == "Bearer caller"
 
 
+def test_subscription_registry_dispatches_without_transport_auth_branch() -> None:
+    from subscription_credential import register, unregister
+
+    class _Hypothetical:
+        def access_token(self) -> str:
+            return "hypothetical-token"
+
+        def account_headers(self) -> dict[str, str]:
+            return {"X-Account": "acct-h"}
+
+        def refresh(self) -> str:
+            return "hypothetical-token"
+
+    unregister("hypothetical_oauth")
+    register("hypothetical_oauth", _Hypothetical())
+    try:
+        headers = build_upstream_headers(
+            {"Content-Type": "application/json"},
+            {"auth": "hypothetical_oauth", "name": "hypo"},
+        )
+        assert headers["Authorization"] == "Bearer hypothetical-token"
+        assert headers["X-Account"] == "acct-h"
+        assert "Session-id" not in headers
+        assert "Chatgpt-account-id" not in headers
+    finally:
+        unregister("hypothetical_oauth")
+
+
 def test_upstream_sse_reader_lifecycle_with_scripted_response() -> None:
     class Scripted:
         def __init__(self) -> None:
