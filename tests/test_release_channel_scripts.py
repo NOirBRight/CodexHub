@@ -8,6 +8,14 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_build_revision_recompiles_when_symbolic_branch_head_moves():
+    build_script = (ROOT / "src-tauri" / "build.rs").read_text(encoding="utf-8")
+
+    assert 'args(["symbolic-ref", "-q", "HEAD"])' in build_script
+    assert 'args(["rev-parse", "--git-path", reference])' in build_script
+    assert "cargo:rerun-if-changed={}" in build_script
+
+
 def test_official_transport_wheel_is_pinned_and_packaged():
     wheel = ROOT / "src-python" / "vendor" / "urllib3-2.7.0-py3-none-any.whl"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
