@@ -174,3 +174,13 @@ def test_invalid_codec_still_raises_when_planning_event_sink_is_none(
             )
     assert raised.value.cause.code == route_plan.NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE
     assert "native_responses_tool_codec_rejected" in caplog.text
+
+
+def test_gateway_runtime_and_admission_do_not_import_the_facade() -> None:
+    import gateway_admission
+
+    runtime_source = Path(__file__).resolve().parents[1] / "src-python" / "gateway_runtime.py"
+    admission_source = Path(gateway_admission.__file__).read_text(encoding="utf-8")
+    for source in (runtime_source.read_text(encoding="utf-8"), admission_source):
+        assert "import codex_proxy" not in source
+        assert "from codex_proxy" not in source
