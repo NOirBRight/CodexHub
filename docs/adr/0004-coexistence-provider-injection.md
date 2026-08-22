@@ -10,12 +10,12 @@ CodexHub integrated its first five clients (codex, opencode, pi, omp, zcode)
 with **Managed Takeover** semantics: Apply rewrote the client configuration so
 the local Gateway was effectively the only route. Four of the five clients
 overwrite whole files or strip foreign provider sections
-(`opencode_config_text` gateway.rs:5725-5787, `omp_models_yml_text`
-gateway.rs:5936-5971, zcode catalog gateway.rs:5989-6030, codex overlay
+(`clients::opencode::opencode_config_text`, `clients::omp::omp_models_yml_text`,
+`clients::zcode` catalog serializer, codex overlay
 `STALE_PROXY_PROVIDER_SECTIONS` config_overlay.py:38-42); pi alone edits
 surgically but still forces `defaultProvider`/`defaultModel`. Readback
 verifies by byte-comparing a re-serialized expectation against the whole file
-(`verify_apply_readback` gateway.rs:1146-1303).
+(`readback::verify_apply_readback`).
 
 Consequences that motivated the change:
 

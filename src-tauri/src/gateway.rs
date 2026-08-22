@@ -16,6 +16,26 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod telemetry;
+mod clients;
+mod providers;
+mod readback;
+
+pub use clients::dsh::{
+    detect_dsh_client, dsh_client_connect, dsh_client_disconnect, dsh_client_readback,
+    DshClientInfo,
+};
+pub use providers::provider_probe_upstream_format;
+pub use readback::verify_apply_readback;
+
+use clients::omp::{omp_config_text, omp_models_yml_text};
+use clients::opencode::opencode_config_text;
+use clients::pi::{pi_models_text, pi_settings_text};
+use clients::zcode::{
+    zcode_catalog_text, zcode_provider_endpoint, zcode_v2_cache_text, zcode_v2_config_text,
+};
+
+#[cfg(test)]
+use clients::opencode::opencode_reasoning_variants;
 
 #[cfg(test)]
 pub(crate) use telemetry::{
@@ -623,89 +643,6 @@ pub fn gateway_copy_client_config(
     })
 }
 
-const DSH_PINNED_VERSION: &str = "0.1.0-rc.6";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DshClientInfo {
-    pub client_id: String,
-    pub installed: bool,
-    pub executable_path: Option<PathBuf>,
-    pub package_name: String,
-    pub config_path: PathBuf,
-    pub version: Option<String>,
-    pub qualification: String,
-    pub drift_details: Vec<String>,
-    pub restart_required: String,
-}
-
-fn dsh_executable_path() -> Option<PathBuf> {
-    std::env::var_os("CODEXHUB_DSH_EXECUTABLE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| which::which("dsh").ok())
-}
-
-fn dsh_package_version() -> Option<String> {
-    let mut command = Command::new("npm");
-    command.args(["list", "-g", "@deepseek-ai/dsh", "--json", "--depth=0"]);
-    let output = command_output_no_window(command)?;
-    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
-    value.get("dependencies")?.get("@deepseek-ai/dsh")?.get("version")?.as_str().map(ToOwned::to_owned)
-}
-
-fn dsh_version() -> Option<String> {
-    dsh_executable_path().and_then(|path| version_output_for_path(&path)).and_then(|output| {
-        let text = if output.stdout.is_empty() { String::from_utf8_lossy(&output.stderr) } else { String::from_utf8_lossy(&output.stdout) };
-        parse_version_output(&text)
-    }).or_else(dsh_package_version)
-}
-
-pub fn detect_dsh_client() -> DshClientInfo {
-    let descriptor = crate::injection::dsh_descriptor();
-    let config_path = descriptor.config_file.resolve(&descriptor.client_home().unwrap_or_else(|| PathBuf::from("~/.dsh")));
-    let executable_path = dsh_executable_path();
-    let version = dsh_version();
-    let installed = executable_path.is_some() || version.is_some() || config_path.exists();
-    let mut drift_details = Vec::new();
-    let qualification = match version.as_deref() {
-        Some(DSH_PINNED_VERSION) => "qualified",
-        Some(found) => { drift_details.push(format!("installed DSH version {found} differs from pinned baseline {DSH_PINNED_VERSION}")); "drifted" },
-        None if installed => { drift_details.push(format!("DSH version could not be determined; pinned baseline is {DSH_PINNED_VERSION}")); "unqualified" },
-        None => "unavailable",
-    };
-    DshClientInfo { client_id: "dsh".to_owned(), installed, executable_path, package_name: "@deepseek-ai/dsh".to_owned(), config_path, version, qualification: qualification.to_owned(), drift_details, restart_required: "none".to_owned() }
-}
-
-fn dsh_expectation(settings: &Settings, providers: &[Provider]) -> crate::injection::ReadbackExpectation {
-    crate::injection::ReadbackExpectation { base_url: endpoints(settings.proxy_port).base_url, models: gateway_models_from_config(settings, providers).into_iter().map(|m| m.id).collect() }
-}
-
-pub fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
-    let settings = config::get_settings()?;
-    let providers = config::get_providers()?;
-    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let request = crate::injection::MaskedSecret::new(settings.gateway_client_key.clone());
-    let base_url = endpoints(settings.proxy_port).base_url;
-    let models = gateway_models_from_config(&settings, &providers).into_iter().map(|m| m.id).collect();
-    crate::injection::dsh_connect(&root, base_url, request, models)
-}
-
-pub fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
-    let settings = config::get_settings()?;
-    let providers = config::get_providers()?;
-    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let expectation = dsh_expectation(&settings, &providers);
-    crate::injection::dsh_disconnect(&root, &expectation)
-}
-
-pub fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
-    let settings = config::get_settings()?;
-    let providers = config::get_providers()?;
-    let root = crate::injection::dsh_descriptor().client_home().ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let expectation = dsh_expectation(&settings, &providers);
-    crate::injection::dsh_readback(&root, &expectation)
-}
 
 pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientInfo>, String> {
     let settings = config::get_settings()?;
@@ -1261,148 +1198,6 @@ pub(crate) fn reject_hard_link(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Post-apply readback verifier shared by the production GUI/Web Bridge apply
-/// entrypoints and the headless CLI. Reopens the produced files, rejects
-/// missing/partial/malformed/linked output, and asserts round-trip parity
-/// against the production serializer for the same settings/providers/model.
-///
-/// `target_paths` are the absolute host paths the apply step wrote; this
-/// verifier does not confine them to an isolated root (that confinement is the
-/// caller's responsibility — the isolated CLI path validates the root up
-/// front).
-pub fn verify_apply_readback(
-    client_id: &str,
-    target_paths: &[PathBuf],
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<(), String> {
-    let required_paths: &[PathBuf] = match client_id {
-        // settings.json is user-owned under Provider Injection and is not an
-        // apply output. Only models.json is produced/verified.
-        "pi" if target_paths.len() >= 2 => &target_paths[1..],
-        _ => target_paths,
-    };
-    for path in required_paths {
-        if !path.exists() {
-            return Err(format!(
-                "readback failed: missing output file {}",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
-            ));
-        }
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|error| format!("readback failed: cannot stat {}: {error}", path.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "readback failed: {} is a symlink",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
-            ));
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err(format!(
-                    "readback failed: {} is a reparse point",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
-                ));
-            }
-        }
-        // Reject hard-linked output: a single-link namespace is required so
-        // the produced file is owned by exactly one path beneath the root.
-        reject_hard_link(path)?;
-    }
-    match client_id {
-        "opencode" => {
-            let written = fs::read_to_string(&target_paths[0])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let expected = opencode_config_text(settings, providers, model)?;
-            if written != expected {
-                return Err(
-                    "readback failed: opencode output does not round-trip production preview"
-                        .to_string(),
-                );
-            }
-        }
-        "pi" => {
-            let written_models = fs::read_to_string(&target_paths[1])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let expected_models = pi_models_text(&target_paths[1], settings, providers, model)?;
-            if written_models != expected_models {
-                return Err("readback failed: pi output does not round-trip production preview".to_string());
-            }
-        }
-        "omp" => {
-            let written_config = fs::read_to_string(&target_paths[0])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let written_models = fs::read_to_string(&target_paths[1])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let selector = gateway_client_model_selector(settings, providers, model)?;
-            let vision = if gateway_exported_model_supports_image(settings, providers, model) {
-                Some(selector.as_str())
-            } else {
-                None
-            };
-            let reasoning = gateway_exported_model_default_reasoning_effort(settings, providers, model);
-            let expected_config = omp_config_text(Some(&written_config), &selector, vision, reasoning.as_deref());
-            let expected_models = omp_models_yml_text(settings, providers, model)?;
-            if written_config != expected_config || written_models != expected_models {
-                return Err("readback failed: omp output does not round-trip production preview".to_string());
-            }
-        }
-        "zcode" => {
-            let written_catalog = fs::read_to_string(&target_paths[0])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let written_config = fs::read_to_string(&target_paths[1])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            let written_cache = fs::read_to_string(&target_paths[2])
-                .map_err(|error| format!("readback failed: {error}"))?;
-            for (label, text) in [
-                ("codexhub.json", &written_catalog),
-                ("config.json", &written_config),
-                ("bots-model-cache.v2.json", &written_cache),
-            ] {
-                serde_json::from_str::<Value>(text).map_err(|error| {
-                    format!("readback failed: {label} is malformed: {error}")
-                })?;
-            }
-            // Deterministic round-trip: reuse the timestamps already persisted
-            // in each written collection file instead of regenerating a fresh
-            // `timestamp_millis()`. The apply step calls the serializer twice
-            // (once for the catalog, once for the v2 cache), so the two files
-            // can carry different timestamps a few milliseconds apart; using a
-            // single shared `now` would falsely contradict one of them. Each
-            // file's expected text is regenerated with that file's own
-            // persisted timestamp, so the comparison is stable across
-            // wall-clock time and only fails on a real semantic contradiction.
-            let catalog_now = persisted_zcode_collection_timestamp(&target_paths[0])
-                .unwrap_or_else(|| timestamp_millis() as u64);
-            let cache_now = persisted_zcode_collection_timestamp(&target_paths[2])
-                .unwrap_or_else(|| timestamp_millis() as u64);
-            let expected_catalog = zcode_provider_collection_text_with_now(
-                settings, providers, model, ZcodeProviderFileKind::Catalog, catalog_now,
-            )?;
-            let expected_cache = zcode_provider_collection_text_with_now(
-                settings, providers, model, ZcodeProviderFileKind::V2Cache, cache_now,
-            )?;
-            let expected_config = zcode_v2_config_text(&target_paths[1], settings, providers, model)?;
-            if written_catalog != expected_catalog
-                || written_config != expected_config
-                || written_cache != expected_cache
-            {
-                return Err("readback failed: zcode output does not round-trip production preview".to_string());
-            }
-        }
-        "codex" => {
-            // Codex readback is owned by config::readback_codex_config_isolated;
-            // the host apply path is the Python overlay, whose owner marker is
-            // verified there.
-        }
-        other => return Err(format!("unsupported managed client for readback: {other}")),
-    }
-    Ok(())
-}
 
 fn gateway_client_route_model(
     requested: Option<String>,
@@ -1762,33 +1557,6 @@ fn gateway_client_has_existing_config(client_id: &str) -> bool {
     }
 }
 
-pub fn provider_probe_upstream_format(
-    provider_id: String,
-    model: Option<String>,
-) -> Result<Value, String> {
-    let providers = config::get_providers()?;
-    let provider = providers
-        .iter()
-        .find(|candidate| candidate.id == provider_id)
-        .ok_or_else(|| format!("provider not found: {provider_id}"))?;
-    let probe_model = model.or_else(|| {
-        provider
-            .models
-            .iter()
-            .find(|item| item.enabled)
-            .or_else(|| provider.models.first())
-            .map(|item| {
-                item.upstream_model
-                    .clone()
-                    .unwrap_or_else(|| item.id.clone())
-            })
-    });
-    models::probe_upstream_format(
-        &provider.base_url,
-        provider.api_key.as_deref().unwrap_or(""),
-        probe_model.as_deref(),
-    )
-}
 
 pub fn subagent_matrix_status() -> Result<SubagentMatrixStatus, String> {
     let status = gateway_status()?;
@@ -5684,515 +5452,6 @@ fn remove_zcode_v2_codexhub_provider(config_path: &Path) -> Result<bool, String>
     Ok(removed)
 }
 
-fn opencode_reasoning_variants(
-    supported_reasoning_levels: &[String],
-) -> Map<String, serde_json::Value> {
-    supported_reasoning_levels
-        .iter()
-        .map(|level| (level.clone(), json!({ "reasoningEffort": level.clone() })))
-        .collect::<Map<_, _>>()
-}
-
-fn opencode_config_text(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let mut provider_map = Map::new();
-    for group in &groups.providers {
-        let mut models = Map::new();
-        for gateway_model in &group.models {
-            let mut entry = json!({
-                "name": gateway_model.display_name,
-                "modalities": {
-                    "input": gateway_model.input_modalities,
-                },
-            });
-            if !gateway_model.supported_reasoning_levels.is_empty() {
-                let default_effort = gateway_model
-                    .default_reasoning_level
-                    .as_ref()
-                    .filter(|default| {
-                        gateway_model
-                            .supported_reasoning_levels
-                            .iter()
-                            .any(|level| level == *default)
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| gateway_model.supported_reasoning_levels[0].clone());
-                let variants =
-                    opencode_reasoning_variants(&gateway_model.supported_reasoning_levels);
-                if let Some(object) = entry.as_object_mut() {
-                    object.insert("options".to_string(), json!({ "reasoningEffort": default_effort }));
-                    object.insert("variants".to_string(), Value::Object(variants));
-                }
-            }
-            models.insert(gateway_model.id.clone(), entry);
-        }
-        provider_map.insert(
-            group.client_provider_id.clone(),
-            json!({
-                "name": group.display_name.clone(),
-                "npm": group.endpoint_selection.opencode_npm(),
-                "options": {
-                    "baseURL": group.base_url.clone(),
-                    "apiKey": settings.gateway_client_key,
-                },
-                "models": Value::Object(models),
-            }),
-        );
-    }
-    let body = json!({
-        "$schema": "https://opencode.ai/config.json",
-        "model": groups.default_selector,
-        "small_model": groups.default_selector,
-        "provider": Value::Object(provider_map),
-    });
-    serde_json::to_string_pretty(&body)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize OpenCode config: {error}"))
-}
-
-fn pi_settings_text(
-    settings_path: &Path,
-    _settings: &Settings,
-    _providers: &[Provider],
-    _model: &str,
-) -> Result<String, String> {
-    // Provider Injection (ADR-0004 Q1): settings.json is user-owned.
-    // Never force defaultProvider/defaultModel and never strip enabledModels.
-    let mut value = read_json_file_or_empty(settings_path, "Pi settings")?;
-    if !value.is_object() {
-        value = json!({});
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize Pi settings: {error}"))
-}
-
-fn pi_models_text(
-    models_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let mut value = read_json_file_or_empty(models_path, "Pi models")?;
-    if !value.is_object() {
-        value = json!({});
-    }
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "Pi models root must be a JSON object".to_string())?;
-    let provider_root = object
-        .entry("providers".to_string())
-        .or_insert_with(|| json!({}));
-    if !provider_root.is_object() {
-        *provider_root = json!({});
-    }
-    let providers_object = provider_root
-        .as_object_mut()
-        .ok_or_else(|| "Pi providers root must be a JSON object".to_string())?;
-    remove_codexhub_client_provider_entries(providers_object);
-    for group in &groups.providers {
-        providers_object.insert(
-            group.client_provider_id.clone(),
-            codexhub_pi_provider_value(settings, group),
-        );
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize Pi models: {error}"))
-}
-
-fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
-    let models = group
-        .models
-        .iter()
-        .map(codexhub_pi_model_value)
-        .collect::<Vec<_>>();
-    json!({
-        "baseUrl": group.base_url.clone(),
-        "api": group.endpoint_selection.pi_api(),
-        "apiKey": settings.gateway_client_key,
-        "authHeader": true,
-        "compat": {
-            "supportsDeveloperRole": group.supports_developer_role,
-            "supportsReasoningEffort": true,
-            "supportsUsageInStreaming": true,
-        },
-        "models": models,
-    })
-}
-
-fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
-    let mut value = json!({
-        "id": model.id.clone(),
-        "name": model.display_name.clone(),
-        "reasoning": !model.supported_reasoning_levels.is_empty(),
-        "input": model.input_modalities.clone(),
-        "headers": {
-            "x-codex-client-id": "pi",
-        },
-        "maxTokens": 32768,
-        "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-        },
-    });
-    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
-        object.insert("contextWindow".to_string(), json!(context_window));
-    }
-    value
-}
-
-fn omp_config_text(
-    current: Option<&str>,
-    selector: &str,
-    vision_selector: Option<&str>,
-    default_reasoning_effort: Option<&str>,
-) -> String {
-    let default_selector = match default_reasoning_effort {
-        Some(effort) if !effort.is_empty() => format!("{selector}:{effort}"),
-        _ => selector.to_string(),
-    };
-    let mut block = vec![
-        "modelRoles:".to_string(),
-        format!("  default: {default_selector}"),
-    ];
-    if let Some(vision_selector) = vision_selector {
-        block.push(format!("  vision: {vision_selector}"));
-    }
-    let mut output = Vec::new();
-    let mut inserted = false;
-    let lines = current.unwrap_or_default().lines().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        if is_top_level_yaml_key(line, "modelRoles") {
-            output.extend(block.iter().cloned());
-            inserted = true;
-            index += 1;
-            while index < lines.len() && !is_any_top_level_yaml_key(lines[index]) {
-                index += 1;
-            }
-            continue;
-        }
-        output.push(line.to_string());
-        index += 1;
-    }
-    if !inserted {
-        if !output.is_empty() && output.last().is_some_and(|line| !line.trim().is_empty()) {
-            output.push(String::new());
-        }
-        output.extend(block);
-    }
-    format!("{}\n", output.join("\n"))
-}
-
-fn omp_models_yml_text(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let api_key = yaml_scalar(&settings.gateway_client_key);
-    let mut output = "providers:\n".to_string();
-    for group in &groups.providers {
-        let base_url = yaml_scalar(&group.base_url);
-        let api = group.endpoint_selection.pi_api();
-        let supports_developer_role = group.supports_developer_role;
-        output.push_str(&format!(
-            "  {}:\n    baseUrl: {base_url}\n    api: {api}\n    apiKey: {api_key}\n    authHeader: true\n    compat:\n      supportsDeveloperRole: {supports_developer_role}\n      supportsReasoningEffort: true\n      supportsUsageInStreaming: true\n    models:\n",
-            group.client_provider_id
-        ));
-        for gateway_model in &group.models {
-            let model_id = yaml_scalar(&gateway_model.id);
-            let model_name = yaml_scalar(&gateway_model.display_name);
-            let reasoning = !gateway_model.supported_reasoning_levels.is_empty();
-            let input_list = gateway_model
-                .input_modalities
-                .iter()
-                .map(|modality| format!("          - {modality}\n"))
-                .collect::<String>();
-            let context_window = gateway_model
-                .context_window
-                .map(|value| format!("        contextWindow: {value}\n"))
-                .unwrap_or_default();
-            output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
-        ));
-        }
-    }
-    Ok(output)
-}
-
-fn zcode_catalog_text(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    zcode_provider_collection_text(settings, providers, model, ZcodeProviderFileKind::Catalog)
-}
-
-fn zcode_v2_cache_text(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    zcode_provider_collection_text(settings, providers, model, ZcodeProviderFileKind::V2Cache)
-}
-
-fn zcode_provider_collection_text(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-    file_kind: ZcodeProviderFileKind,
-) -> Result<String, String> {
-    zcode_provider_collection_text_with_now(settings, providers, model, file_kind, timestamp_millis() as u64)
-}
-
-/// Deterministic ZCode collection serializer used by the readback verifier.
-/// The `now` argument is the timestamp to stamp onto `createdAt`/`updatedAt`;
-/// the readback path reuses the timestamps already persisted in the written
-/// file so the round-trip comparison is stable across wall-clock time instead
-/// of regenerating a fresh `timestamp_millis()` that would always contradict
-/// the persisted output.
-fn zcode_provider_collection_text_with_now(
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-    file_kind: ZcodeProviderFileKind,
-    now: u64,
-) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let catalog_providers = groups
-        .providers
-        .iter()
-        .map(|group| zcode_catalog_provider_value(settings, group, now, file_kind))
-        .collect::<Vec<_>>();
-    let body = json!({
-        "schemaVersion": "zcode.model-providers.v2",
-        "providers": catalog_providers,
-    });
-    serde_json::to_string_pretty(&body)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize ZCode catalog: {error}"))
-}
-
-/// Read the persisted `createdAt` (or `updatedAt`) timestamp from a written
-/// ZCode collection file (`codexhub.json` / `bots-model-cache.v2.json`). The
-/// overlay stamps both fields with the same `now` value, so reading the first
-/// provider's `createdAt` is sufficient. Returns `None` when the file is
-/// absent or malformed; callers must have already validated structure.
-fn persisted_zcode_collection_timestamp(path: &Path) -> Option<u64> {
-    let text = fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    let providers = value.get("providers")?.as_array()?;
-    let first = providers.first()?;
-    first.get("createdAt")?.as_u64()
-}
-
-fn zcode_catalog_provider_value(
-    settings: &Settings,
-    group: &GatewayClientProviderGroup,
-    now: u64,
-    file_kind: ZcodeProviderFileKind,
-) -> Value {
-    let kind = group.endpoint_selection.zcode_kind();
-    let models = group
-        .models
-        .iter()
-        .map(|model| zcode_model_value(model, kind))
-        .collect::<Vec<_>>();
-    let (base_url, endpoint_path) = zcode_provider_endpoint(settings, group, file_kind);
-    let mut paths = Map::new();
-    paths.insert(kind.to_string(), Value::String(endpoint_path.to_string()));
-    json!({
-        "id": group.client_provider_id.clone(),
-        "name": group.display_name.clone(),
-        "enabled": true,
-        "source": "custom",
-        "apiFormat": group.endpoint_selection.zcode_api_format(),
-        "endpoints": {
-            "baseURL": base_url,
-            "paths": Value::Object(paths),
-        },
-        "apiKeyRequired": true,
-        "apiKey": settings.gateway_client_key,
-        "defaultKind": kind,
-        "models": models,
-        "createdAt": now,
-        "updatedAt": now,
-    })
-}
-
-fn zcode_provider_endpoint(
-    settings: &Settings,
-    group: &GatewayClientProviderGroup,
-    file_kind: ZcodeProviderFileKind,
-) -> (String, String) {
-    match file_kind {
-        ZcodeProviderFileKind::Catalog => {
-            let endpoint_path = match group.endpoint_selection.openai_compatible_selection() {
-                GatewayClientEndpointSelection::Responses => group.responses_path.clone(),
-                GatewayClientEndpointSelection::ChatCompletions
-                | GatewayClientEndpointSelection::AnthropicMessages => {
-                    group.chat_completions_path.clone()
-                }
-            };
-            (gateway_base_without_v1(settings), endpoint_path)
-        }
-        ZcodeProviderFileKind::V2Cache => {
-            let endpoint_path = match group.endpoint_selection.openai_compatible_selection() {
-                GatewayClientEndpointSelection::Responses => "/responses".to_string(),
-                GatewayClientEndpointSelection::ChatCompletions
-                | GatewayClientEndpointSelection::AnthropicMessages => {
-                    "/chat/completions".to_string()
-                }
-            };
-            (group.base_url.clone(), endpoint_path)
-        }
-    }
-}
-
-fn zcode_reasoning_value(model: &GatewayClientProviderModel) -> Option<Value> {
-    if model.supported_reasoning_levels.is_empty() {
-        return None;
-    }
-    let mut variants = model.supported_reasoning_levels.clone();
-    if !variants.iter().any(|variant| variant == "off") {
-        variants.push("off".to_string());
-    }
-    let default_variant = model
-        .default_reasoning_level
-        .as_ref()
-        .filter(|default| variants.iter().any(|variant| variant == *default))
-        .cloned()
-        .unwrap_or_else(|| variants[0].clone());
-    Some(json!({
-        "enabled": true,
-        "variants": variants,
-        "defaultVariant": default_variant,
-    }))
-}
-
-fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
-    let mut value = json!({
-        "id": model.id.clone(),
-        "name": model.display_name.clone(),
-        "kinds": [kind],
-        "defaultKind": kind,
-        "modalities": {
-            "input": model.input_modalities.clone(),
-            "output": ["text"],
-        },
-        "maxOutputTokens": 32768,
-    });
-    if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
-        object.insert("contextWindow".to_string(), json!(context_window));
-    }
-    if let (Some(object), Some(reasoning)) = (value.as_object_mut(), zcode_reasoning_value(model)) {
-        object.insert("reasoning".to_string(), reasoning);
-    }
-    value
-}
-
-fn zcode_v2_config_text(
-    config_path: &Path,
-    settings: &Settings,
-    providers: &[Provider],
-    model: &str,
-) -> Result<String, String> {
-    let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let mut value = read_json_file_or_empty(config_path, "ZCode v2 config")?;
-    if !value.is_object() {
-        value = json!({});
-    }
-    let root = value
-        .as_object_mut()
-        .ok_or_else(|| "ZCode v2 config root must be a JSON object".to_string())?;
-    let provider_root = root
-        .entry("provider".to_string())
-        .or_insert_with(|| json!({}));
-    if !provider_root.is_object() {
-        *provider_root = json!({});
-    }
-    let provider_map = provider_root
-        .as_object_mut()
-        .ok_or_else(|| "ZCode v2 provider root must be a JSON object".to_string())?;
-    remove_codexhub_client_provider_entries(provider_map);
-    for group in &groups.providers {
-        provider_map.insert(
-            group.client_provider_id.clone(),
-            zcode_v2_provider_value(settings, group),
-        );
-    }
-    serde_json::to_string_pretty(&value)
-        .map(|text| format!("{text}\n"))
-        .map_err(|error| format!("failed to serialize ZCode v2 config: {error}"))
-}
-
-fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGroup) -> Value {
-    let kind = group.endpoint_selection.zcode_kind();
-    let models = group
-        .models
-        .iter()
-        .map(|model| {
-            (
-                model.id.clone(),
-                {
-                    let mut value = json!({
-                    "name": model.display_name.clone(),
-                    "limit": {
-                        "output": 32768,
-                    },
-                    "modalities": {
-                        "input": model.input_modalities.clone(),
-                        "output": ["text"],
-                    },
-                    });
-                    if let (Some(limit), Some(context_window)) = (
-                        value.get_mut("limit").and_then(Value::as_object_mut),
-                        model.context_window,
-                    ) {
-                        limit.insert("context".to_string(), json!(context_window));
-                    }
-                    if let (Some(object), Some(reasoning)) =
-                        (value.as_object_mut(), zcode_reasoning_value(model))
-                    {
-                        object.insert("reasoning".to_string(), reasoning);
-                    }
-                    value
-                },
-            )
-        })
-        .collect::<Map<_, _>>();
-    let (base_url, endpoint_path) =
-        zcode_provider_endpoint(settings, group, ZcodeProviderFileKind::V2Cache);
-    let mut paths = Map::new();
-    paths.insert(kind.to_string(), Value::String(endpoint_path));
-    json!({
-        "name": group.display_name.clone(),
-        "kind": kind,
-        "enabled": true,
-        "source": "custom",
-        "apiFormat": group.endpoint_selection.zcode_api_format(),
-        "endpoints": {
-            "baseURL": base_url,
-            "paths": Value::Object(paths),
-        },
-        "options": {
-            "baseURL": group.base_url.clone(),
-            "apiKey": settings.gateway_client_key,
-            "apiKeyRequired": true,
-        },
-        "models": Value::Object(models),
-    })
-}
 
 fn is_opencode_codexhub_config(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -7196,7 +6455,9 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
     use std::thread;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_os = "windows")]
+    use std::time::{Duration, Instant};
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -7242,7 +6503,7 @@ mod tests {
 
     #[test]
     fn opencode_jsonc_config_is_detected() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!(
             "codexhub-opencode-jsonc-{}-{}",
             std::process::id(),
@@ -7277,7 +6538,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn zcode_linux_defaults_are_home_relative_and_writable() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "codexhub-zcode-home-{}-{}",
             std::process::id(),
@@ -7910,7 +7171,7 @@ mod tests {
 
     #[test]
     fn gateway_client_sync_default_model_skips_disabled_default_model() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
         let root = unique_temp_dir("codexhub-client-sync-official-catalog");
@@ -8001,7 +7262,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn command_version_reads_supported_cmd_shim_from_path() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_path = std::env::var_os("PATH");
         let root = unique_temp_dir("codexhub-version-probe-cmd");
         fs::create_dir_all(&root).unwrap();
@@ -8889,7 +8150,7 @@ mod tests {
 
     #[test]
     fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
         let root = unique_temp_dir("codexhub-official-fast-selection");
@@ -10457,7 +9718,7 @@ mod tests {
 
     #[test]
     fn opencode_official_restore_survives_stable_then_beta_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cross-channel-restore");
         let config_path = root.join("opencode.json");
@@ -10500,7 +9761,7 @@ mod tests {
 
     #[test]
     fn opencode_stable_takeover_adopts_beta_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-stable-adopts-beta");
         let config_path = root.join("opencode.json");
@@ -10558,7 +9819,7 @@ mod tests {
 
     #[test]
     fn opencode_beta_takeover_adopts_stable_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-beta-adopts-stable");
         let config_path = root.join("opencode.json");
@@ -10862,7 +10123,7 @@ mod tests {
 
     #[test]
     fn pi_restore_skips_managed_snapshot_and_restores_clean_pair() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-restore");
         let settings_path = root.join("settings.json");
@@ -10923,7 +10184,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_empty_legacy_roots_removes_managed_config() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-empty-legacy-cleanup");
         let config_path = root.join("opencode.json");
@@ -10968,7 +10229,7 @@ mod tests {
 
     #[test]
     fn pi_restore_missing_legacy_roots_removes_managed_config() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-missing-legacy-cleanup");
         let settings_path = root.join("settings.json");
@@ -11013,7 +10274,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_prefers_canonical_baseline_over_empty_legacy_roots() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-restore");
         let config_path = root.join("opencode.json");
@@ -11072,7 +10333,7 @@ mod tests {
 
     #[test]
     fn pi_restore_prefers_canonical_baseline_over_missing_legacy_roots() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-restore");
         let settings_path = root.join("settings.json");
@@ -11137,7 +10398,7 @@ mod tests {
 
     #[test]
     fn opencode_reapply_preserves_original_canonical_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-reapply-baseline");
         let config_path = root.join("opencode.json");
@@ -11184,7 +10445,7 @@ mod tests {
 
     #[test]
     fn pi_reapply_preserves_original_canonical_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-reapply-baseline");
         let settings_path = root.join("settings.json");
@@ -11252,7 +10513,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_adopts_eligible_legacy_snapshot_into_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-legacy-adoption");
         let config_path = root.join("opencode.json");
@@ -11290,7 +10551,7 @@ mod tests {
 
     #[test]
     fn pi_restore_adopts_eligible_legacy_snapshot_into_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-legacy-adoption");
         let settings_path = root.join("settings.json");
@@ -11345,7 +10606,7 @@ mod tests {
 
     #[test]
     fn pi_stable_takeover_adopts_beta_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-stable-adopts-beta");
         let settings_path = root.join("settings.json");
@@ -11427,7 +10688,7 @@ mod tests {
 
     #[test]
     fn pi_beta_takeover_adopts_stable_legacy_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-beta-adopts-stable");
         let settings_path = root.join("settings.json");
@@ -11508,7 +10769,7 @@ mod tests {
 
     #[test]
     fn opencode_equal_mtime_adoption_is_independent_of_caller() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-equal-mtime");
         let config_path = root.join("opencode.json");
@@ -11578,7 +10839,7 @@ mod tests {
 
     #[test]
     fn pi_equal_mtime_adoption_is_independent_of_caller() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-equal-mtime");
         let settings_path = root.join("settings.json");
@@ -11672,7 +10933,7 @@ mod tests {
 
     #[test]
     fn opencode_equal_mtime_adoption_ignores_parent_path_channel_names() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-misleading-parent");
         let config_path = root.join("opencode.json");
@@ -11744,7 +11005,7 @@ mod tests {
 
     #[test]
     fn pi_equal_mtime_adoption_ignores_parent_path_channel_names() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-misleading-parent");
         let settings_path = root.join("settings.json");
@@ -11838,7 +11099,7 @@ mod tests {
 
     #[test]
     fn pi_restore_absent_tombstone_removes_only_owned_targets() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-absent-tombstone");
         let settings_path = root.join("settings.json");
@@ -11887,7 +11148,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_malformed_config_fails_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed");
         let config_path = root.join("opencode.json");
@@ -11905,7 +11166,7 @@ mod tests {
 
     #[test]
     fn pi_restore_ignores_malformed_settings_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-malformed");
         let settings_path = root.join("settings.json");
@@ -11934,7 +11195,7 @@ mod tests {
 
     #[test]
     fn opencode_apply_records_baseline_before_first_managed_write() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-first-apply-baseline");
         let config_path = root.join("opencode.json");
@@ -11970,7 +11231,7 @@ mod tests {
 
     #[test]
     fn pi_apply_records_absence_tombstone_before_first_managed_write() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-first-apply-tombstone");
         let settings_path = root.join("settings.json");
@@ -12007,7 +11268,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_corrupt_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-corrupt-baseline");
         let config_path = root.join("opencode.json");
@@ -12047,7 +11308,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_unsupported_baseline_version() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-version");
         let config_path = root.join("opencode.json");
@@ -12087,7 +11348,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_corrupt_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-corrupt-baseline");
         let settings_path = root.join("settings.json");
@@ -12126,7 +11387,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_unsupported_baseline_version() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-version");
         let settings_path = root.join("settings.json");
@@ -12169,7 +11430,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_incomplete_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-incomplete-baseline");
         let settings_path = root.join("settings.json");
@@ -12220,7 +11481,7 @@ mod tests {
 
     #[test]
     fn opencode_canonical_restore_preserves_exact_bytes() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-byte-for-byte");
         let config_path = root.join("opencode.json");
@@ -12264,7 +11525,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_preserves_unrelated_enabled_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-enabled");
         let settings_path = root.join("settings.json");
@@ -12314,7 +11575,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_detaches_models_without_requiring_managed_settings() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-unmanaged-settings");
         let settings_path = root.join("settings.json");
@@ -12345,7 +11606,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_enabled_models_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-shape");
         let settings_path = root.join("settings.json");
@@ -12376,7 +11637,7 @@ mod tests {
 
     #[test]
     fn opencode_cleanup_rejects_malformed_provider_entries_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-provider-entries");
         let config_path = root.join("opencode.json");
@@ -12395,7 +11656,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_leaves_user_activation_even_when_enabled_models_are_heterogeneous() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-heterogeneous-enabled");
         let settings_path = root.join("settings.json");
@@ -12424,7 +11685,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_rejects_malformed_provider_entries_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-provider-entries");
         let settings_path = root.join("settings.json");
@@ -12449,7 +11710,7 @@ mod tests {
 
     #[test]
     fn opencode_cleanup_rejects_wrong_shaped_model_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-model-shape");
         let config_path = root.join("opencode.json");
@@ -12468,7 +11729,7 @@ mod tests {
 
     #[test]
     fn opencode_cleanup_rejects_wrong_shaped_provider_without_mutation() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-provider-shape");
         let config_path = root.join("opencode.json");
@@ -12487,7 +11748,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_default_provider_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-provider-shape");
         let settings_path = root.join("settings.json");
@@ -12512,7 +11773,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_ignores_wrong_shaped_default_model_and_detaches_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-default-model-shape");
         let settings_path = root.join("settings.json");
@@ -12537,7 +11798,7 @@ mod tests {
 
     #[test]
     fn opencode_cleanup_write_failure_has_no_absolute_paths() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-write-fail");
         let config_path = root.join("opencode.json");
@@ -12566,7 +11827,7 @@ mod tests {
 
     #[test]
     fn pi_cleanup_write_failure_has_no_absolute_paths() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-cleanup-write-fail");
         let settings_path = root.join("settings.json");
@@ -12601,7 +11862,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_malformed_legacy_snapshot() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed-legacy");
         let config_path = root.join("opencode.json");
@@ -12626,7 +11887,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_incomplete_legacy_snapshot() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-incomplete-legacy");
         let settings_path = root.join("settings.json");
@@ -12671,7 +11932,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_rejects_legacy_snapshot_with_malformed_provider_entries() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-malformed-provider-legacy");
         let config_path = root.join("opencode.json");
@@ -12696,7 +11957,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_legacy_snapshot_with_heterogeneous_enabled_models() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-heterogeneous-enabled-legacy");
         let settings_path = root.join("settings.json");
@@ -12741,7 +12002,7 @@ mod tests {
 
     #[test]
     fn pi_restore_rejects_legacy_snapshot_with_malformed_provider_entries() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-malformed-provider-legacy");
         let settings_path = root.join("settings.json");
@@ -12786,7 +12047,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_result_has_no_absolute_paths_or_contents() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-sanitized-restore");
         let config_path = root.join("opencode.json");
@@ -12812,7 +12073,7 @@ mod tests {
 
     #[test]
     fn opencode_concurrent_legacy_adoption_yields_one_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-concurrent-legacy-adoption");
         let config_path = root.join("opencode.json");
@@ -12874,7 +12135,7 @@ mod tests {
 
     #[test]
     fn pi_concurrent_legacy_adoption_yields_one_baseline() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-concurrent-legacy-adoption");
         let settings_path = root.join("settings.json");
@@ -12979,7 +12240,7 @@ mod tests {
 
     #[test]
     fn opencode_concurrent_legacy_adoption_preserves_first_winner() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-immutability-race");
         let config_path = root.join("opencode.json");
@@ -13046,7 +12307,7 @@ mod tests {
 
     #[test]
     fn pi_concurrent_legacy_adoption_preserves_first_winner() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-immutability-race");
         let settings_path = root.join("settings.json");
@@ -13151,7 +12412,7 @@ mod tests {
         use super::{
             apply_gateway_client_config_isolated, validate_isolated_root, IsolatedClientApplyInput,
         };
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_temp_dir("isolated-default-provenance");
         let isolated = validate_isolated_root(&root).unwrap();
         let settings = Settings {
@@ -13182,7 +12443,7 @@ mod tests {
 
     #[test]
     fn opencode_first_baseline_creation_is_process_atomic() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-concurrent-baseline");
         let config_path = root.join("opencode.json");
@@ -13231,7 +12492,7 @@ mod tests {
 
     #[test]
     fn pi_first_baseline_creation_is_process_atomic() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-concurrent-baseline");
         let settings_path = root.join("settings.json");
@@ -13291,7 +12552,7 @@ mod tests {
 
     #[test]
     fn opencode_baseline_write_failure_leaves_targets_intact() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-baseline-failure");
         let config_path = root.join("opencode.json");
@@ -13328,7 +12589,7 @@ mod tests {
 
     #[test]
     fn pi_baseline_write_failure_leaves_targets_intact() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-pi-baseline-failure");
         let settings_path = root.join("settings.json");
@@ -13372,7 +12633,7 @@ mod tests {
 
     #[test]
     fn opencode_restore_empty_legacy_roots_classifies_bounded_cleanup() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
         let root = unique_temp_dir("codexhub-opencode-cleanup-classification");
         let config_path = root.join("opencode.json");
@@ -13806,7 +13067,7 @@ mod tests {
 
     #[test]
     fn public_apply_rejects_other_channel_managed_config_without_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
         let root = unique_temp_dir("codexhub-opencode-public-apply-owner");
         let config_path = root.join("opencode.json");
@@ -13825,7 +13086,7 @@ mod tests {
 
     #[test]
     fn public_restore_rejects_other_channel_managed_config_without_takeover() {
-        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("CODEXHUB_OPENCODE_CONFIG");
         let root = unique_temp_dir("codexhub-opencode-public-restore-owner");
         let config_path = root.join("opencode.json");
@@ -14534,7 +13795,7 @@ mod tests {
 
         #[test]
         fn isolated_apply_then_readback_round_trips_for_omp() {
-            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
             let root = fresh_root("apply-omp");
             let isolated = validate_isolated_root(&root).unwrap();
             let settings = settings_with_port(9099);
@@ -14552,7 +13813,7 @@ mod tests {
 
         #[test]
         fn isolated_five_client_switches_round_trip_without_host_writes() {
-            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let _guard = TEST_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
             let cases = [
                 ("opencode", UpstreamFormat::Responses),
                 ("zcode", UpstreamFormat::Responses),
