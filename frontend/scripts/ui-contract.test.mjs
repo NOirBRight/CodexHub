@@ -1498,10 +1498,14 @@ test("desktop shell and confirmations use rounded Linux-safe surfaces", async ()
   assert.ok(dialogSource.includes("rounded-overlay"));
   assert.ok(dialogSource.includes('document.getElementById("root")'));
   assert.ok(!dialogSource.includes("document.body"));
+  assert.ok(dialogSource.includes('className="absolute inset-0'));
+  assert.ok(!dialogSource.includes('className="fixed inset-0'));
   assert.ok(providersSource.includes("max-w-[420px] gap-4 rounded-overlay"));
   assert.ok(modelSource.includes("max-w-[760px] overflow-hidden rounded-overlay"));
   assert.ok(cssSource.includes("background: transparent;"));
   assert.ok(cssSource.includes("border-radius: 16px;"));
+  assert.ok(cssSource.includes("position: relative;"));
+  assert.ok(cssSource.includes("isolation: isolate;"));
   assert.equal(tauriConfig.app.windows[0].transparent, true);
   assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
 });

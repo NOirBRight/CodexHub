@@ -70,7 +70,7 @@ function ConfirmDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
+      className="absolute inset-0 z-[200] grid place-items-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) {
           onClose(false);
