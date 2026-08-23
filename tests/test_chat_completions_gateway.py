@@ -55,6 +55,12 @@ from gateway_stream_semantics import (
 )
 from protocol_translation import UpstreamStreamIncompleteError
 from codex_proxy import CodexProxyHandler
+import codex_auth
+import gateway_compat
+import gateway_errors
+import gateway_stream_semantics
+import protocol_translation
+import proxy_telemetry
 
 
 def _prepare_request(body: bytes, *, inbound: str, outbound: str) -> bytes:
@@ -361,7 +367,7 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
         }
 
         payload = json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 body,
                 upstream,
                 model_id="glm-5.2",
@@ -383,7 +389,7 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
             "tool_protocol": "auto",
         }
 
-        self.assertEqual(codex_proxy.external_tool_protocol(upstream), "text_compat")
+        self.assertEqual(gateway_compat.external_tool_protocol(upstream), "text_compat")
 
 
 class RequestKindDetectionTests(unittest.TestCase):
@@ -524,7 +530,7 @@ class CodexHubErrorPayloadTests(unittest.TestCase):
 
         for expected_code, kwargs in cases:
             with self.subTest(expected_code=expected_code):
-                payload = codex_proxy.codexhub_error_payload(**kwargs)
+                payload = gateway_errors.codexhub_error_payload(**kwargs)
                 self.assertEqual(payload["code"], expected_code)
                 self.assertEqual(set(payload), {"code", "message", "source", "retryable", "details"})
                 self.assertIsInstance(payload["retryable"], bool)
@@ -533,14 +539,14 @@ class CodexHubErrorPayloadTests(unittest.TestCase):
 
 class DownstreamErrorMapperTests(unittest.TestCase):
     def test_chat_json_error_mapper_preserves_chat_error_object_shape(self):
-        error = codex_proxy.DownstreamErrorSpec(
+        error = gateway_errors.DownstreamErrorSpec(
             inbound_format="chat_completions",
             upstream_name="official",
             status=502,
             exc=URLError(ConnectionResetError("connection reset")),
         )
 
-        payload = codex_proxy.downstream_json_error_payload(error)
+        payload = gateway_errors.downstream_json_error_payload(error)
 
         self.assertEqual(payload["error"]["type"], "upstream_error")
         self.assertEqual(payload["error"]["code"], "URLError")
@@ -548,14 +554,14 @@ class DownstreamErrorMapperTests(unittest.TestCase):
         self.assertEqual(payload["error"]["upstream"], "official")
 
     def test_responses_sse_error_mapper_preserves_stream_error_payload_shape(self):
-        error = codex_proxy.DownstreamErrorSpec(
+        error = gateway_errors.DownstreamErrorSpec(
             inbound_format="responses",
             upstream_name="official",
             status=429,
             exc=URLError(TimeoutError("upstream timed out")),
         )
 
-        payload = codex_proxy.downstream_sse_error_payload_for_inbound_format(error)
+        payload = gateway_errors.downstream_sse_error_payload_for_inbound_format(error)
 
         self.assertEqual(payload["type"], "upstream_stream_error")
         self.assertEqual(payload["status"], 502)
@@ -928,7 +934,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
     def setUp(self):
         self.runtime_proxy_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.runtime_proxy_dir.cleanup)
-        self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
+        self.runtime_proxy_patch = patch(
+            "collaboration_adapter.WORKER_BINDING_SIGNING_ROOT", Path(self.runtime_proxy_dir.name)
+        )
         self.runtime_proxy_patch.start()
         self.addCleanup(self.runtime_proxy_patch.stop)
         self.catalog_patch = patch("gateway_catalog_runtime.generated_catalog_slugs", return_value={"gpt-5.5"})
@@ -943,10 +951,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.event_patch = patch("gateway_events.write_proxy_event")
         self.write_proxy_event = self.event_patch.start()
         self.addCleanup(self.event_patch.stop)
-        self.auth_patch = patch("codex_proxy.codex_access_token", return_value="fake-sub-token")
+        self.auth_patch = patch("codex_auth.access_token", return_value="fake-sub-token")
         self.auth_patch.start()
         self.addCleanup(self.auth_patch.stop)
-        self.account_patch = patch("codex_proxy.codex_account_id", return_value="fake-acct-id")
+        self.account_patch = patch("codex_auth.account_id", return_value="fake-acct-id")
         self.account_patch.start()
         self.addCleanup(self.account_patch.stop)
 
@@ -1113,7 +1121,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_chat_completions_routes_short_model(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -1185,7 +1193,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_chat_to_chat_transparent_path_does_not_convert_through_responses(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -1244,7 +1252,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 side_effect=_assert_identity_prepare_exchange,
             ),
             patch(
-                "codex_proxy.responses_request_to_chat_completion_body",
+                "protocol_translation.responses_request_to_chat_completion_body",
                 side_effect=AssertionError("responses request converted back to chat"),
             ),
             patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
@@ -1262,7 +1270,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"chatcmpl_transparent", b"".join(handler.wfile.writes))
 
     def test_provider_scoped_transparent_chat_rewrites_developer_role_when_upstream_intolerant(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "kimi/k3",
             "provider_alias": "kimi",
@@ -1345,7 +1353,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(marker_events[0]["messages_rewritten"], 1)
 
     def test_provider_scoped_transparent_chat_preserves_developer_role_when_upstream_tolerant(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "kimi/k3",
             "provider_alias": "kimi",
@@ -1435,7 +1443,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }
 
     def _run_kimi_transparent_chat(self, body: bytes, response_id: str):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
         upstream_body = json.dumps({
             "id": response_id,
@@ -1604,7 +1612,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "metadata": {"flag": True, "nested": {"off": False}},
         }).encode("utf-8")
 
-        next_body, rewritten = codex_proxy.normalize_transparent_tool_schema_booleans(body)
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
 
         self.assertEqual(rewritten, 0)
         self.assertEqual(next_body, body)
@@ -1615,7 +1623,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hi"}],
         }).encode("utf-8")
 
-        next_body, rewritten = codex_proxy.normalize_transparent_tool_schema_booleans(body)
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
 
         self.assertEqual(rewritten, 0)
         self.assertIs(next_body, body)
@@ -1641,7 +1649,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }
 
     def _run_ollama_chat_request(self, payload_fields):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = self._ollama_glm_external_model()
         body = json.dumps(
             {
@@ -1770,7 +1778,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(request_start["reasoning_policy"], "explicit")
 
     def test_explicit_third_party_standard_chat_route_is_transparent_metered(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -1848,7 +1856,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(request_start["codex_semantic_adapter"], route_primitives.CODEX_SEMANTIC_NONE)
 
     def test_provider_scoped_transparent_http_error_keeps_real_upstream_header(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -1901,7 +1909,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(dict(handler._fake.headers).get("X-Codex-Proxy-Upstream"), "volcengine")
 
     def test_provider_scoped_chat_transparent_path_does_not_apply_compact_tool_stripping(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -1962,7 +1970,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
+            patch("gateway_stream_semantics.strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1974,7 +1982,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_chat_transparent_vision_proxy_overlay_replaces_images_when_enabled(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -2094,7 +2102,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
 
     def test_provider_scoped_chat_text_only_image_request_fails_closed_502(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -2180,7 +2188,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
 
     def test_provider_scoped_chat_text_only_image_guard_uses_global_image_proxy_switch(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -2294,7 +2302,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
 
     def test_transparent_vision_proxy_failure_still_records_request_start(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -2354,7 +2362,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("vision_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("vision_proxy.image_proxy_description_for_part", side_effect=gateway_errors.ImageProxyError("vision down")),
             patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2372,7 +2380,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 502)
 
     def test_transparent_streaming_vision_proxy_failure_writes_sse_error_after_progress(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -2450,7 +2458,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("vision_proxy.image_proxy_cache_lookup", return_value=None),
-            patch("vision_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("vision_proxy.image_proxy_description_for_part", side_effect=gateway_errors.ImageProxyError("vision down")),
             patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2463,7 +2471,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn(b'\n{"error"', written)
 
     def test_transparent_fallback_vision_proxy_telemetry_distinguishes_caller_and_upstream_body(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -2570,7 +2578,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(fields["request_body_hmac"], fields["upstream_request_body_hmac"])
 
     def test_provider_scoped_responses_to_responses_transparent_path_does_not_run_codex_adapter(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -2645,7 +2653,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(request_start["behavior_profile"], route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
 
     def test_provider_scoped_chat_to_responses_upstream_uses_lightweight_fallback_without_codex_adapter(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -2718,7 +2726,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi from responses")
 
     def test_provider_scoped_responses_to_chat_non_streaming_fallback_skips_codex_response_repairs(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -2794,7 +2802,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["output"][0]["name"], "raw_tool")
 
     def test_provider_scoped_chat_to_responses_fallback_records_usage_as_async_pending(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -2863,7 +2871,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn("usage_input_tokens", request_complete)
 
     def test_provider_scoped_responses_to_chat_upstream_uses_lightweight_fallback_without_codex_adapter(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -2943,8 +2951,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        expected_upstream_hmac = codex_proxy.proxy_telemetry.telemetry_hmac(
-            codex_proxy.RUNTIME_CODEX_DIR,
+        expected_upstream_hmac = proxy_telemetry.telemetry_hmac(
+            gateway_events.RUNTIME_CODEX_DIR,
             b"body",
             request.data,
         )
@@ -2955,7 +2963,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["output"][0]["content"][0]["text"], "Hi from chat")
 
     def test_provider_scoped_responses_to_chat_accepts_codex_text_tool_output_parts(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3045,7 +3053,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["output"][0]["content"][0]["text"], "Tool output received.")
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_skips_codex_response_repairs(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3111,7 +3119,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_does_not_retry_after_headers(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3200,7 +3208,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(suppressed_events[0]["retry_safety_class"], "suppressed_post_exposure")
 
     def test_provider_scoped_chat_to_responses_streaming_fallback_emits_chat_delta_incrementally(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -3274,7 +3282,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_emits_response_delta_incrementally(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3348,7 +3356,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"response.completed", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_preserves_tool_calls(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3418,7 +3426,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn(b"data: [DONE]", written)
 
     def test_provider_scoped_responses_to_chat_streaming_fallback_converts_chat_error_payload(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "chat-only/glm-5.2",
             "provider_alias": "chat-only",
@@ -3477,7 +3485,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn(b"stream_incomplete", written)
 
     def test_provider_scoped_chat_to_responses_streaming_fallback_converts_responses_failure(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "responses-only/glm-5.2",
             "provider_alias": "responses-only",
@@ -3558,7 +3566,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 400)
 
     def test_provider_scoped_chat_completions_routes_slash_model_as_provider_relative(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "openrouter/anthropic/claude-sonnet-4",
             "provider_alias": "openrouter",
@@ -3670,7 +3678,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "compact_empty_response")
 
     def test_provider_scoped_chat_completions_image_proxy_uses_streaming_responses_vision(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         image_url = "data:image/png;base64,e2UydC12aXNpb24tcHJveHktZmFsbGJhY2t9"
         body = json.dumps({
             "model": "glm-5.2",
@@ -3733,7 +3741,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
@@ -3776,7 +3784,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "Main response")
 
     def test_provider_scoped_chat_completions_streaming_image_proxy_emits_compatible_progress_chunk(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         image_url = "data:image/png;base64,e2UydC12aXNpb24tcHJvZ3Jlc3N9"
         body = json.dumps({
             "model": "glm-5.2",
@@ -3828,7 +3836,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
@@ -3866,7 +3874,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertTrue(written.rstrip().endswith(b"data: [DONE]"))
 
     def test_provider_scoped_responses_streaming_image_proxy_emits_compatible_progress_event(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         image_url = "data:image/png;base64,e2UydC12aXNpb24tcmVzcG9uc2VzLXByb2dyZXNzfQ=="
         body = json.dumps({
             "model": "glm-5.2",
@@ -3919,7 +3927,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
@@ -3953,7 +3961,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"Main response", written)
 
     def test_zcode_provider_scoped_responses_image_proxy_follows_image_proxy_setting(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         image_url = "data:image/png;base64,e3pjb2RlLXZpc2lvbi1wcm94eX0="
         body = json.dumps({
             "model": "glm-5.2",
@@ -4008,7 +4016,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
@@ -4043,7 +4051,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
 
     def test_provider_scoped_chat_completions_image_proxy_supports_chat_completions_vision(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         image_url = "data:image/png;base64,e2UydC12aXNpb24tY2hhdC1mb3JtYXR9"
         body = json.dumps({
             "model": "glm-5.2",
@@ -4135,7 +4143,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
@@ -4375,7 +4383,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn("upstream_retry", event_names)
 
     def test_provider_chat_streaming_transparent_read_error_closes_without_synthetic_error(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "volc/glm-5.2",
             "provider_alias": "volc",
@@ -4527,7 +4535,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertNotIn(b"event: response.completed", written)
 
     def test_auto_upstream_format_uses_responses_when_responses_succeeds(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
             "provider_alias": "auto",
@@ -4603,7 +4611,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             )
 
     def test_auto_upstream_format_suppresses_chat_fallback_for_protocol_http_error(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
             "provider_alias": "auto",
@@ -4670,7 +4678,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "upstream_error")
 
     def test_auto_handler_suppresses_chat_fallback_for_tool_protocol_http_error(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
             "provider_alias": "auto",
@@ -4750,7 +4758,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "upstream_error")
 
     def test_auto_upstream_format_does_not_fallback_after_responses_stream_starts(self):
-        policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
             "alias": "auto/glm-5.2",
             "provider_alias": "auto",

@@ -6,7 +6,9 @@ from typing import Any
 
 import pytest
 
-import codex_proxy
+import collaboration_adapter
+import gateway_compat
+import gateway_errors
 import route_primitives
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
 from collaboration_runtime_contract import (
@@ -187,7 +189,7 @@ class _ProtocolFixture:
     def request(self) -> dict[str, Any]:
         """Run the request through the gateway and record what the upstream receives."""
         raw = json.dumps(self.original_body, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-        transformed = codex_proxy.compatible_request_body(
+        transformed = gateway_compat.compatible_request_body(
             raw,
             self.upstream,
             model_id="fixture-model",
@@ -205,7 +207,7 @@ class _ProtocolFixture:
     def response(self, body: dict[str, Any]) -> dict[str, Any]:
         """Run one upstream Responses body back through the gateway."""
         raw = json.dumps(body, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-        transformed = codex_proxy.compatible_response_body(
+        transformed = gateway_compat.compatible_response_body(
             raw,
             self.upstream_name,
             event_context=self.event_context,
@@ -216,7 +218,7 @@ class _ProtocolFixture:
 
     def sse(self, line: bytes) -> bytes:
         """Run one upstream SSE line back through the gateway."""
-        transformed = codex_proxy.compatible_sse_line(
+        transformed = gateway_compat.compatible_sse_line(
             line,
             self.upstream_name,
             event_context=self.event_context,
@@ -494,10 +496,10 @@ def test_c3_stream_arguments_delta_assembly_and_terminal() -> None:
     assert decoded_done["item"]["arguments"] == arguments
 
     # Duplicate output_item.done for the same id is rejected (no fabricated completion).
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
         fixture.sse(done_event)
     assert exc_info.value.cause.code in {
-        codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
+        collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
         "tool_compatibility_boundary",
     }
 
@@ -552,7 +554,7 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
             lambda body: body["tools"].append(
                 {"type": "namespace", "name": "multi_agent_v1", "tools": [{"type": "function", "name": "spawn_agent"}]}
             ),
-            codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
+            collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
         ),
         # Mixed V1/V2 history.
         (
@@ -565,7 +567,7 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
                     "arguments": '{"agent_type":"general","message":"work"}',
                 }
             ),
-            codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
+            collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
         ),
         # V1-style parameters on a V2 function_call.
         (
@@ -623,7 +625,7 @@ def test_c3_stream_preserves_output_order_and_no_reordering() -> None:
                     "content": [{"type": "output_text", "text": "wrong variant"}],
                 }
             ),
-            codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
+            collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
         ),
     ],
     ids=[
@@ -641,7 +643,7 @@ def test_c4_negative_cases_fail_before_mutation(mutate, expected_code: str) -> N
     mutate(body)
     fixture = _ProtocolFixture(body, _responses_upstream(native_namespace=False))
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
         fixture.request()
 
     assert exc_info.value.cause.code == expected_code
@@ -702,11 +704,11 @@ def test_c4_history_integrity_and_state_fail_before_mutation(mutate) -> None:
     body = _request_body(input_items=history)
     fixture = _ProtocolFixture(body, _responses_upstream(native_namespace=False))
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
         fixture.request()
 
     assert exc_info.value.cause.code in {
-        codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE,
+        collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE,
         "tool_compatibility_boundary",
     }
     assert len(fixture.requests) == 0

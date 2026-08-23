@@ -13,6 +13,9 @@ import codex_proxy
 import gateway_catalog_runtime
 import pytest
 import gateway_transport
+import codex_auth
+import gateway_admission
+import gateway_settings
 
 
 class _ImageUpstreamHandler(BaseHTTPRequestHandler):
@@ -56,7 +59,7 @@ class _CancellationResponse:
         self.closed = threading.Event()
 
     def __enter__(self) -> "_CancellationResponse":
-        admission = codex_proxy.active_gateway_request()
+        admission = gateway_admission.active_gateway_request()
         assert admission is not None
         admission.attach_upstream_transport(self)
         return self
@@ -85,7 +88,7 @@ def _http_server(
     handler: type[BaseHTTPRequestHandler],
 ) -> Iterator[ThreadingHTTPServer]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.gateway_shutdown_controller = codex_proxy.GatewayShutdownController()  # type: ignore[attr-defined]
+    server.gateway_shutdown_controller = gateway_admission.GatewayShutdownController()  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -157,10 +160,10 @@ def test_image_generation_relays_official_raw_contract(
         upstream.response_body = upstream_body  # type: ignore[attr-defined]
         controlled_base = f"http://127.0.0.1:{upstream.server_port}/custom/v1"
         with (
-            patch.object(codex_proxy, "official_base_url", return_value=controlled_base),
-            patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
-            patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"),
-            patch.object(codex_proxy, "codex_account_id", return_value="synthetic-account-id"),
+            patch.object(gateway_catalog_runtime, "official_base_url", return_value=controlled_base),
+            patch.object(gateway_settings, "gateway_client_key", return_value="local-client-key"),
+            patch.object(codex_auth, "access_token", return_value="synthetic-official-token"),
+            patch.object(codex_auth, "account_id", return_value="synthetic-account-id"),
             patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}),
             _http_server(codex_proxy.CodexProxyHandler) as gateway,
         ):
@@ -202,10 +205,10 @@ def test_image_generation_cancellation_during_upstream_body_read_uses_shutdown_o
                 "auth": "codex_auth",
             },
         ),
-        patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
-        patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"),
-        patch.object(codex_proxy, "codex_account_id", return_value="synthetic-account-id"),
-        patch.object(codex_proxy, "_open_upstream_response", return_value=upstream_response),
+        patch.object(gateway_settings, "gateway_client_key", return_value="local-client-key"),
+        patch.object(codex_auth, "access_token", return_value="synthetic-official-token"),
+        patch.object(codex_auth, "account_id", return_value="synthetic-account-id"),
+        patch.object(gateway_transport, "open_upstream_response", return_value=upstream_response),
         _http_server(codex_proxy.CodexProxyHandler) as gateway,
     ):
         request_thread = threading.Thread(
@@ -226,14 +229,14 @@ def test_image_generation_cancellation_during_upstream_body_read_uses_shutdown_o
     assert result["status"] == 503
     assert result["headers"]["connection"] == "close"  # type: ignore[index]
     payload = json.loads(result["body"])  # type: ignore[arg-type]
-    assert payload["type"] == codex_proxy.USER_REQUESTED_SHUTDOWN_OUTCOME
-    assert payload["error"] == codex_proxy.USER_REQUESTED_SHUTDOWN_OUTCOME
+    assert payload["type"] == gateway_admission.USER_REQUESTED_SHUTDOWN_OUTCOME
+    assert payload["error"] == gateway_admission.USER_REQUESTED_SHUTDOWN_OUTCOME
     assert b"must-not-relay" not in result["body"]  # type: ignore[operator]
 
 
 def test_image_generation_official_lookup_failure_completes_admission_and_returns_error() -> None:
     with (
-        patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
+        patch.object(gateway_settings, "gateway_client_key", return_value="local-client-key"),
         patch.object(
             gateway_catalog_runtime,
             "official_upstream",

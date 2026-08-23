@@ -12,6 +12,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src-python"))
 from python_runtime_contract import require_python_313  # noqa: E402
+import gateway_compat
 
 require_python_313(__file__)
 
@@ -187,9 +188,7 @@ def _prepared_surface(workspace: Path, namespace_tool_count: int, strategy: str)
     _require(source_python.is_dir(), "workspace_source_unavailable")
     sys.path.insert(0, str(source_python))
     try:
-        import codex_proxy
-
-        prepared_bytes = codex_proxy.compatible_request_body(
+        prepared_bytes = gateway_compat.compatible_request_body(
             source_bytes,
             {
                 "name": "ollama_cloud",

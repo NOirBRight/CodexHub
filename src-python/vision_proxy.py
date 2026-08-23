@@ -39,8 +39,11 @@ from route_primitives import (
 )
 
 
+from gateway_settings import _runtime_proxy_dir
+
 logger = logging.getLogger("vision_proxy")
 IMAGE_PROXY_CACHE_LOCK = threading.Lock()
+IMAGE_PROXY_CACHE_PATH = _runtime_proxy_dir() / "image-proxy-cache.sqlite"
 
 # Request-time injectables. Tests patch these; unset (None) means use the
 # Gateway runtime default implementation.

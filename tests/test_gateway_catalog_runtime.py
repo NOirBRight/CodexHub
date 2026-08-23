@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-import codex_proxy
 import gateway_catalog_runtime
 from catalog import CatalogPolicy
 from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
@@ -140,14 +139,14 @@ def test_context_guard_uses_only_complete_published_official_budget() -> None:
 def test_catalog_factory_keeps_owning_module_reader_patches_live() -> None:
     row = {"slug": "runtime-model", "max_output_tokens": 321}
     with patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value={"runtime-model": row}):
-        assert codex_proxy.catalog_max_output_tokens("runtime-model") == 321
+        assert gateway_catalog_runtime.catalog_max_output_tokens("runtime-model") == 321
 
 
 def test_owning_module_generated_catalog_slug_hook_stays_live():
     with patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value={"hook-only": {"slug": "hook-only"}}):
-        assert codex_proxy.generated_catalog_slugs() == {"hook-only"}
+        assert gateway_catalog_runtime.generated_catalog_slugs() == {"hook-only"}
 
 
 def test_catalog_types_are_true_facade_aliases() -> None:
-    assert codex_proxy.CatalogFacts is CatalogFacts
-    assert codex_proxy.CatalogRuntime is CatalogRuntime
+    assert gateway_catalog_runtime.CatalogFacts is CatalogFacts
+    assert gateway_catalog_runtime.CatalogRuntime is CatalogRuntime

@@ -1,8 +1,8 @@
 """Compatibility application pipeline for third-party and official Gateway routes.
 
 Planning lives in ``tool_compatibility``; this package applies a request plan to
-bodies and SSE frames. Host helpers that still live in ``gateway_runtime`` are
-injected via ``host.bind`` at facade load time.
+bodies and SSE frames. Host helpers are imported from their owning modules in
+``host``.
 """
 
 from __future__ import annotations
@@ -51,6 +51,26 @@ def transparent_request_body(*args, **kwargs):
     return _load_submodule("official_passthrough").transparent_request_body(*args, **kwargs)
 
 
+def adapt_third_party_apply_patch_response_body(*args, **kwargs):
+    return lookup("_adapt_third_party_apply_patch_response_body")(*args, **kwargs)
+
+
+def external_tool_protocol(*args, **kwargs):
+    return lookup("_external_tool_protocol")(*args, **kwargs)
+
+
+def normalize_transparent_tool_schema_booleans(*args, **kwargs):
+    return lookup("_normalize_transparent_tool_schema_booleans")(*args, **kwargs)
+
+
+def resolve_collaboration_boundary(*args, **kwargs):
+    return host._resolve_collaboration_boundary(*args, **kwargs)
+
+
+def rewrite_structured_tool_input_items(*args, **kwargs):
+    return lookup("_rewrite_structured_tool_input_items")(*args, **kwargs)
+
+
 def lookup(name: str):
     """Return a live attribute from the owning submodule."""
 
@@ -76,9 +96,14 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "adapt_third_party_apply_patch_response_body",
     "compatible_request_body",
     "compatible_response_body",
     "compatible_sse_line",
+    "external_tool_protocol",
+    "normalize_transparent_tool_schema_booleans",
     "official_passthrough_request_body",
+    "resolve_collaboration_boundary",
+    "rewrite_structured_tool_input_items",
     "transparent_request_body",
 ]
