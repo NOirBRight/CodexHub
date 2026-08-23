@@ -93,6 +93,21 @@ def test_codex_proxy_imports_only_the_real_module_set() -> None:
     assert imported <= ENTRY_ALLOWED_FIRST_PARTY, sorted(imported - ENTRY_ALLOWED_FIRST_PARTY)
 
 
+def test_proxy_post_request_body_stays_under_500_lines() -> None:
+    source = (SRC_PYTHON / "gateway_handler_impl.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    func = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        for item in node.body
+        if isinstance(item, ast.FunctionDef) and item.name == "_proxy_post_request"
+    )
+    assert func.end_lineno is not None
+    span = func.end_lineno - func.lineno + 1
+    assert span <= 500, f"_proxy_post_request is {span} lines"
+
+
 def test_gateway_module_files_stay_under_line_budgets() -> None:
     oversized: list[str] = []
     for path in sorted(SRC_PYTHON.glob("gateway_*.py")):
