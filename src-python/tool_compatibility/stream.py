@@ -19,7 +19,7 @@ from collaboration_runtime_contract import (
 
 from .collab_v1 import is_legacy_flattened_spawn
 from .collab_v2 import CollaborationV2StreamMixin, V2_NAMES as _V2_NAMES
-from .contracts import ToolCompatibilityError, _copy_mapping, _freeze, _thaw
+from .contracts import ToolCompatibilityError, _copy_mapping, _freeze, _item_id, _native_wire_identity, _thaw
 from .dispositions import (
     ADAPT,
     CUSTOM_FREEFORM,
@@ -156,30 +156,8 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
     def terminal(self) -> bool:
         return self._terminal
 
-    @staticmethod
-    def _item_id(value: Mapping[str, Any]) -> str | None:
-        item_id = value.get("item_id")
-        plain_id = value.get("id")
-        if (
-            isinstance(item_id, str)
-            and item_id
-            and isinstance(plain_id, str)
-            and plain_id
-            and item_id != plain_id
-        ):
-            raise ToolCompatibilityError(
-                "tool_compatibility_boundary",
-                "ambiguous_native_identity",
-                surface="stream",
-            )
-        for key in ("item_id", "id"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
-        return None
-
     def _pending_for(self, value: Mapping[str, Any]) -> _PendingStreamItem:
-        item_id = self._item_id(value)
+        item_id = _item_id(value)
         if item_id and item_id in self._pending:
             return self._pending[item_id]
         raise ToolCompatibilityError("tool_compatibility_boundary", "missing_stream_identity", surface="stream")
@@ -191,7 +169,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         """Record an undeclared legacy custom call established by ``added``."""
         if item.get("type") != "custom_tool_call":
             return None
-        item_id = self._item_id(item)
+        item_id = _item_id(item)
         call_id = item.get("call_id")
         if item_id is None or not isinstance(call_id, str) or not call_id:
             raise ToolCompatibilityError(
@@ -216,7 +194,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         opaque = _OpaqueStreamItem(
             item_id=item_id,
             call_id=call_id,
-            wire_identity=self._native_wire_identity(item),
+            wire_identity=_native_wire_identity(item),
         )
         self._seen_item_ids.add(item_id)
         self._seen_call_ids.add(call_id)
@@ -233,7 +211,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         entry: ToolCompatibilityEntry,
     ) -> None:
         """Record one complete legacy item that legitimately omits ``added``."""
-        item_id = self._item_id(item)
+        item_id = _item_id(item)
         if item_id is None:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
@@ -266,7 +244,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         self._legacy_unowned_done[item_id] = (
             call_id,
             entry,
-            self._native_wire_identity(item),
+            _native_wire_identity(item),
             self._semantic_wire_payload(item, entry),
         )
 
@@ -321,8 +299,8 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
 
     def _native_item_id_for_event(self, value: Mapping[str, Any]) -> str | None:
         item = value.get("item")
-        nested_item_id = self._item_id(item) if isinstance(item, Mapping) else None
-        event_item_id = self._item_id(value)
+        nested_item_id = _item_id(item) if isinstance(item, Mapping) else None
+        event_item_id = _item_id(value)
         if nested_item_id and event_item_id and nested_item_id != event_item_id:
             raise ToolCompatibilityError(
                 "tool_compatibility_boundary",
@@ -330,10 +308,6 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 surface="stream",
             )
         return nested_item_id or event_item_id
-
-    @staticmethod
-    def _native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:
-        return (item.get("type"), item.get("name"), item.get("namespace"))
 
     @staticmethod
     def _semantic_wire_payload(
@@ -527,7 +501,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             if (
                 not isinstance(nested_item, Mapping)
                 or expected_wire is None
-                or self._native_wire_identity(nested_item) != expected_wire
+                or _native_wire_identity(nested_item) != expected_wire
             ):
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -748,7 +722,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                             "ambiguous_call_identity",
                             surface="stream",
                         )
-                    if self._native_wire_identity(item) != expected_wire:
+                    if _native_wire_identity(item) != expected_wire:
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
@@ -796,7 +770,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                             "ambiguous_call_identity",
                             surface="stream",
                         )
-                    if self._native_wire_identity(item) != expected_wire:
+                    if _native_wire_identity(item) != expected_wire:
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
@@ -824,7 +798,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                             "ambiguous_call_identity",
                             surface="stream",
                         )
-                    if self._native_wire_identity(item) != opaque.wire_identity:
+                    if _native_wire_identity(item) != opaque.wire_identity:
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
@@ -918,7 +892,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 )
             if expected_entry.family == TOOL_SEARCH:
                 self.plan._validate_native_item(item, expected_entry, surface="stream")
-            if self._native_wire_identities.get(item_id) != self._native_wire_identity(item):
+            if self._native_wire_identities.get(item_id) != _native_wire_identity(item):
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
                     "ambiguous_native_identity",
@@ -981,7 +955,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                     surface="stream",
                 )
             self.plan._validate_collaboration_v2_items([item], surface="stream")
-            item_id = self._item_id(item)
+            item_id = _item_id(item)
             if item_id is None:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -1088,7 +1062,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             self._validate_output_item_added(item)
             self.plan._reject_unknown_standard_item(item, surface="stream")
             decoded_item, record, _changed = self._check_alias_in_item(item)
-            item_id = self._item_id(item)
+            item_id = _item_id(item)
             if record is not None:
                 if not item_id:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="stream")
@@ -1107,7 +1081,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 self._adapter_wire_identities[item_id] = (
                     call_id,
                     record,
-                    self._native_wire_identity(item),
+                    _native_wire_identity(item),
                 )
                 if record.version == "v2" and record.family == NAMESPACE:
                     self.plan._validate_collaboration_v2_call_item(
@@ -1124,7 +1098,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 return result
             native_entry = self._native_entry_for_item(item)
             if native_entry is not None:
-                item_id = self._item_id(item)
+                item_id = _item_id(item)
                 call_id = item.get("call_id")
                 if item_id is None:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "missing_item_identity", surface="stream")
@@ -1134,7 +1108,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "duplicate_item_identity", surface="stream")
                     self._seen_item_ids.add(item_id)
                     self._native_pending[item_id] = (None, native_entry)
-                    self._native_wire_identities[item_id] = self._native_wire_identity(item)
+                    self._native_wire_identities[item_id] = _native_wire_identity(item)
                     hosted_spec = _hosted_event_spec_for_declaration_kind(
                         native_entry.declaration.get("type")
                     )
@@ -1166,7 +1140,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 self._seen_item_ids.add(item_id)
                 self._seen_call_ids.add(call_id)
                 self._native_pending[item_id] = (call_id, native_entry)
-                self._native_wire_identities[item_id] = self._native_wire_identity(item)
+                self._native_wire_identities[item_id] = _native_wire_identity(item)
                 if native_entry.version == "v2" and native_entry.family == NAMESPACE:
                     self._record_collaboration_v2_added(item_id, item, result)
                 result["item"] = decoded_item
@@ -1224,7 +1198,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 )
             return result
         if event_type in {"response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
-            item_id = self._item_id(result)
+            item_id = _item_id(result)
             if item_id in self._native_pending:
                 expected_call_id, expected_entry = self._native_pending[item_id]
                 if expected_entry.family == TOOL_SEARCH:
@@ -1288,7 +1262,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 result["type"] = "response.custom_tool_call_input.delta"
             return result
         if event_type in {"response.function_call_arguments.done", "response.custom_tool_call_input.done"}:
-            item_id = self._item_id(result)
+            item_id = _item_id(result)
             if item_id in self._native_pending:
                 expected_call_id, expected_entry = self._native_pending[item_id]
                 if expected_entry.family == TOOL_SEARCH:
@@ -1452,7 +1426,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                         "unknown_alias",
                         surface="stream",
                     )
-                native_item_id = self._item_id(item)
+                native_item_id = _item_id(item)
                 opaque = self._opaque_pending.get(native_item_id) if native_item_id else None
                 if opaque is not None:
                     if item.get("call_id") != opaque.call_id:
@@ -1461,7 +1435,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                             "ambiguous_call_identity",
                             surface="stream",
                         )
-                    if self._native_wire_identity(item) != opaque.wire_identity:
+                    if _native_wire_identity(item) != opaque.wire_identity:
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
@@ -1508,7 +1482,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                     if call_id != native_pending[0]:
                         raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_call_identity", surface="stream")
                     expected_entry = native_pending[1]
-                    if self._native_wire_identities.get(native_item_id) != self._native_wire_identity(item):
+                    if self._native_wire_identities.get(native_item_id) != _native_wire_identity(item):
                         raise ToolCompatibilityError(
                             "tool_compatibility_boundary",
                             "ambiguous_native_identity",
@@ -1648,7 +1622,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             pending = self._pending_for(item)
             if (
                 pending.record.family == CUSTOM_FREEFORM
-                and self._native_wire_identity(item)
+                and _native_wire_identity(item)
                 != self._adapter_wire_identities[pending.item_id][2]
             ):
                 raise ToolCompatibilityError(
@@ -1774,7 +1748,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             if record.family == CUSTOM_FREEFORM:
                 if item.get("type") != "function_call":
                     raise self._stream_error("ambiguous_call_identity")
-                item_id = self._item_id(item)
+                item_id = _item_id(item)
                 call_id = item.get("call_id")
                 if (
                     not item_id
@@ -1799,7 +1773,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 self._adapter_wire_identities[item_id] = (
                     call_id,
                     record,
-                    self._native_wire_identity(item),
+                    _native_wire_identity(item),
                 )
                 return []
 
@@ -1812,7 +1786,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             if record is not None and record.family == TOOL_SEARCH:
                 if item.get("type") != "function_call":
                     raise self._stream_error("ambiguous_call_identity")
-                item_id = self._item_id(item)
+                item_id = _item_id(item)
                 call_id = item.get("call_id")
                 if (
                     not item_id
@@ -1837,11 +1811,11 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 self._adapter_wire_identities[item_id] = (
                     call_id,
                     record,
-                    self._native_wire_identity(item),
+                    _native_wire_identity(item),
                 )
                 return []
 
-        item_id = self._item_id(value)
+        item_id = _item_id(value)
         pending = self._buffered_custom.get(item_id) if item_id else None
         if event_type == "response.function_call_arguments.delta" and pending is not None:
             supplied_call_id = value.get("call_id")
@@ -1927,13 +1901,13 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
             return []
 
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
-            done_item_id = self._item_id(item)
+            done_item_id = _item_id(item)
             pending = self._buffered_custom.get(done_item_id) if done_item_id else None
             if pending is not None:
                 expected_wire = self._adapter_wire_identities.get(pending.item_id)
                 if (
                     expected_wire is None
-                    or self._native_wire_identity(item) != expected_wire[2]
+                    or _native_wire_identity(item) != expected_wire[2]
                 ):
                     raise self._stream_error("ambiguous_native_identity")
                 if (
@@ -1972,14 +1946,14 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 return [added_event, delta_event, input_done_event, value]
 
         if event_type == "response.output_item.done" and isinstance(item, Mapping):
-            done_item_id = self._item_id(item)
+            done_item_id = _item_id(item)
             search_pending = self._buffered_tool_search.get(done_item_id) if done_item_id else None
             if search_pending is None:
                 return [self.decode_event(value)]
             expected_wire = self._adapter_wire_identities.get(search_pending.item_id)
             if (
                 expected_wire is None
-                or self._native_wire_identity(item) != expected_wire[2]
+                or _native_wire_identity(item) != expected_wire[2]
                 or search_pending.arguments_done_event is None
                 or item.get("call_id") != search_pending.call_id
                 or item.get("name") not in {search_pending.record.alias, "tool_search"}

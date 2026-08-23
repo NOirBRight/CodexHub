@@ -264,7 +264,7 @@ def _dump_envelope(key: str, value: Any) -> str:
     return json.dumps({key: _thaw(_freeze(value))}, ensure_ascii=True, separators=(",", ":"))
 
 
-def _item_identity(item: Mapping[str, Any]) -> str | None:
+def _item_identity(item: Mapping[str, Any], *, surface: str = "request") -> str | None:
     item_id = item.get("item_id")
     plain_id = item.get("id")
     if (
@@ -274,12 +274,26 @@ def _item_identity(item: Mapping[str, Any]) -> str | None:
         and plain_id
         and item_id != plain_id
     ):
-        raise ToolCompatibilityError("tool_compatibility_boundary", "ambiguous_native_identity")
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "ambiguous_native_identity",
+            surface=surface,
+        )
     for key in ("item_id", "id"):
         value = item.get(key)
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _item_id(value: Mapping[str, Any]) -> str | None:
+    """Extract stream-surface item identity from ``item_id`` or ``id``."""
+
+    return _item_identity(value, surface="stream")
+
+
+def _native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    return (item.get("type"), item.get("name"), item.get("namespace"))
 
 
 def _is_legacy_message_identity(value: str) -> bool:
