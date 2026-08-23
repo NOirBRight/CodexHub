@@ -596,6 +596,11 @@ test("tauri config enables cross-platform updater packaging", async () => {
   assert.equal(tauriConfig.plugins.updater.windows.installMode, "quiet");
   assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
   assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
+  assert.equal(tauriConfig.bundle.resources["../src-python/*.py"], "src-python");
+  assert.equal(
+    tauriConfig.bundle.resources["../src-python/tool_compatibility/*.py"],
+    "src-python/tool_compatibility",
+  );
   assert.equal(tauriConfig.bundle.resources["resources/python/*"], "python");
   assert.equal(
     tauriConfig.bundle.resources["../scripts/xai_device_login.py"],
