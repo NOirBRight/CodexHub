@@ -1087,6 +1087,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_uninstall_script_preserves_replacement_and_accepts_different_user_owner() {
         let exe = Path::new(r"C:\Program Files\CodexHub\CodexHub.exe");
@@ -1229,6 +1230,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_readback_rejects_other_user_and_malformed_task_shapes() {
         let paths = FakePaths::new(
@@ -1372,6 +1374,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn run_uninstall_script_fixture(exe: &Path, task_xml: &[&str]) -> (i32, bool) {
         let mut prelude = "$ErrorActionPreference='Stop';$global:tasks=New-Object Collections.Queue;"
             .to_string();

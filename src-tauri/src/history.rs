@@ -995,19 +995,22 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 mod tests {
     use super::{
         acquire_history_repair, preflight_target,
-        DeadlineCommandRunner,
         migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
         reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
         sync_history_with_paths, HistoryBucketTarget, PreflightRequest, PreflightTarget,
         UnifiedHistoryStatus,
     };
+    #[cfg(windows)]
+    use super::DeadlineCommandRunner;
     use crate::config::{CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(windows)]
+    use std::time::{Duration, Instant};
 
     #[test]
     fn history_repair_gate_allows_only_one_mutation_at_a_time() {
