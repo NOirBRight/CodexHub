@@ -145,6 +145,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
 
+    @classmethod
+    def unbound(cls) -> "CodexProxyHandler":
+        """Construct a handler without binding it to a socket, for isolated tests."""
+        return cls.__new__(cls)
+
 
 _HANDLER_IMPL = Path(__file__).with_name("gateway_handler_impl.py")
 exec(compile(_HANDLER_IMPL.read_text(encoding="utf-8"), str(_HANDLER_IMPL), "exec"), globals())

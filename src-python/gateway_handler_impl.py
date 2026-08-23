@@ -457,7 +457,7 @@ def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None 
         if (
             route_plan.tool_exposure.strip_caller_tools
             and isinstance(inbound_payload, dict)
-            and _strip_tools_for_compact_payload(
+            and strip_tools_for_compact_payload(
                 inbound_payload,
                 event_context={
                     "request_id": request_id,
@@ -1007,7 +1007,7 @@ def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None 
             ),
             downstream_retry_payload=_downstream_retry_payload,
             retry_identity=_retry_identity_from_context,
-            sleep=_sleep_for_retry_with_gateway_cancellation,
+            sleep=sleep_for_retry_with_gateway_cancellation,
             protocol_fallback=protocol_fallback,
             error_status=exchange_error_status,
             handle_empty_completed=handle_empty_completed,

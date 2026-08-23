@@ -323,9 +323,9 @@ def _official_proxy_url(url: str) -> str | None:
 def _official_pool_manager(url: str) -> Any:
     return _transport_official_pool_manager(
         url,
-        pools=OFFICIAL_HTTP_POOLS,
-        pools_lock=OFFICIAL_HTTP_POOLS_LOCK,
-        proxy_url=_official_proxy_url(url),
+        pools=_live("OFFICIAL_HTTP_POOLS", OFFICIAL_HTTP_POOLS),
+        pools_lock=_live("OFFICIAL_HTTP_POOLS_LOCK", OFFICIAL_HTTP_POOLS_LOCK),
+        proxy_url=_live("official_proxy_url", _official_proxy_url)(url),
     )
 
 
@@ -333,7 +333,7 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
     return _transport_official_urlopen(
         request,
         timeout=timeout,
-        pool_manager=_official_pool_manager,
+        pool_manager=_live("official_pool_manager", _official_pool_manager),
     )
 
 
@@ -1314,12 +1314,18 @@ def _vision_proxy_adapter() -> VisionProxyAdapter:
             usage_from_payload=_usage_from_payload,
             normalize_usage=_normalize_usage_for_event,
             safe_upstream_error_detail=safe_upstream_error_detail,
-            cache_lookup_override=_vision_proxy_override(_image_proxy_cache_lookup, _VISION_ORIGINAL_CACHE_LOOKUP),
+            cache_lookup_override=_vision_proxy_override(
+                _live("image_proxy_cache_lookup", _image_proxy_cache_lookup),
+                _VISION_ORIGINAL_CACHE_LOOKUP,
+            ),
             cache_store_override=_vision_proxy_override(_image_proxy_cache_store, _VISION_ORIGINAL_CACHE_STORE),
             response_body_override=_vision_proxy_override(_image_proxy_response_body, _VISION_ORIGINAL_RESPONSE_BODY),
             response_text_override=_vision_proxy_override(_extract_model_response_text, _VISION_ORIGINAL_EXTRACT_TEXT),
             describe_image_override=_vision_proxy_override(_call_vision_model_for_image_description, _VISION_ORIGINAL_DESCRIBE_IMAGE),
-            description_for_part_override=_vision_proxy_override(_image_proxy_description_for_part, _VISION_ORIGINAL_DESCRIPTION_FOR_PART),
+            description_for_part_override=_vision_proxy_override(
+                _live("image_proxy_description_for_part", _image_proxy_description_for_part),
+                _VISION_ORIGINAL_DESCRIPTION_FOR_PART,
+            ),
             vision_upstream_override=_vision_proxy_override(_image_proxy_vision_upstream, _VISION_ORIGINAL_UPSTREAM),
             apply_responses_override=_vision_proxy_override(apply_image_proxy_to_responses_payload, _VISION_ORIGINAL_APPLY_RESPONSES),
             apply_chat_override=_vision_proxy_override(apply_image_proxy_to_chat_payload, _VISION_ORIGINAL_APPLY_CHAT),
@@ -1427,7 +1433,7 @@ def _catalog_runtime() -> CatalogRuntime:
         known_official_ids_reader=catalog_known_official_model_ids,
         official_display_name_reader=official_short_display_name,
         catalog_by_slug_reader=lambda: generated_catalog_by_slug(),
-        published_model_reader=_published_catalog_model,
+        published_model_reader=_live("published_catalog_model", _published_catalog_model),
         generated_official_reader=generated_official_catalog_upstream_model,
         official_alias_reader=official_alias_upstream_model,
         official_fast_variant_reader=official_fast_variant_upstream_model,
@@ -2941,8 +2947,8 @@ def _xmlish_tool_call_outputs_from_text(text: str) -> list[dict[str, Any]]:
 
 def _repair_chat_completion_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
     _hide_reasoning_text(payload)
-    payload, _ = _normalize_third_party_tool_call(payload)
-    payload, _ = _downgrade_invalid_third_party_tool_calls(payload)
+    payload, _ = normalize_third_party_tool_call(payload)
+    payload, _ = downgrade_invalid_third_party_tool_calls(payload)
     return payload
 
 
@@ -9055,7 +9061,7 @@ def compatible_response_body(
         surface="body",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
+    payload, alias_changed = normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -9075,9 +9081,9 @@ def compatible_response_body(
     changed = changed or worker_multi_agent_changed
     payload, coordinator_forbidden_changed = _suppress_coordinator_forbidden_tool_calls(payload, event_context)
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
+    payload, invalid_tool_changed = downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    payload, duplicate_spawn_changed = guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
@@ -9184,7 +9190,7 @@ def compatible_sse_line(
         surface="sse",
         attach_sidecars=False,
     )
-    payload, alias_changed = _normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
+    payload, alias_changed = normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         _write_adapter_event(
             event_context,
@@ -9212,9 +9218,9 @@ def compatible_sse_line(
     if payload is None:
         return b""
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = _downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
+    payload, invalid_tool_changed = downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, duplicate_spawn_changed = _guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    payload, duplicate_spawn_changed = guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
@@ -9688,7 +9694,18 @@ def _facade_ns() -> dict[str, Any]:
 
 
 def _live(name: str, fallback: Any) -> Any:
-    return _facade_ns().get(name, fallback)
+    """Prefer a patched facade binding, including the public name without the underscore."""
+    ns = _facade_ns()
+    keys = [name]
+    if name.startswith("_") and len(name) > 1 and name[1].isalpha():
+        keys.append(name[1:])
+    elif name and not name.startswith("_"):
+        keys.append(f"_{name}")
+    for key in keys:
+        current = ns.get(key, fallback)
+        if current is not fallback:
+            return current
+    return ns.get(name, fallback)
 
 
 def _gateway_transport() -> GatewayTransport:
@@ -10892,10 +10909,16 @@ def _relay_symbols() -> RelaySymbols:
             _compact_response_body_is_empty=_compact_response_body_is_empty,
             _converted_sse_payload=_converted_sse_payload,
             _count_sse_reasoning_event=_count_sse_reasoning_event,
-            _downgrade_invalid_third_party_tool_calls=_downgrade_invalid_third_party_tool_calls,
+            _downgrade_invalid_third_party_tool_calls=_live(
+                "downgrade_invalid_third_party_tool_calls",
+                _downgrade_invalid_third_party_tool_calls,
+            ),
             _events_to_responses_body=_events_to_responses_body,
             _filtered_response_headers=_filtered_response_headers,
-            _guard_duplicate_multi_agent_spawn_calls=_guard_duplicate_multi_agent_spawn_calls,
+            _guard_duplicate_multi_agent_spawn_calls=_live(
+                "guard_duplicate_multi_agent_spawn_calls",
+                _guard_duplicate_multi_agent_spawn_calls,
+            ),
             _handler_downstream_stream_commit=_handler_downstream_stream_commit,
             _incomplete_stream_json_error_body=_incomplete_stream_json_error_body,
             _is_event_stream=_is_event_stream,
@@ -10905,7 +10928,10 @@ def _relay_symbols() -> RelaySymbols:
             _json_error_payload_for_inbound_format=_json_error_payload_for_inbound_format,
             _lifecycle_final_issue_event_name=_lifecycle_final_issue_event_name,
             _lifecycle_final_issue_missing_reason=_lifecycle_final_issue_missing_reason,
-            _normalize_third_party_tool_call=_normalize_third_party_tool_call,
+            _normalize_third_party_tool_call=_live(
+                "normalize_third_party_tool_call",
+                _normalize_third_party_tool_call,
+            ),
             _observe_gateway_diagnostic=_observe_gateway_diagnostic,
             _offer_usage_observed_body=_offer_usage_observed_body,
             _offer_usage_observed_sse_line=_offer_usage_observed_sse_line,
@@ -10983,5 +11009,47 @@ def _relay_context_for_handler(handler: Any) -> RelayContext:
         official_passthrough_relay=handler._relay_official_passthrough_sse_response,
         prepared_exchange=getattr(handler, "_active_prepared_exchange", None),
     )
+
+
+# Public facade aliases so tests patch and call ``codex_proxy.<name>`` rather than
+# underscore-private internals. Private names remain for in-module callers.
+official_urlopen = _official_urlopen
+official_pool_manager = _official_pool_manager
+official_proxy_url = _official_proxy_url
+open_upstream_once = _open_upstream_once
+open_upstream_response = _open_upstream_response
+explicit_transport_phase = _explicit_transport_phase
+diagnostic_error_connection_disposition = _diagnostic_error_connection_disposition
+set_official_attempt_connection_disposition = _set_official_attempt_connection_disposition
+connection_disposition = _connection_disposition
+diagnostic_connection_disposition = _diagnostic_connection_disposition
+observe_gateway_diagnostic = _observe_gateway_diagnostic
+enqueue_gateway_event_payload = _enqueue_gateway_event_payload
+activate_gateway_request = _activate_gateway_request
+restore_gateway_request = _restore_gateway_request
+active_gateway_request = _active_gateway_request
+sleep_for_retry_with_gateway_cancellation = _sleep_for_retry_with_gateway_cancellation
+published_catalog_model = _published_catalog_model
+resolve_collaboration_boundary = _resolve_collaboration_boundary
+collaboration_adapter = _collaboration_adapter
+external_tool_protocol = _external_tool_protocol
+codexhub_error_payload = _codexhub_error_payload
+downstream_json_error_payload = _downstream_json_error_payload
+downstream_sse_error_payload_for_inbound_format = _downstream_sse_error_payload_for_inbound_format
+normalize_transparent_tool_schema_booleans = _normalize_transparent_tool_schema_booleans
+strip_tools_for_compact_payload = _strip_tools_for_compact_payload
+image_proxy_description_for_part = _image_proxy_description_for_part
+image_proxy_cache_lookup = _image_proxy_cache_lookup
+normalize_third_party_tool_call = _normalize_third_party_tool_call
+downgrade_invalid_third_party_tool_calls = _downgrade_invalid_third_party_tool_calls
+guard_duplicate_multi_agent_spawn_calls = _guard_duplicate_multi_agent_spawn_calls
+adapt_third_party_apply_patch_response_body = _adapt_third_party_apply_patch_response_body
+apply_patch_adapter = _apply_patch_adapter
+rewrite_structured_tool_input_items = _rewrite_structured_tool_input_items
+OfficialHTTPSConnection = _OfficialHTTPSConnection
+OfficialHTTPSConnectionPool = _OfficialHTTPSConnectionPool
+OfficialPooledResponse = _OfficialPooledResponse
+TRANSPORT_PHASE_ATTRIBUTE = _TRANSPORT_PHASE_ATTRIBUTE
+
 
 __all__ = [name for name in globals() if not name.startswith('__')]
