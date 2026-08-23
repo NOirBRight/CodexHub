@@ -47,6 +47,9 @@ from model_limits import (
     DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE,
 )
 from providers_config import resolve_external_model_alias, resolve_ollama_cloud_model
+from subscription_credential import provider_auth_mode, register_builtin_adapters
+
+register_builtin_adapters()
 
 
 CatalogDocument = dict[str, Any]
@@ -892,10 +895,11 @@ class CatalogRuntime:
                 f"model identity is internal and cannot be routed: {slug}",
                 reason="internal_model", provider_id=provider_id, model_slug=slug,
             )
+        auth_mode = provider_auth_mode(provider_id) or "api_key"
         return {
             "name": external_model["upstream_name"], "provider_id": provider_id,
             "model_id": slug, "base_url": external_model["base_url"],
-            "auth": "api_key", "api_key": external_model["api_key"],
+            "auth": auth_mode, "api_key": external_model["api_key"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),

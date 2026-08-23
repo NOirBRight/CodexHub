@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 import codex_proxy
+import route_primitives
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
 from collaboration_runtime_contract import (
     EXPECTED_OUTPUT_SCHEMAS,
@@ -735,7 +736,7 @@ def test_v2_skips_v1_scheduler_and_repair() -> None:
     fixture = _ProtocolFixture(
         _request_body(input_items=_v2_history_without_encrypted_agent_message()),
         _responses_upstream(native_namespace=False),
-        repair_policy=codex_proxy.REPAIR_CODEX_SUBAGENT,
+        repair_policy=route_primitives.REPAIR_CODEX_SUBAGENT,
     )
     fixture.request()
 

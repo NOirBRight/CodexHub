@@ -54,7 +54,7 @@ class _CancellationResponse:
         self.closed = threading.Event()
 
     def __enter__(self) -> "_CancellationResponse":
-        admission = codex_proxy._active_gateway_request()
+        admission = codex_proxy.active_gateway_request()
         assert admission is not None
         admission.attach_upstream_transport(self)
         return self

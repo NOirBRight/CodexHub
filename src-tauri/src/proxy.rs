@@ -5696,6 +5696,17 @@ time.sleep(10)
             }
         }
 
+        let package_source = source.join("tool_compatibility");
+        let package_target = target.join("tool_compatibility");
+        fs::create_dir_all(&package_target).unwrap();
+        for entry in fs::read_dir(package_source).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("py") {
+                fs::copy(&path, package_target.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+
         let vendor_source = source.join("vendor");
         let vendor_target = target.join("vendor");
         fs::create_dir_all(&vendor_target).unwrap();

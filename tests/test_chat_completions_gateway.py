@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 import route_plan
+import route_primitives
 from protocol_translation import prepare_exchange as _real_prepare_exchange
 
 
@@ -355,7 +356,7 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
                 body,
                 upstream,
                 model_id="glm-5.2",
-                behavior_profile=codex_proxy.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+                behavior_profile=route_primitives.BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
             )
         )
 
@@ -373,7 +374,7 @@ class CodexAppExternalResponsesToolHistoryTests(unittest.TestCase):
             "tool_protocol": "auto",
         }
 
-        self.assertEqual(codex_proxy._external_tool_protocol(upstream), "text_compat")
+        self.assertEqual(codex_proxy.external_tool_protocol(upstream), "text_compat")
 
 
 class RequestKindDetectionTests(unittest.TestCase):
@@ -514,7 +515,7 @@ class CodexHubErrorPayloadTests(unittest.TestCase):
 
         for expected_code, kwargs in cases:
             with self.subTest(expected_code=expected_code):
-                payload = codex_proxy._codexhub_error_payload(**kwargs)
+                payload = codex_proxy.codexhub_error_payload(**kwargs)
                 self.assertEqual(payload["code"], expected_code)
                 self.assertEqual(set(payload), {"code", "message", "source", "retryable", "details"})
                 self.assertIsInstance(payload["retryable"], bool)
@@ -530,7 +531,7 @@ class DownstreamErrorMapperTests(unittest.TestCase):
             exc=URLError(ConnectionResetError("connection reset")),
         )
 
-        payload = codex_proxy._downstream_json_error_payload(error)
+        payload = codex_proxy.downstream_json_error_payload(error)
 
         self.assertEqual(payload["error"]["type"], "upstream_error")
         self.assertEqual(payload["error"]["code"], "URLError")
@@ -545,7 +546,7 @@ class DownstreamErrorMapperTests(unittest.TestCase):
             exc=URLError(TimeoutError("upstream timed out")),
         )
 
-        payload = codex_proxy._downstream_sse_error_payload_for_inbound_format(error)
+        payload = codex_proxy.downstream_sse_error_payload_for_inbound_format(error)
 
         self.assertEqual(payload["type"], "upstream_stream_error")
         self.assertEqual(payload["status"], 502)
@@ -941,7 +942,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.addCleanup(self.account_patch.stop)
 
     def _make_handler(self, body, path="/v1/chat/completions"):
-        handler = CodexProxyHandler.__new__(CodexProxyHandler)
+        handler = CodexProxyHandler.unbound()
         handler.path = path
         handler.headers = {
             "Content-Length": str(len(body)),
@@ -987,7 +988,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
             CodexProxyHandler.do_POST(handler)
 
         # Verify the upstream request was sent to the official Responses endpoint.
@@ -1024,7 +1025,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
         }).encode("utf-8")
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         result = json.loads(b"".join(handler.wfile.writes))
@@ -1032,7 +1033,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "unsupported_protocol_semantics")
         self.assertEqual(
             result["codexhub_error"]["details"]["failure_class"],
-            codex_proxy.RETRY_FAILURE_PERMANENT,
+            route_primitives.RETRY_FAILURE_PERMANENT,
         )
         self.assertFalse(result["codexhub_error"]["retryable"])
 
@@ -1059,7 +1060,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
@@ -1069,7 +1070,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(fields["request_kind"], "main_generation")
             self.assertEqual(fields["client_request_kind"], "turn")
             self.assertEqual(fields["turn_id"], "turn-meta")
-            self.assertEqual(fields["behavior_profile"], codex_proxy.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
+            self.assertEqual(fields["behavior_profile"], route_primitives.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT)
 
     def test_post_chat_completions_retries_official_connect_error_before_relaying(self):
         body = json.dumps({
@@ -1091,7 +1092,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
 
         with patch(
-            "codex_proxy._official_urlopen",
+            "codex_proxy.official_urlopen",
             side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body)],
         ) as mock_urlopen, patch("codex_proxy.time.sleep"):
             CodexProxyHandler.do_POST(handler)
@@ -1234,7 +1235,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 side_effect=_assert_identity_prepare_exchange,
             ),
             patch(
-                "codex_proxy._responses_request_to_chat_completion_body",
+                "codex_proxy.responses_request_to_chat_completion_body",
                 side_effect=AssertionError("responses request converted back to chat"),
             ),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
@@ -1594,7 +1595,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "metadata": {"flag": True, "nested": {"off": False}},
         }).encode("utf-8")
 
-        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+        next_body, rewritten = codex_proxy.normalize_transparent_tool_schema_booleans(body)
 
         self.assertEqual(rewritten, 0)
         self.assertEqual(next_body, body)
@@ -1605,7 +1606,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hi"}],
         }).encode("utf-8")
 
-        next_body, rewritten = codex_proxy._normalize_transparent_tool_schema_booleans(body)
+        next_body, rewritten = codex_proxy.normalize_transparent_tool_schema_booleans(body)
 
         self.assertEqual(rewritten, 0)
         self.assertIs(next_body, body)
@@ -1833,9 +1834,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
-        self.assertEqual(request_start["wire_format_adapter"], codex_proxy.WIRE_TRANSPARENT)
-        self.assertEqual(request_start["codex_semantic_adapter"], codex_proxy.CODEX_SEMANTIC_NONE)
+        self.assertEqual(request_start["behavior_profile"], route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["wire_format_adapter"], route_primitives.WIRE_TRANSPARENT)
+        self.assertEqual(request_start["codex_semantic_adapter"], route_primitives.CODEX_SEMANTIC_NONE)
 
     def test_provider_scoped_transparent_http_error_keeps_real_upstream_header(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -1952,7 +1953,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy._strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
+            patch("codex_proxy.strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1960,7 +1961,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["request_kind"], codex_proxy.RETRY_REQUEST_MAIN_GENERATION)
+        self.assertEqual(request_start["request_kind"], route_primitives.RETRY_REQUEST_MAIN_GENERATION)
         self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_chat_transparent_vision_proxy_overlay_replaces_images_when_enabled(self):
@@ -2051,7 +2052,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2065,21 +2066,21 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertEqual(
             request_start["vision_action"],
-            codex_proxy.VisionAction.PROXY.value,
+            route_primitives.VisionAction.PROXY.value,
         )
         self.assertEqual(
             request_start["vision_network_action"],
-            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+            route_primitives.VisionNetworkAction.IMAGE_PROXY.value,
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            route_primitives.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
             request_start["mutation_summary"],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
+            route_primitives.RouteMutation.IMAGE_CONTENT_REPLACEMENT.value,
             request_start["route_attempt_mutation_summary"],
         )
 
@@ -2154,18 +2155,18 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
         self.assertEqual(
             request_error["vision_action"],
-            codex_proxy.VisionAction.REJECT.value,
+            route_primitives.VisionAction.REJECT.value,
         )
         self.assertEqual(
             request_error["vision_network_action"],
-            codex_proxy.VisionNetworkAction.NONE.value,
+            route_primitives.VisionNetworkAction.NONE.value,
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            route_primitives.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
             request_error["mutation_summary"],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
+            route_primitives.RouteMutation.IMAGE_UNSUPPORTED_REJECTION.value,
             request_error["route_attempt_mutation_summary"],
         )
 
@@ -2257,7 +2258,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy._image_proxy_description_for_part", return_value="A boundary-guard chart description."),
+            patch("codex_proxy.image_proxy_description_for_part", return_value="A boundary-guard chart description."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2273,14 +2274,14 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertEqual(
             request_start["vision_action"],
-            codex_proxy.VisionAction.PROXY.value,
+            route_primitives.VisionAction.PROXY.value,
         )
         self.assertEqual(
             request_start["vision_network_action"],
-            codex_proxy.VisionNetworkAction.IMAGE_PROXY.value,
+            route_primitives.VisionNetworkAction.IMAGE_PROXY.value,
         )
 
     def test_transparent_vision_proxy_failure_still_records_request_start(self):
@@ -2344,7 +2345,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy._image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
             patch("codex_proxy.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2357,7 +2358,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
         self.assertIn("caller_request_body_hmac", request_start)
         self.assertEqual(handler._fake.status, 502)
 
@@ -2439,8 +2440,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy._image_proxy_cache_lookup", return_value=None),
-            patch("codex_proxy._image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("codex_proxy.image_proxy_cache_lookup", return_value=None),
+            patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
             patch("codex_proxy.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2542,7 +2543,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy._image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2632,7 +2633,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_start = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
-        self.assertEqual(request_start["behavior_profile"], codex_proxy.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
+        self.assertEqual(request_start["behavior_profile"], route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED)
 
     def test_provider_scoped_chat_to_responses_upstream_uses_lightweight_fallback_without_codex_adapter(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -2770,9 +2771,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
-            patch("codex_proxy._normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
-            patch("codex_proxy._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
-            patch("codex_proxy._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
+            patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
+            patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
+            patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
             patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2847,7 +2848,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         request_complete = next(
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_complete"
         )
-        self.assertEqual(request_complete["usage_policy"], codex_proxy.USAGE_ASYNC_TAP)
+        self.assertEqual(request_complete["usage_policy"], route_primitives.USAGE_ASYNC_TAP)
         self.assertEqual(request_complete["usage_source"], "missing")
         self.assertEqual(request_complete["usage_missing_reason"], "async_usage_pending")
         self.assertNotIn("usage_input_tokens", request_complete)
@@ -3088,9 +3089,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy._normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
-            patch("codex_proxy._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
-            patch("codex_proxy._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
+            patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
+            patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
+            patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
             patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -3169,7 +3170,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ),
             patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
-            patch("codex_proxy._sleep_for_retry_with_gateway_cancellation") as mock_sleep,
+            patch("codex_proxy.sleep_for_retry_with_gateway_cancellation") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3642,7 +3643,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy._official_urlopen",
+                "codex_proxy.official_urlopen",
                 side_effect=[
                     _FakeJsonResponse(empty_body),
                     _FakeJsonResponse(empty_body),
@@ -4030,7 +4031,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             call.kwargs for call in self.write_proxy_event.call_args_list if call.args and call.args[0] == "request_start"
         )
         self.assertEqual(request_start["client_id"], "zcode")
-        self.assertEqual(request_start["vision_proxy_policy"], codex_proxy.VISION_PROXY_TRANSPARENT_OVERLAY)
+        self.assertEqual(request_start["vision_proxy_policy"], route_primitives.VISION_PROXY_TRANSPARENT_OVERLAY)
 
     def test_provider_scoped_chat_completions_image_proxy_supports_chat_completions_vision(self):
         policy = codex_proxy.load_policy(codex_proxy.POLICY_PATH)
@@ -4189,7 +4190,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             b'',
         ]
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4229,7 +4230,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy._official_urlopen",
+                "codex_proxy.official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeSseResponse(sse_lines)],
             ) as mock_urlopen,
             patch("codex_proxy.time.sleep"),
@@ -4269,7 +4270,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy._official_urlopen",
+                "codex_proxy.official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body, status=502)],
             ),
             patch("codex_proxy.time.sleep"),
@@ -4309,7 +4310,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
                 with (
                     patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-                    patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)),
+                    patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)),
                 ):
                     CodexProxyHandler.do_POST(handler)
 
@@ -4352,7 +4353,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy._official_urlopen", side_effect=[failed_stream, successful_stream]),
+            patch("codex_proxy.official_urlopen", side_effect=[failed_stream, successful_stream]),
             patch("codex_proxy.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -4421,7 +4422,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy._official_urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
+            patch("codex_proxy.official_urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4453,7 +4454,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy._official_urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
+            patch("codex_proxy.official_urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4480,7 +4481,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             OSError("responses stream reset"),
         ]
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4508,7 +4509,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        with patch("codex_proxy._official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4588,7 +4589,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             self.assertEqual(event["route_attempt_index"], 0)
             self.assertEqual(event["route_attempt_protocol"], "responses")
             self.assertIn(
-                codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+                route_primitives.RouteMutation.WIRE_CONVERSION.value,
                 event["route_attempt_mutation_summary"],
             )
 
@@ -4653,7 +4654,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             [404, 405, 415, 422],
         )
         self.assertIn(
-            codex_proxy.RouteMutation.WIRE_CONVERSION.value,
+            route_primitives.RouteMutation.WIRE_CONVERSION.value,
             suppressed["route_attempt_mutation_summary"],
         )
         result = json.loads(b"".join(handler.wfile.writes))

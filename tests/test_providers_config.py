@@ -1387,7 +1387,10 @@ enabled = true
     def test_default_config_uses_provider_ids_that_match_model_slug_prefixes(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
 
-        self.assertEqual([provider.id for provider in providers], ["ollama-cloud", "volc", "minimax-cn", "xunfei"])
+        self.assertEqual(
+            [provider.id for provider in providers],
+            ["ollama-cloud", "volc", "minimax-cn", "xunfei", "xai"],
+        )
 
     def test_default_config_external_aliases_exclude_volc_minimax_m3_by_default(self):
         with patch.dict(

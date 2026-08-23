@@ -213,3 +213,23 @@ enabled = true
   context_window = 256000
   sort_order = 16
   enabled = true
+
+[[providers]]
+id = "xai"
+name = "xAI"
+base_url = "https://api.x.ai/v1"
+api_key = "{env:XAI_API_KEY}"
+display_prefix = "xAI"
+upstream_format = "responses"
+available_upstream_formats = ["responses"]
+reports_cached_input_tokens = false
+sort_order = 5
+enabled = true
+
+  [[providers.models]]
+  id = "grok-4"
+  display_name = "Grok 4"
+  context_window = 256000
+  max_output_tokens = 65536
+  sort_order = 1
+  enabled = true

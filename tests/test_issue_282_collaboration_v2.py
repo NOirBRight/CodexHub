@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_primitives
 from codex_semantic_adapter import (
     COLLABORATION_V1,
     COLLABORATION_V2,
@@ -490,7 +491,7 @@ def test_native_responses_namespace_is_validated_and_preserved_unchanged() -> No
 def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior() -> None:
     body = _request(COLLABORATION_V2)
     context: dict[str, object] = {
-        "repair_policy": codex_proxy.REPAIR_CODEX_SUBAGENT,
+        "repair_policy": route_primitives.REPAIR_CODEX_SUBAGENT,
         "request_id": "bounded-request",
     }
 

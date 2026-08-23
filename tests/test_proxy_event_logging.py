@@ -57,12 +57,12 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "codex_proxy._open_upstream_once",
+                            "codex_proxy.open_upstream_once",
                             side_effect=[URLError(TimeoutError("upstream timed out")), success],
                         ) as open_once,
                         patch("codex_proxy.time.sleep"),
                     ):
-                        response = codex_proxy._open_upstream_response(
+                        response = codex_proxy.open_upstream_response(
                             request,
                             upstream_name="official",
                             upstream_format="responses",
@@ -105,7 +105,7 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "codex_proxy._open_upstream_once",
+                            "codex_proxy.open_upstream_once",
                             side_effect=HTTPError(
                                 "https://example.test/v1/responses",
                                 503,
@@ -117,7 +117,7 @@ class ProxyEventLoggingTests(TestCase):
                         patch("codex_proxy.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
-                            codex_proxy._open_upstream_response(
+                            codex_proxy.open_upstream_response(
                                 request,
                                 upstream_name="volcengine",
                                 upstream_format="responses",
@@ -190,7 +190,7 @@ class ProxyEventLoggingTests(TestCase):
                         patch("codex_proxy.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
-                            codex_proxy._open_upstream_response(
+                            codex_proxy.open_upstream_response(
                                 request,
                                 upstream_name="ollama_cloud",
                                 upstream_format="responses",
@@ -685,8 +685,8 @@ class ProxyEventLoggingTests(TestCase):
             {"event": "request_complete", "request_id": "req-two"},
         ]
         with patch.object(codex_proxy.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
-            self.assertTrue(codex_proxy._enqueue_gateway_event_payload(payloads[0]))
-            self.assertFalse(codex_proxy._enqueue_gateway_event_payload(payloads[1]))
+            self.assertTrue(codex_proxy.enqueue_gateway_event_payload(payloads[0]))
+            self.assertFalse(codex_proxy.enqueue_gateway_event_payload(payloads[1]))
 
         self.assertEqual(enqueue.call_args_list[0].args, (payloads[0],))
         self.assertEqual(enqueue.call_args_list[1].args, (payloads[1],))

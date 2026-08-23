@@ -281,7 +281,7 @@ def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_proxy, "write_proxy_event", emit)
     monkeypatch.setattr(codex_proxy, "WORKER_BINDING_SIGNING_ROOT", tmp_path)
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-        codex_proxy._resolve_collaboration_boundary(
+        codex_proxy.resolve_collaboration_boundary(
             {
                 "input": [
                     _spawn_call(arguments={"message": "one", "fork_context": True}),
@@ -299,5 +299,5 @@ def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
     assert seen == [
         ("collaboration_boundary_rejected", {"surface": "request", "outcome": "rejected", "count": 1})
     ]
-    adapter = codex_proxy._collaboration_adapter()
+    adapter = codex_proxy.collaboration_adapter()
     assert adapter.facts.signing_root == tmp_path

@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 import uuid
 
-from gateway_errors import UpstreamStreamIncompleteError
+from gateway_errors import (
+    UpstreamProtocolTranslationError,
+    UpstreamStreamIncompleteError,
+)
 
 
 ChatContentText = Callable[[Any], str]
@@ -3056,6 +3059,32 @@ class ChatToResponsesStreamConverter:
         return events
 
 
+class GatewayResponsesToChatStreamConverter(ResponsesToChatStreamConverter):
+    """Gateway-facing converter that maps seam errors onto transport errors."""
+
+    def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            return super().chunks_for_event(event)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+
+
+class GatewayChatToResponsesStreamConverter(ChatToResponsesStreamConverter):
+    """Gateway-facing converter that maps seam errors onto transport errors."""
+
+    def events_for_chunk(self, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            return super().events_for_chunk(chunk)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+
+    def events_for_done(self) -> list[dict[str, Any]]:
+        try:
+            return super().events_for_done()
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+
+
 def events_to_responses_body(
     events: list[Mapping[str, Any]],
     *,
@@ -3474,6 +3503,8 @@ __all__ = [
     entrypoint.__name__
     for entrypoint in (
         ChatToResponsesStreamConverter,
+        GatewayChatToResponsesStreamConverter,
+        GatewayResponsesToChatStreamConverter,
         NonForwardable,
         PreparedExchange,
         ResponsesToChatStreamConverter,

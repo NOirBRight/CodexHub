@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_primitives
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import (
     COLLABORATION_V1,
@@ -851,7 +852,7 @@ def test_mixed_history_rejection_is_bounded_and_does_not_include_payload() -> No
 
     with patch.object(codex_proxy, "write_proxy_event") as write_event:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy._resolve_collaboration_boundary(body, context)
+            codex_proxy.resolve_collaboration_boundary(body, context)
 
     event = next(
         call
@@ -913,7 +914,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
         body,
         {"name": "official", "auth": "codex_auth"},
         event_context={"request_id": "issue198-official"},
-        behavior_profile=codex_proxy.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     )
 
     payload = json.loads(transformed)
@@ -1035,7 +1036,7 @@ def test_current_target_boundary_rejects_mixed_history() -> None:
         ({"input": [_v1_spawn_call(), _v2_spawn_call()]}, {}),
     ):
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy._resolve_collaboration_boundary(payload, context)
+            codex_proxy.resolve_collaboration_boundary(payload, context)
 
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
         codex_proxy.compatible_request_body(

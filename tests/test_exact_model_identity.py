@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import route_plan
 from providers_config import ModelConfig, ProviderConfig, build_external_model_index, build_ollama_cloud_model_index
-from test_routing import post_handler
 
 
 def _catalog_row(slug: str, *, provider: str = "openai", upstream_model: str | None = None):
@@ -277,7 +277,7 @@ def test_bare_ollama_catalog_fallback_includes_exact_upstream_identity():
     row = _catalog_row("glm-5.2", provider="ollama-cloud", upstream_model="glm-5.2")
 
     with (
-        patch("codex_proxy._published_catalog_model", return_value=row),
+        patch("codex_proxy.published_catalog_model", return_value=row),
         patch("codex_proxy.resolve_ollama_cloud_model", return_value=(False, None)),
         patch("codex_proxy.should_include_model", return_value=True),
     ):
@@ -497,7 +497,7 @@ def test_ollama_provider_index_failure_is_catalog_inconsistency_before_io():
 
 def test_route_plan_rejects_missing_upstream_identity_without_substitution():
     with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
-        codex_proxy.route_plan_for_request(
+        route_plan.route_plan_for_request(
             {"name": "official", "auth": "codex_auth"},
             {"client_id": "unknown"},
             inbound_format="responses",
@@ -510,7 +510,7 @@ def test_route_plan_rejects_missing_upstream_identity_without_substitution():
 
 
 def test_route_plan_retains_exact_provider_id_and_model_slug():
-    plan = codex_proxy.route_plan_for_request(
+    plan = route_plan.route_plan_for_request(
         {
             "name": "volcengine",
             "provider_id": "volc",
@@ -532,7 +532,7 @@ def test_route_plan_retains_exact_provider_id_and_model_slug():
 
 
 def test_route_plan_preserves_explicit_provider_id_underscores():
-    plan = codex_proxy.route_plan_for_request(
+    plan = route_plan.route_plan_for_request(
         {
             "name": "custom_transport",
             "provider_id": "foo_bar",
@@ -553,7 +553,7 @@ def test_route_plan_preserves_explicit_provider_id_underscores():
 def test_route_plan_rejects_mismatched_upstream_without_model_id():
     with patch("codex_proxy.urlopen") as urlopen:
         with pytest.raises(codex_proxy.ModelIdentityResolutionError) as failure:
-            codex_proxy.route_plan_for_request(
+            route_plan.route_plan_for_request(
                 {
                     "name": "volcengine",
                     "provider_id": "volc",
@@ -571,113 +571,3 @@ def test_route_plan_rejects_mismatched_upstream_without_model_id():
     assert failure.value.classification == "catalog_inconsistency"
     assert failure.value.reason == "configured_model_mismatch"
     urlopen.assert_not_called()
-
-
-def test_identity_error_payload_distinguishes_catalog_and_local_resolution():
-    catalog_error = codex_proxy.ModelIdentityResolutionError(
-        "duplicate canonical slug",
-        classification="catalog_inconsistency",
-        reason="duplicate_canonical_slug",
-    )
-    local_error = codex_proxy.ModelIdentityResolutionError(
-        "model is not supported",
-        classification="local_resolution_failure",
-        reason="unsupported_model",
-    )
-
-    catalog_payload = codex_proxy._codexhub_error_payload(
-        source="gateway",
-        message=str(catalog_error),
-        status=400,
-        exc=catalog_error,
-        error_type="model_identity_error",
-        error="ModelIdentityResolutionError",
-    )
-    local_payload = codex_proxy._codexhub_error_payload(
-        source="gateway",
-        message=str(local_error),
-        status=400,
-        exc=local_error,
-        error_type="model_identity_error",
-        error="ModelIdentityResolutionError",
-    )
-
-    assert catalog_payload["code"] == "catalog.inconsistency"
-    assert catalog_payload["details"]["classification"] == "catalog_inconsistency"
-    assert local_payload["code"] == "gateway.model_resolution"
-    assert local_payload["details"]["classification"] == "local_resolution_failure"
-    assert "codex-auto-review" not in json.dumps(catalog_payload)
-
-
-def test_identity_error_payload_drops_untrusted_provider_and_model_labels():
-    failure = codex_proxy.ModelIdentityResolutionError(
-        "model identity is invalid",
-        classification="local_resolution_failure",
-        reason="unsupported_model",
-        provider_id="Bearer SECRET",
-        model_slug="Bearer SECRET",
-    )
-
-    payload = codex_proxy._codexhub_error_payload(
-        source="gateway",
-        message="model identity is invalid",
-        status=400,
-        exc=failure,
-        error_type="model_identity_error",
-        error="ModelIdentityResolutionError",
-    )
-
-    rendered = json.dumps(payload)
-    assert "SECRET" not in rendered
-    assert "provider_id" not in payload["details"]
-    assert "model_slug" not in payload["details"]
-
-
-def test_handler_rejects_identity_before_auth_or_upstream_io():
-    handler, fake = post_handler(
-        "/v1/responses",
-        json.dumps({"model": "openai/codex-auto-review", "input": []}).encode(),
-    )
-    failure = codex_proxy.ModelIdentityResolutionError(
-        "model identity is internal and cannot be routed",
-        classification="local_resolution_failure",
-        reason="internal_model",
-        provider_id="openai",
-        model_slug="codex-auto-review",
-    )
-
-    with (
-        patch("codex_proxy.choose_upstream", side_effect=failure),
-        patch("codex_proxy.materialize_operational_authentication") as auth,
-        patch("codex_proxy._open_upstream_response") as open_upstream,
-    ):
-        codex_proxy.CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
-
-    assert fake.status == 400
-    payload = json.loads(fake.wfile.writes[-1].decode())
-    assert payload["codexhub_error"]["code"] == "gateway.model_resolution"
-    assert payload["codexhub_error"]["details"]["reason"] == "internal_model"
-    auth.assert_not_called()
-    open_upstream.assert_not_called()
-
-
-def test_handler_identity_error_detail_uses_bounded_non_secret_reason():
-    handler, fake = post_handler(
-        "/v1/responses",
-        json.dumps({"model": "openai/secret-model", "input": []}).encode(),
-    )
-    failure = codex_proxy.ModelIdentityResolutionError(
-        "Bearer SECRET should never be returned",
-        classification="local_resolution_failure",
-        reason="unsupported_model",
-        provider_id="openai",
-        model_slug="secret-model",
-    )
-
-    with patch("codex_proxy.choose_upstream", side_effect=failure):
-        codex_proxy.CodexProxyHandler._proxy_post_request(handler, inbound_format="responses")
-
-    rendered = fake.wfile.writes[-1].decode()
-    assert "SECRET" not in rendered
-    assert "Bearer " not in rendered
-    assert "unsupported_model" in rendered

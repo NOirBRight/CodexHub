@@ -110,6 +110,10 @@ def test_timeout_is_terminal_and_cleanup_is_fail_closed(tmp_path: Path, monkeypa
     )
 
     runner = BoundedPhaseRunner(tmp_path, IDENTITY)
+    monkeypatch.setattr(
+        "run_issue_62_live_control.os.killpg",
+        lambda pid, sig: process.terminate(),
+    )
     result = runner.run_subprocess("cli", ["fixture", "secret"])
     assert result.status == "timed_out"
     assert process.terminated is True
@@ -147,6 +151,10 @@ def test_cancellation_of_active_process_terminates_it(
     monkeypatch.setattr("run_issue_62_live_control.subprocess.run", lambda *args, **kwargs: None)
     cancel = threading.Event()
     runner = BoundedPhaseRunner(tmp_path, IDENTITY)
+    monkeypatch.setattr(
+        "run_issue_62_live_control.os.killpg",
+        lambda pid, sig: process.terminate(),
+    )
     result_box: list[CommandResult] = []
 
     worker = threading.Thread(

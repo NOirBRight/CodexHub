@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { ModelSection, createDraftModel, uniqueModelId } from "./ProviderModelSection";
 import { ApiKeyInput, Field, HeaderRow, IconButton } from "./ProviderFormControls";
+import { XaiLoginCard } from "./XaiLoginCard";
 import {
   applyAddProviderProbeResult,
   applyProviderProbeResult,
@@ -180,6 +181,8 @@ export function ProviderDetail({
             </IconButton>
           }
         />
+
+        {provider.id === "xai" ? <XaiLoginCard /> : null}
 
         <div className="grid grid-cols-2 gap-2">
           <Field label={t("common.name")}>

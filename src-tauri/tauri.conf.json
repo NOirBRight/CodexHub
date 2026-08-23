@@ -32,7 +32,9 @@
       "../config/official_model_catalog_metadata.json": "config/official_model_catalog_metadata.json",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
+      "../src-python/tool_compatibility/*.py": "src-python/tool_compatibility",
       "../src-python/vendor/*.whl": "src-python/vendor",
+      "../scripts/xai_device_login.py": "scripts/xai_device_login.py",
       "resources/python/*": "python"
     },
     "icon": [

@@ -308,5 +308,5 @@ def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
             }
         ]
     }
-    codex_proxy._rewrite_structured_tool_input_items(payload, event_context={"live": True})
+    codex_proxy.rewrite_structured_tool_input_items(payload, event_context={"live": True})
     assert seen == [{"live": True}]
