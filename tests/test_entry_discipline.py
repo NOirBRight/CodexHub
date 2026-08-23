@@ -11,6 +11,11 @@ ENTRY_PATH = SRC_PYTHON / "codex_proxy.py"
 ENTRY_LINE_BUDGET = 500
 GATEWAY_TOP_LEVEL_LINE_BUDGET = 3000
 PACKAGE_LINE_BUDGET = 2000
+# Deep Modules v4 ratchet: measured post-T6 size + 10%.
+GATEWAY_FILE_LINE_BUDGETS = {
+    "gateway_handler_impl.py": 1972,
+    "gateway_relay.py": 2986,
+}
 
 ENTRY_ALLOWED_FIRST_PARTY = frozenset(
     {
@@ -112,8 +117,9 @@ def test_gateway_module_files_stay_under_line_budgets() -> None:
     oversized: list[str] = []
     for path in sorted(SRC_PYTHON.glob("gateway_*.py")):
         count = _line_count(path)
-        if count >= GATEWAY_TOP_LEVEL_LINE_BUDGET:
-            oversized.append(f"{path.name}={count}")
+        budget = GATEWAY_FILE_LINE_BUDGETS.get(path.name, GATEWAY_TOP_LEVEL_LINE_BUDGET - 1)
+        if count > budget:
+            oversized.append(f"{path.name}={count}>{budget}")
     for package in ("tool_compatibility", "gateway_compat"):
         for path in sorted((SRC_PYTHON / package).glob("*.py")):
             count = _line_count(path)
