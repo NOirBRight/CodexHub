@@ -210,3 +210,24 @@ def test_gateway_events_does_not_import_the_facade() -> None:
     assert "from gateway_runtime" not in source
     assert "BaseHTTPRequestHandler" not in source
     assert "CodexProxyHandler" not in source
+
+
+def test_gateway_stream_semantics_does_not_import_the_facade() -> None:
+    import gateway_stream_semantics
+    import gateway_sse
+
+    stream_source = Path(gateway_stream_semantics.__file__).read_text(encoding="utf-8")
+    sse_source = Path(gateway_sse.__file__).read_text(encoding="utf-8")
+    for source in (stream_source, sse_source):
+        assert "import codex_proxy" not in source
+        assert "from codex_proxy" not in source
+        assert "import gateway_runtime" not in source
+        assert "from gateway_runtime" not in source
+        assert "BaseHTTPRequestHandler" not in source
+        assert "CodexProxyHandler" not in source
+    stream_lines = stream_source.count("\n") + (0 if stream_source.endswith("\n") else 1)
+    sse_lines = sse_source.count("\n") + (0 if sse_source.endswith("\n") else 1)
+    assert stream_lines < 3000, f"gateway_stream_semantics.py is {stream_lines} lines"
+    assert sse_lines < 3000, f"gateway_sse.py is {sse_lines} lines"
+    assert "class UpstreamSseSemanticError" in stream_source
+    assert "def _chat_stream_chunks_have_terminal" in stream_source

@@ -238,6 +238,7 @@ def test_disabled_context_is_passthrough():
 
 def test_facade_wrappers_use_live_write_event(monkeypatch):
     import codex_proxy
+    import gateway_stream_semantics
 
     seen = []
 
@@ -261,7 +262,11 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
     live_adapter = codex_proxy.apply_patch_adapter()
     assert live_adapter.write_event is write_event
 
-    monkeypatch.setattr(codex_proxy, "RESPONSES_TERMINAL_EVENT_TYPES", {"response.custom_terminal"})
+    monkeypatch.setattr(
+        gateway_stream_semantics,
+        "RESPONSES_TERMINAL_EVENT_TYPES",
+        {"response.custom_terminal"},
+    )
     terminal_adapter = codex_proxy.apply_patch_adapter()
     assert terminal_adapter.facts.terminal_event_types == frozenset({"response.custom_terminal"})
     events, changed = terminal_adapter.adapt_stream_events([{"type": "response.custom_terminal"}])

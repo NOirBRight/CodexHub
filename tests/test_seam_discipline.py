@@ -29,7 +29,8 @@ FORBIDDEN_OWNING_MODULE_PATCH = re.compile(
     r"guard_duplicate_multi_agent_spawn_calls|image_proxy_cache_lookup|"
     r"image_proxy_description_for_part|_prepare_runtime_tool_compatibility|"
     r"_filter_tools_for_subagent_coordinator|_inject_explicit_codex_tools|"
-    r"_runtime_alias_for_namespace_child|_adapt_apply_patch_custom_tool_history)"
+    r"_runtime_alias_for_namespace_child|_adapt_apply_patch_custom_tool_history|"
+    r"RESPONSES_TERMINAL_EVENT_TYPES)"
     r"|codex_proxy,\s*['\"](?:OFFICIAL_HTTP_POOLS|_open_upstream_once|"
     r"open_upstream_once|choose_upstream|official_upstream|current_catalog_data|"
     r"write_proxy_event|GATEWAY_EVENT_WRITER|GATEWAY_DIAGNOSTIC_RECORDER|"
@@ -38,7 +39,8 @@ FORBIDDEN_OWNING_MODULE_PATCH = re.compile(
     r"downgrade_invalid_third_party_tool_calls|"
     r"guard_duplicate_multi_agent_spawn_calls|_prepare_runtime_tool_compatibility|"
     r"_filter_tools_for_subagent_coordinator|_inject_explicit_codex_tools|"
-    r"_runtime_alias_for_namespace_child|_adapt_apply_patch_custom_tool_history)"
+    r"_runtime_alias_for_namespace_child|_adapt_apply_patch_custom_tool_history|"
+    r"RESPONSES_TERMINAL_EVENT_TYPES)"
     r")"
 )
 
