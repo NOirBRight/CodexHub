@@ -231,3 +231,15 @@ def test_gateway_stream_semantics_does_not_import_the_facade() -> None:
     assert sse_lines < 3000, f"gateway_sse.py is {sse_lines} lines"
     assert "class UpstreamSseSemanticError" in stream_source
     assert "def _chat_stream_chunks_have_terminal" in stream_source
+
+
+def test_gateway_relay_passthrough_does_not_import_the_facade() -> None:
+    import gateway_relay_passthrough
+
+    source = Path(gateway_relay_passthrough.__file__).read_text(encoding="utf-8")
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "import gateway_runtime" not in source
+    assert "from gateway_runtime" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "CodexProxyHandler" not in source
