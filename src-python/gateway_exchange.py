@@ -625,3 +625,442 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
                 hooks.emit_retry_suppressed(request.event_context, upstream_name=request.upstream_name, upstream_format=state.upstream_format, request_kind=attempt_request_kind, attempt=relay_attempt, max_attempts=relay_attempts, exc=exc, failure_class=hooks.failure_class(exc), failure_phase="response_headers", retry_safety_class=safety)
             raise
     raise RuntimeError("unreachable upstream protocol selection state")
+
+
+# ---------------------------------------------------------------------------
+# Handler-facing relay bindings. These build per-request RelaySymbols /
+# RelayContext objects and the downstream stream-commit seam, reading
+# owning-module attributes at call time so test patches stay live.
+# ---------------------------------------------------------------------------
+
+import logging
+from http.client import IncompleteRead
+from urllib.error import URLError
+
+import gateway_admission
+import gateway_compat
+import gateway_errors
+import gateway_events
+import gateway_sse
+import gateway_stream_semantics
+import gateway_transport
+from gateway_errors import (
+    CompactEmptyResponseError,
+    UpstreamStreamIdleTimeoutError,
+    _responses_failed_event_for_stream_error,
+    safe_upstream_error_detail,
+)
+from gateway_relay import RelayContext, RelaySymbols
+from gateway_request import (
+    _UNSET_CONTENT_ENCODING,
+    _filtered_response_headers,
+    _is_event_stream,
+    decoded_request_body,
+)
+from gateway_sse import DownstreamStreamCommit
+from gateway_stream_semantics import (
+    DownstreamKeepaliveFailedError,
+    UpstreamEmptyCompletedResponseError,
+    UpstreamStreamErrorEvent,
+    UpstreamStreamInterruptedError,
+)
+from gateway_transport import (
+    UpstreamSseReaderLifecycle as _UpstreamSseReaderLifecycle,
+    _get_header,
+    _retry_identity_from_context,
+)
+from protocol_translation import (
+    GatewayChatToResponsesStreamConverter as _ChatToResponsesStreamConverter,
+    GatewayResponsesToChatStreamConverter as _ResponsesToChatStreamConverter,
+    NonForwardable,
+    UpstreamStreamIncompleteError,
+)
+from route_primitives import (
+    RETRY_REQUEST_COMPACT,
+    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+    RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+    StreamingPolicy,
+    UsagePolicy,
+)
+from runtime_tool_compatibility import (
+    ToolCompatibilityError as RuntimeToolCompatibilityError,
+)
+from sse_events import SseFrameTooLargeError
+
+logger = logging.getLogger("codex_proxy")
+
+
+def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
+    gateway_events.observe_gateway_diagnostic(method, *args, **kwargs)
+
+
+def _write_adapter_event(event_context: Any, event: str, **fields: Any) -> None:
+    gateway_events.write_adapter_event(event_context, event, **fields)
+
+
+def _responses_synthetic_terminal_failure(
+    handler: Any,
+    exc: BaseException,
+    *,
+    status: int,
+    response_id: str | None,
+    upstream_name: str,
+    model: str | None,
+    redact_identity: str | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """Write a Responses-format synthetic terminal failure event."""
+    if not handler._write_sse_event(
+        "response.failed",
+        _responses_failed_event_for_stream_error(
+            upstream_name=upstream_name,
+            model=model,
+            status=status,
+            exc=exc,
+            response_id=response_id,
+            redact_identity=redact_identity,
+        ),
+    ):
+        seam = _handler_downstream_stream_commit(handler)
+        write_exc = seam.last_write_error() if seam is not None else None
+        if write_exc is None:
+            write_exc = OSError("downstream closed")
+        return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc, redact_identity=redact_identity)
+    return True, None, None
+
+
+# Downstream writes that do not participate in the stream-commit seam.
+# Non-streaming JSON responses, WebSocket handshakes/frames, and non-streaming
+# body-relay writes are intentionally allowlisted: they either carry no SSE
+# terminal semantics or are complete payloads whose lifecycle is bounded by the
+# calling context. All production SSE headers/bodies must be authorized by the
+# request-scoped stream-commit seam.
+DOWNSTREAM_STREAM_COMMIT_ALLOWLIST: frozenset[str] = frozenset({
+    "_send_json",
+    "_safe_send_json",
+    "_send_local_responses_no_content",
+    "_send_method_not_allowed",
+    "_reject_local_responses_websocket_probe",
+    "_handle_websocket_recording_probe",
+    "_write_non_streaming_body_relay",
+    "_write_sse_bytes",
+})
+
+# Low-level seam methods that are the only legitimate direct ``self.wfile.write``
+# callers inside the stream-commit seam. They are kept separate from the allowlist
+# because they participate in (rather than bypass) the seam.
+# ``write`` is _HandlerDownstreamIO.write, the handler-bound byte sink.
+DOWNSTREAM_STREAM_COMMIT_SEAM_METHODS: frozenset[str] = frozenset({
+    "commit_data",
+    "commit_sse_bytes",
+    "commit_terminal_failure",
+    "write",
+})
+
+
+def _handler_downstream_stream_commit(handler: Any) -> DownstreamStreamCommit | None:
+    """Return the request-scoped stream-commit seam bound to ``handler`` if active."""
+    seam = getattr(handler, "_downstream_stream_commit", None)
+    return seam if isinstance(seam, DownstreamStreamCommit) else None
+
+
+def _downstream_has_been_exposed(handler: Any) -> bool:
+    """Return True if upstream response content has been exposed downstream.
+
+    Exposure includes both bytes already written to the downstream socket and
+    upstream content (visible/tool output) that the relay layer has accepted and
+    would relay, even if it is still buffered.  Headers alone and metadata-only
+    events such as ``response.created`` do not count as exposure.
+    """
+    seam = _handler_downstream_stream_commit(handler)
+    if seam is None:
+        return False
+    return bool(
+        getattr(seam, "_downstream_output_started", False)
+        or getattr(seam, "_downstream_content_exposed", False)
+    )
+
+
+class _HandlerDownstreamIO:
+    """Adapter from CodexProxyHandler to DownstreamStreamCommit write/flush/close."""
+
+    def __init__(self, handler: Any) -> None:
+        self._handler = handler
+
+    def write(self, data: bytes) -> None:
+        self._handler.wfile.write(data)
+
+    def flush(self) -> None:
+        self._handler.wfile.flush()
+
+    def close(self) -> None:
+        self._handler.close_connection = True
+
+
+def _bind_handler_synthetic_terminal_failure(
+    handler: Any,
+    callback: Callable[..., tuple[bool, str | None, str | None]] | None,
+    *,
+    redact_identity: str | None = None,
+) -> Callable[..., tuple[bool, str | None, str | None]] | None:
+    if callback is None:
+        return None
+
+    def bound(
+        exc: BaseException,
+        *,
+        status: int,
+        response_id: str | None,
+        upstream_name: str,
+        model: str | None,
+    ) -> tuple[bool, str | None, str | None]:
+        return callback(
+            handler,
+            exc,
+            status=status,
+            response_id=response_id,
+            upstream_name=upstream_name,
+            model=model,
+            redact_identity=redact_identity,
+        )
+
+    return bound
+
+
+def _bind_downstream_stream_commit(
+    handler: Any,
+    upstream: Any | None,
+    upstream_name: str,
+    **kwargs: Any,
+) -> DownstreamStreamCommit:
+    redact_identity = kwargs.pop("redact_identity", None)
+    kwargs.setdefault("usage_line_callback", gateway_events.offer_official_passthrough_usage_line)
+    kwargs.setdefault("diagnostic_observer", _observe_gateway_diagnostic)
+    kwargs.setdefault("terminal_observer", gateway_stream_semantics._responses_terminal_observer)
+    kwargs.setdefault(
+        "output_observer",
+        lambda event: gateway_stream_semantics._responses_event_commits_downstream_output(event, ""),
+    )
+    kwargs.setdefault(
+        "error_detail_callback",
+        lambda exc: safe_upstream_error_detail(exc, redact_identity=redact_identity),
+    )
+    kwargs.setdefault(
+        "terminal_drain_timeout_seconds",
+        gateway_transport.OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
+    )
+    if "synthetic_terminal_failure_callback" in kwargs:
+        kwargs["synthetic_terminal_failure_callback"] = (
+            _bind_handler_synthetic_terminal_failure(
+                handler,
+                kwargs["synthetic_terminal_failure_callback"],
+                redact_identity=redact_identity,
+            )
+        )
+    return DownstreamStreamCommit(
+        _HandlerDownstreamIO(handler),
+        upstream,
+        upstream_name,
+        **kwargs,
+    )
+
+
+# Relay bindings are rebuilt per request so owning-module patches stay live.
+def _relay_write_proxy_event(event: str, **fields: Any) -> None:
+    gateway_events.write_proxy_event(event, **fields)
+
+
+def _relay_compatible_sse_line(*args: Any, **kwargs: Any) -> Any:
+    return gateway_compat.compatible_sse_line(*args, **kwargs)
+
+
+def _relay_active_gateway_request() -> Any:
+    return gateway_admission.active_gateway_request()
+
+
+def _relay_symbols() -> RelaySymbols:
+    _stream = gateway_stream_semantics
+    _events = gateway_events
+    _errors = gateway_errors
+    _sse = gateway_sse
+    return RelaySymbols(
+        CompactEmptyResponseError=CompactEmptyResponseError,
+        DownstreamKeepaliveFailedError=DownstreamKeepaliveFailedError,
+        IncompleteRead=IncompleteRead,
+        NonForwardable=NonForwardable,
+        RuntimeToolCompatibilityError=RuntimeToolCompatibilityError,
+        SseFrameTooLargeError=SseFrameTooLargeError,
+        URLError=URLError,
+        UpstreamEmptyCompletedResponseError=UpstreamEmptyCompletedResponseError,
+        UpstreamProtocolTranslationError=UpstreamProtocolTranslationError,
+        UpstreamSseSemanticError=_stream.UpstreamSseSemanticError,
+        UpstreamStreamErrorEvent=UpstreamStreamErrorEvent,
+        UpstreamStreamIdleTimeoutError=UpstreamStreamIdleTimeoutError,
+        UpstreamStreamIncompleteError=UpstreamStreamIncompleteError,
+        UpstreamStreamInterruptedError=UpstreamStreamInterruptedError,
+        DownstreamStreamCommit=DownstreamStreamCommit,
+        MutationPolicy=MutationPolicy,
+        PreparedExchange=PreparedExchange,
+        StreamingPolicy=StreamingPolicy,
+        UsagePolicy=UsagePolicy,
+        _ChatToResponsesStreamConverter=_ChatToResponsesStreamConverter,
+        _ResponsesToChatStreamConverter=_ResponsesToChatStreamConverter,
+        _ThirdPartyApplyPatchStreamAdapter=gateway_compat.lookup(
+            "_ThirdPartyApplyPatchStreamAdapter"
+        ),
+        _RuntimeToolInverseStreamError=_stream._RuntimeToolInverseStreamError,
+        RETRY_FAILURE_QUICK_TRANSIENT=RETRY_FAILURE_QUICK_TRANSIENT,
+        RETRY_REQUEST_COMPACT=RETRY_REQUEST_COMPACT,
+        RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE=RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+        RETRY_SAFETY_SUPPRESSED_POST_WRITE=RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+        _adapt_third_party_apply_patch_stream_events=gateway_compat.lookup(
+            "_adapt_third_party_apply_patch_stream_events"
+        ),
+        _apply_external_worker_response_contract=gateway_compat.lookup(
+            "_apply_external_worker_response_contract"
+        ),
+        _apply_patch_adapter_enabled=gateway_compat.lookup("_apply_patch_adapter_enabled"),
+        _bind_downstream_stream_commit=_bind_downstream_stream_commit,
+        _bounded_failure_event_context=_events.bounded_failure_event_context,
+        _capture_usage=_events.capture_usage,
+        _chat_completion_body_is_empty=_stream._chat_completion_body_is_empty,
+        _chat_completion_body_to_stream_chunks=_stream._chat_completion_body_to_stream_chunks,
+        _chat_completion_to_response_body=_stream._chat_completion_to_response_body,
+        _chat_sse_event_resets_idle_timeout=_stream._chat_sse_event_resets_idle_timeout,
+        _chat_stream_chunks_have_terminal=_stream._chat_stream_chunks_have_terminal,
+        _chat_stream_chunks_to_response_events=_stream._chat_stream_chunks_to_response_events,
+        _chat_stream_error_detail=_stream._chat_stream_error_detail,
+        _chat_stream_lifecycle_final_issue=_stream._chat_stream_lifecycle_final_issue,
+        _chat_stream_shape_summary=_stream._chat_stream_shape_summary,
+        _chat_terminal_observer=_stream._chat_terminal_observer,
+        _coerce_exact_spawn_prompt_tool_calls=gateway_compat.lookup(
+            "_coerce_exact_spawn_prompt_tool_calls"
+        ),
+        _coerce_required_subagent_tool_calls=gateway_compat.lookup(
+            "_coerce_required_subagent_tool_calls"
+        ),
+        _compact_response_body_is_empty=_stream._compact_response_body_is_empty,
+        _converted_sse_payload=_stream._converted_sse_payload,
+        _count_sse_reasoning_event=_stream._count_sse_reasoning_event,
+        _downgrade_invalid_third_party_tool_calls=gateway_compat.lookup(
+            "_downgrade_invalid_third_party_tool_calls"
+        ),
+        _events_to_responses_body=_stream._events_to_responses_body,
+        _filtered_response_headers=_filtered_response_headers,
+        _guard_duplicate_multi_agent_spawn_calls=gateway_compat.lookup(
+            "_guard_duplicate_multi_agent_spawn_calls"
+        ),
+        _handler_downstream_stream_commit=_handler_downstream_stream_commit,
+        _incomplete_stream_json_error_body=_stream._incomplete_stream_json_error_body,
+        _is_event_stream=_is_event_stream,
+        _is_reasoning_summary_stream_event=_stream._is_reasoning_summary_stream_event,
+        _is_sse_blank_line=_sse._is_sse_blank_line,
+        _is_sse_event_metadata_line=_sse._is_sse_event_metadata_line,
+        _json_error_payload_for_inbound_format=_errors._json_error_payload_for_inbound_format,
+        _lifecycle_final_issue_event_name=_stream._lifecycle_final_issue_event_name,
+        _lifecycle_final_issue_missing_reason=_stream._lifecycle_final_issue_missing_reason,
+        _normalize_third_party_tool_call=gateway_compat.lookup(
+            "_normalize_third_party_tool_call"
+        ),
+        _observe_gateway_diagnostic=_observe_gateway_diagnostic,
+        _offer_usage_observed_body=_events.offer_usage_observed_body,
+        _offer_usage_observed_sse_line=_events.offer_usage_observed_sse_line,
+        _parse_sse_json_payload=_sse._parse_sse_json_payload,
+        _parse_sse_json_payloads=_sse._parse_sse_json_payloads,
+        _public_event_context=_events.public_event_context,
+        _raise_lifecycle_final_issue=_stream._raise_lifecycle_final_issue,
+        _raise_runtime_tool_compatibility_error=gateway_compat.lookup(
+            "_raise_runtime_tool_compatibility_error"
+        ),
+        _reconcile_function_call_argument_events=gateway_compat.lookup(
+            "_reconcile_function_call_argument_events"
+        ),
+        _redact_identity_in_text=_errors._redact_identity_in_text,
+        _repair_missing_required_subagent_call_events=gateway_compat.lookup(
+            "_repair_missing_required_subagent_call_events"
+        ),
+        _response_body_lifecycle_final_issue=_stream._response_body_lifecycle_final_issue,
+        _response_body_to_chat_completion_body=_stream._response_body_to_chat_completion_body,
+        _response_body_to_response_sse_events=_stream._response_body_to_response_sse_events,
+        _response_events_shape_summary=_stream._response_events_shape_summary,
+        _responses_body_is_empty=_stream._responses_body_is_empty,
+        _responses_completed_tool_item=_stream._responses_completed_tool_item,
+        _responses_event_commits_downstream_output=(
+            _stream._responses_event_commits_downstream_output
+        ),
+        _responses_event_has_visible_or_tool_output=(
+            _stream._responses_event_has_visible_or_tool_output
+        ),
+        _responses_event_is_tool_call_construction=(
+            _stream._responses_event_is_tool_call_construction
+        ),
+        _responses_event_starts_downstream_output=(
+            _stream._responses_event_starts_downstream_output
+        ),
+        _responses_events_have_terminal=_stream._responses_events_have_terminal,
+        _responses_events_lifecycle_final_issue=_stream._responses_events_lifecycle_final_issue,
+        _responses_failed_event_for_stream_error=_errors._responses_failed_event_for_stream_error,
+        _responses_sse_event_resets_idle_timeout=_stream._responses_sse_event_resets_idle_timeout,
+        _responses_sse_line_resets_idle_timeout=_stream._responses_sse_line_resets_idle_timeout,
+        _responses_stream_error_detail=_stream._responses_stream_error_detail,
+        _responses_stream_error_type=_stream._responses_stream_error_type,
+        _responses_terminal_observer=_stream._responses_terminal_observer,
+        _retry_identity_from_context=_retry_identity_from_context,
+        _route_failure_event_fields=_events.route_failure_event_fields,
+        _runtime_tool_compatibility_stream_for_attempt=gateway_compat.lookup(
+            "_runtime_tool_compatibility_stream_for_attempt"
+        ),
+        _sse_event_separator_after_line=_sse._sse_event_separator_after_line,
+        _sse_json_line=_stream._sse_json_line,
+        _sse_line_ending=_sse._sse_line_ending,
+        _suppress_bounded_tool_search_calls=gateway_compat.lookup(
+            "_suppress_bounded_tool_search_calls"
+        ),
+        _suppress_chat_reasoning_extensions=_stream._suppress_chat_reasoning_extensions,
+        _suppress_coordinator_forbidden_tool_calls=gateway_compat.lookup(
+            "_suppress_coordinator_forbidden_tool_calls"
+        ),
+        _suppress_worker_multi_agent_tool_calls=gateway_compat.lookup(
+            "_suppress_worker_multi_agent_tool_calls"
+        ),
+        _synthetic_response_completed_from_tool_items=(
+            _stream._synthetic_response_completed_from_tool_items
+        ),
+        _upstream_failure_class=gateway_transport._upstream_failure_class,
+        _usage_from_json_body=_events._usage_from_json_body,
+        _usage_from_payload=_events._usage_from_payload,
+        _usage_from_response_event=_events._usage_from_response_event,
+        _usage_observed_context=_events._usage_observed_context,
+        _verified_converted_sse_semantic_error=_stream._verified_converted_sse_semantic_error,
+        _with_codexhub_http_error=_errors._with_codexhub_http_error,
+        _write_adapter_event=_write_adapter_event,
+        _write_runtime_tool_adapter_response_evidence=gateway_compat.lookup(
+            "_write_runtime_tool_adapter_response_evidence"
+        ),
+        compatible_response_body=gateway_compat.compatible_response_body,
+        compatible_sse_line=_relay_compatible_sse_line,
+        safe_upstream_error_detail=_errors.safe_upstream_error_detail,
+        write_proxy_event=_relay_write_proxy_event,
+        _active_gateway_request=_relay_active_gateway_request,
+        _bind_handler_synthetic_terminal_failure=_bind_handler_synthetic_terminal_failure,
+        _responses_synthetic_terminal_failure=_responses_synthetic_terminal_failure,
+        _offer_official_passthrough_usage_line=_events.offer_official_passthrough_usage_line,
+        _UpstreamSseReaderLifecycle=_UpstreamSseReaderLifecycle,
+        logger=logger,
+        _UNSET_CONTENT_ENCODING=_UNSET_CONTENT_ENCODING,
+        _chat_completion_error_payload=_errors._chat_completion_error_payload,
+        _downstream_stream_error_payload=_errors._downstream_stream_error_payload,
+        _get_header=_get_header,
+        decoded_request_body=decoded_request_body,
+        _sse_payload_bytes=_sse._sse_payload_bytes,
+        _chat_function_name_from_response_item=_stream._chat_function_name_from_response_item,
+    )
+
+
+def _relay_context_for_handler(handler: Any) -> RelayContext:
+    return RelayContext(
+        handler=handler,
+        symbols=_relay_symbols(),
+        transparent_relay=handler._relay_transparent_upstream_response,
+        official_passthrough_relay=handler._relay_official_passthrough_sse_response,
+        prepared_exchange=getattr(handler, "_active_prepared_exchange", None),
+    )

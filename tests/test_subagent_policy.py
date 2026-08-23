@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-import codex_proxy
+import gateway_settings
 from subagent_policy import (
     REPAIR_CODEX_SUBAGENT,
     deterministic_required_action,
@@ -49,10 +49,10 @@ class SubagentPolicyTests(unittest.TestCase):
         ]
         self.assertIsNone(deterministic_required_action(actions))
 
-    def test_codex_proxy_uses_policy_helpers_as_single_source_of_truth(self):
-        self.assertIs(getattr(codex_proxy, "_subagent_policy_assist_mode", None), subagent_assist_mode)
-        self.assertIs(getattr(codex_proxy, "_subagent_policy_guidance_enabled", None), guidance_enabled)
-        self.assertIs(getattr(codex_proxy, "_subagent_policy_semantic_repair_enabled", None), semantic_repair_enabled)
+    def test_gateway_settings_uses_policy_helpers_as_single_source_of_truth(self):
+        self.assertIs(gateway_settings._subagent_policy_assist_mode, subagent_assist_mode)
+        self.assertIs(gateway_settings._subagent_policy_guidance_enabled, guidance_enabled)
+        self.assertIs(gateway_settings._subagent_policy_semantic_repair_enabled, semantic_repair_enabled)
 
 
 if __name__ == "__main__":

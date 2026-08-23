@@ -802,3 +802,16 @@ class _ThirdPartyApplyPatchStreamAdapter:
                 outcome="untouched",
                 count=len(self._untouched_keys),
             )
+
+
+def apply_patch_adapter() -> ApplyPatchAdapter:
+    """Build a request-time adapter so event-writer and terminal-type patches stay live."""
+    import gateway_events
+    import gateway_stream_semantics as stream_semantics
+
+    return ApplyPatchAdapter(
+        facts=ApplyPatchFacts(
+            terminal_event_types=frozenset(stream_semantics.RESPONSES_TERMINAL_EVENT_TYPES)
+        ),
+        write_event=gateway_events.write_adapter_event,
+    )

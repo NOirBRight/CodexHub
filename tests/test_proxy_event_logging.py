@@ -13,10 +13,10 @@ from unittest.mock import patch
 import io
 from urllib.error import HTTPError, URLError
 
-import codex_proxy
 from lock_fixtures import write_dead_legacy_lock
 import gateway_events
 import gateway_transport
+import gateway_request
 
 
 class ProxyEventLoggingTests(TestCase):
@@ -25,28 +25,28 @@ class ProxyEventLoggingTests(TestCase):
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
-                    importlib.reload(codex_proxy)
+                    gateway_events.refresh_runtime_paths()
 
                     self.assertEqual(
-                        codex_proxy.PROXY_EVENT_LOG_PATH,
+                        gateway_events.PROXY_EVENT_LOG_PATH,
                         codex_home / "proxy" / "codex-proxy-events.jsonl",
                     )
-                    codex_proxy.write_proxy_event("request_complete", request_id="req-test", status=200)
-                    codex_proxy.flush_proxy_event_writer()
+                    gateway_events.write_proxy_event("request_complete", request_id="req-test", status=200)
+                    gateway_events.flush_proxy_event_writer()
 
-                    payload = json.loads(codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip())
+                    payload = json.loads(gateway_events.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").strip())
                     self.assertEqual(payload["event"], "request_complete")
                     self.assertEqual(payload["request_id"], "req-test")
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_upstream_open_retry_event_preserves_transport_failure_phase(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
-                    importlib.reload(codex_proxy)
-                    request = codex_proxy.Request("https://example.test/v1/responses", data=b"{}", method="POST")
+                    gateway_events.refresh_runtime_paths()
+                    request = gateway_transport.Request("https://example.test/v1/responses", data=b"{}", method="POST")
                     success = object()
 
                     with (
@@ -64,7 +64,7 @@ class ProxyEventLoggingTests(TestCase):
                         ) as open_once,
                         patch("gateway_transport.time.sleep"),
                     ):
-                        response = codex_proxy.open_upstream_response(
+                        response = gateway_transport.open_upstream_response(
                             request,
                             upstream_name="official",
                             upstream_format="responses",
@@ -74,10 +74,10 @@ class ProxyEventLoggingTests(TestCase):
 
                     self.assertIs(response, success)
                     self.assertEqual(open_once.call_count, 2)
-                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    self.assertTrue(gateway_events.flush_proxy_event_writer())
                     payloads = [
                         json.loads(line)
-                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                        for line in gateway_events.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
                         if line.strip()
                     ]
                     retry = next(payload for payload in payloads if payload["event"] == "upstream_retry")
@@ -85,15 +85,15 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertEqual(retry["upstream"], "official")
                     self.assertEqual(retry["failure_phase"], "tcp_connect")
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_non_official_http_error_emits_upstream_retry_suppressed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
-                    importlib.reload(codex_proxy)
-                    request = codex_proxy.Request(
+                    gateway_events.refresh_runtime_paths()
+                    request = gateway_transport.Request(
                         "https://example.test/v1/responses", data=b"{}", method="POST"
                     )
 
@@ -119,7 +119,7 @@ class ProxyEventLoggingTests(TestCase):
                         patch("gateway_transport.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
-                            codex_proxy.open_upstream_response(
+                            gateway_transport.open_upstream_response(
                                 request,
                                 upstream_name="volcengine",
                                 upstream_format="responses",
@@ -131,10 +131,10 @@ class ProxyEventLoggingTests(TestCase):
                             )
 
                     self.assertEqual(open_once.call_count, 1)
-                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
+                    self.assertTrue(gateway_events.flush_proxy_event_writer())
                     payloads = [
                         json.loads(line)
-                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(
+                        for line in gateway_events.PROXY_EVENT_LOG_PATH.read_text(
                             encoding="utf-8"
                         ).splitlines()
                         if line.strip()
@@ -150,15 +150,15 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertEqual(suppressed["retry_safety_class"], "suppressed_post_write")
                     self.assertNotIn("upstream_retry", [p["event"] for p in payloads])
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_failure_boundary_event_keeps_only_bounded_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
-                    importlib.reload(codex_proxy)
-                    request = codex_proxy.Request(
+                    gateway_events.refresh_runtime_paths()
+                    request = gateway_transport.Request(
                         "https://example.test/v1/responses",
                         data=b"{}",
                         method="POST",
@@ -192,7 +192,7 @@ class ProxyEventLoggingTests(TestCase):
                         patch("gateway_transport.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
-                            codex_proxy.open_upstream_response(
+                            gateway_transport.open_upstream_response(
                                 request,
                                 upstream_name="ollama_cloud",
                                 upstream_format="responses",
@@ -213,8 +213,8 @@ class ProxyEventLoggingTests(TestCase):
                             )
 
                     self.assertEqual(open_once.call_count, 1)
-                    self.assertTrue(codex_proxy.flush_proxy_event_writer())
-                    jsonl = codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
+                    self.assertTrue(gateway_events.flush_proxy_event_writer())
+                    jsonl = gateway_events.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
                     payload = json.loads(jsonl.strip())
                     self.assertEqual(payload["event"], "upstream_retry_suppressed")
                     self.assertEqual(payload["status"], 502)
@@ -231,7 +231,7 @@ class ProxyEventLoggingTests(TestCase):
                     for private_value in private_values:
                         self.assertNotIn(private_value, jsonl)
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_event_log_writes_jsonl_without_sqlite_request_path_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -241,10 +241,10 @@ class ProxyEventLoggingTests(TestCase):
                     import proxy_telemetry
 
                     importlib.reload(proxy_telemetry)
-                    importlib.reload(codex_proxy)
+                    gateway_events.refresh_runtime_paths()
 
                     with patch("proxy_telemetry.write_event_to_sqlite") as sqlite_write:
-                        codex_proxy.write_proxy_event(
+                        gateway_events.write_proxy_event(
                             "request_start",
                             request_id="req-jsonl",
                             method="POST",
@@ -260,7 +260,7 @@ class ProxyEventLoggingTests(TestCase):
                             request_body_hmac="body-hash",
                             Authorization="Bearer should-not-persist",
                         )
-                        codex_proxy.write_proxy_event(
+                        gateway_events.write_proxy_event(
                             "request_complete",
                             request_id="req-jsonl",
                             method="POST",
@@ -273,9 +273,9 @@ class ProxyEventLoggingTests(TestCase):
                             upstream="official",
                             model="openai/gpt-5.5",
                         )
-                        codex_proxy.flush_proxy_event_writer()
+                        gateway_events.flush_proxy_event_writer()
 
-                    jsonl = codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
+                    jsonl = gateway_events.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8")
                     self.assertNotIn("should-not-persist", jsonl)
                     sqlite_write.assert_not_called()
                     self.assertFalse(proxy_telemetry.telemetry_db_path(codex_home).exists())
@@ -283,7 +283,7 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertEqual([payload["event"] for payload in payloads], ["request_start", "request_complete"])
                     self.assertTrue(all(payload["request_id"] == "req-jsonl" for payload in payloads))
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_official_bare_model_names_are_normalized_before_sqlite_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -466,8 +466,8 @@ class ProxyEventLoggingTests(TestCase):
             codex_home = Path(tmpdir) / "codex-home"
             try:
                 with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False):
-                    importlib.reload(codex_proxy)
-                    context = codex_proxy.request_context_from_headers(
+                    gateway_events.refresh_runtime_paths()
+                    context = gateway_request.request_context_from_headers(
                         {
                             "x-codex-metadata": json.dumps(
                                 {
@@ -482,19 +482,19 @@ class ProxyEventLoggingTests(TestCase):
                     self.assertEqual(context["client_id"], "opencode")
                     self.assertEqual(context["thread_id"], "thread-1")
                     self.assertNotIn("route_mode", context)
-                    codex_proxy.write_proxy_event(
+                    gateway_events.write_proxy_event(
                         "request_start",
                         request_id="req-route-context",
                         route_mode="codexhub",
                         upstream="external",
                         **context,
                     )
-                    codex_proxy.flush_proxy_event_writer()
+                    gateway_events.flush_proxy_event_writer()
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_request_context_does_not_infer_codex_app_from_generic_codex_user_agent(self):
-        context = codex_proxy.request_context_from_headers(
+        context = gateway_request.request_context_from_headers(
             {
                 "User-Agent": "my-codex-client/1.0",
             }
@@ -659,19 +659,19 @@ class ProxyEventLoggingTests(TestCase):
                     import proxy_telemetry
 
                     importlib.reload(proxy_telemetry)
-                    importlib.reload(codex_proxy)
+                    gateway_events.refresh_runtime_paths()
                     with patch("proxy_telemetry.write_event_to_sqlite", side_effect=sqlite3.DatabaseError("boom")) as sqlite_write:
-                        codex_proxy.write_proxy_event(
+                        gateway_events.write_proxy_event(
                             "request_complete",
                             request_id="req-jsonl-survives",
                             status=200,
                         )
-                        codex_proxy.flush_proxy_event_writer()
+                        gateway_events.flush_proxy_event_writer()
                     sqlite_write.assert_not_called()
 
                     payloads = [
                         json.loads(line)
-                        for line in codex_proxy.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+                        for line in gateway_events.PROXY_EVENT_LOG_PATH.read_text(encoding="utf-8").splitlines()
                         if line.strip()
                     ]
                     self.assertTrue(
@@ -679,7 +679,7 @@ class ProxyEventLoggingTests(TestCase):
                     )
                     self.assertFalse(any(payload.get("event") == "telemetry_sqlite_write_failed" for payload in payloads))
             finally:
-                importlib.reload(codex_proxy)
+                gateway_events.refresh_runtime_paths()
 
     def test_gateway_event_writer_delegates_payloads_to_the_bounded_writer(self):
         payloads = [
@@ -687,8 +687,8 @@ class ProxyEventLoggingTests(TestCase):
             {"event": "request_complete", "request_id": "req-two"},
         ]
         with patch.object(gateway_events.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
-            self.assertTrue(codex_proxy.enqueue_gateway_event_payload(payloads[0]))
-            self.assertFalse(codex_proxy.enqueue_gateway_event_payload(payloads[1]))
+            self.assertTrue(gateway_events.enqueue_gateway_event_payload(payloads[0]))
+            self.assertFalse(gateway_events.enqueue_gateway_event_payload(payloads[1]))
 
         self.assertEqual(enqueue.call_args_list[0].args, (payloads[0],))
         self.assertEqual(enqueue.call_args_list[1].args, (payloads[1],))

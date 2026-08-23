@@ -1,3 +1,10 @@
+"""CodexHub Gateway process entry.
+
+Owns the HTTP server wiring: `CodexProxyHandler` (routing + health),
+`run_server`, and `main`. All request-handling behavior lives in
+`gateway_handler_impl.GatewayHandlerMixin` and the owning modules.
+"""
+
 from __future__ import annotations
 
 import sys
@@ -19,28 +26,98 @@ if not VENDORED_URLLIB3_WHEEL.is_file():
     raise RuntimeError(f"missing pinned Gateway transport dependency: {VENDORED_URLLIB3_WHEEL}")
 sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import logging
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
-# Execute helper definitions into this module dict so ``codex_proxy.<name>``
-# patches stay live. ``gateway_runtime`` remains importable for source tests.
-_RUNTIME_IMPL = Path(__file__).with_name("gateway_runtime.py")
-exec(compile(_RUNTIME_IMPL.read_text(encoding="utf-8"), str(_RUNTIME_IMPL), "exec"), globals())
+import gateway_admission
+import gateway_catalog_runtime
+import gateway_events
+import gateway_settings
 import route_plan as _route_plan_module
+from gateway_admission import (
+    USER_REQUESTED_SHUTDOWN_OUTCOME,
+    gateway_shutdown_controller_for_handler as _gateway_shutdown_controller_for_handler,
+)
+from gateway_errors import _local_gateway_auth_error_payload
+from gateway_events import GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
+from gateway_handler_impl import GatewayHandlerMixin
+from gateway_request import (
+    _is_websocket_upgrade,
+    _local_request_authorized,
+    provider_scoped_path,
+    request_context_from_headers,
+)
+from protocol_translation import PreparedExchange
+
+logger = logging.getLogger("codex_proxy")
+
+PROXY_TEXT_LOG_PATH = gateway_settings._runtime_proxy_dir() / "codex-proxy.log"
+
+PROXY_BUILD = "2026-07-04-browser-tool-exposure"
+PROXY_FEATURES = [
+    "compressed-request-routing",
+    "provider-alias-routing",
+    "local-responses-probe-fast-reject",
+    "internal-history-item-normalization",
+    "external-reasoning-hidden",
+    "tool-name-guard",
+    "third-party-subagent-tool-alias",
+    "third-party-tool-search-call-shim",
+    "third-party-multi-agent-discovery-shim",
+    "third-party-multi-agent-namespace-shim",
+    "third-party-multi-agent-wait-close-argument-shim",
+    "third-party-explicit-codex-native-tools",
+    "third-party-json-schema-type-array-guard",
+    "third-party-multi-agent-discovery-fallback",
+    "third-party-native-tools-stay-visible",
+    "third-party-multi-agent-discovery-guidance",
+    "third-party-tool-search-disabled",
+    "third-party-spawn-hidden-while-agent-open",
+    "third-party-multi-agent-status-guidance",
+    "third-party-unsupported-reasoning-strip",
+    "third-party-subagent-observability",
+    "official-invalid-tool-assistant-shim",
+    "upstream-incomplete-read-guard",
+    "chat-completions-gateway",
+    "third-party-open-agent-id-schema-guidance",
+    "third-party-ordered-agent-lifecycle-guidance",
+    "third-party-single-loop-completion-gate",
+    "ollama-output-token-cap",
+    "official-upstream-open-retry",
+    "compact-text-only-tool-strip",
+    "compact-empty-response-guard",
+    "compact-empty-response-retry",
+    "stream-read-error-retry-before-downstream",
+    "downstream-sse-keepalive",
+    "split-transport-model-event-sse-idle-timeouts",
+    "capacity-aware-upstream-retry",
+    "stream-transient-global-retry-budget",
+    "third-party-tool-terminal-synthesis",
+    "browser-context-skill-guidance",
+    "third-party-multi-agent-deterministic-repair",
+    "third-party-required-subagent-action-repair",
+    "third-party-chat-output-repair-parity",
+    "official-upstream-connection-pool",
+    "official-upstream-idle-connection-expiry",
+    "official-terminal-sse-authoritative",
+    "official-title-responses-lite-header-strip",
+    "zstd-request-body-runtime",
+    "raw-provider-probe-opt-out",
+]
 
 
 def _forward_planning_event(event: str, **fields: Any) -> None:
-    write_proxy_event(event, **fields)
+    gateway_events.write_proxy_event(event, **fields)
 
 
 _route_plan_module._planning_event_sink = _forward_planning_event
 
 
-class CodexProxyHandler(BaseHTTPRequestHandler):
+class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     _active_prepared_exchange: PreparedExchange | None = None
 
@@ -60,7 +137,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         fields: dict[str, Any] = {"request_id": request_id}
         if isinstance(status, int):
             fields["status"] = status
-        _observe_gateway_diagnostic("observe_proxy_event", event, fields)
+        gateway_events.observe_gateway_diagnostic("observe_proxy_event", event, fields)
 
     def send_response(self, code: int, message: str | None = None) -> None:
         super().send_response(code, message)
@@ -72,7 +149,7 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
-        if _is_websocket_upgrade(self.headers) and gateway_websocket_recorder_enabled():
+        if _is_websocket_upgrade(self.headers) and gateway_settings.gateway_websocket_recorder_enabled():
             self._handle_websocket_recording_probe()
             return
         if parsed.path == "/health":
@@ -86,7 +163,12 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/v1/models":
-            self._send_json(200, openai_model_list(current_catalog_data()))
+            self._send_json(
+                200,
+                gateway_catalog_runtime.openai_model_list(
+                    gateway_catalog_runtime.current_catalog_data()
+                ),
+            )
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):
@@ -151,40 +233,6 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         return cls.__new__(cls)
 
 
-_HANDLER_IMPL = Path(__file__).with_name("gateway_handler_impl.py")
-exec(compile(_HANDLER_IMPL.read_text(encoding="utf-8"), str(_HANDLER_IMPL), "exec"), globals())
-for _name in (
-    "_proxy_official_image_generation",
-    "_proxy_post_request",
-    "_send_local_responses_no_content",
-    "_handle_websocket_recording_probe",
-    "_reject_local_responses_websocket_probe",
-    "_passthrough_official_control_request",
-    "_send_user_requested_shutdown_outcome",
-    "_send_json",
-    "_send_json_and_close",
-    "_relay_raw_upstream_response",
-    "_send_sse_headers",
-    "_write_sse_bytes",
-    "_write_non_streaming_body_relay",
-    "_write_sse_event",
-    "_write_sse_data",
-    "_write_sse_keepalive",
-    "_write_sse_done",
-    "_iter_upstream_sse_lines",
-    "_iter_upstream_sse_events",
-    "_write_sse_error_event",
-    "_write_downstream_sse_error",
-    "_write_sse_protocol_error_event",
-    "_safe_send_downstream_json_error",
-    "_safe_send_json",
-    "_relay_official_passthrough_sse_response",
-    "_relay_transparent_upstream_response",
-    "_relay_upstream_response",
-):
-    setattr(CodexProxyHandler, _name, globals()[_name])
-
-
 def run_server(host: str, port: int) -> None:
     PROXY_TEXT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -198,7 +246,7 @@ def run_server(host: str, port: int) -> None:
     )
     server = ThreadingHTTPServer((host, port), CodexProxyHandler)
     server.daemon_threads = True
-    shutdown_controller = GatewayShutdownController()
+    shutdown_controller = gateway_admission.GatewayShutdownController()
     server.gateway_shutdown_controller = shutdown_controller
     logger.info("serving Codex proxy on %s:%s", host, port)
     try:

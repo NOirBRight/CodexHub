@@ -31,7 +31,7 @@ class _ResettingProxyManager:
     def request(self, *_args: object, **_kwargs: object) -> object:
         self.calls += 1
         self._pool._get_conn()
-        raise codex_proxy.urllib3.exceptions.ProtocolError(
+        raise gateway_transport.urllib3.exceptions.ProtocolError(
             "fixture proxy reset",
             ConnectionResetError("fixture proxy reset"),
         )
@@ -75,7 +75,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
                 recorder = diagnostic_recorder.DiagnosticRecorder(root)
                 self.addCleanup(recorder.shutdown, 1)
                 request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
-                pool = object.__new__(codex_proxy.OfficialHTTPSConnectionPool)
+                pool = object.__new__(gateway_transport.OfficialHTTPSConnectionPool)
                 pool.proxy = object()
                 connection = _Connection()
                 if released_at is not None:
@@ -93,7 +93,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
                     patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
                 ):
                     with self.assertRaises(ConnectionResetError):
-                        codex_proxy.open_upstream_response(
+                        gateway_transport.open_upstream_response(
                             request,
                             upstream_name="official",
                             upstream_format="responses",
@@ -114,7 +114,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
 
     def test_pre_header_proxy_reset_respects_the_fixed_gateway_retry_budget(self) -> None:
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
-        pool = object.__new__(codex_proxy.OfficialHTTPSConnectionPool)
+        pool = object.__new__(gateway_transport.OfficialHTTPSConnectionPool)
         pool.proxy = object()
         connection = _Connection()
         manager = _ResettingProxyManager(pool)
@@ -130,7 +130,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
             patch("gateway_events.write_proxy_event") as write_event,
         ):
             with self.assertRaises(ConnectionResetError):
-                codex_proxy.open_upstream_response(
+                gateway_transport.open_upstream_response(
                     request,
                     upstream_name="official",
                     upstream_format="responses",
@@ -155,7 +155,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
             patch("gateway_transport.getproxies_registry") as registry,
             patch("gateway_transport.proxy_bypass", return_value=True),
         ):
-            self.assertIsNone(codex_proxy.official_proxy_url(target))
+            self.assertIsNone(gateway_transport.official_proxy_url(target))
         registry.assert_not_called()
 
         with (
@@ -164,7 +164,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
             patch("gateway_transport.getproxies_registry") as registry,
             patch("gateway_transport.proxy_bypass", return_value=False),
         ):
-            self.assertEqual(codex_proxy.official_proxy_url(target), explicit_proxy)
+            self.assertEqual(gateway_transport.official_proxy_url(target), explicit_proxy)
         registry.assert_not_called()
 
         with (
@@ -173,7 +173,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
             patch("gateway_transport.getproxies_registry", return_value={"https": registry_proxy}),
             patch("gateway_transport.proxy_bypass", return_value=False),
         ):
-            self.assertEqual(codex_proxy.official_proxy_url(target), registry_proxy)
+            self.assertEqual(gateway_transport.official_proxy_url(target), registry_proxy)
 
     def test_direct_and_registry_derived_routes_use_separate_pool_managers(self) -> None:
         direct_manager = _RouteManager()
@@ -187,16 +187,16 @@ class OfficialProxyPathLocalizationTests(TestCase):
             patch("gateway_transport.urllib3.ProxyManager", return_value=proxy_manager) as make_proxy_manager,
             patch("gateway_transport.urllib3.PoolManager", return_value=direct_manager) as make_direct_manager,
         ):
-            direct = codex_proxy.official_pool_manager("https://example.test/v1/responses")
-            proxied = codex_proxy.official_pool_manager("https://example.test/v1/responses")
+            direct = gateway_transport.official_pool_manager("https://example.test/v1/responses")
+            proxied = gateway_transport.official_pool_manager("https://example.test/v1/responses")
 
         self.assertIs(direct, direct_manager)
         self.assertIs(proxied, proxy_manager)
         self.assertIsNot(direct, proxied)
         make_proxy_manager.assert_called_once()
         make_direct_manager.assert_called_once()
-        self.assertIs(proxy_manager.pool_classes_by_scheme["https"], codex_proxy.OfficialHTTPSConnectionPool)
-        self.assertIs(direct_manager.pool_classes_by_scheme["https"], codex_proxy.OfficialHTTPSConnectionPool)
+        self.assertIs(proxy_manager.pool_classes_by_scheme["https"], gateway_transport.OfficialHTTPSConnectionPool)
+        self.assertIs(direct_manager.pool_classes_by_scheme["https"], gateway_transport.OfficialHTTPSConnectionPool)
 
     def test_proxy_reset_during_stream_body_is_ordered_after_headers_and_never_retried(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

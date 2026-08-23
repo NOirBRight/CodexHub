@@ -3,9 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import codex_proxy
 import codex_semantic_adapter
 import worker_binding_signing
+import collaboration_adapter
+import gateway_compat
 
 
 class Issue408WorkerBindingRegressionTests(unittest.TestCase):
@@ -40,7 +41,7 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
         ).encode("utf-8")
 
         transformed = json.loads(
-            codex_proxy.compatible_response_body(body, "ollama_cloud")
+            gateway_compat.compatible_response_body(body, "ollama_cloud")
         )
 
         args = json.loads(transformed["output"][0]["arguments"])
@@ -50,8 +51,8 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
         """Bug 2: native-style spawn output without effective_binding does not poison history."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            original_root = codex_proxy.WORKER_BINDING_SIGNING_ROOT
-            codex_proxy.WORKER_BINDING_SIGNING_ROOT = tmp_path
+            original_root = collaboration_adapter.WORKER_BINDING_SIGNING_ROOT
+            collaboration_adapter.WORKER_BINDING_SIGNING_ROOT = tmp_path
             try:
                 call_id = "call_worker_1"
                 binding = {
@@ -114,7 +115,7 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
 
                 # Must not raise external_worker_binding_rejected.
                 payload = json.loads(
-                    codex_proxy.compatible_request_body(body, upstream, model_id="glm-5.2")
+                    gateway_compat.compatible_request_body(body, upstream, model_id="glm-5.2")
                 )
                 forwarded_arguments = json.loads(payload["input"][1]["arguments"])
                 self.assertNotIn(
@@ -123,7 +124,7 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
                 )
                 self.assertEqual(payload["input"][-1]["content"], "continue")
             finally:
-                codex_proxy.WORKER_BINDING_SIGNING_ROOT = original_root
+                collaboration_adapter.WORKER_BINDING_SIGNING_ROOT = original_root
 
 
 class Issue408SemanticAdapterTests(unittest.TestCase):

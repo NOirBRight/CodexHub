@@ -9,12 +9,17 @@ tests exercise the same typed seam directly.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import contextvars
+import sys
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import tomllib
 from types import MappingProxyType
 from typing import Any, Protocol, TypedDict
+
+import gateway_settings
 
 from catalog import (
     CatalogPolicy,
@@ -1220,34 +1225,42 @@ class CatalogRuntime:
         return image_reader(self.catalog_input_modalities(model_id, upstream))
 
 
+def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    routing = data.get("routing", {})
+    return routing if isinstance(routing, dict) else {}
+
+
 def generated_catalog_by_slug(
     path: Path = GENERATED_CATALOG_PATH,
 ) -> dict[str, dict[str, Any]]:
-    return CatalogRuntime().generated_catalog_by_slug(path)
+    return default_catalog_runtime().generated_catalog_by_slug(path)
 
 
 def generated_catalog_slugs(path: Path = GENERATED_CATALOG_PATH) -> set[str]:
-    return CatalogRuntime().generated_catalog_slugs(path)
+    return default_catalog_runtime().generated_catalog_slugs(path)
 
 
 def published_catalog_model(slug: str) -> dict[str, Any] | None:
-    return CatalogRuntime().published_catalog_model(slug)
+    return default_catalog_runtime().published_catalog_model(slug)
 
 
 def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] | None:
-    return CatalogRuntime().ollama_cloud_runtime_upstream(model_id, policy)
+    return default_catalog_runtime().ollama_cloud_runtime_upstream(model_id, policy)
 
 
 def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] | None:
-    return CatalogRuntime().ollama_cloud_alias_upstream_model(slug, policy)
+    return default_catalog_runtime().ollama_cloud_alias_upstream_model(slug, policy)
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
-    return CatalogRuntime().choose_upstream(model_id)
+    return default_catalog_runtime().choose_upstream(model_id)
 
 
 def official_upstream() -> dict[str, Any]:
-    runtime = CatalogRuntime()
+    runtime = default_catalog_runtime()
     return {
         "name": "official",
         "provider_id": "openai",
@@ -1258,29 +1271,299 @@ def official_upstream() -> dict[str, Any]:
 
 
 def current_catalog_data() -> CatalogDocument:
-    return CatalogRuntime().current_catalog_data()
+    return default_catalog_runtime().current_catalog_data()
 
 
 def catalog_max_output_tokens(model_id: str) -> int | None:
-    return CatalogRuntime().catalog_max_output_tokens(model_id)
+    return default_catalog_runtime().catalog_max_output_tokens(model_id)
+
+
+def official_prefixes() -> tuple[str, ...]:
+    return default_catalog_runtime().official_prefixes()
+
+
+def official_base_url() -> str:
+    return default_catalog_runtime().official_base_url()
+
+
+def ollama_cloud_base_url() -> str:
+    return default_catalog_runtime().ollama_cloud_base_url()
+
+
+def catalog_identity_slug(slug: str) -> str:
+    return default_catalog_runtime().catalog_identity_slug(slug)
+
+
+def is_internal_route_identity(value: Any) -> bool:
+    return default_catalog_runtime().is_internal_route_identity(value)
+
+
+def validate_published_model_for_provider(
+    model: Mapping[str, Any],
+    *,
+    provider_id: str,
+    model_slug: str,
+    expected_upstream_model: str | None = None,
+) -> None:
+    default_catalog_runtime().validate_published_model_for_provider(
+        model,
+        provider_id=provider_id,
+        model_slug=model_slug,
+        expected_upstream_model=expected_upstream_model,
+    )
+
+
+def provider_catalog_failure(
+    message: str,
+    *,
+    provider_id: str,
+    model_slug: str,
+) -> ModelIdentityResolutionError:
+    return CatalogRuntime.provider_catalog_failure(
+        message,
+        provider_id=provider_id,
+        model_slug=model_slug,
+    )
+
+
+def resolve_external_model(slug: str) -> dict[str, Any] | None:
+    return default_catalog_runtime().resolve_external_model(slug)
+
+
+def resolve_ollama_cloud_model_checked(
+    model_id: str,
+    *,
+    require_api_key: bool,
+) -> tuple[bool, dict[str, Any] | None]:
+    return default_catalog_runtime().resolve_ollama_cloud_model(
+        model_id,
+        require_api_key=require_api_key,
+    )
+
+
+def catalog_output_limit(model_id: str) -> tuple[int | None, bool]:
+    return default_catalog_runtime().catalog_output_limit(model_id)
+
+
+def policy_denies_model(model_id: Any, policy: Any) -> bool:
+    return CatalogRuntime.policy_denies_model(model_id, policy)
+
+
+def policy_denies_any_model(model_ids: tuple[Any, ...], policy: Any) -> bool:
+    return default_catalog_runtime().policy_denies_any_model(model_ids, policy)
+
+
+def generated_official_catalog_upstream_model(slug: str, policy: Any) -> str | None:
+    return default_catalog_runtime().generated_official_upstream_model(slug, policy)
+
+
+def official_alias_upstream_model(slug: str, policy: Any) -> str | None:
+    return default_catalog_runtime().official_alias_upstream_model(slug, policy)
+
+
+def official_fast_variant_upstream_model(slug: str, policy: Any) -> str | None:
+    return default_catalog_runtime().official_fast_variant_upstream_model(slug, policy)
+
+
+def route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
+    return CatalogRuntime.route_capability_metadata(source)
+
+
+def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    return CatalogRuntime.openai_model_list(catalog)
+
+
+def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:
+    return default_catalog_runtime().published_official_context_budgets(catalog_path)
+
+
+def catalog_with_openai_context_guard(
+    catalog: dict[str, Any],
+    published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    require_published_snapshot: bool = False,
+) -> dict[str, Any]:
+    return default_catalog_runtime().catalog_with_openai_context_guard(
+        catalog,
+        published_budgets,
+        require_published_snapshot=require_published_snapshot,
+    )
+
+
+def catalog_with_vision_proxy_capabilities(catalog: dict[str, Any]) -> dict[str, Any]:
+    return default_catalog_runtime().catalog_with_vision_proxy_capabilities(catalog)
+
+
+def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, Any]:
+    return default_catalog_runtime().catalog_with_official_fast_variants(catalog)
+
+
+def canonical_catalog_models(
+    models: list[Any],
+    policy: CatalogPolicy,
+) -> list[Any]:
+    return default_catalog_runtime().canonical_catalog_models(models, policy)
+
+
+def modalities_include_image(value: Any) -> bool:
+    return CatalogRuntime.modalities_include_image(value)
+
+
+def catalog_input_modalities(
+    model_id: str | None,
+    upstream: Mapping[str, Any] | None = None,
+) -> Any:
+    return default_catalog_runtime().catalog_input_modalities(model_id, upstream)
+
+
+def model_supports_image(
+    model_id: str | None,
+    upstream: Mapping[str, Any] | None = None,
+) -> bool:
+    return default_catalog_runtime().model_supports_image(model_id, upstream)
+
+
+# Originals captured so request-time wiring can detect monkeypatched module
+# functions without freezing them into the seam.
+_OWNED_GENERATED_CATALOG_BY_SLUG = generated_catalog_by_slug
+_OWNED_GENERATED_CATALOG_SLUGS = generated_catalog_slugs
+_OWNED_PUBLISHED_CATALOG_MODEL = published_catalog_model
+_OWNED_CHOOSE_UPSTREAM = choose_upstream
+_OWNED_OFFICIAL_UPSTREAM = official_upstream
+_OWNED_CURRENT_CATALOG_DATA = current_catalog_data
+_OWNED_CATALOG_MAX_OUTPUT_TOKENS = catalog_max_output_tokens
+_OWNED_OLLAMA_CLOUD_RUNTIME = ollama_cloud_runtime_upstream
+_OWNED_OLLAMA_CLOUD_ALIAS = ollama_cloud_alias_upstream_model
+_OWNED_LOAD_POLICY = load_policy
+_OWNED_LOAD_CATALOG_MODELS = load_catalog_models
+_OWNED_CATALOG_PATH_READER = existing_generated_catalog_path
+_OWNED_EXTERNAL_MODEL_READER = resolve_external_model_alias
+_OWNED_OLLAMA_MODEL_READER = resolve_ollama_cloud_model
+_OWNED_SHOULD_INCLUDE_MODEL = should_include_model
+_CATALOG_ORIGINAL_OFFICIAL_BASE_URL = official_base_url
+_CATALOG_ORIGINAL_OLLAMA_BASE_URL = ollama_cloud_base_url
+_CATALOG_ORIGINAL_FAST_VARIANTS = catalog_with_official_fast_variants
+_CATALOG_ORIGINAL_CONTEXT_GUARD = catalog_with_openai_context_guard
+_CATALOG_ORIGINAL_VISION_PROJECTION = catalog_with_vision_proxy_capabilities
+_CATALOG_ORIGINAL_CANONICAL_MODELS = canonical_catalog_models
+_CATALOG_ORIGINAL_MODALITIES = modalities_include_image
+_CATALOG_ORIGINAL_INPUT_MODALITIES = catalog_input_modalities
+_CATALOG_ORIGINAL_PUBLISHED_BUDGETS = published_official_context_budgets
+_CATALOG_HOOK_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "catalog_hook_depth", default=0
+)
+
+
+def _patched(current: Any, original: Any) -> Any | None:
+    """Return the monkeypatched module function, or None when unpatched."""
+    return None if current is original else current
+
+
+def _catalog_override(candidate: Callable[..., Any], original: Callable[..., Any]) -> Callable[..., Any] | None:
+    if candidate is original or _CATALOG_HOOK_DEPTH.get() > 0:
+        return None
+
+    def invoke(*args: Any, **kwargs: Any) -> Any:
+        token = _CATALOG_HOOK_DEPTH.set(_CATALOG_HOOK_DEPTH.get() + 1)
+        try:
+            return candidate(*args, **kwargs)
+        finally:
+            _CATALOG_HOOK_DEPTH.reset(token)
+
+    return invoke
+
+
+def default_catalog_runtime() -> CatalogRuntime:
+    """Build a request-time catalog seam so module-level monkeypatches stay live."""
+
+    patched_by_slug = _patched(generated_catalog_by_slug, _OWNED_GENERATED_CATALOG_BY_SLUG)
+    patched_published = _patched(published_catalog_model, _OWNED_PUBLISHED_CATALOG_MODEL)
+    def _live_ollama_model_reader(
+        model_id: str, *, require_api_key: bool = True
+    ) -> tuple[bool, dict[str, Any] | None]:
+        module = sys.modules[__name__]
+        return module.resolve_ollama_cloud_model(model_id, require_api_key=require_api_key)
+
+    return CatalogRuntime(
+        catalog_path_reader=lambda path: existing_generated_catalog_path(path),
+        catalog_models_reader=lambda path: load_catalog_models(path),
+        policy_reader=lambda path: load_policy(path),
+        routing_config_reader=lambda: load_routing_config(),
+        external_model_reader=lambda slug: resolve_external_model_alias(slug),
+        ollama_model_reader=_live_ollama_model_reader,
+        vision_proxy_enabled_reader=gateway_settings.gateway_image_proxy_enabled,
+        official_base_url_reader=_catalog_override(official_base_url, _CATALOG_ORIGINAL_OFFICIAL_BASE_URL),
+        ollama_base_url_reader=_catalog_override(ollama_cloud_base_url, _CATALOG_ORIGINAL_OLLAMA_BASE_URL),
+        official_fast_projection_reader=_catalog_override(catalog_with_official_fast_variants, _CATALOG_ORIGINAL_FAST_VARIANTS),
+        context_guard_reader=_catalog_override(catalog_with_openai_context_guard, _CATALOG_ORIGINAL_CONTEXT_GUARD),
+        vision_projection_reader=_catalog_override(catalog_with_vision_proxy_capabilities, _CATALOG_ORIGINAL_VISION_PROJECTION),
+        canonical_models_reader=_catalog_override(canonical_catalog_models, _CATALOG_ORIGINAL_CANONICAL_MODELS),
+        modalities_reader=_catalog_override(modalities_include_image, _CATALOG_ORIGINAL_MODALITIES),
+        input_modalities_reader=_catalog_override(catalog_input_modalities, _CATALOG_ORIGINAL_INPUT_MODALITIES),
+        generated_catalog_by_slug_reader=patched_by_slug,
+        published_budget_reader=_catalog_override(published_official_context_budgets, _CATALOG_ORIGINAL_PUBLISHED_BUDGETS),
+        known_official_ids_reader=known_official_model_ids,
+        official_display_name_reader=official_short_display_name,
+        catalog_by_slug_reader=(lambda: patched_by_slug()) if patched_by_slug is not None else None,
+        published_model_reader=patched_published,
+        generated_official_reader=generated_official_catalog_upstream_model,
+        official_alias_reader=official_alias_upstream_model,
+        official_fast_variant_reader=official_fast_variant_upstream_model,
+        ollama_runtime_reader=_patched(ollama_cloud_runtime_upstream, _OWNED_OLLAMA_CLOUD_RUNTIME),
+        ollama_alias_reader=_patched(ollama_cloud_alias_upstream_model, _OWNED_OLLAMA_CLOUD_ALIAS),
+        should_include_model_reader=lambda slug, policy: should_include_model(slug, policy),
+        should_include_external_model_reader=should_include_external_provider_model,
+        model_visibility_reader=model_visibility,
+        internal_model_reader=is_internal_model,
+    )
 
 
 __all__ = [
     "CatalogFacts",
     "CatalogRuntime",
     "CatalogUpstream",
+    "POLICY_PATH",
+    "GENERATED_CATALOG_PATH",
+    "canonical_catalog_models",
+    "catalog_identity_slug",
+    "catalog_input_modalities",
     "catalog_max_output_tokens",
+    "catalog_output_limit",
+    "catalog_with_official_fast_variants",
+    "catalog_with_openai_context_guard",
+    "catalog_with_vision_proxy_capabilities",
     "choose_upstream",
     "current_catalog_data",
+    "default_catalog_runtime",
     "existing_generated_catalog_path",
     "generated_catalog_by_slug",
     "generated_catalog_slugs",
+    "generated_official_catalog_upstream_model",
+    "is_internal_route_identity",
+    "load_catalog_models",
     "load_policy",
+    "load_routing_config",
+    "modalities_include_image",
+    "model_supports_image",
+    "official_alias_upstream_model",
+    "official_base_url",
+    "official_fast_variant_upstream_model",
+    "official_prefixes",
     "official_upstream",
     "ollama_cloud_alias_upstream_model",
+    "ollama_cloud_base_url",
     "ollama_cloud_runtime_upstream",
+    "openai_model_list",
+    "policy_denies_any_model",
+    "policy_denies_model",
+    "provider_catalog_failure",
     "published_catalog_model",
+    "published_official_context_budgets",
+    "resolve_external_model",
     "resolve_external_model_alias",
     "resolve_ollama_cloud_model",
+    "resolve_ollama_cloud_model_checked",
+    "route_capability_metadata",
     "should_include_model",
+    "validate_published_model_for_provider",
 ]

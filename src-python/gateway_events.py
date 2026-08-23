@@ -1,8 +1,8 @@
 """Gateway telemetry writer, usage observation, and diagnostic observation.
 
 This module owns the process-wide ``GATEWAY_EVENT_WRITER`` singleton so importing
-it cannot fork a second event stream. ``gateway_runtime`` must import these
-symbols rather than redefine them.
+it cannot fork a second event stream. Callers must import these symbols rather
+than redefine them.
 """
 
 from __future__ import annotations

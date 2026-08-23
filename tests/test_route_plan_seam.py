@@ -16,9 +16,10 @@ from unittest.mock import patch
 
 from collaboration_runtime_contract import COLLABORATION_V1, COLLABORATION_V2
 
-import codex_proxy
 import route_plan
 import route_primitives
+import codex_auth
+import gateway_transport
 
 
 class RoutePlanSeamTests(unittest.TestCase):
@@ -710,7 +711,7 @@ class RoutePlanSeamTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                attempt.usage_policy == codex_proxy.UsagePolicy.SYNC_CAPTURE
+                attempt.usage_policy == route_primitives.UsagePolicy.SYNC_CAPTURE
                 for attempt in plan.attempts
             )
         )
@@ -931,7 +932,7 @@ class RoutePlanSeamTests(unittest.TestCase):
     def test_operational_auth_snapshot_refreshes_only_on_the_next_request_binding(self):
         def planned_headers(upstream, incoming_headers):
             authentication = (
-                codex_proxy.materialize_operational_authentication(
+                gateway_transport.materialize_operational_authentication(
                     incoming_headers,
                     upstream,
                 )
@@ -943,7 +944,7 @@ class RoutePlanSeamTests(unittest.TestCase):
                 model_requested="volc/glm-5.2",
                 official_http_passthrough_enabled=False,
             )
-            plan = codex_proxy.bind_route_plan_operational_authentication(
+            plan = gateway_transport.bind_route_plan_operational_authentication(
                 plan,
                 incoming_headers,
                 upstream,
@@ -1016,11 +1017,11 @@ class RoutePlanSeamTests(unittest.TestCase):
             "upstream_format": "responses",
         }
         with (
-            patch("codex_proxy.codex_access_token", return_value="codex-old"),
-            patch("codex_proxy.codex_account_id", return_value="acct-old"),
+            patch("codex_auth.access_token", return_value="codex-old"),
+            patch("codex_auth.account_id", return_value="acct-old"),
         ):
             official_authentication = (
-                codex_proxy.materialize_operational_authentication(
+                gateway_transport.materialize_operational_authentication(
                     {},
                     official_provider,
                 )
@@ -1033,7 +1034,7 @@ class RoutePlanSeamTests(unittest.TestCase):
                 official_http_passthrough_enabled=False,
             )
             official_plan = (
-                codex_proxy.bind_route_plan_operational_authentication(
+                gateway_transport.bind_route_plan_operational_authentication(
                     official_plan,
                     {},
                     official_provider,
@@ -1048,7 +1049,7 @@ class RoutePlanSeamTests(unittest.TestCase):
                 official_http_passthrough_enabled=False,
             )
             repeated_official_plan = (
-                codex_proxy.bind_route_plan_operational_authentication(
+                gateway_transport.bind_route_plan_operational_authentication(
                     repeated_official_plan,
                     {},
                     official_provider,

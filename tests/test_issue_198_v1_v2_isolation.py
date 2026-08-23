@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import pytest
 
-import codex_proxy
 import gateway_events
 import route_primitives
 from gateway_compat import official_passthrough as gateway_compat_official
@@ -20,6 +19,10 @@ from codex_semantic_adapter import (
     collaboration_protocols,
 )
 from subagent_policy import REPAIR_CODEX_SUBAGENT, guidance_enabled, semantic_repair_enabled
+import collaboration_adapter
+import gateway_compat
+import gateway_errors
+import gateway_handler_impl
 
 
 def _upstream() -> dict[str, object]:
@@ -140,7 +143,7 @@ def test_v2_namespace_function_declaration_accepts_parameters_schema() -> None:
     assert classify_collaboration_payload(body) == COLLABORATION_V2
 
     context: dict[str, object] = {}
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -213,14 +216,14 @@ def test_current_v2_tools_reject_malformed_collaboration_history(
         "tools": [_collaboration_namespace(COLLABORATION_V2)],
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             _upstream(),
             event_context={},
         )
 
-    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert exc_info.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_current_v2_tools_reject_completed_mixed_collaboration_history() -> None:
@@ -238,14 +241,14 @@ def test_current_v2_tools_reject_completed_mixed_collaboration_history() -> None
     context = {"request_id": "mixed-history-v2-current"}
 
     with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-            codex_proxy.compatible_request_body(
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+            gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
                 _upstream(),
                 event_context=context,
             )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
     prepare.assert_not_called()
 
 
@@ -293,7 +296,7 @@ def test_v2_request_preserves_native_namespace_and_does_not_inject_v1_tools() ->
         "tools": [_collaboration_namespace(COLLABORATION_V2)],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -336,7 +339,7 @@ def test_v2_preserves_collaboration_calls_but_rewrites_unsupported_custom_tool_h
         "tools": [_collaboration_namespace(COLLABORATION_V2)],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -380,7 +383,7 @@ def test_v2_does_not_preserve_custom_history_that_only_matches_a_plain_function(
         ],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -427,7 +430,7 @@ def test_v2_does_not_preserve_undeclared_custom_history_when_capability_is_expli
         ],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         upstream,
         event_context=context,
@@ -468,7 +471,7 @@ def test_v2_does_not_preserve_unknown_custom_alias_history() -> None:
         ],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -525,9 +528,9 @@ def test_v2_does_not_treat_namespace_alias_as_custom_history_owner() -> None:
         },
     }
 
-    with patch("codex_proxy.uuid.uuid4") as uuid4:
+    with patch("gateway_handler_impl.uuid.uuid4") as uuid4:
         uuid4.return_value.hex = token
-        transformed = codex_proxy.compatible_request_body(
+        transformed = gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             upstream,
             event_context=context,
@@ -565,7 +568,7 @@ def test_v2_sanitizes_custom_history_when_tools_are_null() -> None:
         "tools": None,
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -618,7 +621,7 @@ def test_v2_preserves_custom_history_when_upstream_explicitly_supports_custom_li
         ],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         upstream,
         event_context=context,
@@ -664,7 +667,7 @@ def test_v2_preserves_declared_custom_history_without_event_context() -> None:
         },
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         upstream,
     )
@@ -688,7 +691,7 @@ def test_v2_response_does_not_apply_v1_alias_repair() -> None:
         ],
     }
 
-    transformed = codex_proxy.compatible_response_body(
+    transformed = gateway_compat.compatible_response_body(
         json.dumps(body).encode(),
         "ollama_cloud",
         event_context=context,
@@ -711,14 +714,14 @@ def test_v2_response_with_a_v1_alias_fails_closed() -> None:
         ],
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_response_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
+        gateway_compat.compatible_response_body(
             json.dumps(body).encode(),
             "ollama_cloud",
             event_context={"collaboration_protocol": COLLABORATION_V2},
         )
 
-    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert exc_info.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_direct_v2_response_and_sse_resolve_boundary_before_repairs() -> None:
@@ -726,14 +729,14 @@ def test_direct_v2_response_and_sse_resolve_boundary_before_repairs() -> None:
         "id": "resp_v2_direct",
         "output": [_v2_spawn_call()],
     }
-    transformed = codex_proxy.compatible_response_body(
+    transformed = gateway_compat.compatible_response_body(
         json.dumps(body).encode(),
         "ollama_cloud",
     )
     assert json.loads(transformed) == body
 
     line = b"data: " + json.dumps(_v2_spawn_call(), separators=(",", ":")).encode() + b"\n\n"
-    assert codex_proxy.compatible_sse_line(line, "ollama_cloud") == line
+    assert gateway_compat.compatible_sse_line(line, "ollama_cloud") == line
 
 
 def test_selected_v2_metadata_skips_v1_injection_without_a_call_marker() -> None:
@@ -747,7 +750,7 @@ def test_selected_v2_metadata_skips_v1_injection_without_a_call_marker() -> None
         "input": [{"type": "message", "role": "user", "content": "continue"}],
     }
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -767,7 +770,7 @@ def test_context_multi_agent_version_does_not_select_a_runtime_protocol() -> Non
         "multi_agent_version": "v2",
         "request_id": "issue198-context-v2",
     }
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps({"model": "glm-5.2", "input": "continue"}).encode(),
         _upstream(),
         event_context=context,
@@ -791,13 +794,13 @@ def test_request_multi_agent_version_is_rejected_when_collaboration_namespace_is
         "metadata": {"multi_agent_version": "v2"},
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             _upstream(),
             event_context=context,
         )
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 @pytest.mark.parametrize(
@@ -814,7 +817,7 @@ def test_context_feature_selection_is_table_driven(
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, **selection}
     body = {"model": "glm-5.2", "input": "continue"}
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _upstream(),
         event_context=context,
@@ -829,14 +832,14 @@ def test_context_feature_selection_is_table_driven(
 
 
 def test_unknown_context_state_fails_closed() -> None:
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
+        gateway_compat.compatible_request_body(
             json.dumps({"model": "glm-5.2", "input": "continue"}).encode(),
             _upstream(),
             event_context={"collaboration_protocol": "unclassified"},
         )
 
-    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert exc_info.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_mixed_history_rejection_is_bounded_and_does_not_include_payload() -> None:
@@ -853,8 +856,8 @@ def test_mixed_history_rejection_is_bounded_and_does_not_include_payload() -> No
     }
 
     with patch.object(gateway_events, "write_proxy_event") as write_event:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy.resolve_collaboration_boundary(body, context)
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+            gateway_compat.resolve_collaboration_boundary(body, context)
 
     event = next(
         call
@@ -875,14 +878,14 @@ def test_selected_v2_context_conflicting_with_v1_history_fails_closed() -> None:
         "request_id": "issue198-conflict",
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
             _upstream(),
             event_context=context,
         )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_conflicting_current_target_metadata_without_namespace_is_ordinary_request() -> None:
@@ -895,7 +898,7 @@ def test_conflicting_current_target_metadata_without_namespace_is_ordinary_reque
         }
     ).encode()
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         body,
         _upstream(),
         event_context={},
@@ -912,7 +915,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
     }
     body = json.dumps(body_payload).encode()
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         body,
         {"name": "official", "auth": "codex_auth"},
         event_context={"request_id": "issue198-official"},
@@ -925,7 +928,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
 
 def test_v1_request_keeps_existing_repair_path_and_rejects_mixed_history() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "issue198-v1"}
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
         _upstream(),
         event_context=context,
@@ -939,13 +942,13 @@ def test_v1_request_keeps_existing_repair_path_and_rejects_mixed_history() -> No
     )
 
     mixed_context = {"request_id": "issue198-mixed"}
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call(), _v2_spawn_call()]}).encode(),
             _upstream(),
             event_context=mixed_context,
         )
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_model_switch_v2_history_to_v1_current_surface_fails_closed() -> None:
@@ -959,12 +962,12 @@ def test_model_switch_v2_history_to_v1_current_surface_fails_closed() -> None:
     upstream = _upstream()
     upstream["upstream_model"] = body["model"]
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(), upstream, event_context=context,
         )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_model_switch_v1_history_to_v2_current_surface_fails_closed() -> None:
@@ -978,12 +981,12 @@ def test_model_switch_v1_history_to_v2_current_surface_fails_closed() -> None:
     upstream = _upstream()
     upstream["upstream_model"] = body["model"]
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(), upstream, event_context=context,
         )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_current_tool_surface_conflicting_with_context_fails_closed() -> None:
@@ -999,11 +1002,11 @@ def test_current_tool_surface_conflicting_with_context_fails_closed() -> None:
         "tools": [_collaboration_namespace(COLLABORATION_V1)],
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(), _upstream(), event_context=context,
         )
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_current_tool_surface_containing_both_protocols_still_fails_closed() -> None:
@@ -1017,10 +1020,10 @@ def test_current_tool_surface_containing_both_protocols_still_fails_closed() -> 
         ],
     }
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as exc_info:
-        codex_proxy.compatible_request_body(json.dumps(body).encode(), _upstream(), event_context={})
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as exc_info:
+        gateway_compat.compatible_request_body(json.dumps(body).encode(), _upstream(), event_context={})
 
-    assert exc_info.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert exc_info.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_current_target_boundary_rejects_mixed_history() -> None:
@@ -1037,11 +1040,11 @@ def test_current_target_boundary_rejects_mixed_history() -> None:
         ),
         ({"input": [_v1_spawn_call(), _v2_spawn_call()]}, {}),
     ):
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy.resolve_collaboration_boundary(payload, context)
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+            gateway_compat.resolve_collaboration_boundary(payload, context)
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+        gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "input": [{"type": "message", "role": "user", "content": "continue"}],
