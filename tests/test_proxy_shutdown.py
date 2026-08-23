@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from urllib.request import Request
 
 import codex_proxy
+import gateway_catalog_runtime
 import gateway_transport
 import pytest
 from codex_proxy import CodexProxyHandler
@@ -215,7 +216,7 @@ def test_shutdown_endpoint_stops_server() -> None:
         connection = HTTPConnection(host, port, timeout=2)
         with (
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 side_effect=AssertionError(
                     "shutdown must not select an upstream"
@@ -380,7 +381,7 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
 
     try:
         controller.close_admission()
-        with patch.object(codex_proxy, "_open_upstream_once") as open_upstream:
+        with patch.object(gateway_transport.GatewayTransport, "open_once") as open_upstream:
             with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
                 codex_proxy.open_upstream_response(
                     Request("https://example.invalid/v1/responses", data=b"{}", method="POST"),
@@ -402,7 +403,7 @@ def test_cancelled_admission_interrupts_retry_wait_without_sleep() -> None:
 
     try:
         controller.close_admission()
-        with patch.object(codex_proxy.time, "sleep") as sleep:
+        with patch.object(gateway_transport.time, "sleep") as sleep:
             with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
                 codex_proxy.sleep_for_retry_with_gateway_cancellation(30.0)
         sleep.assert_not_called()
@@ -445,7 +446,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
     try:
         with (
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 return_value={
                     "name": "official",

@@ -63,7 +63,18 @@ if _vendored_urllib3 not in sys.path:
 
 import urllib3
 
+import gateway_catalog_runtime as _catalog_mod
 from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
+
+_OWNED_GENERATED_CATALOG_BY_SLUG = _catalog_mod.generated_catalog_by_slug
+_OWNED_GENERATED_CATALOG_SLUGS = _catalog_mod.generated_catalog_slugs
+_OWNED_PUBLISHED_CATALOG_MODEL = _catalog_mod.published_catalog_model
+_OWNED_CHOOSE_UPSTREAM = _catalog_mod.choose_upstream
+_OWNED_OFFICIAL_UPSTREAM = _catalog_mod.official_upstream
+_OWNED_CURRENT_CATALOG_DATA = _catalog_mod.current_catalog_data
+_OWNED_CATALOG_MAX_OUTPUT_TOKENS = _catalog_mod.catalog_max_output_tokens
+_OWNED_OLLAMA_CLOUD_RUNTIME = _catalog_mod.ollama_cloud_runtime_upstream
+_OWNED_OLLAMA_CLOUD_ALIAS = _catalog_mod.ollama_cloud_alias_upstream_model
 from gateway_exchange import (
     ExchangeFailureTypes,
     ExchangeHooks,
@@ -311,30 +322,15 @@ OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
 
 
 def _official_proxy_url(url: str) -> str | None:
-    return _transport_official_proxy_url(
-        url,
-        getproxies_fn=getproxies,
-        getproxies_registry_fn=getproxies_registry,
-        proxy_bypass_fn=proxy_bypass,
-        platform=sys.platform,
-    )
+    return gateway_transport.official_proxy_url(url)
 
 
 def _official_pool_manager(url: str) -> Any:
-    return _transport_official_pool_manager(
-        url,
-        pools=_live("OFFICIAL_HTTP_POOLS", OFFICIAL_HTTP_POOLS),
-        pools_lock=_live("OFFICIAL_HTTP_POOLS_LOCK", OFFICIAL_HTTP_POOLS_LOCK),
-        proxy_url=_live("official_proxy_url", _official_proxy_url)(url),
-    )
+    return gateway_transport.official_pool_manager(url)
 
 
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
-    return _transport_official_urlopen(
-        request,
-        timeout=timeout,
-        pool_manager=_live("official_pool_manager", _official_pool_manager),
-    )
+    return gateway_transport.official_urlopen(request, timeout=timeout)
 
 
 OFFICIAL_BASE_URL = "https://api.openai.com/v1"
@@ -1394,9 +1390,24 @@ def load_routing_config(path: Path = POLICY_PATH) -> dict[str, Any]:
     return routing if isinstance(routing, dict) else {}
 
 
-def _catalog_runtime() -> CatalogRuntime:
-    """Build a request-time catalog seam so facade monkeypatches stay live."""
+def _owning(module: Any, name: str, fallback: Any) -> Any:
+    """Look up a request-time name on an owning module so tests patch that module."""
+    current = getattr(module, name, fallback)
+    return current if current is not fallback else fallback
 
+
+def _catalog_patched(name: str, original: Any) -> Any | None:
+    current = getattr(_catalog_mod, name, original)
+    if current is original:
+        return None
+    return current
+
+
+def _catalog_runtime() -> CatalogRuntime:
+    """Build a request-time catalog seam so owning-module monkeypatches stay live."""
+
+    patched_by_slug = _catalog_patched("generated_catalog_by_slug", _OWNED_GENERATED_CATALOG_BY_SLUG)
+    patched_published = _catalog_patched("published_catalog_model", _OWNED_PUBLISHED_CATALOG_MODEL)
     return CatalogRuntime(
         facts=CatalogFacts(
             generated_catalog_path=GENERATED_CATALOG_PATH,
@@ -1413,12 +1424,12 @@ def _catalog_runtime() -> CatalogRuntime:
             upstream_max_output_token_caps=dict(UPSTREAM_MAX_OUTPUT_TOKEN_CAPS),
             official_refresh_state_filename=OFFICIAL_REFRESH_STATE_FILENAME,
         ),
-        catalog_path_reader=existing_generated_catalog_path,
+        catalog_path_reader=_owning(_catalog_mod, "existing_generated_catalog_path", existing_generated_catalog_path),
         catalog_models_reader=load_catalog_models,
-        policy_reader=load_policy,
+        policy_reader=_owning(_catalog_mod, "load_policy", load_policy),
         routing_config_reader=lambda: load_routing_config(),
-        external_model_reader=resolve_external_model_alias,
-        ollama_model_reader=resolve_ollama_cloud_model,
+        external_model_reader=_owning(_catalog_mod, "resolve_external_model_alias", resolve_external_model_alias),
+        ollama_model_reader=_owning(_catalog_mod, "resolve_ollama_cloud_model", resolve_ollama_cloud_model),
         vision_proxy_enabled_reader=gateway_image_proxy_enabled,
         official_base_url_reader=_catalog_override(official_base_url, _CATALOG_ORIGINAL_OFFICIAL_BASE_URL),
         ollama_base_url_reader=_catalog_override(ollama_cloud_base_url, _CATALOG_ORIGINAL_OLLAMA_BASE_URL),
@@ -1428,18 +1439,18 @@ def _catalog_runtime() -> CatalogRuntime:
         canonical_models_reader=_catalog_override(canonical_catalog_models, _CATALOG_ORIGINAL_CANONICAL_MODELS),
         modalities_reader=_catalog_override(_modalities_include_image, _CATALOG_ORIGINAL_MODALITIES),
         input_modalities_reader=_catalog_override(_catalog_input_modalities, _CATALOG_ORIGINAL_INPUT_MODALITIES),
-        generated_catalog_by_slug_reader=_catalog_override(generated_catalog_by_slug, _CATALOG_ORIGINAL_BY_SLUG),
+        generated_catalog_by_slug_reader=patched_by_slug,
         published_budget_reader=_catalog_override(published_official_context_budgets, _CATALOG_ORIGINAL_PUBLISHED_BUDGETS),
         known_official_ids_reader=catalog_known_official_model_ids,
         official_display_name_reader=official_short_display_name,
-        catalog_by_slug_reader=lambda: generated_catalog_by_slug(),
-        published_model_reader=_live("published_catalog_model", _published_catalog_model),
+        catalog_by_slug_reader=(lambda: patched_by_slug()) if patched_by_slug is not None else None,
+        published_model_reader=patched_published,
         generated_official_reader=generated_official_catalog_upstream_model,
         official_alias_reader=official_alias_upstream_model,
         official_fast_variant_reader=official_fast_variant_upstream_model,
-        ollama_runtime_reader=ollama_cloud_runtime_upstream,
-        ollama_alias_reader=ollama_cloud_alias_upstream_model,
-        should_include_model_reader=should_include_model,
+        ollama_runtime_reader=_catalog_patched("ollama_cloud_runtime_upstream", _OWNED_OLLAMA_CLOUD_RUNTIME),
+        ollama_alias_reader=_catalog_patched("ollama_cloud_alias_upstream_model", _OWNED_OLLAMA_CLOUD_ALIAS),
+        should_include_model_reader=_owning(_catalog_mod, "should_include_model", should_include_model),
         should_include_external_model_reader=should_include_external_provider_model,
         model_visibility_reader=model_visibility,
         internal_model_reader=is_internal_model,
@@ -1459,10 +1470,16 @@ def ollama_cloud_base_url() -> str:
 
 
 def generated_catalog_slugs(path: Path = GENERATED_CATALOG_PATH) -> set[str]:
+    live = _catalog_patched("generated_catalog_slugs", _OWNED_GENERATED_CATALOG_SLUGS)
+    if live is not None:
+        return live(path)
     return _catalog_runtime().generated_catalog_slugs(path)
 
 
 def generated_catalog_by_slug(path: Path = GENERATED_CATALOG_PATH) -> dict[str, dict[str, Any]]:
+    live = _catalog_patched("generated_catalog_by_slug", _OWNED_GENERATED_CATALOG_BY_SLUG)
+    if live is not None:
+        return live(path)
     return _catalog_runtime().generated_catalog_by_slug(path)
 
 
@@ -1540,6 +1557,9 @@ def _catalog_output_limit(model_id: str) -> tuple[int | None, bool]:
 
 
 def catalog_max_output_tokens(model_id: str) -> int | None:
+    live = _catalog_patched("catalog_max_output_tokens", _OWNED_CATALOG_MAX_OUTPUT_TOKENS)
+    if live is not None:
+        return live(model_id)
     return _catalog_runtime().catalog_max_output_tokens(model_id)
 
 
@@ -1591,10 +1611,16 @@ def provider_scoped_route_model(model_id: str | None, provider_hint: str | None)
 
 
 def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] | None:
+    live = _catalog_patched("ollama_cloud_runtime_upstream", _OWNED_OLLAMA_CLOUD_RUNTIME)
+    if live is not None:
+        return live(model_id, policy)
     return _catalog_runtime().ollama_cloud_runtime_upstream(model_id, policy)
 
 
 def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] | None:
+    live = _catalog_patched("ollama_cloud_alias_upstream_model", _OWNED_OLLAMA_CLOUD_ALIAS)
+    if live is not None:
+        return live(slug, policy)
     return _catalog_runtime().ollama_cloud_alias_upstream_model(slug, policy)
 
 
@@ -1603,10 +1629,16 @@ def _route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def choose_upstream(model_id: str) -> dict[str, Any]:
+    live = _catalog_patched("choose_upstream", _OWNED_CHOOSE_UPSTREAM)
+    if live is not None:
+        return live(model_id)
     return _catalog_runtime().choose_upstream(model_id)
 
 
 def official_upstream() -> dict[str, Any]:
+    live = _catalog_patched("official_upstream", _OWNED_OFFICIAL_UPSTREAM)
+    if live is not None:
+        return live()
     runtime = _catalog_runtime()
     return {
         "name": "official",
@@ -9729,10 +9761,10 @@ def _gateway_transport() -> GatewayTransport:
                 "DownstreamClosedBeforeRetryError", DownstreamClosedBeforeRetryError
             ),
         ),
-        official_open=_live("_official_urlopen", _official_urlopen),
-        standard_open=_live("urlopen", urlopen),
-        open_once_hook=_live("_open_upstream_once", _open_upstream_once),
-        sleep=_live("_sleep_for_retry_with_gateway_cancellation", _sleep_for_retry_with_gateway_cancellation),
+        official_open=None,
+        standard_open=gateway_transport.urlopen,
+        open_once_hook=None,
+        sleep=None,
         active_request=_live("_active_gateway_request", _active_gateway_request),
         access_token=_live("codex_access_token", codex_access_token),
         account_id=_live("codex_account_id", codex_account_id),
@@ -9762,7 +9794,7 @@ def _gateway_transport() -> GatewayTransport:
         ),
         retry_safety_class=_live("_retry_safety_class", _retry_safety_class),
         retry_safety_failure_phase=_live("_retry_safety_failure_phase", _retry_safety_failure_phase),
-        failure_phase=_live("transport_failure_phase", transport_failure_phase),
+        failure_phase=gateway_transport.transport_failure_phase,
         model_access_path=_live("_model_access_path_from_event_context", _model_access_path_from_event_context),
         model_access_path_idempotent=_live(
             "_model_access_path_idempotency_guaranteed", _model_access_path_idempotency_guaranteed
@@ -9773,14 +9805,14 @@ def _gateway_transport() -> GatewayTransport:
         get_header=_live("_get_header", _get_header),
         header_items=_live("_header_items", _header_items),
         upstream_retry_attempts=_live("_upstream_retry_attempts", _upstream_retry_attempts),
-        getproxies=_live("getproxies", getproxies),
-        getproxies_registry=_live("getproxies_registry", getproxies_registry),
-        proxy_bypass=_live("proxy_bypass", proxy_bypass),
+        getproxies=None,
+        getproxies_registry=None,
+        proxy_bypass=None,
         platform=sys.platform,
-        official_pools=_live("OFFICIAL_HTTP_POOLS", OFFICIAL_HTTP_POOLS),
-        official_pools_lock=_live("OFFICIAL_HTTP_POOLS_LOCK", OFFICIAL_HTTP_POOLS_LOCK),
-        pool_manager_hook=_live("_official_pool_manager", _official_pool_manager),
-        proxy_url_hook=_live("_official_proxy_url", _official_proxy_url),
+        official_pools=None,
+        official_pools_lock=None,
+        pool_manager_hook=None,
+        proxy_url_hook=None,
         endpoint_url_hook=_live("_upstream_endpoint_url", _upstream_endpoint_url),
     )
 
@@ -9878,6 +9910,9 @@ def bind_route_plan_operational_authentication(
 
 
 def current_catalog_data() -> dict[str, Any]:
+    live = _catalog_patched("current_catalog_data", _OWNED_CURRENT_CATALOG_DATA)
+    if live is not None:
+        return live()
     return _catalog_runtime().current_catalog_data()
 
 

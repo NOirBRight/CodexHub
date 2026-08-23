@@ -11,6 +11,7 @@ from typing import Any, Iterator
 from unittest.mock import patch
 
 import codex_proxy
+import gateway_catalog_runtime
 import gateway_transport
 
 GATEWAY_CLIENT_KEY = "characterization-client-key"
@@ -130,8 +131,8 @@ class GatewayHarness:
         stub_server.stub = stub  # type: ignore[attr-defined]
         self.stub = stub
 
-        self._stack.enter_context(patch("codex_proxy.getproxies", return_value={"no": "localhost,127.0.0.1"}))
-        self._stack.enter_context(patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}))
+        self._stack.enter_context(patch("gateway_transport.getproxies", return_value={"no": "localhost,127.0.0.1"}))
+        self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
         self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
         self._stack.enter_context(patch.object(codex_proxy, "gateway_client_key", return_value=GATEWAY_CLIENT_KEY))
         self._stack.enter_context(patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"))
@@ -141,21 +142,21 @@ class GatewayHarness:
         self._stack.enter_context(patch.object(codex_proxy, "transport_sse_idle_timeout_seconds", return_value=2.0))
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 side_effect=self._choose_upstream,
             )
         )
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "official_upstream",
                 side_effect=self._official_upstream,
             )
         )
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "current_catalog_data",
                 return_value={
                     "models": [

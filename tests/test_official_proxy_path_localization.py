@@ -10,6 +10,7 @@ from urllib.request import Request
 
 import codex_proxy
 import diagnostic_recorder
+import gateway_transport
 
 
 class _Connection:
@@ -82,12 +83,12 @@ class OfficialProxyPathLocalizationTests(TestCase):
 
                 with (
                     patch.object(
-                        codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                        gateway_transport.urllib3.connectionpool.HTTPSConnectionPool,
                         "_get_conn",
                         return_value=connection,
                     ),
-                    patch("codex_proxy.time.monotonic", return_value=100.0),
-                    patch("codex_proxy.official_pool_manager", return_value=manager),
+                    patch("gateway_transport.time.monotonic", return_value=100.0),
+                    patch("gateway_transport.official_pool_manager", return_value=manager),
                     patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
                 ):
                     with self.assertRaises(ConnectionResetError):
@@ -119,12 +120,12 @@ class OfficialProxyPathLocalizationTests(TestCase):
 
         with (
             patch.object(
-                codex_proxy.urllib3.connectionpool.HTTPSConnectionPool,
+                gateway_transport.urllib3.connectionpool.HTTPSConnectionPool,
                 "_get_conn",
                 return_value=connection,
             ),
-            patch("codex_proxy.official_pool_manager", return_value=manager),
-            patch("codex_proxy.time.sleep") as sleep,
+            patch("gateway_transport.official_pool_manager", return_value=manager),
+            patch("gateway_transport.time.sleep") as sleep,
             patch("codex_proxy.write_proxy_event") as write_event,
         ):
             with self.assertRaises(ConnectionResetError):
@@ -148,28 +149,28 @@ class OfficialProxyPathLocalizationTests(TestCase):
         registry_proxy = "http://registry-proxy.invalid"
 
         with (
-            patch("codex_proxy.sys.platform", "win32"),
-            patch("codex_proxy.getproxies", return_value={"https": explicit_proxy}),
-            patch("codex_proxy.getproxies_registry") as registry,
-            patch("codex_proxy.proxy_bypass", return_value=True),
+            patch("gateway_transport.sys.platform", "win32"),
+            patch("gateway_transport.getproxies", return_value={"https": explicit_proxy}),
+            patch("gateway_transport.getproxies_registry") as registry,
+            patch("gateway_transport.proxy_bypass", return_value=True),
         ):
             self.assertIsNone(codex_proxy.official_proxy_url(target))
         registry.assert_not_called()
 
         with (
-            patch("codex_proxy.sys.platform", "win32"),
-            patch("codex_proxy.getproxies", return_value={"https": explicit_proxy}),
-            patch("codex_proxy.getproxies_registry") as registry,
-            patch("codex_proxy.proxy_bypass", return_value=False),
+            patch("gateway_transport.sys.platform", "win32"),
+            patch("gateway_transport.getproxies", return_value={"https": explicit_proxy}),
+            patch("gateway_transport.getproxies_registry") as registry,
+            patch("gateway_transport.proxy_bypass", return_value=False),
         ):
             self.assertEqual(codex_proxy.official_proxy_url(target), explicit_proxy)
         registry.assert_not_called()
 
         with (
-            patch("codex_proxy.sys.platform", "win32"),
-            patch("codex_proxy.getproxies", return_value={"no": "localhost"}),
-            patch("codex_proxy.getproxies_registry", return_value={"https": registry_proxy}),
-            patch("codex_proxy.proxy_bypass", return_value=False),
+            patch("gateway_transport.sys.platform", "win32"),
+            patch("gateway_transport.getproxies", return_value={"no": "localhost"}),
+            patch("gateway_transport.getproxies_registry", return_value={"https": registry_proxy}),
+            patch("gateway_transport.proxy_bypass", return_value=False),
         ):
             self.assertEqual(codex_proxy.official_proxy_url(target), registry_proxy)
 
@@ -177,13 +178,13 @@ class OfficialProxyPathLocalizationTests(TestCase):
         direct_manager = _RouteManager()
         proxy_manager = _RouteManager()
         with (
-            patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}),
+            patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}),
             patch(
-                "codex_proxy.official_proxy_url",
+                "gateway_transport.official_proxy_url",
                 side_effect=[None, "http://registry-proxy.invalid"],
             ),
-            patch("codex_proxy.urllib3.ProxyManager", return_value=proxy_manager) as make_proxy_manager,
-            patch("codex_proxy.urllib3.PoolManager", return_value=direct_manager) as make_direct_manager,
+            patch("gateway_transport.urllib3.ProxyManager", return_value=proxy_manager) as make_proxy_manager,
+            patch("gateway_transport.urllib3.PoolManager", return_value=direct_manager) as make_direct_manager,
         ):
             direct = codex_proxy.official_pool_manager("https://example.test/v1/responses")
             proxied = codex_proxy.official_pool_manager("https://example.test/v1/responses")
