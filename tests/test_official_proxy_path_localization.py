@@ -10,6 +10,7 @@ from urllib.request import Request
 
 import codex_proxy
 import diagnostic_recorder
+import gateway_events
 import gateway_transport
 
 
@@ -89,7 +90,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
                     ),
                     patch("gateway_transport.time.monotonic", return_value=100.0),
                     patch("gateway_transport.official_pool_manager", return_value=manager),
-                    patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+                    patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
                 ):
                     with self.assertRaises(ConnectionResetError):
                         codex_proxy.open_upstream_response(
@@ -126,7 +127,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
             ),
             patch("gateway_transport.official_pool_manager", return_value=manager),
             patch("gateway_transport.time.sleep") as sleep,
-            patch("codex_proxy.write_proxy_event") as write_event,
+            patch("gateway_events.write_proxy_event") as write_event,
         ):
             with self.assertRaises(ConnectionResetError):
                 codex_proxy.open_upstream_response(
@@ -210,7 +211,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
         handler.wfile = io.BytesIO()
         recorder.observe_upstream_headers("private-request", status=200, headers=response.headers)
 
-        with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
+        with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
             status = handler._relay_official_passthrough_sse_response(
                 response,
                 "official",

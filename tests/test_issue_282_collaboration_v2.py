@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import gateway_events
 import route_primitives
 from codex_semantic_adapter import (
     COLLABORATION_V1,
@@ -452,7 +453,7 @@ def test_collaboration_rejection_diagnostic_is_count_only_and_content_safe() -> 
         }
     ]
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_event:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
             codex_proxy.compatible_request_body(
                 json.dumps(body).encode(),

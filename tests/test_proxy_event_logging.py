@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 from lock_fixtures import write_dead_legacy_lock
+import gateway_events
 import gateway_transport
 
 
@@ -685,7 +686,7 @@ class ProxyEventLoggingTests(TestCase):
             {"event": "request_start", "request_id": "req-one"},
             {"event": "request_complete", "request_id": "req-two"},
         ]
-        with patch.object(codex_proxy.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
+        with patch.object(gateway_events.GATEWAY_EVENT_WRITER, "enqueue", side_effect=[True, False]) as enqueue:
             self.assertTrue(codex_proxy.enqueue_gateway_event_payload(payloads[0]))
             self.assertFalse(codex_proxy.enqueue_gateway_event_payload(payloads[1]))
 

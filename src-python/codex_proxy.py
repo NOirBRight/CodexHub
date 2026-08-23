@@ -213,13 +213,13 @@ def run_server(host: str, port: int) -> None:
             )
         else:
             flush_timeout = GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
-        writer_result = GATEWAY_EVENT_WRITER.shutdown(
+        writer_result = gateway_events.GATEWAY_EVENT_WRITER.shutdown(
             timeout=flush_timeout,
         )
         if not writer_result.completed:
             logger.warning("Gateway event writer shutdown ended with %s", writer_result.outcome)
         try:
-            diagnostic_shutdown = getattr(GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
+            diagnostic_shutdown = getattr(gateway_events.GATEWAY_DIAGNOSTIC_RECORDER, "shutdown", None)
             diagnostic_timeout = (
                 min(
                     GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,

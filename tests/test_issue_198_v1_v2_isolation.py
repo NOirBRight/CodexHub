@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import gateway_events
 import route_primitives
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import (
@@ -850,7 +851,7 @@ def test_mixed_history_rejection_is_bounded_and_does_not_include_payload() -> No
         ],
     }
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_event:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
             codex_proxy.resolve_collaboration_boundary(body, context)
 

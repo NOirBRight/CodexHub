@@ -184,3 +184,15 @@ def test_gateway_runtime_and_admission_do_not_import_the_facade() -> None:
     for source in (runtime_source.read_text(encoding="utf-8"), admission_source):
         assert "import codex_proxy" not in source
         assert "from codex_proxy" not in source
+
+
+def test_gateway_events_does_not_import_the_facade() -> None:
+    import gateway_events
+
+    source = Path(gateway_events.__file__).read_text(encoding="utf-8")
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "import gateway_runtime" not in source
+    assert "from gateway_runtime" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "CodexProxyHandler" not in source
