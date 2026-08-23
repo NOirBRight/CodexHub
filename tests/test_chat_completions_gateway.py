@@ -40,22 +40,21 @@ def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_
     )
 
 
-from codex_proxy import (
-    CodexProxyHandler,
-    UpstreamStreamIncompleteError,
-    _chat_stream_chunks_have_terminal,
-    _chat_messages_to_responses_input,
-    _chat_tool_choice_to_responses_tool_choice,
-    _chat_tools_to_responses_tools,
-    _events_to_responses_body,
-    _is_compact_summary_payload,
-    _normalize_usage_for_event,
-    _response_body_to_chat_completion_body,
-    _response_events_to_chat_stream_chunks,
-    _request_kind_from_headers_and_payload,
-    _responses_events_have_terminal,
-    _strip_tools_for_compact_payload,
+from gateway_events import normalize_usage_for_event
+from gateway_stream_semantics import (
+    chat_stream_chunks_have_terminal,
+    is_compact_summary_payload,
+    request_kind_from_headers_and_payload,
+    responses_events_have_terminal,
+    strip_tools_for_compact_payload,
+    _chat_tool_choice_to_responses_tool_choice as chat_tool_choice_to_responses_tool_choice,
+    _chat_tools_to_responses_tools as chat_tools_to_responses_tools,
+    _events_to_responses_body as events_to_responses_body,
+    _response_body_to_chat_completion_body as response_body_to_chat_completion_body,
+    _response_events_to_chat_stream_chunks as response_events_to_chat_stream_chunks,
 )
+from protocol_translation import UpstreamStreamIncompleteError
+from codex_proxy import CodexProxyHandler
 
 
 def _prepare_request(body: bytes, *, inbound: str, outbound: str) -> bytes:
@@ -308,8 +307,8 @@ class ChatRequestToResponsesTests(unittest.TestCase):
             "tool_choice": "auto",
         }
 
-        self.assertTrue(_is_compact_summary_payload(payload, "chat_completions"))
-        self.assertTrue(_strip_tools_for_compact_payload(payload))
+        self.assertTrue(is_compact_summary_payload(payload, "chat_completions"))
+        self.assertTrue(strip_tools_for_compact_payload(payload))
 
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
@@ -391,7 +390,7 @@ class RequestKindDetectionTests(unittest.TestCase):
     def test_codex_turn_metadata_marks_compaction_without_prompt_heuristic(self):
         payload = {"model": "gpt-5.5", "input": "summarize"}
 
-        request_kind = _request_kind_from_headers_and_payload(
+        request_kind = request_kind_from_headers_and_payload(
             {
                 "x-codex-turn-metadata": json.dumps(
                     {
@@ -415,7 +414,7 @@ class RequestKindDetectionTests(unittest.TestCase):
 
         for metadata in ("{", "[]", '{"request_kind":"turn"}'):
             with self.subTest(metadata=metadata):
-                request_kind = _request_kind_from_headers_and_payload(
+                request_kind = request_kind_from_headers_and_payload(
                     {"x-codex-turn-metadata": metadata},
                     payload,
                     "responses",
@@ -426,7 +425,7 @@ class RequestKindDetectionTests(unittest.TestCase):
     def test_compact_header_marks_request_kind_without_prompt_heuristic(self):
         payload = {"model": "gpt-5.5", "input": "summarize"}
 
-        request_kind = _request_kind_from_headers_and_payload(
+        request_kind = request_kind_from_headers_and_payload(
             {"x-query-source": "compact"},
             payload,
             "responses",
@@ -447,7 +446,7 @@ class RequestKindDetectionTests(unittest.TestCase):
             }],
         }
 
-        request_kind = _request_kind_from_headers_and_payload({}, payload, "chat_completions")
+        request_kind = request_kind_from_headers_and_payload({}, payload, "chat_completions")
 
         self.assertEqual(request_kind, "compact")
 
@@ -567,19 +566,19 @@ class DownstreamErrorMapperTests(unittest.TestCase):
 
 class ChatToolChoiceTests(unittest.TestCase):
     def test_string_tool_choice(self):
-        self.assertEqual(_chat_tool_choice_to_responses_tool_choice("auto"), "auto")
-        self.assertEqual(_chat_tool_choice_to_responses_tool_choice("none"), "none")
-        self.assertEqual(_chat_tool_choice_to_responses_tool_choice("required"), "required")
+        self.assertEqual(chat_tool_choice_to_responses_tool_choice("auto"), "auto")
+        self.assertEqual(chat_tool_choice_to_responses_tool_choice("none"), "none")
+        self.assertEqual(chat_tool_choice_to_responses_tool_choice("required"), "required")
 
     def test_dict_tool_choice(self):
-        result = _chat_tool_choice_to_responses_tool_choice({"type": "function", "function": {"name": "foo"}})
+        result = chat_tool_choice_to_responses_tool_choice({"type": "function", "function": {"name": "foo"}})
         self.assertEqual(result, {"type": "function", "name": "foo"})
 
 
 class ChatToolsToResponsesTests(unittest.TestCase):
     def test_rejects_non_function_tools_that_cannot_cross_the_protocol_seam(self):
         with self.assertRaises(ValueError):
-            _chat_tools_to_responses_tools([
+            chat_tools_to_responses_tools([
                 {"type": "function", "function": {"name": "foo"}},
                 {"type": "other"},
             ])
@@ -600,7 +599,7 @@ class ResponseBodyToChatTests(unittest.TestCase):
             "usage": {"input_tokens": 10, "output_tokens": 2},
         }).encode("utf-8")
 
-        result = json.loads(_response_body_to_chat_completion_body(body))
+        result = json.loads(response_body_to_chat_completion_body(body))
 
         self.assertEqual(result["object"], "chat.completion")
         self.assertEqual(result["id"], "resp_123")
@@ -631,7 +630,7 @@ class ResponseBodyToChatTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        result = json.loads(_response_body_to_chat_completion_body(body))
+        result = json.loads(response_body_to_chat_completion_body(body))
 
         choice = result["choices"][0]
         self.assertEqual(choice["finish_reason"], "tool_calls")
@@ -644,41 +643,41 @@ class ResponseBodyToChatTests(unittest.TestCase):
 
 class ResponseEventsToChatStreamTests(unittest.TestCase):
     def test_responses_events_terminal_detection_requires_completed_or_failure(self):
-        self.assertFalse(_responses_events_have_terminal([]))
-        self.assertFalse(_responses_events_have_terminal([
+        self.assertFalse(responses_events_have_terminal([]))
+        self.assertFalse(responses_events_have_terminal([
             {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
             {"type": "response.output_text.delta", "delta": "partial"},
         ]))
-        self.assertTrue(_responses_events_have_terminal([
+        self.assertTrue(responses_events_have_terminal([
             {"type": "response.completed", "response": {"id": "resp_1", "model": "gpt-5.5", "output": []}},
         ]))
-        self.assertTrue(_responses_events_have_terminal([
+        self.assertTrue(responses_events_have_terminal([
             {"type": "response.failed", "response": {"id": "resp_1", "model": "gpt-5.5"}},
         ]))
 
-    def test_events_to_responses_body_can_require_completed_event(self):
+    def testevents_to_responses_body_can_require_completed_event(self):
         with self.assertRaises(UpstreamStreamIncompleteError):
-            _events_to_responses_body([
+            events_to_responses_body([
                 {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
                 {"type": "response.output_text.delta", "delta": "partial"},
             ], require_completed=True)
 
-    def test_response_events_to_chat_stream_chunks_can_require_completed_event(self):
+    def testresponse_events_to_chat_stream_chunks_can_require_completed_event(self):
         with self.assertRaises(UpstreamStreamIncompleteError):
-            _response_events_to_chat_stream_chunks([
+            response_events_to_chat_stream_chunks([
                 {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.5"}},
                 {"type": "response.output_text.delta", "delta": "partial"},
             ], require_completed=True)
 
     def test_chat_stream_chunks_terminal_detection_accepts_done_or_finish_reason(self):
-        self.assertFalse(_chat_stream_chunks_have_terminal([]))
-        self.assertFalse(_chat_stream_chunks_have_terminal([
+        self.assertFalse(chat_stream_chunks_have_terminal([]))
+        self.assertFalse(chat_stream_chunks_have_terminal([
             {"choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": None}]},
         ]))
-        self.assertTrue(_chat_stream_chunks_have_terminal([
+        self.assertTrue(chat_stream_chunks_have_terminal([
             {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
         ]))
-        self.assertTrue(_chat_stream_chunks_have_terminal(["[DONE]"]))
+        self.assertTrue(chat_stream_chunks_have_terminal(["[DONE]"]))
 
     def test_text_delta_events(self):
         events = [
@@ -688,7 +687,7 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
             {"type": "response.completed", "response": {"id": "resp_1", "model": "gpt-5.5", "output": []}},
         ]
 
-        chunks = _response_events_to_chat_stream_chunks(events)
+        chunks = response_events_to_chat_stream_chunks(events)
 
         # 1 role chunk + 2 text chunks + 1 finish chunk
         self.assertEqual(len(chunks), 4)
@@ -743,7 +742,7 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
             },
         ]
 
-        chunks = _response_events_to_chat_stream_chunks(events)
+        chunks = response_events_to_chat_stream_chunks(events)
 
         # 1 role chunk + header chunk + 2 argument delta chunks + finish chunk
         self.assertEqual(len(chunks), 5)
@@ -756,12 +755,12 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
         self.assertEqual(chunks[4]["choices"][0]["finish_reason"], "tool_calls")
 
     def test_no_events_produces_finish_chunk(self):
-        chunks = _response_events_to_chat_stream_chunks([])
+        chunks = response_events_to_chat_stream_chunks([])
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["choices"][0]["finish_reason"], "stop")
 
-    def test_events_to_responses_body_preserves_completed_usage(self):
-        body = _events_to_responses_body([
+    def testevents_to_responses_body_preserves_completed_usage(self):
+        body = events_to_responses_body([
             {"type": "response.created", "response": {"id": "resp_usage", "model": "gpt-5.5"}},
             {"type": "response.output_text.delta", "delta": "hello"},
             {
@@ -788,7 +787,7 @@ class ResponseEventsToChatStreamTests(unittest.TestCase):
 
 class UsageNormalizationTests(unittest.TestCase):
     def test_normalizes_responses_usage_shape_for_events(self):
-        fields = _normalize_usage_for_event({
+        fields = normalize_usage_for_event({
             "input_tokens": 20,
             "input_tokens_details": {"cached_tokens": 8},
             "output_tokens": 4,
@@ -804,7 +803,7 @@ class UsageNormalizationTests(unittest.TestCase):
         self.assertEqual(fields["usage_total_tokens"], 24)
 
     def test_normalizes_chat_usage_shape_for_events(self):
-        fields = _normalize_usage_for_event({
+        fields = normalize_usage_for_event({
             "prompt_tokens": 11,
             "prompt_tokens_details": {"cached_tokens": 5},
             "completion_tokens": 7,
@@ -818,7 +817,7 @@ class UsageNormalizationTests(unittest.TestCase):
         self.assertEqual(fields["usage_reasoning_tokens"], 2)
 
     def test_missing_usage_records_reason_without_estimate(self):
-        fields = _normalize_usage_for_event(None)
+        fields = normalize_usage_for_event(None)
 
         self.assertEqual(fields["usage_source"], "missing")
         self.assertEqual(fields["usage_missing_reason"], "upstream_missing_usage")
