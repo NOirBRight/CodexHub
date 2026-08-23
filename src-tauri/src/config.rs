@@ -1181,7 +1181,7 @@ pub(crate) fn find_python() -> Result<PathBuf, String> {
 /// Populate the isolated `repo` directory of `paths` with the production
 /// Codex overlay resources so `apply_codex_config_isolated` can invoke the
 /// real `config_overlay.py` (and its `src-python` siblings) without host
-/// discovery. Copies `src-python/*.py`, the `tool_compatibility` package, and
+/// discovery. Copies `src-python/*.py`, the `tool_compatibility` and `gateway_compat` packages, and
 /// the bundled `config/providers.toml` referenced by
 /// `providers_config.DEFAULT_PROVIDERS_PATH`. This mirrors the existing
 /// `copy_python_sources_to_temp_repo` test helper but is production-safe and
@@ -1206,29 +1206,31 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
                 })?;
             }
         }
-        let package_source = src_python_source.join("tool_compatibility");
-        if package_source.is_dir() {
-            let package_target = src_python_target.join("tool_compatibility");
-            fs::create_dir_all(&package_target).map_err(|error| {
-                format!("failed to create isolated tool_compatibility package: {error}")
-            })?;
-            for entry in fs::read_dir(&package_source).map_err(|error| {
-                format!("failed to read production tool_compatibility package: {error}")
-            })? {
-                let entry = entry.map_err(|error| {
-                    format!("failed to read tool_compatibility entry: {error}")
+        for package_name in ["tool_compatibility", "gateway_compat"] {
+            let package_source = src_python_source.join(package_name);
+            if package_source.is_dir() {
+                let package_target = src_python_target.join(package_name);
+                fs::create_dir_all(&package_target).map_err(|error| {
+                    format!("failed to create isolated {package_name} package: {error}")
                 })?;
-                let path = entry.path();
-                if path.extension().and_then(|value| value.to_str()) == Some("py") {
-                    let name = path
-                        .file_name()
-                        .ok_or_else(|| "tool_compatibility entry has no file name".to_string())?;
-                    fs::copy(&path, package_target.join(name)).map_err(|error| {
-                        format!(
-                            "failed to copy production tool_compatibility module {}: {error}",
-                            path.display()
-                        )
+                for entry in fs::read_dir(&package_source).map_err(|error| {
+                    format!("failed to read production {package_name} package: {error}")
+                })? {
+                    let entry = entry.map_err(|error| {
+                        format!("failed to read {package_name} entry: {error}")
                     })?;
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) == Some("py") {
+                        let name = path.file_name().ok_or_else(|| {
+                            format!("{package_name} entry has no file name")
+                        })?;
+                        fs::copy(&path, package_target.join(name)).map_err(|error| {
+                            format!(
+                                "failed to copy production {package_name} module {}: {error}",
+                                path.display()
+                            )
+                        })?;
+                    }
                 }
             }
         }
@@ -3142,6 +3144,16 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
                 compatibility_init.is_file(),
                 "tool_compatibility package must be copied: {}",
                 compatibility_init.display()
+            );
+            let gateway_compat_init = paths
+                .repo_root
+                .join("src-python")
+                .join("gateway_compat")
+                .join("__init__.py");
+            assert!(
+                gateway_compat_init.is_file(),
+                "gateway_compat package must be copied: {}",
+                gateway_compat_init.display()
             );
             // The bundled providers.toml referenced by providers_config must
             // exist beneath the isolated repo so no host config/ discovery

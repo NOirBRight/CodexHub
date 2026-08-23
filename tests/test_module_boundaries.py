@@ -186,6 +186,20 @@ def test_gateway_runtime_and_admission_do_not_import_the_facade() -> None:
         assert "from codex_proxy" not in source
 
 
+def test_gateway_compat_does_not_import_the_facade() -> None:
+    package = Path(__file__).resolve().parents[1] / "src-python" / "gateway_compat"
+    for path in sorted(package.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        assert "import codex_proxy" not in source
+        assert "from codex_proxy" not in source
+        assert "import gateway_runtime" not in source
+        assert "from gateway_runtime" not in source
+        assert "BaseHTTPRequestHandler" not in source
+        assert "CodexProxyHandler" not in source
+        line_count = source.count("\n") + (0 if source.endswith("\n") else 1)
+        assert line_count < 2000, f"{path.name} is {line_count} lines"
+
+
 def test_gateway_events_does_not_import_the_facade() -> None:
     import gateway_events
 

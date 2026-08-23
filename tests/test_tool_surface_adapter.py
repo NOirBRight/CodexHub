@@ -297,7 +297,11 @@ def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
         seen.append(event_context)
         return input_items, set(), False
 
-    monkeypatch.setattr(codex_proxy, "_adapt_apply_patch_custom_tool_history", adapt)
+    monkeypatch.setattr(
+        __import__("gateway_compat.response", fromlist=["_adapt_apply_patch_custom_tool_history"]),
+        "_adapt_apply_patch_custom_tool_history",
+        adapt,
+    )
     payload = {
         "input": [
             {

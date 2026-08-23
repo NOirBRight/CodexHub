@@ -9,6 +9,8 @@ import pytest
 import codex_proxy
 import gateway_events
 import route_primitives
+from gateway_compat import multi_agent as gateway_compat_multi_agent
+from gateway_compat import official_passthrough as gateway_compat_official
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
 
@@ -793,10 +795,10 @@ Execution constraints:
     with monkeypatch.context() as patches:
         # Keep both declarations on the synthetic surface so the required-tool
         # restriction itself (rather than coordinator filtering) is exercised.
-        patches.setattr(codex_proxy, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
-        patches.setattr(codex_proxy, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
+        patches.setattr(gateway_compat_multi_agent, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
+        patches.setattr(gateway_compat_official, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
         patches.setattr(
-            codex_proxy,
+            gateway_compat_official,
             "_runtime_alias_for_namespace_child",
             lambda *args, **kwargs: "__codexhub_ns_generated_1",
         )
@@ -1120,7 +1122,7 @@ def test_gateway_rejects_foreign_collaboration_history_before_planning(
     }
 
     context: dict = {}
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
             codex_proxy.compatible_request_body(
                 json.dumps(body).encode("utf-8"),
