@@ -6,10 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-import codex_proxy
+import gateway_events
 import route_primitives
+from gateway_compat import multi_agent as gateway_compat_multi_agent
+from gateway_compat import official_passthrough as gateway_compat_official
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
+import collaboration_adapter
+import gateway_compat
+import gateway_errors
 
 
 def _external_chat_upstream() -> dict:
@@ -80,7 +85,7 @@ def _decoded_sse(line: bytes) -> dict:
 def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     )
@@ -99,7 +104,7 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
     context: dict = {"request_id": "req-private"}
 
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(tools),
             _external_chat_upstream(),
             event_context=context,
@@ -137,7 +142,7 @@ def test_dsh_shaped_overlapping_tools_without_tool_choice_reach_provider_route()
     ).encode("utf-8")
 
     transformed = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             body,
             _external_chat_upstream(),
             event_context=context,
@@ -166,7 +171,7 @@ def test_ordinary_request_version_metadata_does_not_enter_collaboration_boundary
     ).encode("utf-8")
 
     transformed = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             body,
             _external_chat_upstream(),
             event_context=context,
@@ -183,15 +188,15 @@ def test_attempted_collaboration_namespace_without_tool_choice_still_fails_close
     body = json.loads(_request([_collaboration_namespace(COLLABORATION_V2)]))
     body.pop("tool_choice")
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode("utf-8"),
             _external_responses_upstream(),
             event_context={},
             inject_codex_tools=False,
         )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_runtime_plan_aliases_are_deterministic_for_identical_external_request():
@@ -209,13 +214,13 @@ def test_runtime_plan_aliases_are_deterministic_for_identical_external_request()
     request["prompt_cache_key"] = "stable-runtime-tool-prefix"
     body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
-    first = codex_proxy.compatible_request_body(
+    first = gateway_compat.compatible_request_body(
         body,
         _external_chat_upstream(),
         event_context={},
         inject_codex_tools=False,
     )
-    second = codex_proxy.compatible_request_body(
+    second = gateway_compat.compatible_request_body(
         body,
         _external_chat_upstream(),
         event_context={},
@@ -253,19 +258,19 @@ def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
     context: dict = {}
     upstream = _external_chat_upstream()
     with patch.object(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     ):
         encoded = json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 _request(tools), upstream, event_context=context, inject_codex_tools=False
             )
         )
         plan = context["_runtime_tool_compatibility_plan"]
         alias = plan.aliases[0]
         decoded = json.loads(
-            codex_proxy.compatible_response_body(
+            gateway_compat.compatible_response_body(
                 json.dumps(
                     {
                         "output": [
@@ -309,7 +314,7 @@ def test_v2_default_role_namespace_adapter_removes_encrypted_provider_schema_fla
     context: dict = {}
 
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request([declaration]),
             _external_responses_upstream(),
             event_context=context,
@@ -340,7 +345,7 @@ def test_runtime_plan_aliases_do_not_change_with_tool_choice_policy():
     def encoded(tool_choice) -> dict:
         request = json.loads(_request(tools, tool_choice=tool_choice))
         return json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 json.dumps(request).encode("utf-8"),
                 _external_chat_upstream(),
                 event_context={},
@@ -390,19 +395,19 @@ def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
     changed_capabilities = copy.deepcopy(first_upstream)
     changed_capabilities["tool_protocol_capabilities"]["max_alias_attempts"] = 127
 
-    first = codex_proxy.compatible_request_body(
+    first = gateway_compat.compatible_request_body(
         body,
         first_upstream,
         event_context={},
         inject_codex_tools=False,
     )
-    equivalent = codex_proxy.compatible_request_body(
+    equivalent = gateway_compat.compatible_request_body(
         body,
         equivalent_upstream,
         event_context={},
         inject_codex_tools=False,
     )
-    changed = codex_proxy.compatible_request_body(
+    changed = gateway_compat.compatible_request_body(
         body,
         changed_capabilities,
         event_context={},
@@ -431,7 +436,7 @@ def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
         context: dict = {}
         upstream = {**_external_chat_upstream(), "tool_surface_strategy": strategy}
         payload = json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 _request(tools),
                 upstream,
                 event_context=context,
@@ -490,13 +495,13 @@ def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespace
     first_context: dict = {}
     second_context: dict = {}
 
-    first = codex_proxy.compatible_request_body(
+    first = gateway_compat.compatible_request_body(
         body,
         {"name": "official"},
         event_context=first_context,
         behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     )
-    second = codex_proxy.compatible_request_body(
+    second = gateway_compat.compatible_request_body(
         body,
         {"name": "official"},
         event_context=second_context,
@@ -513,8 +518,8 @@ def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespace
 
 
 def test_required_unsupported_hosted_tool_fails_before_request_is_returned():
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             _request(
                 [{"type": "web_search"}],
                 tool_choice={"type": "web_search"},
@@ -531,7 +536,7 @@ def test_required_unsupported_hosted_tool_fails_before_request_is_returned():
 def test_response_body_uses_the_request_plan_for_exact_namespace_and_custom_inverse():
     context: dict = {}
     request_payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(
                 [
                     {
@@ -571,7 +576,7 @@ def test_response_body_uses_the_request_plan_for_exact_namespace_and_custom_inve
     }
 
     decoded = json.loads(
-        codex_proxy.compatible_response_body(
+        gateway_compat.compatible_response_body(
             json.dumps(upstream_response).encode("utf-8"),
             "custom_endpoint",
             context,
@@ -590,7 +595,7 @@ def test_response_body_uses_the_request_plan_for_exact_namespace_and_custom_inve
 def test_sse_inverse_uses_the_same_request_plan_and_rejects_unknown_alias():
     context: dict = {}
     request_payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(
                 [
                     {
@@ -617,7 +622,7 @@ def test_sse_inverse_uses_the_same_request_plan_and_rejects_unknown_alias():
         },
     }
     mapped = _decoded_sse(
-        codex_proxy.compatible_sse_line(
+        gateway_compat.compatible_sse_line(
             b"data: " + json.dumps(added).encode("utf-8") + b"\n",
             "custom_endpoint",
             context,
@@ -635,8 +640,8 @@ def test_sse_inverse_uses_the_same_request_plan_and_rejects_unknown_alias():
             "item_id": "other-item",
         },
     }
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-        codex_proxy.compatible_sse_line(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+        gateway_compat.compatible_sse_line(
             b"data: " + json.dumps(unknown).encode("utf-8") + b"\n",
             "custom_endpoint",
             context,
@@ -646,7 +651,7 @@ def test_sse_inverse_uses_the_same_request_plan_and_rejects_unknown_alias():
 def _runtime_attempt_context() -> tuple[dict, str]:
     context: dict = {}
     request_payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(
                 [{
                     "type": "namespace",
@@ -663,7 +668,7 @@ def _runtime_attempt_context() -> tuple[dict, str]:
 
 
 def _send_runtime_sse_event(context: dict, event: dict) -> bytes:
-    return codex_proxy.compatible_sse_line(
+    return gateway_compat.compatible_sse_line(
         b"data: " + json.dumps(event).encode("utf-8") + b"\n",
         "custom_endpoint",
         event_context=context,
@@ -777,7 +782,7 @@ def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_strea
 def test_required_tool_restriction_diagnostics_keep_generated_aliases_private(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     )
@@ -792,14 +797,14 @@ Execution constraints:
     with monkeypatch.context() as patches:
         # Keep both declarations on the synthetic surface so the required-tool
         # restriction itself (rather than coordinator filtering) is exercised.
-        patches.setattr(codex_proxy, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
-        patches.setattr(codex_proxy, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
+        patches.setattr(gateway_compat_multi_agent, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
+        patches.setattr(gateway_compat_official, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
         patches.setattr(
-            codex_proxy,
+            gateway_compat_official,
             "_runtime_alias_for_namespace_child",
             lambda *args, **kwargs: "__codexhub_ns_generated_1",
         )
-        transformed = codex_proxy.compatible_request_body(
+        transformed = gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "model": "custom-model",
@@ -847,7 +852,7 @@ def test_changing_only_model_slug_does_not_change_compatibility_dispositions():
     ]
     contexts = [{}, {}]
     for model, context in zip(("model-a", "model-b"), contexts, strict=True):
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(tools, model=model),
             _external_chat_upstream(),
             event_context=context,
@@ -874,7 +879,7 @@ def test_explicit_selected_provider_hosted_capability_preserves_native_declarati
     }
 
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request([{"type": "web_search", "search_context_size": "low"}]),
             upstream,
             event_context=context,
@@ -889,7 +894,7 @@ def test_explicit_selected_provider_hosted_capability_preserves_native_declarati
 def test_custom_sse_is_not_forwarded_until_the_complete_envelope_is_valid():
     context: dict = {}
     request_payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request([{"type": "custom", "name": "editor", "format": {"type": "text"}}]),
             _external_chat_upstream(),
             event_context=context,
@@ -899,7 +904,7 @@ def test_custom_sse_is_not_forwarded_until_the_complete_envelope_is_valid():
     alias = request_payload["tools"][0]["name"]
 
     def send(event: dict) -> bytes:
-        return codex_proxy.compatible_sse_line(
+        return gateway_compat.compatible_sse_line(
             b"data: " + json.dumps(event).encode("utf-8") + b"\n\n",
             "custom_endpoint",
             context,
@@ -981,7 +986,7 @@ def test_collaboration_v2_is_adapted_without_v1_injection_or_repair():
     ]
 
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "model": "custom-model",
@@ -1027,7 +1032,7 @@ def test_collaboration_v2_interrupt_error_replay_accepts_plain_text_history():
     ]
 
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "model": "custom-model",
@@ -1048,7 +1053,7 @@ def test_collaboration_v2_interrupt_error_replay_accepts_plain_text_history():
 def test_collaboration_v2_provider_wire_drops_encrypted_schema_extension():
     context: dict = {}
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request([_collaboration_namespace(COLLABORATION_V2)]),
             _external_responses_upstream(),
             event_context=context,
@@ -1119,16 +1124,16 @@ def test_gateway_rejects_foreign_collaboration_history_before_planning(
     }
 
     context: dict = {}
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-            codex_proxy.compatible_request_body(
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+            gateway_compat.compatible_request_body(
                 json.dumps(body).encode("utf-8"),
                 _external_responses_upstream(),
                 event_context=context,
                 inject_codex_tools=False,
             )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
     prepare.assert_not_called()
 
 
@@ -1156,7 +1161,7 @@ def _responses_structural_tools() -> list[dict]:
 def test_responses_structured_without_explicit_facts_uses_conservative_tool_defaults():
     context: dict = {}
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(_responses_structural_tools()),
             _external_responses_upstream(),
             event_context=context,
@@ -1185,7 +1190,7 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
     }
     tools = _responses_structural_tools()
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request(tools),
             upstream,
             event_context=context,
@@ -1209,9 +1214,9 @@ def test_deferred_core_v1_telemetry_uses_removed_surface_without_request_context
         ],
     }
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_proxy_event:
         payload = json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 _request([collaboration, vendor]),
                 {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
             )
@@ -1240,9 +1245,9 @@ def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_names
     }
     context: dict = {}
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_proxy_event:
         payload = json.loads(
-            codex_proxy.compatible_request_body(
+            gateway_compat.compatible_request_body(
                 _request([collaboration, vendor]),
                 {**_external_responses_upstream(), "tool_surface_strategy": "deferred_core"},
                 event_context=context,
@@ -1278,7 +1283,7 @@ def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required
     }
     context: dict = {}
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             _request([{"type": "function", "name": "plain"}]),
             upstream,
             event_context=context,
@@ -1288,8 +1293,8 @@ def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required
     assert payload["tools"] == []
     assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "omit"
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             _request(
                 [{"type": "function", "name": "plain"}],
                 tool_choice={"type": "function", "name": "plain"},
@@ -1318,8 +1323,8 @@ def test_malformed_tool_protocol_capabilities_are_bounded_translation_errors(fac
         **_external_chat_upstream(),
         "tool_protocol_capabilities": facts,
     }
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             _request([{"type": "function", "name": "plain"}]),
             upstream,
             event_context={},
@@ -1332,8 +1337,8 @@ def test_malformed_tool_protocol_capabilities_are_bounded_translation_errors(fac
 
 def test_named_namespace_choice_requires_exact_child_identity():
     upstream = _external_chat_upstream()
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             _request(
                 [{
                     "type": "namespace",
@@ -1357,7 +1362,7 @@ def test_text_compat_does_not_expose_injected_codex_functions():
         }
     ).encode("utf-8")
     payload = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             body,
             {
                 "name": "ollama_cloud",

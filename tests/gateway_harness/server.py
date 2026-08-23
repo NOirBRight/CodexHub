@@ -10,7 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Iterator
 from unittest.mock import patch
 
+import codex_auth
+import codex_auth
 import codex_proxy
+import gateway_admission
+import gateway_catalog_runtime
+import gateway_errors
+import gateway_settings
 import gateway_transport
 
 GATEWAY_CLIENT_KEY = "characterization-client-key"
@@ -130,32 +136,31 @@ class GatewayHarness:
         stub_server.stub = stub  # type: ignore[attr-defined]
         self.stub = stub
 
-        self._stack.enter_context(patch("codex_proxy.getproxies", return_value={"no": "localhost,127.0.0.1"}))
-        self._stack.enter_context(patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}))
+        self._stack.enter_context(patch("gateway_transport.getproxies", return_value={"no": "localhost,127.0.0.1"}))
         self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
-        self._stack.enter_context(patch.object(codex_proxy, "gateway_client_key", return_value=GATEWAY_CLIENT_KEY))
-        self._stack.enter_context(patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"))
-        self._stack.enter_context(patch.object(codex_proxy, "codex_account_id", return_value="synthetic-account-id"))
-        self._stack.enter_context(patch.object(codex_proxy, "gateway_auto_retry_enabled", return_value=False))
-        self._stack.enter_context(patch("gateway_settings.gateway_auto_retry_enabled", return_value=False))
-        self._stack.enter_context(patch.object(codex_proxy, "transport_sse_idle_timeout_seconds", return_value=2.0))
+        self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
+        self._stack.enter_context(patch.object(gateway_settings, "gateway_client_key", return_value=GATEWAY_CLIENT_KEY))
+        self._stack.enter_context(patch.object(codex_auth, "access_token", return_value="synthetic-official-token"))
+        self._stack.enter_context(patch.object(codex_auth, "account_id", return_value="synthetic-account-id"))
+        self._stack.enter_context(patch.object(gateway_settings, "gateway_auto_retry_enabled", return_value=False))
+        self._stack.enter_context(patch.object(gateway_settings, "transport_sse_idle_timeout_seconds", return_value=2.0))
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 side_effect=self._choose_upstream,
             )
         )
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "official_upstream",
                 side_effect=self._official_upstream,
             )
         )
         self._stack.enter_context(
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "current_catalog_data",
                 return_value={
                     "models": [
@@ -174,7 +179,7 @@ class GatewayHarness:
         )
 
         gateway = self._stack.enter_context(_serve(codex_proxy.CodexProxyHandler))
-        gateway.gateway_shutdown_controller = codex_proxy.GatewayShutdownController()  # type: ignore[attr-defined]
+        gateway.gateway_shutdown_controller = gateway_admission.GatewayShutdownController()  # type: ignore[attr-defined]
         self.gateway = gateway
         return self
 
@@ -223,7 +228,7 @@ class GatewayHarness:
                 "supported_reasoning_levels": (),
                 "input_modalities": ("text",),
             }
-        raise codex_proxy.ModelIdentityResolutionError(
+        raise gateway_errors.ModelIdentityResolutionError(
             f"model is not in the characterization catalog: {slug}",
             classification="local_resolution_failure",
             reason="unsupported_model",

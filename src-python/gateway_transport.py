@@ -49,11 +49,15 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 import urllib3
 
 from catalog import canonical_model_id
+import gateway_admission
+import gateway_events
+from gateway_admission import sleep_for_retry_with_gateway_cancellation
 from gateway_errors import (
     CompactEmptyResponseError,
     GatewayPreResponseBudgetExhausted,
     UpstreamStreamIdleTimeoutError,
     UpstreamStreamIncompleteError,
+    safe_upstream_error_detail,
 )
 from gateway_settings import (
     _request_kind_retry_attempts_configured,
@@ -81,7 +85,11 @@ from route_primitives import (
     RETRY_FAILURE_QUICK_TRANSIENT,
     RETRY_GATEWAY_FULL,
     RETRY_REQUEST_MAIN_GENERATION,
+    RETRY_SAFETY_GUARANTEED_IDEMPOTENT,
     RETRY_SAFETY_SAFE_PREWRITE,
+    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+    RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+    RETRY_SAFETY_UNKNOWN,
     TRANSIENT_HTTP_RETRY_STATUSES,
     AuthenticationStrategy,
     MutationPolicy,
@@ -1350,28 +1358,6 @@ def build_upstream_headers(
     return outgoing
 
 
-def upstream_headers(
-    incoming_headers: Mapping[str, str] | Any,
-    upstream: Mapping[str, Any],
-    drop_content_encoding: bool = False,
-    behavior_profile: str | None = None,
-    model_id: str | None = None,
-    authentication_strategy: AuthenticationStrategy | None = None,
-    request_mutation_policy: MutationPolicy | None = None,
-    operational_authentication: OperationalAuthentication | None = None,
-) -> dict[str, str]:
-    return build_upstream_headers(
-        incoming_headers,
-        upstream,
-        drop_content_encoding=drop_content_encoding,
-        behavior_profile=behavior_profile,
-        model_id=model_id,
-        authentication_strategy=authentication_strategy,
-        request_mutation_policy=request_mutation_policy,
-        operational_authentication=operational_authentication,
-    )
-
-
 def _redact_error_detail(exc: BaseException) -> str:
     reason = getattr(exc, "reason", None)
     source = reason if reason is not None else exc
@@ -2042,7 +2028,7 @@ def _open_upstream_response(
                     )
                 ):
                     raise transport.facts.downstream_closed_before_retry_error("downstream closed before upstream retry")
-            (transport.sleep or time.sleep)(delay_seconds)
+            (transport.sleep or sleep_for_retry_with_gateway_cancellation)(delay_seconds)
             attempt += 1
 
 
@@ -2246,3 +2232,468 @@ class UpstreamSseReaderLifecycle:
 
 
 _UpstreamSseReaderLifecycle = UpstreamSseReaderLifecycle
+
+
+# ---------------------------------------------------------------------------
+# Retry-safety orchestration for non-Official main-generation POSTs.
+# ---------------------------------------------------------------------------
+
+
+def _retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str | None:
+    """Return the private stable retry identity if one exists in the context."""
+    if event_context is None:
+        return None
+    identity = event_context.get("_retry_attempt_identity")
+    return identity if isinstance(identity, str) and identity else None
+
+
+def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
+    """Phase label used for the request-scoped retry-safety decision.
+
+    This function is conservative: it returns a pre-write phase only when the
+    exception itself is a structurally unambiguous instance of that phase.
+    Generic TimeoutError, SSLError, OSError, and URLError are ambiguous (they
+    can occur during connect, request write, or body read) and therefore return
+    ``None`` so the caller-supplied ``failure_phase`` or the ``unknown`` safety
+    class is used.  Only specifically inspected exception types carry
+    authoritative phase evidence: socket.gaierror (DNS), ConnectionRefusedError
+    (TCP connect), and ssl.SSLCertVerificationError (TLS handshake).  Text
+    needles in OS-level error messages are never treated as proof because the
+    same message can occur after the request has been written.
+    """
+    if exc is None:
+        return None
+    explicit_phase = _explicit_transport_phase(exc)
+    if explicit_phase is not None:
+        return explicit_phase
+    if isinstance(exc, (UpstreamStreamIncompleteError, _STREAM_ERROR_EVENT)):
+        return "stream_body"
+    if isinstance(exc, HTTPError):
+        return "response_headers"
+    if isinstance(exc, IncompleteRead):
+        return "response_headers"
+    if isinstance(exc, socket.gaierror):
+        return "dns"
+    if isinstance(exc, ConnectionRefusedError):
+        return "tcp_connect"
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return "tls_handshake"
+    if isinstance(exc, URLError):
+        nested = _retry_safety_failure_phase(exc.reason)
+        if nested is not None:
+            return nested
+    return None
+
+
+def _model_access_path_idempotency_guaranteed(model_access_path: tuple[str, ...]) -> bool:
+    """Return True when the exact Model Access Path carries an explicit guarantee.
+
+    The default allowlist is empty: no non-Official main-generation POST is
+    assumed idempotent unless it is explicitly enrolled here.  This keeps the
+    conservative default while providing a single seam for future guarantees.
+    """
+    return False
+
+
+def _model_access_path_from_event_context(
+    event_context: Mapping[str, Any] | None,
+    upstream_name: str,
+    upstream_format: str,
+) -> tuple[str, ...]:
+    model = ""
+    behavior_profile = ""
+    inbound_format = ""
+    if event_context is not None:
+        try:
+            model = str(event_context.get("model") or "")
+        except Exception:
+            model = ""
+        try:
+            behavior_profile = str(event_context.get("behavior_profile") or "")
+        except Exception:
+            behavior_profile = ""
+        try:
+            inbound_format = str(event_context.get("_caller_wire_format") or "")
+        except Exception:
+            inbound_format = ""
+    return (upstream_name, model, behavior_profile, upstream_format, inbound_format)
+
+
+def _ensure_retry_attempt_identity(
+    event_context: dict[str, Any] | None,
+    request: Request,
+    model_access_path: tuple[str, ...],
+) -> str | None:
+    """Return the stable attempt identity for this logical request.
+
+    The identity is stored in the mutable event context under a private key so
+    it is not emitted by public_event_context.  When the Model Access Path is
+    explicitly idempotent, the identity is attached to the upstream request as
+    an idempotency key; it is never logged, returned to the client, or placed
+    in telemetry payloads.
+    """
+    if event_context is None:
+        return None
+    identity = event_context.get("_retry_attempt_identity")
+    if not isinstance(identity, str):
+        identity = uuid.uuid4().hex
+        event_context["_retry_attempt_identity"] = identity
+    if _model_access_path_idempotency_guaranteed(model_access_path):
+        request.headers["X-CodexHub-Retry-Attempt-Identity"] = identity
+    return identity
+
+
+_SUPPRESSED_RETRY_SAFETY_CLASSES = frozenset({
+    RETRY_SAFETY_SUPPRESSED_POST_WRITE,
+    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
+    RETRY_SAFETY_UNKNOWN,
+})
+
+
+def _retry_safety_class(
+    exc: BaseException,
+    *,
+    request: Request,
+    upstream_name: str,
+    request_kind: str,
+    downstream_exposed: bool,
+    model_access_path: tuple[str, ...],
+    failure_phase: str | None = None,
+) -> str:
+    """Classify whether this failure is safe to retry for a non-Official main-generation POST.
+
+    Official main-generation POSTs and all other request kinds preserve their
+    existing retry behavior and receive no classification here.
+
+    Callers that already know the failure occurred during the response stream
+    may pass ``failure_phase`` to override the exception-based heuristic; this
+    is required to distinguish a connect-time ``TimeoutError`` from a body-read
+    ``TimeoutError``.
+    """
+    if upstream_name == "official" or request_kind != RETRY_REQUEST_MAIN_GENERATION:
+        return RETRY_SAFETY_SAFE_PREWRITE
+    if request.get_method() != "POST":
+        return RETRY_SAFETY_SAFE_PREWRITE
+    if downstream_exposed:
+        return RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+    if _model_access_path_idempotency_guaranteed(model_access_path):
+        return RETRY_SAFETY_GUARANTEED_IDEMPOTENT
+    phase = failure_phase if failure_phase is not None else _retry_safety_failure_phase(exc)
+    if phase in {"dns", "tcp_connect", "tls_handshake"}:
+        return RETRY_SAFETY_SAFE_PREWRITE
+    if phase in {"request_write", "response_headers", "stream_body"}:
+        return RETRY_SAFETY_SUPPRESSED_POST_WRITE
+    return RETRY_SAFETY_UNKNOWN
+
+
+def _emit_upstream_retry_suppressed_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    request_kind: str,
+    attempt: int,
+    max_attempts: int,
+    exc: BaseException,
+    failure_class: str,
+    failure_phase: str | None,
+    retry_safety_class: str,
+) -> None:
+    identity = _retry_identity_from_context(event_context)
+    detail = safe_upstream_error_detail(exc, redact_identity=identity)
+    if isinstance(exc, _STREAM_ERROR_EVENT):
+        detail = "Upstream SSE error event"
+    gateway_events.write_failure_event(
+        event_context,
+        "upstream_retry_suppressed",
+        upstream=upstream_name,
+        provider_id=upstream_name,
+        upstream_format=upstream_format,
+        request_kind=request_kind,
+        retryable=False,
+        failure_class=failure_class,
+        status=_upstream_retry_status(exc),
+        attempt=attempt,
+        max_attempts=max_attempts,
+        delay_ms=0,
+        error=type(exc).__name__,
+        detail=detail,
+        failure_phase=failure_phase or transport_failure_phase(exc),
+        retry_safety_class=retry_safety_class,
+        terminal=False,
+        downstream_output_started=(
+            retry_safety_class == RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+        ),
+        retry_forbidden=True,
+    )
+
+
+def _emit_upstream_retry_event(
+    event_context: Mapping[str, Any] | None,
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    request_kind: str,
+    attempt: int,
+    max_attempts: int,
+    exc: BaseException,
+    delay_seconds: int,
+    failure_class: str | None = None,
+    failure_phase: str | None = None,
+    retry_safety_class: str | None = None,
+) -> None:
+    identity = _retry_identity_from_context(event_context)
+    resolved_failure_class = failure_class or _upstream_failure_class(exc)
+    if isinstance(exc, _STREAM_ERROR_EVENT):
+        detail = "Upstream SSE error event"
+    else:
+        detail = safe_upstream_error_detail(exc, redact_identity=identity)
+    fields: dict[str, Any] = {
+        "upstream": upstream_name,
+        "provider_id": upstream_name,
+        "upstream_format": upstream_format,
+        "request_kind": request_kind,
+        "retryable": True,
+        "failure_class": resolved_failure_class,
+        "status": _upstream_retry_status(exc),
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "delay_ms": delay_seconds * 1000,
+        "error": type(exc).__name__,
+        "detail": detail,
+        "failure_phase": failure_phase or transport_failure_phase(exc),
+    }
+    if retry_safety_class is not None:
+        fields["retry_safety_class"] = retry_safety_class
+    gateway_events.write_failure_event(
+        event_context,
+        "upstream_retry",
+        **fields,
+    )
+
+
+def _downstream_retry_payload(
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    request_kind: str,
+    attempt: int,
+    max_attempts: int,
+    exc: BaseException,
+    delay_seconds: int,
+    failure_class: str | None = None,
+    failure_phase: str | None = None,
+    redact_identity: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "codexhub.retry",
+        "upstream": upstream_name,
+        "upstream_format": upstream_format,
+        "request_kind": request_kind,
+        "failure_class": failure_class or _upstream_failure_class(exc),
+        "status": _upstream_retry_status(exc),
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "delay_ms": delay_seconds * 1000,
+        "error": type(exc).__name__,
+        "detail": safe_upstream_error_detail(exc, redact_identity=redact_identity),
+        "failure_phase": failure_phase or transport_failure_phase(exc),
+    }
+
+
+def _diagnostic_context_value(event_context: Mapping[str, Any] | None, key: str) -> Any:
+    """Read optional diagnostic context without changing a request on failure."""
+
+    if event_context is None:
+        return None
+    try:
+        return event_context.get(key)
+    except Exception:
+        return None
+
+
+def default_gateway_transport() -> GatewayTransport:
+    """Build a request-time transport seam that reads owning-module attributes.
+
+    A new adapter is constructed per request so monkeypatches on the owning
+    modules (codex_auth tokens, gateway_events diagnostics, gateway_settings
+    retry knobs, and this module's retry hooks) stay live.
+    """
+
+    import codex_auth
+    import route_plan
+    import gateway_settings as _settings
+
+    module = sys.modules[__name__]
+    stream_error_event = _STREAM_ERROR_EVENT
+
+    return GatewayTransport(
+        facts=TransportFacts(
+            suppressed_retry_safety_classes=module._SUPPRESSED_RETRY_SAFETY_CLASSES,
+            downstream_closed_before_retry_error=_downstream_closed_before_retry_error(),
+        ),
+        active_request=lambda: gateway_admission.active_gateway_request(),
+        access_token=lambda: codex_auth.access_token(),
+        account_id=lambda: codex_auth.account_id(),
+        diagnostic_recorder=gateway_events.GATEWAY_DIAGNOSTIC_RECORDER,
+        diagnostic_context_value=module._diagnostic_context_value,
+        emit_retry=module._emit_upstream_retry_event,
+        emit_retry_suppressed=module._emit_upstream_retry_suppressed_event,
+        retry_delay_seconds=lambda *args, **kwargs: _settings.gateway_retry_delay_seconds(*args, **kwargs),
+        retry_safety_class=module._retry_safety_class,
+        retry_safety_failure_phase=module._retry_safety_failure_phase,
+        model_access_path=module._model_access_path_from_event_context,
+        model_access_path_idempotent=module._model_access_path_idempotency_guaranteed,
+        ensure_retry_identity=module._ensure_retry_attempt_identity,
+        retry_identity_from_context=module._retry_identity_from_context,
+        downstream_retry_payload=module._downstream_retry_payload,
+        upstream_retry_attempts=lambda kind: _settings._upstream_retry_attempts(kind),
+        endpoint_url_hook=lambda upstream, path: route_plan._upstream_endpoint_url(upstream, path),
+    )
+
+
+def _downstream_closed_before_retry_error() -> type[BaseException]:
+    import gateway_stream_semantics
+
+    return gateway_stream_semantics.DownstreamClosedBeforeRetryError
+
+
+def open_upstream_once(
+    request: Request,
+    *,
+    upstream_name: str,
+    timeout: int | float,
+    transport_policy: TransportPolicy | None = None,
+) -> Any:
+    return default_gateway_transport().open_once(
+        request,
+        upstream_name=upstream_name,
+        timeout=timeout,
+        transport_policy=transport_policy,
+    )
+
+
+def open_upstream_response(
+    request: Request,
+    *,
+    upstream_name: str,
+    upstream_format: str,
+    timeout: int | float,
+    event_context: Mapping[str, Any] | None = None,
+    downstream_retry_callback: Any = None,
+    request_kind: str = RETRY_REQUEST_MAIN_GENERATION,
+    max_attempts: int | None = None,
+    retry_policy: str = RETRY_GATEWAY_FULL,
+    retry_http_errors: bool = True,
+    retry_execution: RetryExecutionPlanLike | None = None,
+    transport_policy: TransportPolicy | None = None,
+    downstream_exposed: Callable[[], bool] | None = None,
+    pre_response_deadline: float | None = None,
+    open_attempt_budget: dict[str, int] | None = None,
+) -> Any:
+    return default_gateway_transport().open_response(
+        request,
+        upstream_name=upstream_name,
+        upstream_format=upstream_format,
+        timeout=timeout,
+        event_context=event_context,
+        downstream_retry_callback=downstream_retry_callback,
+        request_kind=request_kind,
+        max_attempts=max_attempts,
+        retry_policy=retry_policy,
+        retry_http_errors=retry_http_errors,
+        retry_execution=retry_execution,
+        transport_policy=transport_policy,
+        downstream_exposed=downstream_exposed,
+        pre_response_deadline=pre_response_deadline,
+        open_attempt_budget=open_attempt_budget,
+    )
+
+
+def upstream_headers(
+    incoming_headers: Mapping[str, str] | Any,
+    upstream: Mapping[str, Any],
+    drop_content_encoding: bool = False,
+    behavior_profile: str | None = None,
+    model_id: str | None = None,
+    authentication_strategy: AuthenticationStrategy | None = None,
+    request_mutation_policy: MutationPolicy | None = None,
+    operational_authentication: OperationalAuthentication | None = None,
+) -> dict[str, str]:
+    return default_gateway_transport().build_headers(
+        incoming_headers,
+        upstream,
+        drop_content_encoding=drop_content_encoding,
+        behavior_profile=behavior_profile,
+        model_id=model_id,
+        authentication_strategy=authentication_strategy,
+        request_mutation_policy=request_mutation_policy,
+        operational_authentication=operational_authentication,
+    )
+
+
+def bind_route_plan_operational_authentication(
+    plan: Any,
+    incoming_headers: Mapping[str, str] | Any,
+    upstream: Mapping[str, Any],
+    operational_authentication: OperationalAuthentication,
+    *,
+    drop_content_encoding: bool = False,
+) -> Any:
+    """Return a new plan whose attempts freeze one request-scoped auth snapshot."""
+
+    from dataclasses import replace
+
+    from route_primitives import FrozenRequestHeaders
+
+    if not plan.attempts:
+        raise ValueError(
+            "cannot materialize authentication for a route plan without attempts"
+        )
+    primary_attempt = plan.attempts[0]
+    if any(
+        attempt.request_headers.materialized
+        for attempt in plan.attempts
+    ):
+        raise ValueError("route attempt authentication was already materialized")
+    if any(
+        attempt.authentication_strategy
+        != operational_authentication.strategy
+        or attempt.request_mutation_policy
+        != primary_attempt.request_mutation_policy
+        for attempt in plan.attempts
+    ):
+        raise ValueError(
+            "route attempts do not share one authentication/header policy"
+        )
+    request_headers = FrozenRequestHeaders(
+        upstream_headers(
+            incoming_headers,
+            upstream,
+            drop_content_encoding=drop_content_encoding,
+            model_id=plan.canonical_model or plan.model_requested,
+            authentication_strategy=primary_attempt.authentication_strategy,
+            request_mutation_policy=primary_attempt.request_mutation_policy,
+            operational_authentication=operational_authentication,
+        ),
+        materialized=True,
+    )
+    return replace(
+        plan,
+        attempts=tuple(
+            replace(attempt, request_headers=request_headers)
+            for attempt in plan.attempts
+        ),
+    )
+
+
+# Public aliases matching the former facade surface.
+OfficialHTTPSConnection = _OfficialHTTPSConnection
+OfficialHTTPSConnectionPool = _OfficialHTTPSConnectionPool
+OfficialPooledResponse = _OfficialPooledResponse
+TRANSPORT_PHASE_ATTRIBUTE = _TRANSPORT_PHASE_ATTRIBUTE
+explicit_transport_phase = _explicit_transport_phase
+connection_disposition = _connection_disposition
+set_official_attempt_connection_disposition = _set_official_attempt_connection_disposition
+diagnostic_connection_disposition = _diagnostic_connection_disposition_value
+diagnostic_error_connection_disposition = _diagnostic_error_connection_disposition_value

@@ -176,11 +176,70 @@ def test_invalid_codec_still_raises_when_planning_event_sink_is_none(
     assert "native_responses_tool_codec_rejected" in caplog.text
 
 
-def test_gateway_runtime_and_admission_do_not_import_the_facade() -> None:
+def test_gateway_runtime_is_deleted_and_admission_does_not_import_the_facade() -> None:
     import gateway_admission
 
     runtime_source = Path(__file__).resolve().parents[1] / "src-python" / "gateway_runtime.py"
+    assert not runtime_source.exists(), "gateway_runtime.py must stay deleted (#465)"
     admission_source = Path(gateway_admission.__file__).read_text(encoding="utf-8")
-    for source in (runtime_source.read_text(encoding="utf-8"), admission_source):
+    assert "import codex_proxy" not in admission_source
+    assert "from codex_proxy" not in admission_source
+
+
+def test_gateway_compat_does_not_import_the_facade() -> None:
+    package = Path(__file__).resolve().parents[1] / "src-python" / "gateway_compat"
+    for path in sorted(package.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
         assert "import codex_proxy" not in source
         assert "from codex_proxy" not in source
+        assert "import gateway_runtime" not in source
+        assert "from gateway_runtime" not in source
+        assert "BaseHTTPRequestHandler" not in source
+        assert "CodexProxyHandler" not in source
+        line_count = source.count("\n") + (0 if source.endswith("\n") else 1)
+        assert line_count < 2000, f"{path.name} is {line_count} lines"
+
+
+def test_gateway_events_does_not_import_the_facade() -> None:
+    import gateway_events
+
+    source = Path(gateway_events.__file__).read_text(encoding="utf-8")
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "import gateway_runtime" not in source
+    assert "from gateway_runtime" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "CodexProxyHandler" not in source
+
+
+def test_gateway_stream_semantics_does_not_import_the_facade() -> None:
+    import gateway_stream_semantics
+    import gateway_sse
+
+    stream_source = Path(gateway_stream_semantics.__file__).read_text(encoding="utf-8")
+    sse_source = Path(gateway_sse.__file__).read_text(encoding="utf-8")
+    for source in (stream_source, sse_source):
+        assert "import codex_proxy" not in source
+        assert "from codex_proxy" not in source
+        assert "import gateway_runtime" not in source
+        assert "from gateway_runtime" not in source
+        assert "BaseHTTPRequestHandler" not in source
+        assert "CodexProxyHandler" not in source
+    stream_lines = stream_source.count("\n") + (0 if stream_source.endswith("\n") else 1)
+    sse_lines = sse_source.count("\n") + (0 if sse_source.endswith("\n") else 1)
+    assert stream_lines < 3000, f"gateway_stream_semantics.py is {stream_lines} lines"
+    assert sse_lines < 3000, f"gateway_sse.py is {sse_lines} lines"
+    assert "class UpstreamSseSemanticError" in stream_source
+    assert "def _chat_stream_chunks_have_terminal" in stream_source
+
+
+def test_gateway_relay_passthrough_does_not_import_the_facade() -> None:
+    import gateway_relay_passthrough
+
+    source = Path(gateway_relay_passthrough.__file__).read_text(encoding="utf-8")
+    assert "import codex_proxy" not in source
+    assert "from codex_proxy" not in source
+    assert "import gateway_runtime" not in source
+    assert "from gateway_runtime" not in source
+    assert "BaseHTTPRequestHandler" not in source
+    assert "CodexProxyHandler" not in source

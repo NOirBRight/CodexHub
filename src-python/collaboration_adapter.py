@@ -41,6 +41,7 @@ from codex_semantic_adapter import (
 from gateway_errors import UpstreamProtocolTranslationError
 from route_primitives import WORKER_REQUESTED_BINDING_FIELD
 from protocol_translation import UnsupportedProtocolTranslationError
+import gateway_settings
 import worker_binding_signing
 
 
@@ -1125,3 +1126,18 @@ class CollaborationAdapter:
                 classification="missing_readback",
             )
         return changed
+
+
+WORKER_BINDING_SIGNING_ROOT = gateway_settings._runtime_proxy_dir()
+
+
+def collaboration_adapter() -> CollaborationAdapter:
+    """Build a request-time adapter so emit and signing-root patches stay live."""
+    import gateway_events
+
+    signing_root = WORKER_BINDING_SIGNING_ROOT
+    return CollaborationAdapter(
+        facts=CollaborationFacts(signing_root=signing_root),
+        emit=gateway_events.write_proxy_event,
+        signer=PathBindingSigner(signing_root),
+    )

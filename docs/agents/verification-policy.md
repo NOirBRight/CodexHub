@@ -49,7 +49,10 @@ helpers. They must not import or invoke private members of
 `CodexProxyHandler` or other underscore-private internals of `codex_proxy`.
 `tests/test_seam_discipline.py` enforces that `tests/` has no
 `codex_proxy._*` or `CodexProxyHandler.__new__` / `CodexProxyHandler._`
-references. Do not add new private-method tests.
+references, and that tests do not `patch("codex_proxy.` or
+`monkeypatch.setattr(codex_proxy`. Patch the owning module instead.
+`tests/test_entry_discipline.py` pins the thin Gateway entry (no `exec`,
+no `gateway_runtime.py`, line budgets). Do not add new private-method tests.
 
 ## Manual and runtime evidence
 

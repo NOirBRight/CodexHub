@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 import apply_patch_adapter
+import gateway_compat
 import gateway_errors
+import gateway_events
 from apply_patch_adapter import (
     APPLY_PATCH_ADAPTER_ERROR_CODE,
     APPLY_PATCH_ADAPTER_EVENT,
@@ -237,15 +239,15 @@ def test_disabled_context_is_passthrough():
 
 
 def test_facade_wrappers_use_live_write_event(monkeypatch):
-    import codex_proxy
+    import gateway_stream_semantics
 
     seen = []
 
     def write_event(event_context, event, **fields):
         seen.append((event, fields, event_context))
 
-    monkeypatch.setattr(codex_proxy, "_write_adapter_event", write_event)
-    payload, changed = codex_proxy.adapt_third_party_apply_patch_response_body(
+    monkeypatch.setattr(gateway_events, "write_adapter_event", write_event)
+    payload, changed = gateway_compat.adapt_third_party_apply_patch_response_body(
         {"output": [_function_call()]},
         {"request_id": "live-write"},
     )
@@ -258,11 +260,15 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
             {"request_id": "live-write"},
         )
     ]
-    live_adapter = codex_proxy.apply_patch_adapter()
+    live_adapter = apply_patch_adapter.apply_patch_adapter()
     assert live_adapter.write_event is write_event
 
-    monkeypatch.setattr(codex_proxy, "RESPONSES_TERMINAL_EVENT_TYPES", {"response.custom_terminal"})
-    terminal_adapter = codex_proxy.apply_patch_adapter()
+    monkeypatch.setattr(
+        gateway_stream_semantics,
+        "RESPONSES_TERMINAL_EVENT_TYPES",
+        {"response.custom_terminal"},
+    )
+    terminal_adapter = apply_patch_adapter.apply_patch_adapter()
     assert terminal_adapter.facts.terminal_event_types == frozenset({"response.custom_terminal"})
     events, changed = terminal_adapter.adapt_stream_events([{"type": "response.custom_terminal"}])
     assert events == [{"type": "response.custom_terminal"}]

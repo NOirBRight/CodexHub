@@ -19,6 +19,7 @@ from collaboration_adapter import (
     PathBindingSigner,
 )
 from codex_semantic_adapter import COLLABORATION_V2
+import gateway_compat
 
 
 FORBIDDEN_SOURCE_MARKERS = (
@@ -271,17 +272,17 @@ def test_stream_ledger_rejects_malformed_selector_before_sidecar(tmp_path):
 
 
 def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
-    import codex_proxy
+    import gateway_events
 
     seen = []
 
     def emit(event, **fields):
         seen.append((event, fields))
 
-    monkeypatch.setattr(codex_proxy, "write_proxy_event", emit)
-    monkeypatch.setattr(codex_proxy, "WORKER_BINDING_SIGNING_ROOT", tmp_path)
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-        codex_proxy.resolve_collaboration_boundary(
+    monkeypatch.setattr(gateway_events, "write_proxy_event", emit)
+    monkeypatch.setattr(collaboration_adapter, "WORKER_BINDING_SIGNING_ROOT", tmp_path)
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+        gateway_compat.resolve_collaboration_boundary(
             {
                 "input": [
                     _spawn_call(arguments={"message": "one", "fork_context": True}),
@@ -299,5 +300,5 @@ def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
     assert seen == [
         ("collaboration_boundary_rejected", {"surface": "request", "outcome": "rejected", "count": 1})
     ]
-    adapter = codex_proxy.collaboration_adapter()
+    adapter = collaboration_adapter.collaboration_adapter()
     assert adapter.facts.signing_root == tmp_path

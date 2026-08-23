@@ -8,14 +8,18 @@ from unittest.mock import patch
 
 import pytest
 
-import codex_proxy
+import gateway_events
 import route_primitives
+from gateway_compat import official_passthrough as gateway_compat_official
 from codex_semantic_adapter import (
     COLLABORATION_V1,
     COLLABORATION_V2,
     CollaborationBoundaryError,
     classify_collaboration_payload,
 )
+import collaboration_adapter
+import gateway_compat
+import gateway_errors
 from runtime_tool_compatibility import (
     ProtocolCapabilities,
     ToolCompatibilityError,
@@ -292,15 +296,15 @@ def test_gateway_rejects_unqualified_history_after_exact_namespace_selection() -
         "arguments": "{}",
     }]
 
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             _responses_upstream(native_namespace=False),
             event_context={},
             inject_codex_tools=False,
         )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
 
 
 def test_provider_namespace_with_overlapping_child_name_is_not_collaboration() -> None:
@@ -425,16 +429,16 @@ def test_invalid_request_is_rejected_before_runtime_planning() -> None:
     body = _request(COLLABORATION_V2)
     body["tools"][0]["tools"].pop()
 
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-            codex_proxy.compatible_request_body(
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+            gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
                 _responses_upstream(native_namespace=False),
                 event_context={"request_id": "bounded-request"},
                 inject_codex_tools=False,
             )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
     prepare.assert_not_called()
 
 
@@ -452,9 +456,9 @@ def test_collaboration_rejection_diagnostic_is_count_only_and_content_safe() -> 
         }
     ]
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_event:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
-            codex_proxy.compatible_request_body(
+    with patch.object(gateway_events, "write_proxy_event") as write_event:
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+            gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
                 _responses_upstream(native_namespace=False),
                 event_context={"request_id": "SECRET_REQUEST"},
@@ -474,7 +478,7 @@ def test_native_responses_namespace_is_validated_and_preserved_unchanged() -> No
     raw = json.dumps(body, separators=(",", ":")).encode()
     context: dict[str, object] = {}
 
-    transformed = codex_proxy.compatible_request_body(
+    transformed = gateway_compat.compatible_request_body(
         raw,
         _responses_upstream(native_namespace=True),
         event_context=context,
@@ -496,7 +500,7 @@ def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior()
     }
 
     transformed = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             _responses_upstream(native_namespace=False),
             event_context=context,
@@ -528,7 +532,7 @@ def test_v2_provider_adapter_removes_official_encryption_schema_annotations() ->
     context: dict[str, object] = {}
 
     transformed = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             _responses_upstream(native_namespace=False),
             event_context=context,
@@ -554,7 +558,7 @@ def test_v2_chat_surface_uses_capability_driven_namespace_adapter() -> None:
     context: dict = {}
 
     transformed = json.loads(
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(body).encode(),
             upstream,
             event_context=context,
@@ -955,16 +959,16 @@ def test_mixed_collaboration_history_fails_before_runtime_planning() -> None:
         _v2_history()[0],
     ]
 
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
-        with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-            codex_proxy.compatible_request_body(
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+            gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
                 _responses_upstream(native_namespace=False),
                 event_context={},
                 inject_codex_tools=False,
             )
 
-    assert caught.value.cause.code == codex_proxy.COLLABORATION_BOUNDARY_ERROR_CODE
+    assert caught.value.cause.code == collaboration_adapter.COLLABORATION_BOUNDARY_ERROR_CODE
     prepare.assert_not_called()
 
 
@@ -1503,7 +1507,7 @@ def test_v2_stream_rejects_output_index_drift_and_terminal_shape_changes(native:
 def test_v2_stream_does_not_create_v1_worker_binding_state() -> None:
     context: dict[str, object] = {}
     body = _request(COLLABORATION_V2)
-    codex_proxy.compatible_request_body(
+    gateway_compat.compatible_request_body(
         json.dumps(body).encode(),
         _responses_upstream(native_namespace=False),
         event_context=context,
@@ -1522,7 +1526,7 @@ def test_v2_stream_does_not_create_v1_worker_binding_state() -> None:
             "status": "in_progress",
         },
     }
-    codex_proxy.compatible_sse_line(
+    gateway_compat.compatible_sse_line(
         ("data: " + json.dumps(added) + "\n").encode(),
         "custom_endpoint",
         event_context=context,
@@ -1535,7 +1539,7 @@ def test_v2_stream_does_not_create_v1_worker_binding_state() -> None:
     }
     # The argument delta is intentionally incomplete; it still must not
     # initialize the V1 worker stream scheduler before V2 is resolved.
-    codex_proxy.compatible_sse_line(
+    gateway_compat.compatible_sse_line(
         ("data: " + json.dumps(event) + "\n").encode(),
         "custom_endpoint",
         event_context=context,

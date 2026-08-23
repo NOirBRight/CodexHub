@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import gateway_compat
 import tool_surface_adapter
 from tool_surface_adapter import (
     NODE_REPL_NAMESPACE,
@@ -289,15 +290,17 @@ def test_downgrade_invalid_tool_calls_uses_scripted_transcript():
 
 
 def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
-    import codex_proxy
-
     seen = []
 
     def adapt(input_items, *, event_context=None):
         seen.append(event_context)
         return input_items, set(), False
 
-    monkeypatch.setattr(codex_proxy, "_adapt_apply_patch_custom_tool_history", adapt)
+    monkeypatch.setattr(
+        __import__("gateway_compat.response", fromlist=["_adapt_apply_patch_custom_tool_history"]),
+        "_adapt_apply_patch_custom_tool_history",
+        adapt,
+    )
     payload = {
         "input": [
             {
@@ -308,5 +311,5 @@ def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
             }
         ]
     }
-    codex_proxy.rewrite_structured_tool_input_items(payload, event_context={"live": True})
+    gateway_compat.rewrite_structured_tool_input_items(payload, event_context={"live": True})
     assert seen == [{"live": True}]

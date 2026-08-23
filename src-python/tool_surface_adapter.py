@@ -1544,3 +1544,15 @@ class ToolSurfaceAdapter:
                 rewritten[key] = replacement
                 changed = True
         return (rewritten if changed else value), changed
+
+
+def tool_surface_adapter() -> ToolSurfaceAdapter:
+    """Build a request-time adapter so apply-patch and message patches stay live."""
+    import gateway_compat
+
+    return ToolSurfaceAdapter(
+        facts=ToolSurfaceFacts(),
+        adapt_apply_patch_history=lambda *args, **kwargs: gateway_compat._adapt_apply_patch_custom_tool_history(*args, **kwargs),
+        compatible_internal_message=lambda *args, **kwargs: gateway_compat._compatible_internal_message(*args, **kwargs),
+        transcript_message=lambda *args, **kwargs: gateway_compat._assistant_transcript_message(*args, **kwargs),
+    )

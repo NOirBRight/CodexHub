@@ -11,6 +11,8 @@ from urllib.request import Request
 
 import codex_proxy
 import diagnostic_recorder
+import gateway_events
+import gateway_transport
 
 
 class _Response:
@@ -173,7 +175,7 @@ class _ErrorResponse:
         return None
 
 
-class _VirtualOfficialConnection(codex_proxy.OfficialHTTPSConnection):
+class _VirtualOfficialConnection(gateway_transport.OfficialHTTPSConnection):
     def __init__(
         self,
         sock: _SlowWriteSocket,
@@ -192,7 +194,7 @@ class _VirtualOfficialConnection(codex_proxy.OfficialHTTPSConnection):
         connect_timeout = self.timeout if isinstance(self.timeout, (int, float)) else None
         if connect_timeout is not None and self._connect_duration > connect_timeout:
             self._clock.advance(connect_timeout)
-            raise codex_proxy.urllib3.exceptions.ConnectTimeoutError(self, "simulated slow connect")
+            raise gateway_transport.urllib3.exceptions.ConnectTimeoutError(self, "simulated slow connect")
         self._clock.advance(self._connect_duration)
         self.sock = self._fixture_sock
         self.is_verified = True
@@ -206,20 +208,20 @@ class _ExplodingRecorder:
 
 class DiagnosticRecorderGatewayTests(TestCase):
     def _official_request_pool_fixture(self, sock: _SlowWriteSocket) -> tuple[object, object]:
-        connection = codex_proxy.OfficialHTTPSConnection("example.test", timeout=0.05)
+        connection = gateway_transport.OfficialHTTPSConnection("example.test", timeout=0.05)
         connection.sock = sock
         connection.is_verified = True
         connection.proxy_is_verified = True
-        pool = codex_proxy.OfficialHTTPSConnectionPool("example.test")
+        pool = gateway_transport.OfficialHTTPSConnectionPool("example.test")
         return pool, connection
 
     def test_official_pool_uses_request_budget_for_new_and_reused_connections(self) -> None:
         clock = _VirtualClock()
         sock = _SlowWriteSocket(clock=clock, write_duration=0.1)
         connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.04)
-        pool = codex_proxy.OfficialHTTPSConnectionPool("example.test")
+        pool = gateway_transport.OfficialHTTPSConnectionPool("example.test")
 
-        with patch("codex_proxy.time.monotonic", side_effect=clock.monotonic):
+        with patch("gateway_transport.time.monotonic", side_effect=clock.monotonic):
             for _ in range(2):
                 response = pool._make_request(
                     connection,
@@ -228,7 +230,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
                     body=b"x" * (2 * 1024 * 1024),
                     headers={"Content-Length": str(2 * 1024 * 1024)},
                     retries=None,
-                    timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
+                    timeout=gateway_transport.urllib3.Timeout(connect=0.05, read=0.2),
                     chunked=False,
                     response_conn=None,
                     preload_content=False,
@@ -248,14 +250,14 @@ class DiagnosticRecorderGatewayTests(TestCase):
         clock = _VirtualClock()
         sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
         connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.01)
-        pool = codex_proxy.OfficialHTTPSConnectionPool(
+        pool = gateway_transport.OfficialHTTPSConnectionPool(
             "example.test", maxsize=1, block=True
         )
         pool.pool.get_nowait()
         pool.pool.put_nowait(connection)
 
         with (
-            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
             patch("urllib3.connectionpool.is_connection_dropped", return_value=False),
         ):
             first = pool._get_conn()
@@ -303,7 +305,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
                     )
                 except TimeoutError as exc:
                     self.failure = exc
-                    raise codex_proxy.urllib3.exceptions.MaxRetryError(pool, _url, exc) from exc
+                    raise gateway_transport.urllib3.exceptions.MaxRetryError(pool, _url, exc) from exc
 
         manager = _DelayedManager()
         request = Request(
@@ -312,12 +314,12 @@ class DiagnosticRecorderGatewayTests(TestCase):
             method="POST",
         )
         with (
-            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
-            patch("codex_proxy.official_pool_manager", return_value=manager),
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_transport.official_pool_manager", return_value=manager),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
             self.assertRaises(TimeoutError) as raised,
         ):
-            codex_proxy.open_upstream_response(
+            gateway_transport.open_upstream_response(
                 request,
                 upstream_name="official",
                 upstream_format="responses",
@@ -327,7 +329,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
             )
 
         self.assertIs(raised.exception, manager.failure)
-        self.assertEqual(codex_proxy.transport_failure_phase(raised.exception), "request_write")
+        self.assertEqual(gateway_transport.transport_failure_phase(raised.exception), "request_write")
         self.assertTrue(
             any(
                 isinstance(timeout, (int, float)) and timeout < 0.17
@@ -349,11 +351,11 @@ class DiagnosticRecorderGatewayTests(TestCase):
         clock = _VirtualClock()
         sock = _SlowWriteSocket(clock=clock, write_duration=0.01)
         connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.06)
-        pool = codex_proxy.OfficialHTTPSConnectionPool("example.test")
+        pool = gateway_transport.OfficialHTTPSConnectionPool("example.test")
 
         with (
-            patch("codex_proxy.time.monotonic", side_effect=clock.monotonic),
-            self.assertRaises(codex_proxy.urllib3.exceptions.ConnectTimeoutError) as raised,
+            patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            self.assertRaises(gateway_transport.urllib3.exceptions.ConnectTimeoutError) as raised,
         ):
             pool._make_request(
                 connection,
@@ -362,7 +364,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
                 body=b"x" * 2048,
                 headers={"Content-Length": "2048"},
                 retries=None,
-                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.2),
+                timeout=gateway_transport.urllib3.Timeout(connect=0.05, read=0.2),
                 chunked=False,
                 response_conn=None,
                 preload_content=False,
@@ -371,13 +373,13 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         self.assertEqual(connection.connect_calls, 1)
         self.assertEqual(clock.now, 0.05)
-        self.assertIsNone(codex_proxy.explicit_transport_phase(raised.exception))
+        self.assertIsNone(gateway_transport.explicit_transport_phase(raised.exception))
 
     def test_official_read_timeout_keeps_read_socket_budget_and_no_write_phase(self) -> None:
         sock = _ReadTimeoutSocket()
         pool, connection = self._official_request_pool_fixture(sock)
 
-        with self.assertRaises(codex_proxy.urllib3.exceptions.ReadTimeoutError) as raised:
+        with self.assertRaises(gateway_transport.urllib3.exceptions.ReadTimeoutError) as raised:
             pool._make_request(
                 connection,
                 "POST",
@@ -385,7 +387,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
                 body=b"x",
                 headers={"Content-Length": "1"},
                 retries=None,
-                timeout=codex_proxy.urllib3.Timeout(connect=0.05, read=0.75),
+                timeout=gateway_transport.urllib3.Timeout(connect=0.05, read=0.75),
                 chunked=False,
                 response_conn=None,
                 preload_content=False,
@@ -393,50 +395,50 @@ class DiagnosticRecorderGatewayTests(TestCase):
             )
 
         self.assertIn(0.75, sock.timeouts)
-        self.assertIsNone(codex_proxy.explicit_transport_phase(raised.exception))
+        self.assertIsNone(gateway_transport.explicit_transport_phase(raised.exception))
 
     def test_official_pooled_read_translation_preserves_phase_and_disposition(self) -> None:
         inner = TimeoutError("simulated response body timeout")
-        wrapped = codex_proxy.urllib3.exceptions.ProtocolError("response body failed", inner)
-        setattr(wrapped, codex_proxy.TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        wrapped = gateway_transport.urllib3.exceptions.ProtocolError("response body failed", inner)
+        setattr(wrapped, gateway_transport.TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
         connection = _PoolConnection()
         connection._codexhub_diagnostic_connection_disposition = "reused"
 
         for method in ("read", "readline"):
             with self.subTest(method=method):
-                pooled = codex_proxy.OfficialPooledResponse(
+                pooled = gateway_transport.OfficialPooledResponse(
                     _PooledReadFailure(wrapped, connection)
                 )
                 with self.assertRaises(TimeoutError) as raised:
                     getattr(pooled, method)()
 
                 self.assertEqual(
-                    codex_proxy.explicit_transport_phase(raised.exception),
+                    gateway_transport.explicit_transport_phase(raised.exception),
                     "stream_body",
                 )
                 self.assertEqual(
-                    codex_proxy.diagnostic_error_connection_disposition(raised.exception),
+                    gateway_transport.diagnostic_error_connection_disposition(raised.exception),
                     "reused",
                 )
 
     def test_official_pooled_direct_read_transport_error_preserves_metadata(self) -> None:
         direct = TimeoutError("simulated direct response body timeout")
-        setattr(direct, codex_proxy.TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
+        setattr(direct, gateway_transport.TRANSPORT_PHASE_ATTRIBUTE, "stream_body")
         connection = _PoolConnection()
         connection._codexhub_diagnostic_connection_disposition = "reused"
 
-        pooled = codex_proxy.OfficialPooledResponse(
+        pooled = gateway_transport.OfficialPooledResponse(
             _PooledReadFailure(direct, connection)
         )
         with self.assertRaises(TimeoutError) as raised:
             pooled.read()
 
         self.assertEqual(
-            codex_proxy.explicit_transport_phase(raised.exception),
+            gateway_transport.explicit_transport_phase(raised.exception),
             "stream_body",
         )
         self.assertEqual(
-            codex_proxy.diagnostic_error_connection_disposition(raised.exception),
+            gateway_transport.diagnostic_error_connection_disposition(raised.exception),
             "reused",
         )
 
@@ -445,7 +447,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         connection._codexhub_diagnostic_connection_disposition = "reused"
         for method, expected_phase in (("read", "response_body"), ("readline", "stream_body")):
             with self.subTest(method=method):
-                pooled = codex_proxy.OfficialPooledResponse(
+                pooled = gateway_transport.OfficialPooledResponse(
                     _PooledReadFailure(TimeoutError("simulated unannotated body timeout"), connection)
                 )
 
@@ -453,18 +455,18 @@ class DiagnosticRecorderGatewayTests(TestCase):
                     getattr(pooled, method)()
 
                 self.assertEqual(
-                    codex_proxy.explicit_transport_phase(raised.exception),
+                    gateway_transport.explicit_transport_phase(raised.exception),
                     expected_phase,
                 )
                 self.assertEqual(
-                    codex_proxy.transport_failure_phase(raised.exception),
+                    gateway_transport.transport_failure_phase(raised.exception),
                     expected_phase,
                 )
 
     def test_official_response_header_read_timeout_is_classified_as_response_headers(self) -> None:
         class _ReadTimeoutManager:
             def request(self, *_args: object, **_kwargs: object) -> object:
-                raise codex_proxy.urllib3.exceptions.ReadTimeoutError(
+                raise gateway_transport.urllib3.exceptions.ReadTimeoutError(
                     None,
                     "https://example.test/v1/responses",
                     "simulated response header timeout",
@@ -472,35 +474,35 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
         with (
-            patch("codex_proxy.official_pool_manager", return_value=_ReadTimeoutManager()),
+            patch("gateway_transport.official_pool_manager", return_value=_ReadTimeoutManager()),
             self.assertRaises(TimeoutError) as raised,
         ):
-            codex_proxy.official_urlopen(request, timeout=1)
+            gateway_transport.official_urlopen(request, timeout=1)
 
         self.assertEqual(
-            codex_proxy.explicit_transport_phase(raised.exception),
+            gateway_transport.explicit_transport_phase(raised.exception),
             "response_headers",
         )
         self.assertEqual(
-            codex_proxy.transport_failure_phase(raised.exception),
+            gateway_transport.transport_failure_phase(raised.exception),
             "response_headers",
         )
 
     def test_official_urlopen_direct_stdlib_transport_error_preserves_attempt_disposition(self) -> None:
         class _DirectFailureManager:
             def request(self, *_args: object, **_kwargs: object) -> object:
-                codex_proxy.set_official_attempt_connection_disposition("new")
+                gateway_transport.set_official_attempt_connection_disposition("new")
                 raise TimeoutError("simulated direct request write timeout")
 
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
         with (
-            patch("codex_proxy.official_pool_manager", return_value=_DirectFailureManager()),
+            patch("gateway_transport.official_pool_manager", return_value=_DirectFailureManager()),
             self.assertRaises(TimeoutError) as raised,
         ):
-            codex_proxy.official_urlopen(request, timeout=1)
+            gateway_transport.official_urlopen(request, timeout=1)
 
         self.assertEqual(
-            codex_proxy.diagnostic_error_connection_disposition(raised.exception),
+            gateway_transport.diagnostic_error_connection_disposition(raised.exception),
             "new",
         )
 
@@ -510,36 +512,36 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         class _ErrorManager:
             def request(self, *_args: object, **_kwargs: object) -> object:
-                codex_proxy.set_official_attempt_connection_disposition("reused")
+                gateway_transport.set_official_attempt_connection_disposition("reused")
                 return _ErrorResponse(connection)
 
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
         with (
-            patch("codex_proxy.official_pool_manager", return_value=_ErrorManager()),
+            patch("gateway_transport.official_pool_manager", return_value=_ErrorManager()),
             self.assertRaises(HTTPError) as raised,
         ):
-            codex_proxy.official_urlopen(request, timeout=1)
+            gateway_transport.official_urlopen(request, timeout=1)
 
         self.assertEqual(
-            codex_proxy.diagnostic_error_connection_disposition(raised.exception),
+            gateway_transport.diagnostic_error_connection_disposition(raised.exception),
             "reused",
         )
 
     def test_official_pool_exposes_new_and_reused_connection_dispositions(self) -> None:
-        pool = object.__new__(codex_proxy.OfficialHTTPSConnectionPool)
+        pool = object.__new__(gateway_transport.OfficialHTTPSConnectionPool)
         pool.proxy = None
         connection = _PoolConnection()
 
         with (
-            patch.object(codex_proxy.urllib3.connectionpool.HTTPSConnectionPool, "_get_conn", return_value=connection),
-            patch("codex_proxy.time.monotonic", return_value=100.0),
+            patch.object(gateway_transport.urllib3.connectionpool.HTTPSConnectionPool, "_get_conn", return_value=connection),
+            patch("gateway_transport.time.monotonic", return_value=100.0),
         ):
             pool._get_conn()
-            self.assertEqual(codex_proxy.connection_disposition(connection), "new")
+            self.assertEqual(gateway_transport.connection_disposition(connection), "new")
             connection._codexhub_released_at = 99.0
             pool._get_conn()
-            self.assertEqual(codex_proxy.connection_disposition(connection), "reused")
-        self.assertEqual(codex_proxy.diagnostic_connection_disposition(object()), "unobserved")
+            self.assertEqual(gateway_transport.connection_disposition(connection), "reused")
+        self.assertEqual(gateway_transport.diagnostic_connection_disposition(object()), "unobserved")
 
     def test_reused_upstream_open_omits_unobservable_transport_success_phases(self) -> None:
         tmpdir = self.enterContext(tempfile.TemporaryDirectory())
@@ -548,10 +550,10 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
 
         with (
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
-            patch("codex_proxy.open_upstream_once", return_value=_Response()),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch("gateway_transport.GatewayTransport.open_once", return_value=_Response()),
         ):
-            response = codex_proxy.open_upstream_response(
+            response = gateway_transport.open_upstream_response(
                 request,
                 upstream_name="official",
                 upstream_format="responses",
@@ -587,12 +589,12 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
 
         with (
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
-            patch("codex_proxy.open_upstream_once", side_effect=URLError("private failure")),
-            patch("codex_proxy.transport_failure_phase", return_value="tls"),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch("gateway_transport.GatewayTransport.open_once", side_effect=URLError("private failure")),
+            patch("gateway_transport.transport_failure_phase", return_value="tls"),
         ):
             with self.assertRaises(URLError):
-                codex_proxy.open_upstream_response(
+                gateway_transport.open_upstream_response(
                     request,
                     upstream_name="official",
                     upstream_format="responses",
@@ -627,7 +629,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
             recorder = diagnostic_recorder.DiagnosticRecorder(Path(tmpdir), incident_tail_seconds=0)
             self.addCleanup(recorder.shutdown, 1)
-            with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
+            with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
                 status = handler._relay_official_passthrough_sse_response(
                     _TerminalResponse(),
                     "official",
@@ -649,8 +651,8 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
         response = _MetadataFaultResponse()
 
-        with patch("codex_proxy.open_upstream_once", return_value=response):
-            actual = codex_proxy.open_upstream_response(
+        with patch("gateway_transport.GatewayTransport.open_once", return_value=response):
+            actual = gateway_transport.open_upstream_response(
                 request,
                 upstream_name="official",
                 upstream_format="responses",
@@ -681,7 +683,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         handler = object.__new__(codex_proxy.CodexProxyHandler)
         handler._diagnostic_request_id = "private-downstream-request"
 
-        with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
+        with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
             handler._observe_downstream_phase("downstream_response_open", status=200)
             handler._observe_downstream_phase("downstream_headers")
 
@@ -695,8 +697,8 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertNotIn("private-downstream-request", rendered)
 
     def test_recorder_failure_is_never_visible_to_proxy_event_callers(self) -> None:
-        with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", _ExplodingRecorder()):
-            codex_proxy.observe_gateway_diagnostic(
+        with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", _ExplodingRecorder()):
+            gateway_events.observe_gateway_diagnostic(
                 "observe_proxy_event",
                 "request_start",
                 {"request_id": "raw-request"},

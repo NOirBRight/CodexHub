@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-import codex_proxy
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
     EXPECTED_PARAMETER_SCHEMAS,
@@ -18,6 +17,8 @@ from protocol_translation import (
     prepare_exchange,
 )
 from runtime_tool_compatibility import ToolCompatibilityError
+import gateway_compat
+import gateway_errors
 
 
 ARGUMENTS = {
@@ -93,7 +94,7 @@ def _prepared_chat(
 ) -> tuple[dict, dict]:
     context: dict = {}
     selected_upstream = upstream or _upstream()
-    prepared = codex_proxy.compatible_request_body(
+    prepared = gateway_compat.compatible_request_body(
         _request(input_items=input_items, model=model),
         selected_upstream,
         event_context=context,
@@ -138,7 +139,7 @@ def test_native_responses_codec_is_inert_on_chat_custom_adapter() -> None:
     ).encode()
     context: dict = {}
 
-    prepared = codex_proxy.compatible_request_body(
+    prepared = gateway_compat.compatible_request_body(
         body,
         upstream,
         event_context=context,
@@ -215,7 +216,7 @@ def test_v2_chat_calls_reverse_to_exact_namespace_and_identity(name: str) -> Non
     }
     responses = chat_completion_to_response_body(json.dumps(completion).encode())
     decoded = json.loads(
-        codex_proxy.compatible_response_body(
+        gateway_compat.compatible_response_body(
             responses,
             _upstream()["name"],
             event_context=context,
@@ -316,7 +317,7 @@ def test_v2_chat_stream_calls_reverse_progressively(name: str) -> None:
 
     mapped = []
     for event in events:
-        line = codex_proxy.compatible_sse_line(
+        line = gateway_compat.compatible_sse_line(
             b"data: " + json.dumps(event).encode() + b"\n\n",
             _upstream()["name"],
             event_context=context,
@@ -351,8 +352,8 @@ def test_v2_unknown_alias_fails_visibly() -> None:
             ]
         }
     ).encode()
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
-        codex_proxy.compatible_response_body(body, _upstream()["name"], event_context=context)
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
+        gateway_compat.compatible_response_body(body, _upstream()["name"], event_context=context)
     assert caught.value.cause.code == "tool_compatibility_boundary"
 
 
@@ -368,7 +369,7 @@ def test_v2_encrypted_argument_handoff_fails_before_chat_sampling() -> None:
             "encrypted_function_args": ["message"],
         }
     ]
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
         _prepared_chat(input_items=input_items)
     assert caught.value.cause.code == "tool_compatibility_boundary"
 
@@ -408,7 +409,7 @@ def test_v2_encrypted_agent_message_fails_before_chat_sampling() -> None:
             {"type": "encrypted_content", "encrypted_content": "opaque"}
         ],
     }
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
         _prepared_chat(input_items=[encrypted])
     assert caught.value.cause.code == "tool_compatibility_boundary"
 
@@ -422,7 +423,7 @@ def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() 
         "content": [{"type": "input_text", "text": "child task"}],
     }
     context: dict = {}
-    prepared = codex_proxy.compatible_request_body(
+    prepared = gateway_compat.compatible_request_body(
         json.dumps(
             {
                 "model": "placeholder",
@@ -457,10 +458,10 @@ def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() 
 
 def test_partial_agent_message_cannot_select_v2_child_context() -> None:
     with pytest.raises(
-        codex_proxy.UpstreamProtocolTranslationError,
+        gateway_errors.UpstreamProtocolTranslationError,
         match="malformed or ambiguous",
     ):
-        codex_proxy.compatible_request_body(
+        gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "model": "placeholder",
@@ -483,8 +484,8 @@ def test_v2_child_agent_message_without_adapter_capability_fails_closed() -> Non
         "recipient": "agent/root/worker",
         "content": [{"type": "input_text", "text": "child task"}],
     }
-    with pytest.raises(codex_proxy.UpstreamProtocolTranslationError, match="required_unavailable"):
-        codex_proxy.compatible_request_body(
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError, match="required_unavailable"):
+        gateway_compat.compatible_request_body(
             json.dumps(
                 {
                     "model": "placeholder",

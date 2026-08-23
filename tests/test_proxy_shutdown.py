@@ -13,9 +13,14 @@ from unittest.mock import Mock, patch
 from urllib.request import Request
 
 import codex_proxy
+import codex_auth
+import gateway_catalog_runtime
+import gateway_events
 import gateway_transport
 import pytest
 from codex_proxy import CodexProxyHandler
+import gateway_admission
+import gateway_errors
 
 
 class _LifecycleResponse:
@@ -75,7 +80,7 @@ def _run_server_with_event_writer_result(writer_result):
             patch.object(codex_proxy.logging, "FileHandler"),
             patch.object(codex_proxy.logging, "StreamHandler"),
             patch.object(codex_proxy, "ThreadingHTTPServer", return_value=server),
-            patch.object(codex_proxy, "GATEWAY_EVENT_WRITER", writer),
+            patch.object(gateway_events, "GATEWAY_EVENT_WRITER", writer),
             patch.object(codex_proxy.logger, "warning") as warning,
         ):
             codex_proxy.run_server("127.0.0.1", 8080)
@@ -84,11 +89,11 @@ def _run_server_with_event_writer_result(writer_result):
 
 
 def test_upstream_sse_reader_queue_is_exactly_32_and_full_queue_cancellation_is_bounded() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
     response = _ProducingResponse()
-    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response, admission=admission)
+    lifecycle = gateway_transport.UpstreamSseReaderLifecycle(response, admission=admission)
     full_queue_put_entered = threading.Event()
     queue_put = lifecycle._queue.put
 
@@ -121,7 +126,7 @@ def test_upstream_sse_reader_queue_is_exactly_32_and_full_queue_cancellation_is_
 
 def test_upstream_sse_reader_closes_once_on_normal_eof_and_preserves_order() -> None:
     response = _LifecycleResponse([b"data: first\n\n", b"data: second\n\n", b""])
-    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
+    lifecycle = gateway_transport.UpstreamSseReaderLifecycle(response)
 
     assert list(lifecycle.iter_lines()) == [
         b"data: first\n\n",
@@ -139,7 +144,7 @@ def test_upstream_sse_reader_closes_once_on_normal_eof_and_preserves_order() -> 
 
 def test_upstream_sse_reader_closes_once_and_wakes_consumer_on_upstream_error() -> None:
     response = _LifecycleResponse([OSError("synthetic upstream failure")])
-    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
+    lifecycle = gateway_transport.UpstreamSseReaderLifecycle(response)
 
     with pytest.raises(OSError, match="synthetic upstream failure"):
         lifecycle.readline()
@@ -154,7 +159,7 @@ def test_upstream_sse_reader_closes_once_and_wakes_consumer_on_upstream_error() 
 
 def test_upstream_sse_reader_repeated_close_wakes_unstarted_consumer_without_starting_reader() -> None:
     response = _LifecycleResponse([b"must not be read"])
-    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
+    lifecycle = gateway_transport.UpstreamSseReaderLifecycle(response)
 
     lifecycle.close()
     lifecycle.close()
@@ -167,13 +172,13 @@ def test_upstream_sse_reader_repeated_close_wakes_unstarted_consumer_without_sta
 
 def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classified() -> None:
     response = _NonTerminatingResponse()
-    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
+    lifecycle = gateway_transport.UpstreamSseReaderLifecycle(response)
     lifecycle.start()
     assert response.entered.wait(timeout=1.0)
     lifecycle.close()
 
     started_at = time.monotonic()
-    with patch.object(codex_proxy.logger, "warning") as warning:
+    with patch.object(gateway_transport.logger, "warning") as warning:
         joined, outcome = lifecycle.join(timeout=10.0)
     elapsed = time.monotonic() - started_at
 
@@ -204,7 +209,7 @@ def test_upstream_sse_reader_scope_audit_keeps_bounded_queue_and_thread_in_one_o
 
 
 def test_shutdown_endpoint_stops_server() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
     server.gateway_shutdown_controller = controller
     thread = threading.Thread(target=server.serve_forever)
@@ -215,14 +220,14 @@ def test_shutdown_endpoint_stops_server() -> None:
         connection = HTTPConnection(host, port, timeout=2)
         with (
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 side_effect=AssertionError(
                     "shutdown must not select an upstream"
                 ),
             ) as choose_upstream,
             patch.object(
-                codex_proxy,
+                gateway_transport,
                 "materialize_operational_authentication",
                 side_effect=AssertionError(
                     "shutdown must not materialize provider credentials"
@@ -249,7 +254,7 @@ def test_shutdown_endpoint_stops_server() -> None:
 
 
 def test_shutdown_endpoint_closes_admission_and_reports_user_requested_shutdown() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
     server.gateway_shutdown_controller = controller
     thread = threading.Thread(target=server.serve_forever)
@@ -280,7 +285,7 @@ def test_shutdown_endpoint_closes_admission_and_reports_user_requested_shutdown(
 
 
 def test_closing_admission_cancels_every_active_upstream_transport() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     official_request = controller.admit()
     third_party_request = controller.admit()
     assert official_request is not None
@@ -298,7 +303,7 @@ def test_closing_admission_cancels_every_active_upstream_transport() -> None:
 
 
 def test_transport_attached_after_admission_closes_is_cancelled_without_upstream_work() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
 
@@ -311,7 +316,7 @@ def test_transport_attached_after_admission_closes_is_cancelled_without_upstream
 
 def test_shutdown_budget_is_shared_by_many_active_requests() -> None:
     now = [10.0]
-    controller = codex_proxy.GatewayShutdownController(
+    controller = gateway_admission.GatewayShutdownController(
         clock=lambda: now[0],
         shutdown_budget_seconds=2.0,
     )
@@ -328,7 +333,7 @@ def test_shutdown_budget_is_shared_by_many_active_requests() -> None:
 
 def test_user_requested_shutdown_outcome_is_sanitized_for_every_downstream_format() -> None:
     for inbound_format in ("responses", "chat_completions"):
-        payload = codex_proxy.user_requested_shutdown_payload(inbound_format)
+        payload = gateway_errors.user_requested_shutdown_payload(inbound_format)
         serialized = json.dumps(payload).lower()
 
         assert "user_requested_shutdown" in serialized
@@ -338,7 +343,7 @@ def test_user_requested_shutdown_outcome_is_sanitized_for_every_downstream_forma
 
 
 def test_requests_arriving_after_admission_closure_never_open_an_upstream_transport() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     controller.close_admission()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
     server.gateway_shutdown_controller = controller
@@ -349,8 +354,8 @@ def test_requests_arriving_after_admission_closure_never_open_an_upstream_transp
         host, port = server.server_address
         connection = HTTPConnection(host, port, timeout=2)
         with patch.object(
-            codex_proxy,
-            "_open_upstream_response",
+            gateway_transport,
+            "open_upstream_response",
             side_effect=AssertionError("closed admission must not open upstream work"),
         ) as open_upstream:
             connection.request(
@@ -364,7 +369,7 @@ def test_requests_arriving_after_admission_closure_never_open_an_upstream_transp
         connection.close()
 
         assert response.status == 503
-        assert payload == codex_proxy.user_requested_shutdown_payload("responses")
+        assert payload == gateway_errors.user_requested_shutdown_payload("responses")
         open_upstream.assert_not_called()
     finally:
         server.shutdown()
@@ -373,16 +378,16 @@ def test_requests_arriving_after_admission_closure_never_open_an_upstream_transp
 
 
 def test_request_racing_admission_closure_never_opens_or_retries_upstream_work() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
-    previous = codex_proxy.activate_gateway_request(admission)
+    previous = gateway_admission.activate_gateway_request(admission)
 
     try:
         controller.close_admission()
-        with patch.object(codex_proxy, "_open_upstream_once") as open_upstream:
-            with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
-                codex_proxy.open_upstream_response(
+        with patch.object(gateway_transport.GatewayTransport, "open_once") as open_upstream:
+            with pytest.raises(gateway_admission.GatewayUserRequestedShutdown):
+                gateway_transport.open_upstream_response(
                     Request("https://example.invalid/v1/responses", data=b"{}", method="POST"),
                     upstream_name="official",
                     upstream_format="responses",
@@ -390,29 +395,29 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
                 )
         open_upstream.assert_not_called()
     finally:
-        codex_proxy.restore_gateway_request(previous)
+        gateway_admission.restore_gateway_request(previous)
         controller.complete(admission)
 
 
 def test_cancelled_admission_interrupts_retry_wait_without_sleep() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
-    previous = codex_proxy.activate_gateway_request(admission)
+    previous = gateway_admission.activate_gateway_request(admission)
 
     try:
         controller.close_admission()
-        with patch.object(codex_proxy.time, "sleep") as sleep:
-            with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
-                codex_proxy.sleep_for_retry_with_gateway_cancellation(30.0)
+        with patch.object(gateway_transport.time, "sleep") as sleep:
+            with pytest.raises(gateway_admission.GatewayUserRequestedShutdown):
+                gateway_admission.sleep_for_retry_with_gateway_cancellation(30.0)
         sleep.assert_not_called()
     finally:
-        codex_proxy.restore_gateway_request(previous)
+        gateway_admission.restore_gateway_request(previous)
         controller.complete(admission)
 
 
 def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -> None:
-    controller = codex_proxy.GatewayShutdownController()
+    controller = gateway_admission.GatewayShutdownController()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
     server.gateway_shutdown_controller = controller
     server_thread = threading.Thread(target=server.serve_forever)
@@ -422,7 +427,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
 
     def wait_for_shutdown(*_args, **_kwargs):
         upstream_entered.set()
-        admission = codex_proxy.active_gateway_request()
+        admission = gateway_admission.active_gateway_request()
         assert admission is not None
         assert admission.wait_for_cancellation(2.0)
         admission.raise_if_cancelled()
@@ -445,7 +450,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
     try:
         with (
             patch.object(
-                codex_proxy,
+                gateway_catalog_runtime,
                 "choose_upstream",
                 return_value={
                     "name": "official",
@@ -459,22 +464,22 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
                 },
             ) as choose_upstream,
             patch.object(
-                codex_proxy,
+                gateway_transport,
                 "upstream_headers",
                 return_value={"Authorization": "Bearer test-token"},
             ) as build_upstream_headers,
             patch.object(
-                codex_proxy,
-                "codex_access_token",
+                codex_auth,
+                "access_token",
                 return_value="test-token",
             ) as access_token,
             patch.object(
-                codex_proxy,
-                "codex_account_id",
+                codex_auth,
+                "account_id",
                 return_value="test-account",
             ) as account_id,
-            patch.object(codex_proxy, "_open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
-            patch.object(codex_proxy, "write_proxy_event") as write_event,
+            patch.object(gateway_transport, "open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
+            patch.object(gateway_events, "write_proxy_event") as write_event,
         ):
             client_thread.start()
             assert upstream_entered.wait(timeout=2)
@@ -491,7 +496,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
             assert not client_thread.is_alive()
             assert result == {
                 "status": 503,
-                "payload": codex_proxy.user_requested_shutdown_payload("responses"),
+                "payload": gateway_errors.user_requested_shutdown_payload("responses"),
             }
             assert open_upstream.call_count == 1
             choose_upstream.assert_called_once()
@@ -536,7 +541,7 @@ def test_downstream_already_closed_does_not_hide_user_requested_shutdown_cleanup
 
 def test_run_server_uses_the_remaining_shared_shutdown_budget_for_flush() -> None:
     now = [0.0]
-    controller = codex_proxy.GatewayShutdownController(
+    controller = gateway_admission.GatewayShutdownController(
         clock=lambda: now[0],
         shutdown_budget_seconds=2.0,
     )
@@ -552,8 +557,8 @@ def test_run_server_uses_the_remaining_shared_shutdown_budget_for_flush() -> Non
             patch.object(codex_proxy.logging, "FileHandler"),
             patch.object(codex_proxy.logging, "StreamHandler"),
             patch.object(codex_proxy, "ThreadingHTTPServer", return_value=server),
-            patch.object(codex_proxy, "GatewayShutdownController", return_value=controller),
-            patch.object(codex_proxy, "GATEWAY_EVENT_WRITER", writer),
+            patch.object(gateway_admission, "GatewayShutdownController", return_value=controller),
+            patch.object(gateway_events, "GATEWAY_EVENT_WRITER", writer),
         ):
             codex_proxy.run_server("127.0.0.1", 8080)
 
@@ -567,7 +572,7 @@ def test_run_server_drains_the_event_writer_when_the_server_exits() -> None:
 
     server.serve_forever.assert_called_once_with()
     writer.shutdown.assert_called_once_with(
-        timeout=codex_proxy.GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        timeout=gateway_events.GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
     )
     warning.assert_not_called()
 
@@ -578,7 +583,7 @@ def test_run_server_reports_a_bounded_event_writer_shutdown_timeout() -> None:
     )
 
     writer.shutdown.assert_called_once_with(
-        timeout=codex_proxy.GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
+        timeout=gateway_events.GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS,
     )
     warning.assert_called_once()
     assert "timeout" in warning.call_args.args[1:]
