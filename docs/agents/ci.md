@@ -94,7 +94,10 @@ If changed-path acquisition for a PR is missing, unavailable, or fails, the
 classifier fails closed, selects every formal job, and the gate reports the
 classifier failure instead of silently accepting a partial plan.
 
-The Rust jobs create a temporary `src-tauri/resources/python/.ci-placeholder` file during CI because Tauri's resource glob requires at least one runtime Python resource file. The placeholder is not committed.
+Tauri's `resources/python/*` glob needs at least one file in
+`src-tauri/resources/python/`. The committed `.keep` placeholder satisfies
+that glob; the real bundled CPython runtime is still gitignored. The CI
+jobs may still write `.ci-placeholder` as a belt-and-suspenders step.
 
 ## Full local verification matrix
 

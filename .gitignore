@@ -29,7 +29,10 @@ frontend/dist/
 # Tauri/Rust
 src-tauri/target/
 src-tauri/gen/
-src-tauri/resources/python/
+# Bundled CPython is local. Keep `.keep` so Tauri's `resources/python/*` glob
+# matches on a clean checkout (otherwise `cargo test` cannot compile).
+src-tauri/resources/python/*
+!src-tauri/resources/python/.keep
 src-tauri/resources/downloads/
 
 # Local worktrees
