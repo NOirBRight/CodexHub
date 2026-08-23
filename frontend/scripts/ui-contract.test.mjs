@@ -1597,7 +1597,7 @@ test("gateway toast uses the shared dismissible page toast", async () => {
 test("gateway stopped proxy state stays out of warning banners and toasts", async () => {
   const [gatewaySource, gatewayBackendSource] = await Promise.all([
     readFile(gatewayPagePath, "utf8"),
-    readFile(new URL("../../src-tauri/src/gateway.rs", import.meta.url), "utf8"),
+    readFile(new URL("../../src-tauri/src/gateway/mod.rs", import.meta.url), "utf8"),
   ]);
 
   assert.match(gatewayBackendSource, /category:\s*"proxy_state"\.to_string\(\)/);

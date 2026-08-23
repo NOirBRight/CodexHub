@@ -68,7 +68,6 @@ FRONTEND_EXACT = frozenset(
         "src-tauri/src/autostart.rs",
         "src-tauri/src/catalog.rs",
         "src-tauri/src/config.rs",
-        "src-tauri/src/gateway.rs",
         "src-tauri/src/history.rs",
         "src-tauri/src/models.rs",
         "src-tauri/src/official_refresh.rs",
@@ -254,7 +253,7 @@ def _classify_path(path: str) -> tuple[frozenset[str], bool]:
         categories.add("python_core")
     if _matches(path, SYNTHETIC_EXACT, SYNTHETIC_PREFIXES):
         categories.add("python_synthetic")
-    if _matches(path, FRONTEND_EXACT, ("frontend/",)):
+    if _matches(path, FRONTEND_EXACT, ("frontend/", "src-tauri/src/gateway/")):
         categories.add("frontend")
     if (
         normalized.startswith("src-tauri/")
