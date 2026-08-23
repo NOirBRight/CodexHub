@@ -904,21 +904,15 @@ def _relay_symbols() -> RelaySymbols:
         UsagePolicy=UsagePolicy,
         _ChatToResponsesStreamConverter=_ChatToResponsesStreamConverter,
         _ResponsesToChatStreamConverter=_ResponsesToChatStreamConverter,
-        _ThirdPartyApplyPatchStreamAdapter=gateway_compat.lookup(
-            "_ThirdPartyApplyPatchStreamAdapter"
-        ),
+        _ThirdPartyApplyPatchStreamAdapter=gateway_compat.response._ThirdPartyApplyPatchStreamAdapter,
         _RuntimeToolInverseStreamError=_stream._RuntimeToolInverseStreamError,
         RETRY_FAILURE_QUICK_TRANSIENT=RETRY_FAILURE_QUICK_TRANSIENT,
         RETRY_REQUEST_COMPACT=RETRY_REQUEST_COMPACT,
         RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE=RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
         RETRY_SAFETY_SUPPRESSED_POST_WRITE=RETRY_SAFETY_SUPPRESSED_POST_WRITE,
-        _adapt_third_party_apply_patch_stream_events=gateway_compat.lookup(
-            "_adapt_third_party_apply_patch_stream_events"
-        ),
-        _apply_external_worker_response_contract=gateway_compat.lookup(
-            "_apply_external_worker_response_contract"
-        ),
-        _apply_patch_adapter_enabled=gateway_compat.lookup("_apply_patch_adapter_enabled"),
+        _adapt_third_party_apply_patch_stream_events=gateway_compat.response._adapt_third_party_apply_patch_stream_events,
+        _apply_external_worker_response_contract=gateway_compat.multi_agent._apply_external_worker_response_contract,
+        _apply_patch_adapter_enabled=gateway_compat.response._apply_patch_adapter_enabled,
         _bind_downstream_stream_commit=_bind_downstream_stream_commit,
         _bounded_failure_event_context=_events.bounded_failure_event_context,
         _capture_usage=_events.capture_usage,
@@ -932,23 +926,15 @@ def _relay_symbols() -> RelaySymbols:
         _chat_stream_lifecycle_final_issue=_stream._chat_stream_lifecycle_final_issue,
         _chat_stream_shape_summary=_stream._chat_stream_shape_summary,
         _chat_terminal_observer=_stream._chat_terminal_observer,
-        _coerce_exact_spawn_prompt_tool_calls=gateway_compat.lookup(
-            "_coerce_exact_spawn_prompt_tool_calls"
-        ),
-        _coerce_required_subagent_tool_calls=gateway_compat.lookup(
-            "_coerce_required_subagent_tool_calls"
-        ),
+        _coerce_exact_spawn_prompt_tool_calls=gateway_compat.sse._coerce_exact_spawn_prompt_tool_calls,
+        _coerce_required_subagent_tool_calls=gateway_compat.sse._coerce_required_subagent_tool_calls,
         _compact_response_body_is_empty=_stream._compact_response_body_is_empty,
         _converted_sse_payload=_stream._converted_sse_payload,
         _count_sse_reasoning_event=_stream._count_sse_reasoning_event,
-        _downgrade_invalid_third_party_tool_calls=gateway_compat.lookup(
-            "_downgrade_invalid_third_party_tool_calls"
-        ),
+        _downgrade_invalid_third_party_tool_calls=gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls,
         _events_to_responses_body=_stream._events_to_responses_body,
         _filtered_response_headers=_filtered_response_headers,
-        _guard_duplicate_multi_agent_spawn_calls=gateway_compat.lookup(
-            "_guard_duplicate_multi_agent_spawn_calls"
-        ),
+        _guard_duplicate_multi_agent_spawn_calls=gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls,
         _handler_downstream_stream_commit=_handler_downstream_stream_commit,
         _incomplete_stream_json_error_body=_stream._incomplete_stream_json_error_body,
         _is_event_stream=_is_event_stream,
@@ -958,9 +944,7 @@ def _relay_symbols() -> RelaySymbols:
         _json_error_payload_for_inbound_format=_errors._json_error_payload_for_inbound_format,
         _lifecycle_final_issue_event_name=_stream._lifecycle_final_issue_event_name,
         _lifecycle_final_issue_missing_reason=_stream._lifecycle_final_issue_missing_reason,
-        _normalize_third_party_tool_call=gateway_compat.lookup(
-            "_normalize_third_party_tool_call"
-        ),
+        _normalize_third_party_tool_call=gateway_compat.official_passthrough._normalize_third_party_tool_call,
         _observe_gateway_diagnostic=_observe_gateway_diagnostic,
         _offer_usage_observed_body=_events.offer_usage_observed_body,
         _offer_usage_observed_sse_line=_events.offer_usage_observed_sse_line,
@@ -968,16 +952,10 @@ def _relay_symbols() -> RelaySymbols:
         _parse_sse_json_payloads=_sse._parse_sse_json_payloads,
         _public_event_context=_events.public_event_context,
         _raise_lifecycle_final_issue=_stream._raise_lifecycle_final_issue,
-        _raise_runtime_tool_compatibility_error=gateway_compat.lookup(
-            "_raise_runtime_tool_compatibility_error"
-        ),
-        _reconcile_function_call_argument_events=gateway_compat.lookup(
-            "_reconcile_function_call_argument_events"
-        ),
+        _raise_runtime_tool_compatibility_error=gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error,
+        _reconcile_function_call_argument_events=gateway_compat.sse._reconcile_function_call_argument_events,
         _redact_identity_in_text=_errors._redact_identity_in_text,
-        _repair_missing_required_subagent_call_events=gateway_compat.lookup(
-            "_repair_missing_required_subagent_call_events"
-        ),
+        _repair_missing_required_subagent_call_events=gateway_compat.sse._repair_missing_required_subagent_call_events,
         _response_body_lifecycle_final_issue=_stream._response_body_lifecycle_final_issue,
         _response_body_to_chat_completion_body=_stream._response_body_to_chat_completion_body,
         _response_body_to_response_sse_events=_stream._response_body_to_response_sse_events,
@@ -1006,22 +984,14 @@ def _relay_symbols() -> RelaySymbols:
         _responses_terminal_observer=_stream._responses_terminal_observer,
         _retry_identity_from_context=_retry_identity_from_context,
         _route_failure_event_fields=_events.route_failure_event_fields,
-        _runtime_tool_compatibility_stream_for_attempt=gateway_compat.lookup(
-            "_runtime_tool_compatibility_stream_for_attempt"
-        ),
+        _runtime_tool_compatibility_stream_for_attempt=gateway_compat.official_passthrough._runtime_tool_compatibility_stream_for_attempt,
         _sse_event_separator_after_line=_sse._sse_event_separator_after_line,
         _sse_json_line=_stream._sse_json_line,
         _sse_line_ending=_sse._sse_line_ending,
-        _suppress_bounded_tool_search_calls=gateway_compat.lookup(
-            "_suppress_bounded_tool_search_calls"
-        ),
+        _suppress_bounded_tool_search_calls=gateway_compat.multi_agent._suppress_bounded_tool_search_calls,
         _suppress_chat_reasoning_extensions=_stream._suppress_chat_reasoning_extensions,
-        _suppress_coordinator_forbidden_tool_calls=gateway_compat.lookup(
-            "_suppress_coordinator_forbidden_tool_calls"
-        ),
-        _suppress_worker_multi_agent_tool_calls=gateway_compat.lookup(
-            "_suppress_worker_multi_agent_tool_calls"
-        ),
+        _suppress_coordinator_forbidden_tool_calls=gateway_compat.multi_agent._suppress_coordinator_forbidden_tool_calls,
+        _suppress_worker_multi_agent_tool_calls=gateway_compat.multi_agent._suppress_worker_multi_agent_tool_calls,
         _synthetic_response_completed_from_tool_items=(
             _stream._synthetic_response_completed_from_tool_items
         ),
@@ -1033,9 +1003,7 @@ def _relay_symbols() -> RelaySymbols:
         _verified_converted_sse_semantic_error=_stream._verified_converted_sse_semantic_error,
         _with_codexhub_http_error=_errors._with_codexhub_http_error,
         _write_adapter_event=_write_adapter_event,
-        _write_runtime_tool_adapter_response_evidence=gateway_compat.lookup(
-            "_write_runtime_tool_adapter_response_evidence"
-        ),
+        _write_runtime_tool_adapter_response_evidence=gateway_compat.official_passthrough._write_runtime_tool_adapter_response_evidence,
         compatible_response_body=gateway_compat.compatible_response_body,
         compatible_sse_line=_relay_compatible_sse_line,
         safe_upstream_error_detail=_errors.safe_upstream_error_detail,

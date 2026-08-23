@@ -130,33 +130,39 @@ def _hide_reasoning_text(value: Any) -> bool:
 
 
 def _message_item_visible_text(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_message_item_visible_text")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._message_item_visible_text(*args, **kwargs)
 
 
 def _valid_tool_name(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_valid_tool_name")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._valid_tool_name(*args, **kwargs)
 
 
 def _codex_apps_namespace_flat_alias(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_codex_apps_namespace_flat_alias")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._codex_apps_namespace_flat_alias(*args, **kwargs)
 
 
 def _supports_explicit_namespace_alias(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_supports_explicit_namespace_alias")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._supports_explicit_namespace_alias(*args, **kwargs)
 
 
 def normalize_third_party_tool_call(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_normalize_third_party_tool_call")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._normalize_third_party_tool_call(*args, **kwargs)
 
 
 def downgrade_invalid_third_party_tool_calls(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_downgrade_invalid_third_party_tool_calls")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._downgrade_invalid_third_party_tool_calls(*args, **kwargs)
 
 
 def _is_raw_reasoning_stream_event(payload: Mapping[str, Any]) -> bool:

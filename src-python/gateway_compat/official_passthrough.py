@@ -70,7 +70,9 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import api, host
+from . import multi_agent as _multi_agent
+from . import response as _response
+from . import host
 
 def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | None:
     seen: set[str] = set()
@@ -1266,7 +1268,7 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             if value:
                 lines.append(f"{label}: {value}")
         _append_internal_field(lines, "execution", item.get("execution"))
-        if api._has_multi_agent_discovery_tools(item.get("tools")):
+        if _multi_agent._has_multi_agent_discovery_tools(item.get("tools")):
             lines.append("status: discovered_codex_native_multi_agent_tools")
             lines.append(
                 "available_function_tools: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent, multi_agent_v1__resume_agent, multi_agent_v1__send_input"
@@ -1308,8 +1310,8 @@ def _is_standard_responses_function_call(item: Mapping[str, Any]) -> bool:
         and "arguments" in item
         and not item.get("namespace")
         and WORKER_REQUESTED_BINDING_FIELD not in item
-        and api._multi_agent_function_call_name(item) is None
-        and api._node_repl_function_call_name(item) is None
+        and _multi_agent._multi_agent_function_call_name(item) is None
+        and _multi_agent._node_repl_function_call_name(item) is None
         and not _is_mcp_or_codex_app_function_call(item)
     )
 
@@ -1410,7 +1412,7 @@ def _rewrite_internal_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
-    single_step_node_repl_request = api._has_single_step_node_repl_request(input_items)
+    single_step_node_repl_request = _multi_agent._has_single_step_node_repl_request(input_items)
     multi_agent_search_call_ids: set[str] = set()
     multi_agent_calls_by_call_id: dict[str, tuple[str, dict[str, Any] | None]] = {}
     node_repl_call_ids: set[str] = set()
@@ -1428,16 +1430,16 @@ def _rewrite_internal_input_items(
                 continue
         if isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
             if item_type == "function_call" and isinstance(call_id, str):
-                if api._node_repl_function_call_name(item) is not None:
+                if _multi_agent._node_repl_function_call_name(item) is not None:
                     node_repl_call_ids.add(call_id)
-                    rewritten_items.append(api._compatible_node_repl_call_message(item))
+                    rewritten_items.append(_multi_agent._compatible_node_repl_call_message(item))
                     changed = True
                     continue
-                tool_name = api._multi_agent_function_call_name(item)
+                tool_name = _multi_agent._multi_agent_function_call_name(item)
                 if tool_name is not None:
                     arguments = _json_object_from_arguments(item.get("arguments"))
                     multi_agent_calls_by_call_id[call_id] = (tool_name, arguments)
-                    rewritten_items.append(api._compatible_multi_agent_call_message(item, tool_name))
+                    rewritten_items.append(_multi_agent._compatible_multi_agent_call_message(item, tool_name))
                     changed = True
                     continue
             if (
@@ -1446,19 +1448,19 @@ def _rewrite_internal_input_items(
                 and call_id in multi_agent_calls_by_call_id
             ):
                 tool_name, arguments = multi_agent_calls_by_call_id[call_id]
-                rewritten_items.append(api._compatible_multi_agent_output_message(item, tool_name, arguments))
+                rewritten_items.append(_multi_agent._compatible_multi_agent_output_message(item, tool_name, arguments))
                 changed = True
                 continue
             if item_type == "function_call_output" and isinstance(call_id, str) and call_id in node_repl_call_ids:
                 rewritten_items.append(
-                    api._compatible_node_repl_output_message(item, enforce_final=single_step_node_repl_request)
+                    _multi_agent._compatible_node_repl_output_message(item, enforce_final=single_step_node_repl_request)
                 )
                 changed = True
                 continue
             if (
                 item_type == "tool_search_call"
                 and isinstance(call_id, str)
-                and api._is_multi_agent_discovery_arguments(_json_object_from_arguments(item.get("arguments")))
+                and _multi_agent._is_multi_agent_discovery_arguments(_json_object_from_arguments(item.get("arguments")))
             ):
                 multi_agent_search_call_ids.add(call_id)
             elif (
@@ -1467,7 +1469,7 @@ def _rewrite_internal_input_items(
                 and call_id in multi_agent_search_call_ids
                 and not item.get("tools")
             ):
-                item = api._multi_agent_discovery_output_item(item)
+                item = _multi_agent._multi_agent_discovery_output_item(item)
                 host._write_adapter_event(
                     event_context,
                     "tool_search_discovery_fallback_applied",
@@ -1553,18 +1555,18 @@ def _response_output_is_text_or_empty(output: Any) -> bool:
 def _response_events_are_text_or_empty(events: list[Mapping[str, Any]]) -> bool:
     for event in events:
         event_type = event.get("type")
-        if event_type in {"response.output_item.added", "response.output_item.done"}:
+        if event_type in {"_response.output_item.added", "_response.output_item.done"}:
             item = event.get("item")
             if not isinstance(item, Mapping):
                 continue
             item_type = item.get("type")
             if item_type not in {"message", "reasoning"}:
                 return False
-        elif event_type == "response.completed":
+        elif event_type == "_response.completed":
             response = event.get("response")
-            if isinstance(response, Mapping) and not _response_output_is_text_or_empty(response.get("output")):
+            if isinstance(response, Mapping) and not _response_output_is_text_or_empty(_response.get("output")):
                 return False
-        elif event_type in {"response.failed", "response.incomplete", "error"}:
+        elif event_type in {"_response.failed", "_response.incomplete", "error"}:
             return False
     return True
 
@@ -1602,7 +1604,7 @@ def official_passthrough_request_body(
     if isinstance(service_tier, str) and service_tier and next_payload.get("service_tier") != service_tier:
         next_payload["service_tier"] = service_tier
         changed = True
-    if api._sanitize_unsupported_compaction_input_items(next_payload):
+    if _response._sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
     if next_payload.get("store") is not False:
         next_payload["store"] = False
@@ -1645,7 +1647,7 @@ def transparent_request_body(
             changed = False
             if host._normalize_responses_message_input_items(next_payload):
                 changed = True
-            if official_responses_backend and api._sanitize_unsupported_compaction_input_items(next_payload):
+            if official_responses_backend and _response._sanitize_unsupported_compaction_input_items(next_payload):
                 changed = True
             if upstream_is_third_party and _rewrite_internal_input_items(
                 next_payload,
@@ -1689,7 +1691,7 @@ def transparent_request_body(
         changed = True
     if official_responses_backend and host._normalize_responses_string_input(next_payload):
         changed = True
-    if official_responses_backend and api._sanitize_unsupported_compaction_input_items(next_payload):
+    if official_responses_backend and _response._sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
     if host._normalize_responses_message_input_items(next_payload):
         changed = True

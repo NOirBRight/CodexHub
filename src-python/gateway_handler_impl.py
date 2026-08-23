@@ -187,9 +187,7 @@ from websocket_transport import (
 
 logger = logging.getLogger("codex_proxy")
 
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = gateway_compat.lookup(
-    "_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY"
-)
+_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = gateway_compat.official_passthrough._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -310,31 +308,31 @@ def transparent_request_body(*args: Any, **kwargs: Any) -> Any:
 
 
 def _normalize_transparent_tool_schema_booleans(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_normalize_transparent_tool_schema_booleans")(*args, **kwargs)
+    return gateway_compat.official_passthrough._normalize_transparent_tool_schema_booleans(*args, **kwargs)
 
 
 def _excessive_transparent_chat_tool_loop_count(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_excessive_transparent_chat_tool_loop_count")(*args, **kwargs)
+    return gateway_compat.official_passthrough._excessive_transparent_chat_tool_loop_count(*args, **kwargs)
 
 
 def _excessive_transparent_responses_tool_loop_count(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_excessive_transparent_responses_tool_loop_count")(
+    return gateway_compat.official_passthrough._excessive_transparent_responses_tool_loop_count(
         *args, **kwargs
     )
 
 
 def _rewrite_transparent_developer_role_messages(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_rewrite_transparent_developer_role_messages")(*args, **kwargs)
+    return gateway_compat.official_passthrough._rewrite_transparent_developer_role_messages(*args, **kwargs)
 
 
 def _responses_body_with_lifecycle_final_retry_guidance(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_responses_body_with_lifecycle_final_retry_guidance")(
+    return gateway_compat.multi_agent._responses_body_with_lifecycle_final_retry_guidance(
         *args, **kwargs
     )
 
 
 def _safe_json_mapping(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.lookup("_safe_json_mapping")(*args, **kwargs)
+    return gateway_compat.official_passthrough._safe_json_mapping(*args, **kwargs)
 
 
 def gateway_image_proxy_enabled() -> bool:

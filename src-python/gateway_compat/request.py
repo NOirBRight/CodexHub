@@ -70,7 +70,10 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import api, host
+from . import multi_agent as _multi_agent
+from . import official_passthrough as _official_passthrough
+from . import response as _response
+from . import host
 
 def compatible_request_body(
     body: bytes,
@@ -105,7 +108,7 @@ def compatible_request_body(
             return body
         upstream_model = upstream.get("upstream_model")
         if isinstance(model_id, str) and isinstance(upstream_model, str) and upstream_model and model_id != upstream_model:
-            return api._replace_embedded_model(body, model_id, upstream_model)
+            return _official_passthrough._replace_embedded_model(body, model_id, upstream_model)
         return body
 
     if not isinstance(payload, dict):
@@ -113,10 +116,10 @@ def compatible_request_body(
 
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
-    requested_reasoning = api._requested_reasoning_effort(payload)
+    requested_reasoning = _official_passthrough._requested_reasoning_effort(payload)
     changed = False
     if official_passthrough:
-        return api.official_passthrough_request_body(body, payload, upstream, model_id=model_id)
+        return _official_passthrough.official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
     collaboration_protocol = host._resolve_collaboration_boundary(
         payload,
@@ -128,13 +131,13 @@ def compatible_request_body(
     if upstream_name == "official":
         if host._sanitize_official_reasoning_items(payload):
             changed = True
-        if api._sanitize_unsupported_compaction_input_items(payload):
+        if _response._sanitize_unsupported_compaction_input_items(payload):
             changed = True
         if host._normalize_responses_string_input(payload):
             changed = True
-        if api._sanitize_official_system_messages(payload):
+        if _response._sanitize_official_system_messages(payload):
             changed = True
-        if api._sanitize_official_invalid_tool_calls(payload):
+        if _response._sanitize_official_invalid_tool_calls(payload):
             changed = True
         if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
             payload["model"] = upstream_model
@@ -156,7 +159,7 @@ def compatible_request_body(
         if "max_output_tokens" in payload:
             del payload["max_output_tokens"]
             changed = True
-        if api._sanitize_official_system_messages(payload):
+        if _response._sanitize_official_system_messages(payload):
             changed = True
         if not changed:
             return body
@@ -165,7 +168,7 @@ def compatible_request_body(
     if host._strip_reasoning_encrypted_content(payload):
         changed = True
 
-    raw_provider_probe = api._is_raw_provider_probe_context(event_context)
+    raw_provider_probe = _official_passthrough._is_raw_provider_probe_context(event_context)
     tool_protocol = (
         tool_protocol_override
         if tool_protocol_override is not None
@@ -187,12 +190,12 @@ def compatible_request_body(
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
     if not raw_provider_probe and not collaboration_v2:
-        if api._validate_worker_binding_history(payload):
+        if _multi_agent._validate_worker_binding_history(payload):
             changed = True
     bounded_tool_search_terminal_calls = (
         {}
         if raw_provider_probe
-        else api._bounded_empty_tool_search_terminal_calls(payload.get("input"))
+        else _multi_agent._bounded_empty_tool_search_terminal_calls(payload.get("input"))
     )
     bounded_tool_search_queries = {
         query for query, _count in bounded_tool_search_terminal_calls.values()
@@ -218,11 +221,11 @@ def compatible_request_body(
             event_context["_tool_search_client_owned"] = True
         if bounded_tool_search_queries:
             event_context["_bounded_tool_search_query_digests"] = frozenset(
-                api._tool_search_query_digest(query) for query in bounded_tool_search_queries
+                _multi_agent._tool_search_query_digest(query) for query in bounded_tool_search_queries
             )
         else:
             event_context.pop("_bounded_tool_search_query_digests", None)
-    if api._terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
+    if _multi_agent._terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
         for _query, count in bounded_tool_search_terminal_calls.values():
             host.write_proxy_event(
                 "tool_search_empty_miss_bound",
@@ -246,7 +249,7 @@ def compatible_request_body(
             # promoted so namespace pruning/runtime planning can inspect the
             # declarations.  Ordinary eager routes must preserve this legacy
             # carrier byte-for-byte (#425).
-            if api._hoist_additional_tools_input_items(payload):
+            if _official_passthrough._hoist_additional_tools_input_items(payload):
                 changed = True
         if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
             tools = payload["tools"]
@@ -254,7 +257,7 @@ def compatible_request_body(
             deferred_namespace_tools = [
                 tool
                 for tool in tools
-                if api._is_raw_namespace_schema(tool)
+                if _official_passthrough._is_raw_namespace_schema(tool)
                 and not (
                     collaboration_v2
                     and isinstance(tool, Mapping)
@@ -265,7 +268,7 @@ def compatible_request_body(
                 tool
                 for tool in tools
                 if not (
-                    api._is_raw_namespace_schema(tool)
+                    _official_passthrough._is_raw_namespace_schema(tool)
                     and not (
                         collaboration_v2
                         and isinstance(tool, Mapping)
@@ -278,7 +281,7 @@ def compatible_request_body(
                 changed = True
             if collaboration_v2:
                 namespace_declaration_count, deferred_tool_count = (
-                    api._deferred_namespace_surface_counts(deferred_namespace_tools, retained_tools)
+                    _official_passthrough._deferred_namespace_surface_counts(deferred_namespace_tools, retained_tools)
                 )
                 retained_tool_ids = {id(tool) for tool in retained_tools}
                 pending_tool_surface_event = {
@@ -288,7 +291,7 @@ def compatible_request_body(
                     "retained_core_count": sum(
                         1
                         for tool in tool_surface_source_tools
-                        if not api._is_raw_namespace_schema(tool)
+                        if not _official_passthrough._is_raw_namespace_schema(tool)
                         and id(tool) in retained_tool_ids
                     ),
                     "deferred_tool_count": deferred_tool_count,
@@ -312,7 +315,7 @@ def compatible_request_body(
             runtime_plan_context = (
                 event_context if isinstance(event_context, dict) else {}
             )
-            if api._prepare_runtime_tool_compatibility(
+            if _official_passthrough._prepare_runtime_tool_compatibility(
                 payload,
                 upstream,
                 tool_protocol,
@@ -320,7 +323,7 @@ def compatible_request_body(
                 native_responses_tool_codec=native_responses_tool_codec_override,
             ):
                 changed = True
-            runtime_tool_plan = api._runtime_tool_compatibility_plan(runtime_plan_context)
+            runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan(runtime_plan_context)
     if raw_provider_probe:
         pass
     elif collaboration_v2:
@@ -331,14 +334,14 @@ def compatible_request_body(
         # an endpoint that only accepts function-call history.
         input_items = payload.get("input")
         if isinstance(input_items, list):
-            adapted_items, _adapted_call_ids, history_changed = api._adapt_apply_patch_custom_tool_history(
+            adapted_items, _adapted_call_ids, history_changed = _response._adapt_apply_patch_custom_tool_history(
                 input_items,
                 event_context=event_context,
             )
             if history_changed:
                 payload["input"] = adapted_items
                 changed = True
-        if api._rewrite_v2_unsupported_tool_history(
+        if _response._rewrite_v2_unsupported_tool_history(
             payload,
             upstream=upstream,
             tool_protocol=tool_protocol,
@@ -349,7 +352,7 @@ def compatible_request_body(
             changed = True
         if (
             upstream.get("upstream_format") == "chat_completions"
-            and api._drop_v2_chat_reasoning_history(
+            and _response._drop_v2_chat_reasoning_history(
                 payload,
                 event_context=event_context,
                 upstream_name=upstream_name,
@@ -360,10 +363,10 @@ def compatible_request_body(
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it
         # so the selected external surface policy can inspect namespaces.
-        if tool_surface_strategy == "deferred_core" and api._hoist_additional_tools_input_items(payload):
+        if tool_surface_strategy == "deferred_core" and _official_passthrough._hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in host.STRUCTURED_TOOL_PROTOCOLS:
-            if api._rewrite_structured_tool_input_items(
+            if _official_passthrough._rewrite_structured_tool_input_items(
                 payload,
                 event_context=event_context,
                 upstream_name=upstream_name,
@@ -373,20 +376,20 @@ def compatible_request_body(
         elif tool_protocol == "none":
             tools = payload.get("tools")
             if isinstance(tools, list):
-                filtered_tools = [tool for tool in tools if not api._is_multi_agent_tool_schema(tool)]
+                filtered_tools = [tool for tool in tools if not _multi_agent._is_multi_agent_tool_schema(tool)]
                 if len(filtered_tools) != len(tools):
                     payload["tools"] = filtered_tools
                     changed = True
-            if api._rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            if _official_passthrough._rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
         else:
-            if api._rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
+            if _official_passthrough._rewrite_internal_input_items(payload, event_context=event_context, upstream_name=upstream_name):
                 changed = True
     if (
         not raw_provider_probe
         and upstream.get("upstream_format") == "chat_completions"
         and (collaboration_v2 or codex_app_external)
-        and api._drop_chat_message_phase(
+        and _response._drop_chat_message_phase(
             payload,
             event_context=event_context,
             upstream_name=upstream_name,
@@ -427,14 +430,14 @@ def compatible_request_body(
     node_repl_single_step_complete = (
         not raw_provider_probe
         and not collaboration_v2
-        and api._has_completed_single_step_node_repl_context(input_items)
+        and _multi_agent._has_completed_single_step_node_repl_context(input_items)
     )
     subagent_workflow_plan_read_complete = (
         not raw_provider_probe
         and subagent_state_active
         and subagent_state is not None
         and bool(getattr(subagent_state, "workflow_intent", False))
-        and api._has_node_repl_subagent_plan_read_context(input_items)
+        and _multi_agent._has_node_repl_subagent_plan_read_context(input_items)
     )
     subagent_workflow_plan_read_required = (
         not raw_provider_probe
@@ -518,15 +521,15 @@ def compatible_request_body(
         include_send_input = True
         state_hint = None
     else:
-        spawned_agent_ids = api._spawned_multi_agent_ids(input_items)
-        open_agent_ids = api._open_multi_agent_ids(input_items)
-        completed_wait_agent_ids = set(api._completed_multi_agent_wait_ids(input_items))
-        closed_agent_ids = api._closed_multi_agent_ids(input_items)
+        spawned_agent_ids = _multi_agent._spawned_multi_agent_ids(input_items)
+        open_agent_ids = _multi_agent._open_multi_agent_ids(input_items)
+        completed_wait_agent_ids = set(_multi_agent._completed_multi_agent_wait_ids(input_items))
+        closed_agent_ids = _multi_agent._closed_multi_agent_ids(input_items)
         wait_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id not in completed_wait_agent_ids]
         close_agent_ids = [agent_id for agent_id in open_agent_ids if agent_id in completed_wait_agent_ids]
-        has_open_agent = api._has_open_multi_agent_context(input_items)
-        requested_spawn_count = api._requested_multi_agent_spawn_count(input_items)
-        single_loop_multi_agent_request = api._has_single_loop_multi_agent_request(input_items)
+        has_open_agent = _multi_agent._has_open_multi_agent_context(input_items)
+        requested_spawn_count = _multi_agent._requested_multi_agent_spawn_count(input_items)
+        single_loop_multi_agent_request = _multi_agent._has_single_loop_multi_agent_request(input_items)
         bounded_multi_agent_request = single_loop_multi_agent_request or requested_spawn_count is not None
         spawn_more_required = (
             requested_spawn_count is not None and len(spawned_agent_ids) < requested_spawn_count
@@ -558,15 +561,15 @@ def compatible_request_body(
             include_close_agent = False
             include_resume_agent = False
             include_send_input = False
-            state_hint = api._multi_agent_lifecycle_complete_message(closed_agent_ids)
+            state_hint = _multi_agent._multi_agent_lifecycle_complete_message(closed_agent_ids)
         elif spawn_more_required and spawned_agent_ids:
-            state_hint = api._multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
+            state_hint = _multi_agent._multi_agent_spawn_more_message(spawned_agent_ids, requested_spawn_count)
         else:
-            state_hint = api._multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
+            state_hint = _multi_agent._multi_agent_current_state_message(wait_agent_ids, close_agent_ids)
     if isinstance(event_context, dict) and not raw_provider_probe:
         if subagent_state is not None:
             event_context["_subagent_state"] = subagent_state
-            exact_prompts = api._exact_child_prompts_from_request_text(api._active_user_request_text(input_items))
+            exact_prompts = _official_passthrough._exact_child_prompts_from_request_text(_official_passthrough._active_user_request_text(input_items))
             protocol_state = getattr(subagent_state, "protocol_state", None)
             if exact_prompts:
                 event_context["subagent_exact_spawn_prompts"] = list(exact_prompts)
@@ -589,7 +592,7 @@ def compatible_request_body(
                             "node_id": legal_actions[0].node_id,
                         }
                     ]
-            required_spawn_arguments = api._required_spawn_arguments_for_state(input_items, subagent_state)
+            required_spawn_arguments = _multi_agent._required_spawn_arguments_for_state(input_items, subagent_state)
             if required_spawn_arguments is not None:
                 event_context["subagent_required_spawn_arguments"] = required_spawn_arguments
         event_context["subagent_worker_context"] = bool(subagent_worker_context)
@@ -607,13 +610,13 @@ def compatible_request_body(
         event_context["subagent_workflow_plan_read_complete"] = bool(subagent_workflow_plan_read_complete)
         event_context["subagent_workflow_plan_read_required"] = bool(subagent_workflow_plan_read_required)
     if guidance_enabled and state_hint is not None and isinstance(input_items, list):
-        node_repl_alias = api._runtime_alias_for_namespace_child(
+        node_repl_alias = _official_passthrough._runtime_alias_for_namespace_child(
             runtime_tool_plan,
             NODE_REPL_NAMESPACE,
             "js",
         )
         if node_repl_alias is not None:
-            state_hint = api._rewrite_generated_guidance_tool_name(
+            state_hint = _official_passthrough._rewrite_generated_guidance_tool_name(
                 state_hint,
                 "mcp__node_repl__js",
                 node_repl_alias,
@@ -634,9 +637,9 @@ def compatible_request_body(
         subagent_worker_context
         and guidance_enabled
         and isinstance(input_items, list)
-        and not api._has_worker_subagent_finalization_guidance(input_items)
+        and not _multi_agent._has_worker_subagent_finalization_guidance(input_items)
     ):
-        input_items.append(api._worker_subagent_finalization_message())
+        input_items.append(_multi_agent._worker_subagent_finalization_message())
         host._write_adapter_event(
             event_context,
             "worker_subagent_finalization_guidance_injected",
@@ -645,7 +648,7 @@ def compatible_request_body(
         )
         changed = True
     if node_repl_single_step_complete and isinstance(input_items, list):
-        input_items.append(api._node_repl_single_step_complete_message())
+        input_items.append(_multi_agent._node_repl_single_step_complete_message())
         host._write_adapter_event(
             event_context,
             "node_repl_single_step_complete_guidance_injected",
@@ -672,7 +675,7 @@ def compatible_request_body(
         )
         and
         tool_protocol == "responses_structured"
-        and api._adapt_native_responses_tool_declarations(
+        and _official_passthrough._adapt_native_responses_tool_declarations(
             payload,
             upstream,
             event_context,
@@ -683,7 +686,7 @@ def compatible_request_body(
     allow_codex_tools = tool_protocol != "none"
     if inject_codex_tools and allow_codex_tools and not raw_provider_probe and not collaboration_v2:
         if lifecycle_complete:
-            if api._hide_tools_for_completed_subagent_lifecycle(payload):
+            if _multi_agent._hide_tools_for_completed_subagent_lifecycle(payload):
                 host._write_adapter_event(
                     event_context,
                     "subagent_lifecycle_complete_tools_hidden",
@@ -734,7 +737,7 @@ def compatible_request_body(
             if (
                 tool_surface_strategy == "deferred_core"
                 and include_node_repl_for_subagent_workflow
-                and api._restore_deferred_core_node_repl_namespace(
+                and _multi_agent._restore_deferred_core_node_repl_namespace(
                     payload,
                     tool_surface_source_tools,
                 )
@@ -746,8 +749,8 @@ def compatible_request_body(
                         tool_choice=payload.get("tool_choice"),
                     )
                     if isinstance(event_context, dict):
-                        event_context[api._RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = runtime_tool_plan
-            if subagent_worker_context and api._filter_tools_for_subagent_worker(
+                        event_context[_official_passthrough._RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = runtime_tool_plan
+            if subagent_worker_context and _multi_agent._filter_tools_for_subagent_worker(
                 payload,
                 compatibility_plan=runtime_tool_plan,
             ):
@@ -758,7 +761,7 @@ def compatible_request_body(
                     model=payload.get("model") if isinstance(payload.get("model"), str) else None,
                 )
                 changed = True
-            if restrict_to_subagent_coordinator_tools and api._filter_tools_for_subagent_coordinator(
+            if restrict_to_subagent_coordinator_tools and _multi_agent._filter_tools_for_subagent_coordinator(
                 payload,
                 include_node_repl_tools=include_node_repl_for_subagent_workflow,
                 compatibility_plan=runtime_tool_plan,
@@ -771,9 +774,9 @@ def compatible_request_body(
                     include_node_repl_tools=include_node_repl_for_subagent_workflow,
                 )
                 changed = True
-            tool_names_before = api._function_tool_names(payload.get("tools"))
+            tool_names_before = _official_passthrough._function_tool_names(payload.get("tools"))
             tool_surface_counts: dict[str, int] = {}
-            worker_caller_carrier_supported = api._worker_caller_carrier_supported(event_context)
+            worker_caller_carrier_supported = _multi_agent._worker_caller_carrier_supported(event_context)
             if isinstance(event_context, dict):
                 if include_spawn_agent:
                     event_context["_spawn_selector_required"] = True
@@ -789,7 +792,7 @@ def compatible_request_body(
                 else:
                     event_context.pop("_worker_binding_required", None)
                     event_context.pop("_worker_requested_binding", None)
-            explicit_tools_injected = api._inject_explicit_codex_tools(
+            explicit_tools_injected = _official_passthrough._inject_explicit_codex_tools(
                 payload,
                 include_tool_search=effective_include_tool_search,
                 include_multi_agent_tools=not subagent_worker_context,
@@ -823,7 +826,7 @@ def compatible_request_body(
                     else ("default",)
                 ),
             )
-            if api._restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
+            if _multi_agent._restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
                 changed = True
             if tool_surface_counts:
                 if runtime_tool_plan is not None and tool_surface_strategy == "eager":
@@ -832,7 +835,7 @@ def compatible_request_body(
                         for entry in runtime_tool_plan.entries
                         if entry.family == "namespace"
                         and entry.disposition == "adapt"
-                        and api._is_flattened_namespace_schema(entry.declaration)
+                        and _official_passthrough._is_flattened_namespace_schema(entry.declaration)
                     )
                     tool_surface_counts["deferred_tool_count"] = 0
                 pending_tool_surface_event = {
@@ -840,7 +843,7 @@ def compatible_request_body(
                     **tool_surface_counts,
                 }
             if explicit_tools_injected:
-                added_tool_names = sorted(api._function_tool_names(payload.get("tools")) - tool_names_before)
+                added_tool_names = sorted(_official_passthrough._function_tool_names(payload.get("tools")) - tool_names_before)
                 host._write_adapter_event(
                     event_context,
                     "explicit_codex_tools_injected",
@@ -852,7 +855,7 @@ def compatible_request_body(
                 changed = True
             required_tool_choice_name = None
             if subagent_state_active:
-                runtime_node_repl_alias = api._runtime_alias_for_namespace_child(
+                runtime_node_repl_alias = _official_passthrough._runtime_alias_for_namespace_child(
                     runtime_tool_plan,
                     NODE_REPL_NAMESPACE,
                     "js",
@@ -863,12 +866,12 @@ def compatible_request_body(
                     and include_node_repl_for_subagent_workflow
                     and (
                         runtime_node_repl_alias is not None
-                        or required_node_repl_name in api._function_tool_names(payload.get("tools"))
+                        or required_node_repl_name in _official_passthrough._function_tool_names(payload.get("tools"))
                     )
                 ):
                     required_tool_choice_name = required_node_repl_name
                 else:
-                    required_tool_choice_name = api._required_subagent_tool_choice(
+                    required_tool_choice_name = _multi_agent._required_subagent_tool_choice(
                         tool_protocol=tool_protocol,
                         lifecycle_complete=lifecycle_complete,
                         include_spawn_agent=include_spawn_agent,
@@ -878,8 +881,8 @@ def compatible_request_body(
                         include_send_input=include_send_input,
                         include_node_repl_for_subagent_workflow=include_node_repl_for_subagent_workflow,
                     )
-            if semantic_repair_enabled and api._restrict_tools_to_required_tool(payload, required_tool_choice_name):
-                required_tool_family, required_tool_disposition = api._runtime_required_tool_diagnostics(
+            if semantic_repair_enabled and _official_passthrough._restrict_tools_to_required_tool(payload, required_tool_choice_name):
+                required_tool_family, required_tool_disposition = _official_passthrough._runtime_required_tool_diagnostics(
                     runtime_tool_plan,
                     required_tool_choice_name,
                 )
@@ -890,7 +893,7 @@ def compatible_request_body(
                     required_tool_disposition=required_tool_disposition,
                 )
                 changed = True
-            if semantic_repair_enabled and api._set_required_subagent_tool_choice(
+            if semantic_repair_enabled and _multi_agent._set_required_subagent_tool_choice(
                 payload,
                 required_tool_choice_name,
                 event_context=event_context,
@@ -912,14 +915,14 @@ def compatible_request_body(
         )
         if finalized_plan is not runtime_tool_plan and isinstance(event_context, dict):
             runtime_tool_plan = finalized_plan
-            event_context[api._RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan
-    if runtime_tool_plan is not None and api._apply_runtime_tool_compatibility_plan(
+            event_context[_official_passthrough._RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan
+    if runtime_tool_plan is not None and _official_passthrough._apply_runtime_tool_compatibility_plan(
         payload,
         runtime_tool_plan,
     ):
         changed = True
     if runtime_tool_plan is not None:
-        api._write_runtime_tool_adapter_request_evidence(
+        _official_passthrough._write_runtime_tool_adapter_request_evidence(
             runtime_tool_plan,
             payload,
             event_context,
@@ -969,7 +972,7 @@ def compatible_request_body(
         changed = True
 
     if upstream_name == "ollama_cloud":
-        if api._apply_ollama_reasoning_effort_alias(payload):
+        if _official_passthrough._apply_ollama_reasoning_effort_alias(payload):
             changed = True
 
     if not changed:

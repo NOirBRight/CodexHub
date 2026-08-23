@@ -70,7 +70,9 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import api, host
+from . import multi_agent as _multi_agent
+from . import official_passthrough as _official_passthrough
+from . import host
 
 def _remember_worker_stream_item(
     state: dict[str, Any],
@@ -159,7 +161,7 @@ def _reconcile_function_call_argument_events(events: list[Mapping[str, Any]]) ->
 
 def _required_subagent_call_spec(event_context: Mapping[str, Any] | None) -> dict[str, Any] | None:
     context = event_context or {}
-    if api._is_raw_provider_probe_context(context):
+    if _official_passthrough._is_raw_provider_probe_context(context):
         return None
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -185,12 +187,12 @@ def _required_subagent_call_spec(event_context: Mapping[str, Any] | None) -> dic
             agent_ids = action.get("agent_ids")
             return {
                 "tool_name": tool_name,
-                "agent_ids": api._string_list(agent_ids) if isinstance(agent_ids, list) else [],
+                "agent_ids": _official_passthrough._string_list(agent_ids) if isinstance(agent_ids, list) else [],
                 "arguments": dict(arguments),
             }
 
-    close_agent_ids = api._string_list(context.get("subagent_close_agent_ids"))
-    wait_agent_ids = api._string_list(context.get("subagent_wait_agent_ids"))
+    close_agent_ids = _official_passthrough._string_list(context.get("subagent_close_agent_ids"))
+    wait_agent_ids = _official_passthrough._string_list(context.get("subagent_wait_agent_ids"))
     if state_next_action == "spawn":
         arguments = context.get("subagent_required_spawn_arguments")
         if isinstance(arguments, Mapping) and isinstance(arguments.get("message"), str) and arguments.get("message"):
@@ -276,7 +278,7 @@ def _with_preserved_spawn_agent_type(
 
 def _required_subagent_call_item_like(spec: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
     if spec.get("tool_name") == "spawn_agent":
-        original_arguments = api._json_object_from_arguments(value.get("arguments"))
+        original_arguments = _official_passthrough._json_object_from_arguments(value.get("arguments"))
         spec = dict(spec)
         required_arguments = spec.get("arguments")
         spec["arguments"] = _with_preserved_spawn_agent_type(
@@ -305,15 +307,15 @@ def _validate_generated_required_spawn_call(
 ) -> None:
     raw_arguments = value.get("arguments")
     if (
-        api._multi_agent_function_call_name(value) != "spawn_agent"
+        _multi_agent._multi_agent_function_call_name(value) != "spawn_agent"
         or raw_arguments in (None, "")
-        or api._json_object_from_arguments(raw_arguments) is None
+        or _official_passthrough._json_object_from_arguments(raw_arguments) is None
     ):
         return
     identities = [identity for identity in (value.get("call_id"), value.get("id")) if isinstance(identity, str)]
     if any(identity in validated_call_ids for identity in identities):
         return
-    api._validate_external_worker_selectors(value, event_context, surface=surface)
+    _multi_agent._validate_external_worker_selectors(value, event_context, surface=surface)
     validated_call_ids.update(identity for identity in identities if identity)
 
 
@@ -432,8 +434,8 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
         expected = arguments_by_item_id.get(item_id)
         if not isinstance(expected, str):
             return value, False
-        original_arguments = api._json_object_from_arguments(value.get("arguments"))
-        expected_arguments = api._json_object_from_arguments(expected)
+        original_arguments = _official_passthrough._json_object_from_arguments(value.get("arguments"))
+        expected_arguments = _official_passthrough._json_object_from_arguments(expected)
         if expected_arguments is not None:
             expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
             expected = json.dumps(expected_arguments, ensure_ascii=True, separators=(",", ":"))
@@ -444,14 +446,14 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
         rewritten["arguments"] = expected
         return rewritten, True
 
-    if api._is_multi_agent_spawn_function_call(value):
+    if _multi_agent._is_multi_agent_spawn_function_call(value):
         item_id = value.get("id")
         arguments_by_item_id = state.setdefault("arguments_by_item_id", {})
         expected_arguments: Mapping[str, Any] | None = None
         if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
             stored = arguments_by_item_id.get(item_id)
             if isinstance(stored, str):
-                parsed = api._json_object_from_arguments(stored)
+                parsed = _official_passthrough._json_object_from_arguments(stored)
                 if parsed is not None:
                     expected_arguments = parsed
         if expected_arguments is None:
@@ -460,7 +462,7 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
                 return value, False
             expected_arguments = specs[next_index]
             state["next_index"] = next_index + 1
-        original_arguments = api._json_object_from_arguments(value.get("arguments"))
+        original_arguments = _official_passthrough._json_object_from_arguments(value.get("arguments"))
         expected_arguments = _with_preserved_spawn_agent_type(expected_arguments, original_arguments)
         expected_json = json.dumps(dict(expected_arguments), ensure_ascii=True, separators=(",", ":"))
         if isinstance(item_id, str) and isinstance(arguments_by_item_id, dict):
@@ -471,7 +473,7 @@ def _coerce_exact_spawn_prompt_tool_calls_inner(
         if rewritten.get("status") == "in_progress":
             rewritten["arguments"] = ""
         else:
-            rewritten["arguments"] = api._dump_arguments_like(value.get("arguments"), expected_arguments)
+            rewritten["arguments"] = _official_passthrough._dump_arguments_like(value.get("arguments"), expected_arguments)
         return (rewritten, True) if rewritten != value else (value, False)
 
     changed = False
@@ -518,7 +520,7 @@ def _coerce_required_subagent_tool_calls_inner(
         if not isinstance(item_id, str) or item_id not in coerced_item_ids:
             return value, False
         arguments = dict(spec.get("arguments")) if isinstance(spec.get("arguments"), Mapping) else {}
-        original_arguments = api._json_object_from_arguments(value.get("arguments"))
+        original_arguments = _official_passthrough._json_object_from_arguments(value.get("arguments"))
         if spec.get("tool_name") == "spawn_agent" and original_arguments is not None:
             arguments = _with_preserved_spawn_agent_type(arguments, original_arguments)
         expected = json.dumps(dict(arguments), ensure_ascii=True, separators=(",", ":"))
@@ -541,13 +543,13 @@ def _coerce_required_subagent_tool_calls_inner(
             return rewritten, True
         return value, False
 
-    original_tool_name = api._multi_agent_function_call_name(value)
+    original_tool_name = _multi_agent._multi_agent_function_call_name(value)
     if original_tool_name is not None:
         replacement = _required_subagent_call_item_like(spec, value)
         item_id = replacement.get("id")
         if isinstance(item_id, str) and item_id:
             coerced_item_ids.add(item_id)
-        if original_tool_name != "spawn_agent" and api._multi_agent_function_call_name(replacement) == "spawn_agent":
+        if original_tool_name != "spawn_agent" and _multi_agent._multi_agent_function_call_name(replacement) == "spawn_agent":
             if isinstance(item_id, str) and item_id:
                 generated_spawn_item_ids.add(item_id)
             _validate_generated_required_spawn_call(
@@ -662,9 +664,9 @@ def _repair_missing_required_subagent_call_payload(
     spec = _required_subagent_call_spec(event_context)
     if spec is None:
         return payload, False
-    if api._contains_response_function_call(payload):
+    if _official_passthrough._contains_response_function_call(payload):
         return payload, False
-    if "error" in payload or not api._response_output_is_text_or_empty(payload.get("output")):
+    if "error" in payload or not _official_passthrough._response_output_is_text_or_empty(payload.get("output")):
         return payload, False
 
     _reject_missing_worker_selector_for_generated_call(spec, event_context, surface="body")
@@ -685,7 +687,7 @@ def _repair_missing_required_subagent_call_events(
     spec = _required_subagent_call_spec(event_context)
     if spec is None:
         return events, False
-    if api._contains_response_function_call(events) or not api._response_events_are_text_or_empty(events):
+    if _official_passthrough._contains_response_function_call(events) or not _official_passthrough._response_events_are_text_or_empty(events):
         return events, False
 
     completed_response: Mapping[str, Any] | None = None
@@ -720,11 +722,11 @@ def _repair_missing_required_subagent_call_sse_line(
     spec = _required_subagent_call_spec(event_context)
     if spec is None:
         return None
-    if api._contains_response_function_call(payload):
+    if _official_passthrough._contains_response_function_call(payload):
         return None
     response = payload.get("response")
     response_obj = response if isinstance(response, Mapping) else {}
-    if not api._response_output_is_text_or_empty(response_obj.get("output")):
+    if not _official_passthrough._response_output_is_text_or_empty(response_obj.get("output")):
         return None
     _reject_missing_worker_selector_for_generated_call(spec, event_context, surface="sse")
     output = response_obj.get("output")
@@ -741,7 +743,7 @@ def compatible_sse_line(
     *,
     runtime_tool_inverse_only: bool = False,
 ) -> bytes:
-    if upstream_name == "official" or api._is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
+    if upstream_name == "official" or _official_passthrough._is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
         return line
 
     line_ending = _sse_line_ending(line)
@@ -773,7 +775,7 @@ def compatible_sse_line(
             surface="sse",
         )
 
-    runtime_tool_plan, stream_state = api._runtime_tool_compatibility_stream_for_attempt(
+    runtime_tool_plan, stream_state = _official_passthrough._runtime_tool_compatibility_stream_for_attempt(
         event_context
     )
     if runtime_tool_plan is not None and stream_state is not None:
@@ -781,8 +783,8 @@ def compatible_sse_line(
         try:
             decoded_events = stream_state.decode_events_for_event(payload)
         except RuntimeToolCompatibilityError as exc:
-            api._raise_runtime_tool_compatibility_error(exc)
-        api._write_runtime_tool_adapter_response_evidence(
+            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+        _official_passthrough._write_runtime_tool_adapter_response_evidence(
             runtime_tool_plan,
             wire_event,
             decoded_events,
@@ -811,13 +813,13 @@ def compatible_sse_line(
         return b""
 
     changed = host._hide_reasoning_text(payload) or runtime_tool_changed
-    payload, _ = api._apply_external_worker_response_contract(
+    payload, _ = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,
         surface="sse",
         attach_sidecars=False,
     )
-    payload, alias_changed = api._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
+    payload, alias_changed = _official_passthrough._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         host._write_adapter_event(
             event_context,
@@ -826,28 +828,28 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
-    payload, bounded_tool_search_changed = api._suppress_bounded_tool_search_calls(payload, event_context)
+    payload, bounded_tool_search_changed = _multi_agent._suppress_bounded_tool_search_calls(payload, event_context)
     if payload is None:
         return b""
     changed = changed or bounded_tool_search_changed
-    payload, post_final_multi_agent_changed = api._suppress_multi_agent_calls_after_lifecycle_final(
+    payload, post_final_multi_agent_changed = _multi_agent._suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
     )
     if payload is None:
         return b""
     changed = changed or post_final_multi_agent_changed
-    payload, worker_multi_agent_changed = api._suppress_worker_multi_agent_tool_calls(payload, event_context)
+    payload, worker_multi_agent_changed = _multi_agent._suppress_worker_multi_agent_tool_calls(payload, event_context)
     if payload is None:
         return b""
     changed = changed or worker_multi_agent_changed
-    payload, coordinator_forbidden_changed = api._suppress_coordinator_forbidden_tool_calls(payload, event_context)
+    payload, coordinator_forbidden_changed = _multi_agent._suppress_coordinator_forbidden_tool_calls(payload, event_context)
     if payload is None:
         return b""
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = api._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
+    payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, duplicate_spawn_changed = api._guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    payload, duplicate_spawn_changed = _multi_agent._guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
     payload, exact_spawn_changed = _coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
@@ -857,7 +859,7 @@ def compatible_sse_line(
         surface="sse",
     )
     changed = changed or required_tool_changed
-    payload, requested_binding_changed = api._apply_external_worker_response_contract(
+    payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,
         surface="sse",

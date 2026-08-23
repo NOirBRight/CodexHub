@@ -70,7 +70,10 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import api, host
+from . import multi_agent as _multi_agent
+from . import official_passthrough as _official_passthrough
+from . import sse as _sse
+from . import host
 
 def _rewrite_v2_unsupported_tool_history(
     payload: dict[str, Any],
@@ -100,7 +103,7 @@ def _rewrite_v2_unsupported_tool_history(
     capabilities = (
         compatibility_plan.capabilities
         if compatibility_plan is not None
-        else api._runtime_tool_protocol_capabilities(tool_protocol, upstream)
+        else _official_passthrough._runtime_tool_protocol_capabilities(tool_protocol, upstream)
     )
     tools = payload.get("tools")
     if not isinstance(tools, list):
@@ -189,7 +192,7 @@ def _rewrite_v2_unsupported_tool_history(
         }
         return (
             set(item).issubset(allowed_fields)
-            and api._is_standard_responses_function_call(item)
+            and _official_passthrough._is_standard_responses_function_call(item)
             and item.get("status") == "completed"
             and isinstance(item.get("arguments"), str)
             and has_valid_optional_item_identity(item)
@@ -251,7 +254,7 @@ def _rewrite_v2_unsupported_tool_history(
             rewritten_items.append(item)
             continue
         if index in stale_function_pair_indexes:
-            replacement = api._compatible_internal_message(item)
+            replacement = _official_passthrough._compatible_internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -260,7 +263,7 @@ def _rewrite_v2_unsupported_tool_history(
             continue
         item_type = item.get("type")
         if item_type == "custom_tool_call" and not preserve_custom_call(item):
-            replacement = api._compatible_internal_message(item)
+            replacement = _official_passthrough._compatible_internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -272,7 +275,7 @@ def _rewrite_v2_unsupported_tool_history(
             item_type == "custom_tool_call_output"
             and item.get("call_id") not in preserved_call_ids
         ):
-            replacement = api._compatible_internal_message(item)
+            replacement = _official_passthrough._compatible_internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -378,7 +381,7 @@ def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> boo
 
         item_type = item.get("type")
         if item_type == "compaction":
-            replacement = api._compatible_compaction_message(item)
+            replacement = _official_passthrough._compatible_compaction_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
             changed = True
@@ -432,7 +435,7 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
 
         item_type = item.get("type")
         call_id = item.get("call_id")
-        if api._has_invalid_tool_name(item):
+        if _official_passthrough._has_invalid_tool_name(item):
             if isinstance(call_id, str):
                 if item_type == "custom_tool_call":
                     bad_custom_call_ids.add(call_id)
@@ -443,17 +446,17 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
                 if item_type == "custom_tool_call"
                 else "Invalid Codex function call transcript"
             )
-            rewritten_items.append(api._assistant_transcript_message(title, item))
+            rewritten_items.append(_official_passthrough._assistant_transcript_message(title, item))
             changed = True
             continue
 
         if item_type == "function_call_output" and isinstance(call_id, str) and call_id in bad_function_call_ids:
-            rewritten_items.append(api._assistant_transcript_message("Invalid Codex function result transcript", item))
+            rewritten_items.append(_official_passthrough._assistant_transcript_message("Invalid Codex function result transcript", item))
             changed = True
             continue
 
         if item_type == "custom_tool_call_output" and isinstance(call_id, str) and call_id in bad_custom_call_ids:
-            rewritten_items.append(api._assistant_transcript_message("Invalid Codex tool result transcript", item))
+            rewritten_items.append(_official_passthrough._assistant_transcript_message("Invalid Codex tool result transcript", item))
             changed = True
             continue
 
@@ -504,7 +507,7 @@ def compatible_response_body(
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
 ) -> bytes:
-    if upstream_name == "official" or api._is_raw_provider_probe_context(event_context):
+    if upstream_name == "official" or _official_passthrough._is_raw_provider_probe_context(event_context):
         return body
 
     try:
@@ -519,14 +522,14 @@ def compatible_response_body(
     )
     event_context = host._collaboration_context_with_protocol(event_context, collaboration_protocol)
     changed = False
-    runtime_tool_plan = api._runtime_tool_compatibility_plan_for_attempt(event_context)
+    runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan_for_attempt(event_context)
     if runtime_tool_plan is not None:
         wire_output = payload.get("output")
         try:
             decoded_payload = runtime_tool_plan.decode_payload(payload)
         except RuntimeToolCompatibilityError as exc:
-            api._raise_runtime_tool_compatibility_error(exc)
-        api._write_runtime_tool_adapter_response_evidence(
+            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+        _official_passthrough._write_runtime_tool_adapter_response_evidence(
             runtime_tool_plan,
             wire_output if wire_output is not None else payload,
             decoded_payload.get("output") if isinstance(decoded_payload, Mapping) else decoded_payload,
@@ -539,13 +542,13 @@ def compatible_response_body(
     changed = host._hide_reasoning_text(payload) or changed
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
-    payload, _ = api._apply_external_worker_response_contract(
+    payload, _ = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,
         surface="body",
         attach_sidecars=False,
     )
-    payload, alias_changed = api._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
+    payload, alias_changed = _official_passthrough._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
         host._write_adapter_event(
             event_context,
@@ -554,32 +557,32 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
-    payload, bounded_tool_search_changed = api._suppress_bounded_tool_search_calls(payload, event_context)
+    payload, bounded_tool_search_changed = _multi_agent._suppress_bounded_tool_search_calls(payload, event_context)
     changed = changed or bounded_tool_search_changed
-    payload, post_final_multi_agent_changed = api._suppress_multi_agent_calls_after_lifecycle_final(
+    payload, post_final_multi_agent_changed = _multi_agent._suppress_multi_agent_calls_after_lifecycle_final(
         payload,
         event_context,
     )
     changed = changed or post_final_multi_agent_changed
-    payload, worker_multi_agent_changed = api._suppress_worker_multi_agent_tool_calls(payload, event_context)
+    payload, worker_multi_agent_changed = _multi_agent._suppress_worker_multi_agent_tool_calls(payload, event_context)
     changed = changed or worker_multi_agent_changed
-    payload, coordinator_forbidden_changed = api._suppress_coordinator_forbidden_tool_calls(payload, event_context)
+    payload, coordinator_forbidden_changed = _multi_agent._suppress_coordinator_forbidden_tool_calls(payload, event_context)
     changed = changed or coordinator_forbidden_changed
-    payload, invalid_tool_changed = api._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
+    payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, duplicate_spawn_changed = api._guard_duplicate_multi_agent_spawn_calls(payload, event_context)
+    payload, duplicate_spawn_changed = _multi_agent._guard_duplicate_multi_agent_spawn_calls(payload, event_context)
     changed = changed or duplicate_spawn_changed
-    payload, exact_spawn_changed = api._coerce_exact_spawn_prompt_tool_calls(payload, event_context)
+    payload, exact_spawn_changed = _sse._coerce_exact_spawn_prompt_tool_calls(payload, event_context)
     changed = changed or exact_spawn_changed
-    payload, required_tool_changed = api._coerce_required_subagent_tool_calls(
+    payload, required_tool_changed = _sse._coerce_required_subagent_tool_calls(
         payload,
         event_context,
         surface="body",
     )
     changed = changed or required_tool_changed
-    payload, required_call_changed = api._repair_missing_required_subagent_call_payload(payload, event_context)
+    payload, required_call_changed = _sse._repair_missing_required_subagent_call_payload(payload, event_context)
     changed = changed or required_call_changed
-    payload, requested_binding_changed = api._apply_external_worker_response_contract(
+    payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,
         surface="body",

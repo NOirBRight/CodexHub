@@ -70,7 +70,8 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import api, host
+from . import official_passthrough as _official_passthrough
+from . import host
 
 LIFECYCLE_FINAL_RETRY_GUIDANCE = """Codex native subagent final report correction
 status: lifecycle_complete_final_retry
@@ -83,7 +84,7 @@ source_of_truth: use only the observed current-turn agent ids, sentinels, wait r
 
 
 def _lifecycle_final_retry_guidance_message(reason: str) -> dict[str, str]:
-    return api._developer_text_message(LIFECYCLE_FINAL_RETRY_GUIDANCE + f"retry_reason: {reason}")
+    return _official_passthrough._developer_text_message(LIFECYCLE_FINAL_RETRY_GUIDANCE + f"retry_reason: {reason}")
 
 
 def _responses_body_with_lifecycle_final_retry_guidance(body: bytes, reason: str) -> bytes:
@@ -114,7 +115,7 @@ do_not_spawn_subagents: this is a worker subagent request, not a coordinator req
 
 
 def _worker_subagent_finalization_message() -> dict[str, str]:
-    return api._developer_text_message(WORKER_SUBAGENT_FINALIZATION_GUIDANCE)
+    return _official_passthrough._developer_text_message(WORKER_SUBAGENT_FINALIZATION_GUIDANCE)
 
 
 def _has_worker_subagent_finalization_guidance(value: Any) -> bool:
@@ -207,12 +208,12 @@ def _filter_tools_for_subagent_coordinator(
         tool
         for tool in tools
         if _is_multi_agent_tool_schema(tool)
-        or api._runtime_alias_matches_namespace(compatibility_plan, tool, "multi_agent_v1")
+        or _official_passthrough._runtime_alias_matches_namespace(compatibility_plan, tool, "multi_agent_v1")
         or (
             include_node_repl_tools
             and (
                 _is_node_repl_tool_schema(tool)
-                or api._runtime_alias_matches_namespace(compatibility_plan, tool, NODE_REPL_NAMESPACE)
+                or _official_passthrough._runtime_alias_matches_namespace(compatibility_plan, tool, NODE_REPL_NAMESPACE)
             )
         )
     ]
@@ -234,16 +235,16 @@ def _filter_tools_for_subagent_worker(
         tool
         for tool in tools
         if not _is_multi_agent_tool_schema(tool)
-        and not api._is_mcp_or_codex_app_tool_schema(tool)
+        and not _official_passthrough._is_mcp_or_codex_app_tool_schema(tool)
         and not any(
-            api._runtime_alias_matches_namespace(compatibility_plan, tool, namespace)
+            _official_passthrough._runtime_alias_matches_namespace(compatibility_plan, tool, namespace)
             for namespace in (
                 NODE_REPL_NAMESPACE,
                 "multi_agent_v1",
                 "mcp__multi_agent_v1",
             )
         )
-        and api._tool_schema_name(tool) != TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
+        and _official_passthrough._tool_schema_name(tool) != TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL["name"]
     ]
     if len(filtered_tools) == len(tools):
         return False
@@ -503,11 +504,11 @@ def _validate_worker_binding_history(
 
 def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str) -> dict[str, str]:
     lines = [f"Previous real Codex native multi_agent_v1.{tool_name} call transcript"]
-    value = api._stringify_internal_field(item.get("call_id"))
+    value = _official_passthrough._stringify_internal_field(item.get("call_id"))
     if value:
         lines.append(f"call_id: {value}")
-    api._append_internal_field(lines, "arguments", item.get("arguments"))
-    return api._developer_text_message("\n".join(lines))
+    _official_passthrough._append_internal_field(lines, "arguments", item.get("arguments"))
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _has_multi_agent_discovery_tools(value: Any) -> bool:
@@ -547,8 +548,8 @@ def _has_multi_agent_discovery_context(value: Any) -> bool:
 def _required_spawn_arguments_for_state(input_items: Any, subagent_state: Any | None) -> dict[str, Any] | None:
     if subagent_state is None or getattr(subagent_state, "next_action", None) != "spawn":
         return None
-    text = api._active_user_request_text(input_items)
-    prompts = api._exact_child_prompts_from_request_text(text)
+    text = _official_passthrough._active_user_request_text(input_items)
+    prompts = _official_passthrough._exact_child_prompts_from_request_text(text)
     if not prompts:
         return _required_workflow_spawn_arguments(text, subagent_state)
     index = len(getattr(subagent_state, "agents", {}) or {})
@@ -569,15 +570,15 @@ def _required_workflow_spawn_arguments(text: str, subagent_state: Any) -> dict[s
     if role not in {"implementer", "spec_reviewer", "code_quality_reviewer"}:
         return None
 
-    output_path = api._line_value(text, "OUTPUT_PATH=")
-    sentinel = api._line_value(text, "SENTINEL=")
-    model = api._line_value(text, "MODEL_UNDER_TEST=") or api._line_value(text, "MODEL=")
-    endpoint = api._line_value(text, "ENDPOINT_UNDER_TEST=") or api._line_value(text, "ENDPOINT=")
-    case_name = api._line_value(text, "CASE=")
+    output_path = _official_passthrough._line_value(text, "OUTPUT_PATH=")
+    sentinel = _official_passthrough._line_value(text, "SENTINEL=")
+    model = _official_passthrough._line_value(text, "MODEL_UNDER_TEST=") or _official_passthrough._line_value(text, "MODEL=")
+    endpoint = _official_passthrough._line_value(text, "ENDPOINT_UNDER_TEST=") or _official_passthrough._line_value(text, "ENDPOINT=")
+    case_name = _official_passthrough._line_value(text, "CASE=")
     if not all(isinstance(value, str) and value for value in (output_path, sentinel, model, endpoint, case_name)):
         return None
 
-    baseline_status = api._workflow_baseline_status(text)
+    baseline_status = _official_passthrough._workflow_baseline_status(text)
     artifact_text = "\n".join(
         [
             f"case: {case_name}",
@@ -674,7 +675,7 @@ Runner-owned scaffolding files observed: <short summary>
 def _multi_agent_result_text(item: Mapping[str, Any], tool_name: str) -> str | None:
     if item.get("type") != "message":
         return None
-    text = api._joined_text(item.get("content"))
+    text = _official_passthrough._joined_text(item.get("content"))
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     header = f"Codex native multi_agent_v1.{tool_name} result"
     if not lines or lines[0] != header:
@@ -691,12 +692,12 @@ def _open_multi_agent_ids(value: Any) -> list[str]:
             continue
         spawn_text = _multi_agent_result_text(item, "spawn_agent")
         if spawn_text is not None and "status: succeeded" in spawn_text:
-            agent_id = api._line_value(spawn_text, "agent_id:")
+            agent_id = _official_passthrough._line_value(spawn_text, "agent_id:")
             if agent_id:
                 open_agent_ids.add(agent_id)
         close_text = _multi_agent_result_text(item, "close_agent")
         if close_text is not None and "status: closed" in close_text:
-            closed_agent_id = api._line_value(close_text, "closed_agent_id:")
+            closed_agent_id = _official_passthrough._line_value(close_text, "closed_agent_id:")
             if closed_agent_id:
                 open_agent_ids.discard(closed_agent_id)
             else:
@@ -713,7 +714,7 @@ def _spawned_multi_agent_ids(value: Any) -> list[str]:
             continue
         spawn_text = _multi_agent_result_text(item, "spawn_agent")
         if spawn_text is not None and "status: succeeded" in spawn_text:
-            agent_id = api._line_value(spawn_text, "agent_id:")
+            agent_id = _official_passthrough._line_value(spawn_text, "agent_id:")
             if agent_id:
                 spawned_agent_ids.add(agent_id)
     return sorted(spawned_agent_ids)
@@ -729,7 +730,7 @@ def _completed_multi_agent_wait_ids(value: Any) -> list[str]:
         text = _multi_agent_result_text(item, "wait_agent")
         if text is None or "status: completed" not in text:
             continue
-        for agent_id in api._split_agent_id_list(api._line_value(text, "completed_agent_ids:")):
+        for agent_id in _official_passthrough._split_agent_id_list(_official_passthrough._line_value(text, "completed_agent_ids:")):
             completed_agent_ids.add(agent_id)
     return sorted(completed_agent_ids)
 
@@ -745,7 +746,7 @@ def _closed_multi_agent_ids(value: Any) -> list[str]:
         text = _multi_agent_result_text(item, "close_agent")
         if text is None or "status: closed" not in text:
             continue
-        closed_agent_id = api._line_value(text, "closed_agent_id:")
+        closed_agent_id = _official_passthrough._line_value(text, "closed_agent_id:")
         if closed_agent_id:
             closed_agent_ids.add(closed_agent_id)
         else:
@@ -758,7 +759,7 @@ def _closed_multi_agent_ids(value: Any) -> list[str]:
 def _has_single_loop_multi_agent_request(value: Any) -> bool:
     if not isinstance(value, list):
         return False
-    text = api._joined_text(value).lower()
+    text = _official_passthrough._joined_text(value).lower()
     if not any(token in text for token in ("spawn_agent", "multi_agent", "subagent", "子代理")):
         return False
     return any(
@@ -788,7 +789,7 @@ def _has_single_loop_multi_agent_request(value: Any) -> bool:
 def _requested_multi_agent_spawn_count(value: Any) -> int | None:
     if not isinstance(value, list):
         return None
-    text = api._joined_text(value).lower()
+    text = _official_passthrough._joined_text(value).lower()
     if not any(token in text for token in ("spawn_agent", "multi_agent", "subagent", "子代理")):
         return None
 
@@ -835,7 +836,7 @@ def _requested_multi_agent_spawn_count(value: Any) -> int | None:
 def _has_single_step_node_repl_request(value: Any) -> bool:
     if not isinstance(value, list):
         return False
-    text = api._joined_text(value).lower()
+    text = _official_passthrough._joined_text(value).lower()
     if not any(token in text for token in ("mcp__node_repl", "node_repl")):
         return False
     return any(
@@ -856,7 +857,7 @@ def _has_single_step_node_repl_request(value: Any) -> bool:
 def _has_completed_single_step_node_repl_context(value: Any) -> bool:
     if host._has_browser_context_signal(value) or not _has_single_step_node_repl_request(value):
         return False
-    text = api._joined_text(value).lower()
+    text = _official_passthrough._joined_text(value).lower()
     return "codex native mcp__node_repl.js result" in text and "status: completed" in text
 
 
@@ -887,18 +888,18 @@ def _has_node_repl_subagent_plan_read_context(value: Any) -> bool:
                 node_repl_call_ids.add(call_id)
             continue
         if item_type == "function_call_output" and isinstance(call_id, str) and call_id in node_repl_call_ids:
-            if _looks_like_subagent_workflow_plan_text(api._joined_text(item.get("output"))):
+            if _looks_like_subagent_workflow_plan_text(_official_passthrough._joined_text(item.get("output"))):
                 return True
             continue
         if item_type == "message":
-            text = api._joined_text(item.get("content"))
+            text = _official_passthrough._joined_text(item.get("content"))
             if "codex native mcp__node_repl.js result" in text.lower() and _looks_like_subagent_workflow_plan_text(text):
                 return True
     return False
 
 
 def _node_repl_single_step_complete_message() -> dict[str, str]:
-    return api._developer_text_message(
+    return _official_passthrough._developer_text_message(
         "\n".join(
             [
                 "Codex native mcp__node_repl.js current state",
@@ -926,11 +927,11 @@ def _has_open_multi_agent_context(value: Any) -> bool:
             continue
         spawn_text = _multi_agent_result_text(item, "spawn_agent")
         if spawn_text is not None and "status: succeeded" in spawn_text:
-            if not api._line_value(spawn_text, "agent_id:"):
+            if not _official_passthrough._line_value(spawn_text, "agent_id:"):
                 unknown_open_agent = True
         close_text = _multi_agent_result_text(item, "close_agent")
         if close_text is not None and "status: closed" in close_text:
-            if not api._line_value(close_text, "closed_agent_id:"):
+            if not _official_passthrough._line_value(close_text, "closed_agent_id:"):
                 unknown_open_agent = False
     return unknown_open_agent
 
@@ -953,7 +954,7 @@ def _multi_agent_lifecycle_complete_message(closed_agent_ids: list[str]) -> dict
     lines.append(
         "required_next_action: write the final concise report now from the observed agent ids, wait sentinels, and close state in the current-turn transcript. The lifecycle already completed via real Codex native tool executions; hidden tools after close indicate lifecycle complete, not unavailable. Do not call tool_search or any multi_agent_v1 tool again for this completed request."
     )
-    return api._developer_text_message("\n".join(lines))
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _multi_agent_spawn_more_message(spawned_agent_ids: list[str], requested_count: int) -> dict[str, str]:
@@ -968,7 +969,7 @@ def _multi_agent_spawn_more_message(spawned_agent_ids: list[str], requested_coun
     lines.append(
         "required_next_action: call multi_agent_v1__spawn_agent for the next not-yet-created child agent before waiting or closing any child agents."
     )
-    return api._developer_text_message("\n".join(lines))
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _multi_agent_current_state_message(
@@ -986,7 +987,7 @@ def _multi_agent_current_state_message(
         lines.append(
             "note: spawn_agent already succeeded; spawn_agent is intentionally hidden while a child agent is open."
         )
-        return api._developer_text_message("\n".join(lines))
+        return _official_passthrough._developer_text_message("\n".join(lines))
     if close_agent_ids:
         ids_text = ", ".join(close_agent_ids)
         lines.append("status: wait_completed_close_required")
@@ -995,7 +996,7 @@ def _multi_agent_current_state_message(
             "required_next_action: call multi_agent_v1__close_agent with target set to one listed agent_id. "
             "Do not write the final report until every listed agent_id has been closed."
         )
-        return api._developer_text_message("\n".join(lines))
+        return _official_passthrough._developer_text_message("\n".join(lines))
     return None
 
 
@@ -1005,12 +1006,12 @@ def _compatible_multi_agent_output_message(
     arguments: Mapping[str, Any] | None,
 ) -> dict[str, str]:
     lines = [f"Codex native multi_agent_v1.{tool_name} result"]
-    call_id = api._single_line_internal_field(item.get("call_id"))
+    call_id = _official_passthrough._single_line_internal_field(item.get("call_id"))
     if call_id:
         lines.append(f"call_id: {call_id}")
 
     output = item.get("output")
-    output_object = api._json_object_from_arguments(output)
+    output_object = _official_passthrough._json_object_from_arguments(output)
 
     if tool_name == "spawn_agent":
         agent_id = output_object.get("agent_id") if output_object else None
@@ -1031,8 +1032,8 @@ def _compatible_multi_agent_output_message(
     elif tool_name == "wait_agent":
         timed_out = output_object.get("timed_out") if output_object else None
         status = output_object.get("status") if output_object else None
-        completed_agent_ids = api._status_completed_agent_ids(status)
-        not_found_agent_ids = api._status_not_found_agent_ids(status)
+        completed_agent_ids = _official_passthrough._status_completed_agent_ids(status)
+        not_found_agent_ids = _official_passthrough._status_not_found_agent_ids(status)
         if timed_out is False and completed_agent_ids:
             lines.append("status: completed")
             lines.append(f"completed_agent_ids: {', '.join(completed_agent_ids)}")
@@ -1058,22 +1059,22 @@ def _compatible_multi_agent_output_message(
                 lines.append(f"target_agent_id: {target}")
             lines.append("next_action: do not retry close for this same target; if it was already closed, continue.")
 
-    api._append_internal_field(lines, "raw_output", output)
-    return api._developer_text_message("\n".join(lines))
+    _official_passthrough._append_internal_field(lines, "raw_output", output)
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _compatible_node_repl_call_message(item: Mapping[str, Any]) -> dict[str, str]:
     lines = ["Previous real Codex native mcp__node_repl.js call transcript"]
-    value = api._stringify_internal_field(item.get("call_id"))
+    value = _official_passthrough._stringify_internal_field(item.get("call_id"))
     if value:
         lines.append(f"call_id: {value}")
-    api._append_internal_field(lines, "arguments", item.get("arguments"))
-    return api._developer_text_message("\n".join(lines))
+    _official_passthrough._append_internal_field(lines, "arguments", item.get("arguments"))
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _compatible_node_repl_output_message(item: Mapping[str, Any], *, enforce_final: bool) -> dict[str, str]:
     lines = ["Codex native mcp__node_repl.js result"]
-    value = api._stringify_internal_field(item.get("call_id"))
+    value = _official_passthrough._stringify_internal_field(item.get("call_id"))
     if value:
         lines.append(f"call_id: {value}")
     lines.append("status: completed")
@@ -1083,8 +1084,8 @@ def _compatible_node_repl_output_message(item: Mapping[str, Any], *, enforce_fin
         lines.append(
             "required_next_action: write the final answer now. The node_repl tool call already completed successfully; do not infer hidden tools were unavailable, and do not call mcp__node_repl__js or tool_search again for this single-step request."
         )
-    api._append_internal_field(lines, "raw_output", item.get("output"))
-    return api._developer_text_message("\n".join(lines))
+    _official_passthrough._append_internal_field(lines, "raw_output", item.get("output"))
+    return _official_passthrough._developer_text_message("\n".join(lines))
 
 
 def _multi_agent_discovery_output_item(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -1159,7 +1160,7 @@ def _coordinator_forbidden_tool_suppressed_message(
     *,
     reason: str,
 ) -> dict[str, Any]:
-    return api._assistant_transcript_message(f"subagent_coordinator_tool_call_suppressed: {reason}", item)
+    return _official_passthrough._assistant_transcript_message(f"subagent_coordinator_tool_call_suppressed: {reason}", item)
 
 
 def _mark_lifecycle_final_seen_if_present(value: Mapping[str, Any], state: dict[str, Any]) -> None:
@@ -1167,11 +1168,11 @@ def _mark_lifecycle_final_seen_if_present(value: Mapping[str, Any], state: dict[
         return
     text = ""
     if value.get("type") == "message":
-        text = api._message_item_visible_text(value)
+        text = _official_passthrough._message_item_visible_text(value)
     elif value.get("type") == "response.output_item.done":
         item = value.get("item")
         if isinstance(item, Mapping):
-            text = api._message_item_visible_text(item)
+            text = _official_passthrough._message_item_visible_text(item)
     elif value.get("type") == "response.output_text.done":
         event_text = value.get("text")
         text = event_text if isinstance(event_text, str) else ""
@@ -1189,7 +1190,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if api._is_raw_provider_probe_context(context) or host._is_collaboration_v2_context(context):
+    if _official_passthrough._is_raw_provider_probe_context(context) or host._is_collaboration_v2_context(context):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -1320,7 +1321,7 @@ def _suppress_coordinator_forbidden_tool_calls(
     context = event_context or {}
     if (
         bool(context.get("subagent_worker_context"))
-        or api._is_raw_provider_probe_context(context)
+        or _official_passthrough._is_raw_provider_probe_context(context)
         or host._is_collaboration_v2_context(context)
     ):
         return value, False
@@ -1333,10 +1334,10 @@ def _suppress_coordinator_forbidden_tool_calls(
     state_has_agents = bool(getattr(subagent_state, "agents", {}))
     active = (
         state_has_agents
-        or bool(api._string_list(context.get("subagent_open_agent_ids")))
-        or bool(api._string_list(context.get("subagent_wait_agent_ids")))
-        or bool(api._string_list(context.get("subagent_close_agent_ids")))
-        or bool(api._string_list(context.get("subagent_closed_agent_ids")))
+        or bool(_official_passthrough._string_list(context.get("subagent_open_agent_ids")))
+        or bool(_official_passthrough._string_list(context.get("subagent_wait_agent_ids")))
+        or bool(_official_passthrough._string_list(context.get("subagent_close_agent_ids")))
+        or bool(_official_passthrough._string_list(context.get("subagent_closed_agent_ids")))
         or bool(context.get("subagent_lifecycle_complete"))
         or (
             bool(context.get("subagent_workflow_active"))
@@ -1402,7 +1403,7 @@ def _suppress_coordinator_forbidden_tool_calls_inner(
     elif _node_repl_function_call_name(value) is not None:
         if not allow_plan_read_node_repl:
             reason = "node_repl_unavailable_after_subagent_plan_read"
-    elif api._is_mcp_or_codex_app_function_call(value):
+    elif _official_passthrough._is_mcp_or_codex_app_function_call(value):
         reason = "mcp_or_codex_app_tool_unavailable_during_subagent_workflow"
     elif _looks_like_coordinator_local_function_call(
         value,
@@ -1587,7 +1588,7 @@ def _guard_duplicate_multi_agent_spawn_calls_inner(
     if _is_multi_agent_spawn_function_call(value):
         blocked_by_state = False
         if subagent_state is not None:
-            arguments = api._json_object_from_arguments(value.get("arguments")) or {}
+            arguments = _official_passthrough._json_object_from_arguments(value.get("arguments")) or {}
             try:
                 if subagent_state.allows_spawn_request(arguments):
                     if (
