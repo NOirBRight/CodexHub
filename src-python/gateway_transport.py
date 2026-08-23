@@ -60,8 +60,8 @@ from gateway_errors import (
     safe_upstream_error_detail,
 )
 from gateway_settings import (
-    _request_kind_retry_attempts_configured,
-    _upstream_retry_attempts,
+    request_kind_retry_attempts_configured as _request_kind_retry_attempts_configured,
+    upstream_retry_attempts as _upstream_retry_attempts,
     gateway_auto_retry_max_attempts,
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
@@ -1041,16 +1041,18 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
 
 
 
-def _header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
+def header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
     return [(str(key), str(value)) for key, value in headers.items()]
+_header_items = header_items
 
 
-def _get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
+def get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
     wanted = name.lower()
     for key, value in _header_items(headers):
         if key.lower() == wanted:
             return value
     return None
+_get_header = get_header
 
 
 def _default_access_token() -> str:
@@ -1562,7 +1564,7 @@ def _status_allows_capacity_error_value(status: int | None) -> bool:
     return status not in PERMANENT_HTTP_ERROR_STATUSES
 
 
-def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
+def retry_after_delay_seconds(exc: BaseException | None) -> int | None:
     if not isinstance(exc, HTTPError):
         return None
     value = _get_header(getattr(exc, "headers", {}), "retry-after")
@@ -1582,9 +1584,10 @@ def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
     if retry_at.tzinfo is None:
         retry_at = retry_at.replace(tzinfo=timezone.utc)
     return max(0, math.ceil(retry_at.timestamp() - time.time()))
+_retry_after_delay_seconds = retry_after_delay_seconds
 
 
-def _upstream_failure_class(exc: BaseException) -> str:
+def upstream_failure_class(exc: BaseException) -> str:
     if isinstance(exc, _STREAM_INTERRUPTED_ERROR):
         return _upstream_failure_class(exc.cause)
     if isinstance(exc, _STREAM_ERROR_EVENT):
@@ -1633,6 +1636,7 @@ def _upstream_failure_class(exc: BaseException) -> str:
     ):
         return RETRY_FAILURE_QUICK_TRANSIENT
     return RETRY_FAILURE_PERMANENT
+_upstream_failure_class = upstream_failure_class
 
 
 def _capacity_retry_elapsed_limit_allows(started_at: float, delay_seconds: int) -> bool:
@@ -2239,12 +2243,13 @@ _UpstreamSseReaderLifecycle = UpstreamSseReaderLifecycle
 # ---------------------------------------------------------------------------
 
 
-def _retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str | None:
+def retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str | None:
     """Return the private stable retry identity if one exists in the context."""
     if event_context is None:
         return None
     identity = event_context.get("_retry_attempt_identity")
     return identity if isinstance(identity, str) and identity else None
+_retry_identity_from_context = retry_identity_from_context
 
 
 def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
@@ -2295,7 +2300,7 @@ def _model_access_path_idempotency_guaranteed(model_access_path: tuple[str, ...]
     return False
 
 
-def _model_access_path_from_event_context(
+def model_access_path_from_event_context(
     event_context: Mapping[str, Any] | None,
     upstream_name: str,
     upstream_format: str,
@@ -2317,6 +2322,7 @@ def _model_access_path_from_event_context(
         except Exception:
             inbound_format = ""
     return (upstream_name, model, behavior_profile, upstream_format, inbound_format)
+_model_access_path_from_event_context = model_access_path_from_event_context
 
 
 def _ensure_retry_attempt_identity(
@@ -2343,11 +2349,12 @@ def _ensure_retry_attempt_identity(
     return identity
 
 
-_SUPPRESSED_RETRY_SAFETY_CLASSES = frozenset({
+SUPPRESSED_RETRY_SAFETY_CLASSES = frozenset({
     RETRY_SAFETY_SUPPRESSED_POST_WRITE,
     RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
     RETRY_SAFETY_UNKNOWN,
 })
+_SUPPRESSED_RETRY_SAFETY_CLASSES = SUPPRESSED_RETRY_SAFETY_CLASSES
 
 
 def _retry_safety_class(

@@ -44,8 +44,8 @@ from catalog_sync import (
 )
 from gateway_errors import (
     ModelIdentityResolutionError,
-    _catalog_failure,
-    _identity_failure,
+    catalog_failure as _catalog_failure,
+    identity_failure as _identity_failure,
 )
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,

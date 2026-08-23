@@ -48,10 +48,11 @@ _REQUEST_KIND_RETRY_POLICY: dict[str, tuple[str | None, str | None, int]] = {
 }
 
 
-def _runtime_proxy_dir() -> Path:
+def runtime_proxy_dir() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     root = Path(codex_home) if codex_home else Path.home() / ".codex"
     return root / "proxy"
+_runtime_proxy_dir = runtime_proxy_dir
 
 def upstream_timeout_seconds() -> int:
     settings_value = _runtime_settings_value("gateway_request_timeout_seconds")
@@ -331,8 +332,9 @@ def _request_kind_retry_settings_name(request_kind: str) -> str | None:
     return _REQUEST_KIND_RETRY_POLICY.get(request_kind, (None, None, 5))[1]
 
 
-def _default_retry_attempts_for_request_kind(request_kind: str) -> int:
+def default_retry_attempts_for_request_kind(request_kind: str) -> int:
     return _REQUEST_KIND_RETRY_POLICY.get(request_kind, (None, None, 5))[2]
+_default_retry_attempts_for_request_kind = default_retry_attempts_for_request_kind
 
 
 def _bounded_retry_attempts(value: Any, default: int) -> int:
@@ -349,7 +351,7 @@ def _bounded_retry_attempts(value: Any, default: int) -> int:
     return default
 
 
-def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) -> int:
+def upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) -> int:
     if not gateway_auto_retry_enabled():
         return 1
     default = _default_retry_attempts_for_request_kind(request_kind)
@@ -364,14 +366,16 @@ def _upstream_retry_attempts(request_kind: str = RETRY_REQUEST_MAIN_GENERATION) 
         if raw_value is not None:
             return _bounded_retry_attempts(raw_value, default)
     return min(gateway_auto_retry_max_attempts(), default)
+_upstream_retry_attempts = upstream_retry_attempts
 
 
-def _request_kind_retry_attempts_configured(request_kind: str) -> bool:
+def request_kind_retry_attempts_configured(request_kind: str) -> bool:
     settings_name = _request_kind_retry_settings_name(request_kind)
     if settings_name and _runtime_settings_value(settings_name) is not None:
         return True
     env_name = _request_kind_retry_env_name(request_kind)
     return bool(env_name and os.environ.get(env_name) is not None)
+_request_kind_retry_attempts_configured = request_kind_retry_attempts_configured
 
 
 def gateway_capacity_retry_elapsed_limit_seconds() -> float:

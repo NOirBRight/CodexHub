@@ -647,14 +647,14 @@ import gateway_transport
 from gateway_errors import (
     CompactEmptyResponseError,
     UpstreamStreamIdleTimeoutError,
-    _responses_failed_event_for_stream_error,
+    responses_failed_event_for_stream_error as _responses_failed_event_for_stream_error,
     safe_upstream_error_detail,
 )
 from gateway_relay import RelayContext, RelayGlue
 from gateway_request import (
-    _UNSET_CONTENT_ENCODING,
-    _filtered_response_headers,
-    _is_event_stream,
+    UNSET_CONTENT_ENCODING as _UNSET_CONTENT_ENCODING,
+    filtered_response_headers as _filtered_response_headers,
+    is_event_stream as _is_event_stream,
     decoded_request_body,
 )
 from gateway_sse import DownstreamStreamCommit
@@ -666,8 +666,8 @@ from gateway_stream_semantics import (
 )
 from gateway_transport import (
     UpstreamSseReaderLifecycle as _UpstreamSseReaderLifecycle,
-    _get_header,
-    _retry_identity_from_context,
+    get_header as _get_header,
+    retry_identity_from_context as _retry_identity_from_context,
 )
 from protocol_translation import (
     GatewayChatToResponsesStreamConverter as _ChatToResponsesStreamConverter,
@@ -698,7 +698,7 @@ def _write_adapter_event(event_context: Any, event: str, **fields: Any) -> None:
     gateway_events.write_adapter_event(event_context, event, **fields)
 
 
-def _responses_synthetic_terminal_failure(
+def responses_synthetic_terminal_failure(
     handler: Any,
     exc: BaseException,
     *,
@@ -726,6 +726,7 @@ def _responses_synthetic_terminal_failure(
             write_exc = OSError("downstream closed")
         return False, type(write_exc).__name__, safe_upstream_error_detail(write_exc, redact_identity=redact_identity)
     return True, None, None
+_responses_synthetic_terminal_failure = responses_synthetic_terminal_failure
 
 
 # Downstream writes that do not participate in the stream-commit seam.
@@ -757,13 +758,14 @@ DOWNSTREAM_STREAM_COMMIT_SEAM_METHODS: frozenset[str] = frozenset({
 })
 
 
-def _handler_downstream_stream_commit(handler: Any) -> DownstreamStreamCommit | None:
+def handler_downstream_stream_commit(handler: Any) -> DownstreamStreamCommit | None:
     """Return the request-scoped stream-commit seam bound to ``handler`` if active."""
     seam = getattr(handler, "_downstream_stream_commit", None)
     return seam if isinstance(seam, DownstreamStreamCommit) else None
+_handler_downstream_stream_commit = handler_downstream_stream_commit
 
 
-def _downstream_has_been_exposed(handler: Any) -> bool:
+def downstream_has_been_exposed(handler: Any) -> bool:
     """Return True if upstream response content has been exposed downstream.
 
     Exposure includes both bytes already written to the downstream socket and
@@ -778,6 +780,7 @@ def _downstream_has_been_exposed(handler: Any) -> bool:
         getattr(seam, "_downstream_output_started", False)
         or getattr(seam, "_downstream_content_exposed", False)
     )
+_downstream_has_been_exposed = downstream_has_been_exposed
 
 
 class _HandlerDownstreamIO:
@@ -826,7 +829,7 @@ def _bind_handler_synthetic_terminal_failure(
     return bound
 
 
-def _bind_downstream_stream_commit(
+def bind_downstream_stream_commit(
     handler: Any,
     upstream: Any | None,
     upstream_name: str,
@@ -862,6 +865,7 @@ def _bind_downstream_stream_commit(
         upstream_name,
         **kwargs,
     )
+_bind_downstream_stream_commit = bind_downstream_stream_commit
 
 
 # Relay bindings are rebuilt per request so owning-module patches stay live.
@@ -892,7 +896,7 @@ def _relay_glue() -> RelayGlue:
     )
 
 
-def _relay_context_for_handler(handler: Any) -> RelayContext:
+def relay_context_for_handler(handler: Any) -> RelayContext:
     return RelayContext(
         handler=handler,
         glue=_relay_glue(),
@@ -900,3 +904,4 @@ def _relay_context_for_handler(handler: Any) -> RelayContext:
         official_passthrough_relay=handler._relay_official_passthrough_sse_response,
         prepared_exchange=getattr(handler, "_active_prepared_exchange", None),
     )
+_relay_context_for_handler = relay_context_for_handler

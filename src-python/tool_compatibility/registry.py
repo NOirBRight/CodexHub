@@ -8,7 +8,7 @@ import hashlib
 from typing import Any, Iterable, Mapping
 
 from .collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
-from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, _copy_mapping
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
 from .dispositions import CUSTOM_FREEFORM, NAMESPACE, TOOL_SEARCH
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
