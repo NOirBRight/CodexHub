@@ -16,6 +16,7 @@ from subscription_credential import (
     SubscriptionAuthError,
     credential_for,
     register,
+    register_provider_auth,
 )
 
 AUTH_ISSUER = "https://auth.x.ai"
@@ -29,7 +30,6 @@ POLL_INTERVAL_SECONDS = 5.0
 DEVICE_TIMEOUT_SECONDS = 600.0
 
 _lock = threading.Lock()
-_cache: dict[str, Any] | None = None
 
 
 def _codex_home() -> Path:
@@ -48,6 +48,16 @@ def auth_json_path() -> Path:
 
 def client_id() -> str:
     return os.environ.get("CODEXHUB_XAI_OAUTH_CLIENT_ID", DEFAULT_CLIENT_ID).strip() or DEFAULT_CLIENT_ID
+
+
+def _cli_timeout_seconds() -> float | None:
+    raw = os.environ.get("CODEXHUB_XAI_CLI_TIMEOUT_SECONDS")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def pin_https_xai_url(url: str) -> str:
@@ -160,7 +170,13 @@ def poll_device_login(
     now: Any = time.time,
 ) -> dict[str, Any]:
     token_endpoint = str(device["token_endpoint"])
-    deadline = float(now()) + float(device.get("expires_in") or DEVICE_TIMEOUT_SECONDS)
+    device_deadline = float(now()) + float(device.get("expires_in") or DEVICE_TIMEOUT_SECONDS)
+    cli_timeout = _cli_timeout_seconds()
+    deadline = (
+        min(device_deadline, float(now()) + cli_timeout)
+        if cli_timeout is not None
+        else device_deadline
+    )
     interval = float(device.get("interval") or POLL_INTERVAL_SECONDS)
     while float(now()) < deadline:
         try:
@@ -183,17 +199,16 @@ def poll_device_login(
             continue
         access = tokens.get("access_token")
         if isinstance(access, str) and access:
-            _persist_tokens(tokens)
+            persist_tokens(tokens)
             return tokens
         sleeper(interval)
     raise SubscriptionAuthError("xAI device-code login timed out", classification="auth-required")
 
 
-def _persist_tokens(tokens: Mapping[str, Any]) -> None:
-    global _cache
+def persist_tokens(tokens: Mapping[str, Any], *, now: Any = time.time) -> None:
     path = auth_json_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "auth_mode": "xai_oauth",
         "tokens": {
             "access_token": tokens.get("access_token"),
@@ -201,14 +216,16 @@ def _persist_tokens(tokens: Mapping[str, Any]) -> None:
             "token_type": tokens.get("token_type", "Bearer"),
         },
     }
-    atomic_write_text(
-        path,
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-        mode=PRIVATE_AUTH_FILE_MODE,
-    )
+    expires_in = tokens.get("expires_in")
+    if isinstance(expires_in, (int, float)):
+        payload["expires_at"] = float(now()) + float(expires_in)
     with _lock:
-        _cache = payload
+        atomic_write_text(
+            path,
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            mode=PRIVATE_AUTH_FILE_MODE,
+        )
 
 
 def load_auth_json(path: Path | None = None) -> dict[str, Any]:
@@ -261,28 +278,32 @@ def refresh(auth_data: dict[str, Any] | None = None, *, opener: Any = None) -> s
         raise SubscriptionAuthError("xAI refresh did not return an access_token", classification="refresh-failed")
     merged = dict(tokens)
     merged.update({key: rotated[key] for key in ("access_token", "refresh_token", "token_type") if key in rotated})
-    _persist_tokens(merged)
+    if "expires_in" in rotated:
+        merged["expires_in"] = rotated["expires_in"]
+    persist_tokens(merged)
     return access
 
 
-def access_token(*, opener: Any = None) -> str:
-    global _cache
-    with _lock:
-        data = _cache
-        if data is None:
-            data = load_auth_json()
-            _cache = data
-        tokens = data.get("tokens", {})
-        token = tokens.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise SubscriptionAuthError("xAI access_token missing", classification="auth-required")
-        return token
+def access_token(*, opener: Any = None, now: Any = time.time) -> str:
+    data = load_auth_json()
+    tokens = data.get("tokens", {})
+    token = tokens.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise SubscriptionAuthError("xAI access_token missing", classification="auth-required")
+    expires_at = data.get("expires_at")
+    refresh_token = tokens.get("refresh_token")
+    if (
+        isinstance(expires_at, (int, float))
+        and float(expires_at) - 60 < float(now())
+        and isinstance(refresh_token, str)
+        and refresh_token
+    ):
+        return refresh(data, opener=opener)
+    return token
 
 
 def reset_cache() -> None:
-    global _cache
-    with _lock:
-        _cache = None
+    return None
 
 
 class XaiOauthAdapter:
@@ -299,6 +320,7 @@ class XaiOauthAdapter:
 def register_default() -> None:
     if credential_for("xai_oauth") is None:
         register("xai_oauth", XaiOauthAdapter())
+    register_provider_auth("xai", "xai_oauth", has_session)
 
 
 register_default()

@@ -7,6 +7,7 @@ Simple API-key strategies are not subscriptions and stay out of this registry.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Mapping, Protocol, runtime_checkable
 
 AUTH_REQUIRED = "auth-required"
@@ -38,6 +39,7 @@ class SubscriptionCredential(Protocol):
 
 
 _REGISTRY: dict[str, SubscriptionCredential] = {}
+_PROVIDER_AUTH: dict[str, tuple[str, Callable[[], bool]]] = {}
 
 
 def register(auth_mode: str, credential: SubscriptionCredential) -> None:
@@ -58,6 +60,32 @@ def credential_for(auth_mode: str | None) -> SubscriptionCredential | None:
 
 def registered_modes() -> tuple[str, ...]:
     return tuple(sorted(_REGISTRY))
+
+
+def register_provider_auth(
+    provider_id: str,
+    auth_mode: str,
+    has_session: Callable[[], bool],
+) -> None:
+    if not provider_id:
+        raise ValueError("provider_id is required")
+    if not auth_mode:
+        raise ValueError("auth_mode is required")
+    _PROVIDER_AUTH[provider_id] = (auth_mode, has_session)
+
+
+def unregister_provider_auth(provider_id: str) -> None:
+    _PROVIDER_AUTH.pop(provider_id, None)
+
+
+def provider_auth_mode(provider_id: str | None) -> str | None:
+    if not provider_id:
+        return None
+    binding = _PROVIDER_AUTH.get(provider_id)
+    if binding is None:
+        return None
+    auth_mode, has_session = binding
+    return auth_mode if has_session() else None
 
 
 class CodexAuthAdapter:

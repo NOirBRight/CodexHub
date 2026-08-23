@@ -41,7 +41,7 @@ def test_persist_and_load_tokens_uses_private_mode(tmp_path, monkeypatch) -> Non
     path = tmp_path / "xai_auth.json"
     monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
     xai_auth.reset_cache()
-    xai_auth._persist_tokens(
+    xai_auth.persist_tokens(
         {"access_token": "access-1", "refresh_token": "refresh-1", "token_type": "Bearer"}
     )
     assert path.stat().st_mode & 0o777 == 0o600
@@ -114,8 +114,21 @@ def test_poll_device_login_persists_access_token(tmp_path, monkeypatch) -> None:
     assert xai_auth.access_token() == "live-token"
 
 
-def test_http_error_on_token_endpoint_is_refresh_failed() -> None:
+def test_http_error_on_token_endpoint_is_refresh_failed(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {"access_token": "old", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+
     def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        if request.full_url.endswith("openid-configuration"):
+            return _FakeResponse(
+                {
+                    "device_authorization_endpoint": "https://auth.x.ai/oauth/device",
+                    "token_endpoint": "https://auth.x.ai/oauth/token",
+                }
+            )
         raise HTTPError(
             request.full_url,
             401,
@@ -125,11 +138,7 @@ def test_http_error_on_token_endpoint_is_refresh_failed() -> None:
         )
 
     with pytest.raises(SubscriptionAuthError) as exc:
-        xai_auth._open_json(
-            "https://auth.x.ai/oauth/token",
-            payload={"grant_type": "refresh_token"},
-            opener=opener,
-        )
+        xai_auth.refresh(opener=opener)
     assert exc.value.classification == "refresh-failed"
 
 
@@ -148,7 +157,7 @@ def test_xai_oauth_headers_use_the_adapter_not_a_transport_branch(tmp_path, monk
     path = tmp_path / "xai_auth.json"
     monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
     xai_auth.reset_cache()
-    xai_auth._persist_tokens({"access_token": "xai-live", "refresh_token": "refresh-1"})
+    xai_auth.persist_tokens({"access_token": "xai-live", "refresh_token": "refresh-1"})
     headers = build_upstream_headers(
         {"Content-Type": "application/json"},
         {"auth": "xai_oauth", "name": "xai", "upstream_model": "grok-4"},
@@ -162,6 +171,73 @@ def test_catalog_selects_xai_oauth_without_a_transport_branch() -> None:
     root = Path(__file__).resolve().parents[1] / "src-python"
     catalog = (root / "gateway_catalog_runtime.py").read_text(encoding="utf-8")
     transport = (root / "gateway_transport.py").read_text(encoding="utf-8")
-    assert 'auth_mode = "xai_oauth"' in catalog
+    assert "provider_auth_mode" in catalog
+    assert "provider_id == " not in catalog
+    assert "xai_oauth" not in catalog
     assert "xai_oauth" not in transport
+
+
+def test_access_token_refreshes_when_expires_at_is_near(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {
+            "access_token": "old-token",
+            "refresh_token": "r1",
+            "token_type": "Bearer",
+            "expires_in": 1,
+        },
+        now=lambda: 0.0,
+    )
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        if request.full_url.endswith("openid-configuration"):
+            return _FakeResponse(
+                {
+                    "device_authorization_endpoint": "https://auth.x.ai/oauth/device",
+                    "token_endpoint": "https://auth.x.ai/oauth/token",
+                }
+            )
+        return _FakeResponse(
+            {"access_token": "rotated-token", "refresh_token": "r2", "token_type": "Bearer"}
+        )
+
+    token = xai_auth.access_token(opener=opener, now=lambda: 100.0)
+    assert token == "rotated-token"
+    assert xai_auth.load_auth_json()["tokens"]["access_token"] == "rotated-token"
+
+
+def test_access_token_skips_refresh_without_expires_at(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {"access_token": "live-token", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        raise AssertionError(f"unexpected refresh against {request.full_url}")
+
+    assert xai_auth.access_token(opener=opener) == "live-token"
+
+
+def test_poll_device_login_honors_cli_timeout_env(monkeypatch) -> None:
+    monkeypatch.setenv("CODEXHUB_XAI_CLI_TIMEOUT_SECONDS", "1")
+    clock = {"now": 0.0}
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        return _FakeResponse({"error": "authorization_pending"})
+
+    with pytest.raises(SubscriptionAuthError, match="timed out") as exc:
+        xai_auth.poll_device_login(
+            {
+                "device_code": "dev-1",
+                "token_endpoint": "https://auth.x.ai/oauth/token",
+                "interval": 0,
+                "expires_in": 600,
+            },
+            opener=opener,
+            sleeper=lambda _seconds: clock.__setitem__("now", clock["now"] + 1),
+            now=lambda: clock["now"],
+        )
+    assert exc.value.classification == "auth-required"
 

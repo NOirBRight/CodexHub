@@ -25,8 +25,14 @@ refreshable, persisted subscription tokens:
 - `access_token() -> str`
 - `account_headers() -> Mapping[str, str]` (empty when the provider has none)
 - `refresh() -> str`
-- persistence is owned by the adapter (0600 atomic writes, thread-safe cache)
+- persistence is owned by the adapter (0600 atomic writes, file is the
+  process-shared source of truth)
 - errors use a small taxonomy: `auth-required`, `refresh-failed`, `not-eligible`
+- provider binding is part of the seam: `register_provider_auth(provider_id,
+  auth_mode, has_session)`. Catalog selects `auth_mode` only through
+  `provider_auth_mode(provider_id)` and must not name a provider. A third
+  subscription type is one adapter `register(...)` plus one
+  `register_provider_auth(...)` — zero catalog or transport edits.
 
 `codex_auth` becomes adapter `#1` behind this protocol. Its headers remain
 byte-identical (`Authorization`, `Chatgpt-account-id`, plus the existing

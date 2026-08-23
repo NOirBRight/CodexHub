@@ -11,10 +11,13 @@ from subscription_credential import (
     CodexAuthAdapter,
     SubscriptionAuthError,
     credential_for,
+    provider_auth_mode,
     register,
     register_builtin_adapters,
+    register_provider_auth,
     registered_modes,
     unregister,
+    unregister_provider_auth,
 )
 
 
@@ -78,6 +81,26 @@ def test_builtin_adapters_register_codex_and_xai() -> None:
         assert credential_for("xai_oauth") is not None
     finally:
         register_builtin_adapters()
+
+
+def test_provider_auth_registry_does_not_require_catalog_edits() -> None:
+    from pathlib import Path
+
+    unregister_provider_auth("acme")
+    try:
+        register_provider_auth("acme", "acme_oauth", lambda: True)
+        assert provider_auth_mode("acme") == "acme_oauth"
+        register_provider_auth("acme", "acme_oauth", lambda: False)
+        assert provider_auth_mode("acme") is None
+        assert provider_auth_mode(None) is None
+        catalog = (
+            Path(__file__).resolve().parents[1] / "src-python" / "gateway_catalog_runtime.py"
+        ).read_text(encoding="utf-8")
+        assert "acme" not in catalog
+        assert "acme_oauth" not in catalog
+        assert "provider_id == " not in catalog
+    finally:
+        unregister_provider_auth("acme")
 
 
 def test_codex_adapter_maps_missing_auth_to_auth_required(monkeypatch: pytest.MonkeyPatch) -> None:
