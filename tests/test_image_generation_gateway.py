@@ -10,7 +10,9 @@ from typing import Iterator
 from unittest.mock import patch
 
 import codex_proxy
+import gateway_catalog_runtime
 import pytest
+import gateway_transport
 
 
 class _ImageUpstreamHandler(BaseHTTPRequestHandler):
@@ -159,7 +161,7 @@ def test_image_generation_relays_official_raw_contract(
             patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
             patch.object(codex_proxy, "codex_access_token", return_value="synthetic-official-token"),
             patch.object(codex_proxy, "codex_account_id", return_value="synthetic-account-id"),
-            patch.object(codex_proxy, "OFFICIAL_HTTP_POOLS", {}),
+            patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}),
             _http_server(codex_proxy.CodexProxyHandler) as gateway,
         ):
             status, headers, response_body = _request_image_generation(gateway, request_body)
@@ -192,7 +194,7 @@ def test_image_generation_cancellation_during_upstream_body_read_uses_shutdown_o
 
     with (
         patch.object(
-            codex_proxy,
+            gateway_catalog_runtime,
             "official_upstream",
             return_value={
                 "name": "official",
@@ -233,7 +235,7 @@ def test_image_generation_official_lookup_failure_completes_admission_and_return
     with (
         patch.object(codex_proxy, "gateway_client_key", return_value="local-client-key"),
         patch.object(
-            codex_proxy,
+            gateway_catalog_runtime,
             "official_upstream",
             side_effect=RuntimeError("controlled routing config failure"),
         ),

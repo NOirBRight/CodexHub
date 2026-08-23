@@ -49,6 +49,7 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 import urllib3
 
 from catalog import canonical_model_id
+from gateway_admission import sleep_for_retry_with_gateway_cancellation
 from gateway_errors import (
     CompactEmptyResponseError,
     GatewayPreResponseBudgetExhausted,
@@ -2042,7 +2043,7 @@ def _open_upstream_response(
                     )
                 ):
                     raise transport.facts.downstream_closed_before_retry_error("downstream closed before upstream retry")
-            (transport.sleep or time.sleep)(delay_seconds)
+            (transport.sleep or sleep_for_retry_with_gateway_cancellation)(delay_seconds)
             attempt += 1
 
 

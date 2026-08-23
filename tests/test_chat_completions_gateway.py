@@ -9,6 +9,8 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 import codex_proxy
+import gateway_catalog_runtime
+import gateway_transport
 import route_plan
 import route_primitives
 from protocol_translation import prepare_exchange as _real_prepare_exchange
@@ -30,6 +32,8 @@ def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_
         inbound_format=inbound_format,
         outbound_format=outbound_format,
     )
+
+
 from codex_proxy import (
     CodexProxyHandler,
     UpstreamStreamIncompleteError,
@@ -922,11 +926,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.runtime_proxy_patch = patch("codex_proxy.RUNTIME_PROXY_DIR", Path(self.runtime_proxy_dir.name))
         self.runtime_proxy_patch.start()
         self.addCleanup(self.runtime_proxy_patch.stop)
-        self.catalog_patch = patch("codex_proxy.generated_catalog_slugs", return_value={"gpt-5.5"})
+        self.catalog_patch = patch("gateway_catalog_runtime.generated_catalog_slugs", return_value={"gpt-5.5"})
         self.catalog_patch.start()
         self.addCleanup(self.catalog_patch.stop)
         self.catalog_by_slug_patch = patch(
-            "codex_proxy.generated_catalog_by_slug",
+            "gateway_catalog_runtime.generated_catalog_by_slug",
             return_value={"gpt-5.5": {"slug": "gpt-5.5"}},
         )
         self.catalog_by_slug_patch.start()
@@ -988,7 +992,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
             CodexProxyHandler.do_POST(handler)
 
         # Verify the upstream request was sent to the official Responses endpoint.
@@ -1025,7 +1029,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
         }).encode("utf-8")
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         result = json.loads(b"".join(handler.wfile.writes))
@@ -1060,7 +1064,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }],
         }).encode("utf-8")
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         events = [(call.args[0], call.kwargs) for call in self.write_proxy_event.call_args_list]
@@ -1092,9 +1096,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
 
         with patch(
-            "codex_proxy.official_urlopen",
+            "gateway_transport.official_urlopen",
             side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body)],
-        ) as mock_urlopen, patch("codex_proxy.time.sleep"):
+        ) as mock_urlopen, patch("gateway_transport.time.sleep"):
             CodexProxyHandler.do_POST(handler)
 
         self.assertEqual(mock_urlopen.call_count, 2)
@@ -1140,25 +1144,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1212,24 +1216,24 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch(
                 "route_plan.prepare_exchange",
                 side_effect=_assert_identity_prepare_exchange,
@@ -1239,7 +1243,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 side_effect=AssertionError("responses request converted back to chat"),
             ),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1293,25 +1297,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "kimi/k3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "kimi/k3": {"slug": "kimi/k3"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1375,25 +1379,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "kimi/k3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "kimi/k3": {"slug": "kimi/k3"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1441,28 +1445,28 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "kimi/k3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "kimi/k3": {"slug": "kimi/k3"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("kimi/k3",),
                 ),
             ),
             patch(
-                "codex_proxy.resolve_external_model_alias",
+                "gateway_catalog_runtime.resolve_external_model_alias",
                 return_value=self._kimi_transparent_external_model(),
             ),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
         return handler, mock_urlopen
@@ -1656,11 +1660,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "ollama-cloud/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "ollama-cloud/glm-5.2": {
@@ -1671,16 +1675,16 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("ollama-cloud/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.ollama_cloud_alias_upstream_model", return_value=None),
-            patch("codex_proxy.ollama_cloud_runtime_upstream", return_value=None),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.ollama_cloud_alias_upstream_model", return_value=None),
+            patch("gateway_catalog_runtime.ollama_cloud_runtime_upstream", return_value=None),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
         return handler, mock_urlopen
@@ -1798,30 +1802,30 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch(
                 "route_plan.prepare_exchange",
                 side_effect=_assert_identity_prepare_exchange,
             ),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1866,25 +1870,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=_http_error(400, error_body)),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", side_effect=_http_error(400, error_body)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -1935,26 +1939,26 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.strip_tools_for_compact_payload", side_effect=AssertionError("compact stripping ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2033,11 +2037,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
@@ -2045,15 +2049,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2122,25 +2126,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen") as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2239,11 +2243,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
@@ -2251,15 +2255,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy.image_proxy_description_for_part", return_value="A boundary-guard chart description."),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2326,11 +2330,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
@@ -2338,15 +2342,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
-            patch("codex_proxy.urlopen") as mock_urlopen,
+            patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2421,11 +2425,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "volc/glm-5.2", "vision-chat/m3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "volc/glm-5.2": {"slug": "volc/glm-5.2", "input_modalities": ["text"]},
@@ -2433,16 +2437,16 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy.image_proxy_cache_lookup", return_value=None),
             patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
-            patch("codex_proxy.urlopen") as mock_urlopen,
+            patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2524,11 +2528,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2", "vision-chat/m3"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2", "input_modalities": ["text"]},
@@ -2536,15 +2540,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2", "vision-chat/m3"),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
             patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2599,27 +2603,27 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2674,27 +2678,27 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2752,29 +2756,29 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
             patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
             patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
             patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2823,25 +2827,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -2899,27 +2903,27 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3004,25 +3008,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3071,28 +3075,28 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
             patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
             patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3151,26 +3155,26 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
-            patch("codex_proxy.sleep_for_retry_with_gateway_cancellation") as mock_sleep,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", side_effect=[failed_stream, successful_stream]) as mock_urlopen,
+            patch("gateway_transport.sleep_for_retry_with_gateway_cancellation") as mock_sleep,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3236,26 +3240,26 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch(
-                "codex_proxy.urlopen",
+                "gateway_transport.urlopen",
                 return_value=_ObservingSseResponse(sse_lines, {4: assert_delta_written_before_completion}),
             ),
         ):
@@ -3310,26 +3314,26 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch(
-                "codex_proxy.urlopen",
+                "gateway_transport.urlopen",
                 return_value=_ObservingSseResponse(chat_stream, {2: assert_delta_written_before_completion}),
             ),
         ):
@@ -3376,25 +3380,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3440,25 +3444,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "chat-only/glm-5.2": {"slug": "chat-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("chat-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_stream)),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3499,25 +3503,25 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.generated_catalog_slugs",
+                "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
             ),
             patch(
-                "codex_proxy.generated_catalog_by_slug",
+                "gateway_catalog_runtime.generated_catalog_by_slug",
                 return_value={
                     "gpt-5.5": {"slug": "gpt-5.5"},
                     "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
                 },
             ),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(responses_stream)),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(responses_stream)),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3534,7 +3538,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         }).encode("utf-8")
         handler = self._make_handler(body, path="/v1/providers/volc/chat/completions")
 
-        with patch("codex_proxy.urlopen") as mock_urlopen:
+        with patch("gateway_transport.urlopen") as mock_urlopen:
             CodexProxyHandler.do_POST(handler)
 
         mock_urlopen.assert_not_called()
@@ -3585,15 +3589,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(
                     policy,
                     allowed_provider_models=policy.allowed_provider_models
                     + ("openrouter/anthropic/claude-sonnet-4",),
                 ),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3643,7 +3647,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.official_urlopen",
+                "gateway_transport.official_urlopen",
                 side_effect=[
                     _FakeJsonResponse(empty_body),
                     _FakeJsonResponse(empty_body),
@@ -3651,7 +3655,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     _FakeJsonResponse(empty_body),
                 ],
             ) as mock_urlopen,
-            patch("codex_proxy.time.sleep"),
+            patch("gateway_transport.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -3725,10 +3729,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
-                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
-                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
+                patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
-                    "codex_proxy.load_policy",
+                    "gateway_catalog_runtime.load_policy",
                     return_value=replace(
                         policy,
                         allowed_provider_models=policy.allowed_provider_models
@@ -3736,7 +3740,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "codex_proxy.urlopen",
+                    "gateway_transport.urlopen",
                     side_effect=[
                         _FakeSseResponse(vision_responses_events),
                         _FakeJsonResponse(main_upstream_body),
@@ -3820,10 +3824,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
-                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
-                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
+                patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
-                    "codex_proxy.load_policy",
+                    "gateway_catalog_runtime.load_policy",
                     return_value=replace(
                         policy,
                         allowed_provider_models=policy.allowed_provider_models
@@ -3831,7 +3835,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "codex_proxy.urlopen",
+                    "gateway_transport.urlopen",
                     side_effect=[
                         _FakeSseResponse(vision_responses_events),
                         _FakeSseResponse(main_responses_events),
@@ -3911,10 +3915,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
-                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
-                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
+                patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
-                    "codex_proxy.load_policy",
+                    "gateway_catalog_runtime.load_policy",
                     return_value=replace(
                         policy,
                         allowed_provider_models=policy.allowed_provider_models
@@ -3922,7 +3926,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "codex_proxy.urlopen",
+                    "gateway_transport.urlopen",
                     side_effect=[
                         _FakeSseResponse(vision_responses_events),
                         _FakeSseResponse(main_responses_events),
@@ -4000,10 +4004,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
-                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
-                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
+                patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
-                    "codex_proxy.load_policy",
+                    "gateway_catalog_runtime.load_policy",
                     return_value=replace(
                         policy,
                         allowed_provider_models=policy.allowed_provider_models
@@ -4011,7 +4015,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "codex_proxy.urlopen",
+                    "gateway_transport.urlopen",
                     side_effect=[
                         _FakeSseResponse(vision_responses_events),
                         _FakeJsonResponse(main_upstream_body),
@@ -4127,18 +4131,18 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("codex_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
-                patch("codex_proxy.generated_catalog_slugs", return_value=set(catalog)),
-                patch("codex_proxy.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
+                patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
                 patch(
-                    "codex_proxy.load_policy",
+                    "gateway_catalog_runtime.load_policy",
                     return_value=replace(
                         policy,
                         allowed_provider_models=policy.allowed_provider_models + ("volc/glm-5.2", "vision-chat/m3"),
                     ),
                 ),
-                patch("codex_proxy.resolve_external_model_alias", side_effect=resolve_external_model),
+                patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
                 patch(
-                    "codex_proxy.urlopen",
+                    "gateway_transport.urlopen",
                     side_effect=[
                         _FakeJsonResponse(vision_chat_body),
                         _FakeJsonResponse(main_upstream_body),
@@ -4190,7 +4194,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             b'',
         ]
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("gateway_transport.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4230,10 +4234,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.official_urlopen",
+                "gateway_transport.official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeSseResponse(sse_lines)],
             ) as mock_urlopen,
-            patch("codex_proxy.time.sleep"),
+            patch("gateway_transport.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4270,10 +4274,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "codex_proxy.official_urlopen",
+                "gateway_transport.official_urlopen",
                 side_effect=[URLError(TimeoutError("connect timed out")), _FakeJsonResponse(upstream_body, status=502)],
             ),
-            patch("codex_proxy.time.sleep"),
+            patch("gateway_transport.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4310,7 +4314,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
                 with (
                     patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-                    patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)),
+                    patch("gateway_transport.official_urlopen", return_value=_FakeSseResponse(sse_lines)),
                 ):
                     CodexProxyHandler.do_POST(handler)
 
@@ -4353,8 +4357,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch("codex_proxy.official_urlopen", side_effect=[failed_stream, successful_stream]),
-            patch("codex_proxy.time.sleep"),
+            patch("gateway_transport.official_urlopen", side_effect=[failed_stream, successful_stream]),
+            patch("gateway_transport.time.sleep"),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4397,9 +4401,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy.load_policy", return_value=policy),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(chat_sse_lines)) as mock_urlopen,
+            patch("gateway_catalog_runtime.load_policy", return_value=policy),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_sse_lines)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4422,7 +4426,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy.official_urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
+            patch("gateway_transport.official_urlopen", side_effect=URLError(ConnectionResetError("connection reset"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4454,7 +4458,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
-            patch("codex_proxy.official_urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
+            patch("gateway_transport.official_urlopen", side_effect=_http_error(429, json.dumps(upstream_error).encode("utf-8"))),
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4481,7 +4485,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             OSError("responses stream reset"),
         ]
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
+        with patch("gateway_transport.official_urlopen", return_value=_FakeSseResponse(sse_lines)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4509,7 +4513,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        with patch("codex_proxy.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
             CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
@@ -4556,11 +4560,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4621,11 +4625,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4712,11 +4716,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", side_effect=[_http_error(404)]) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 
@@ -4773,11 +4777,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
             patch(
-                "codex_proxy.load_policy",
+                "gateway_catalog_runtime.load_policy",
                 return_value=replace(policy, allowed_provider_models=policy.allowed_provider_models + ("auto/glm-5.2",)),
             ),
-            patch("codex_proxy.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.urlopen", return_value=_FakeSseResponse(sse_lines)) as mock_urlopen,
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeSseResponse(sse_lines)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
 

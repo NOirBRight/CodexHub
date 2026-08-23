@@ -1220,4 +1220,67 @@ class CatalogRuntime:
         return image_reader(self.catalog_input_modalities(model_id, upstream))
 
 
-__all__ = ["CatalogFacts", "CatalogRuntime", "CatalogUpstream"]
+def generated_catalog_by_slug(
+    path: Path = GENERATED_CATALOG_PATH,
+) -> dict[str, dict[str, Any]]:
+    return CatalogRuntime().generated_catalog_by_slug(path)
+
+
+def generated_catalog_slugs(path: Path = GENERATED_CATALOG_PATH) -> set[str]:
+    return CatalogRuntime().generated_catalog_slugs(path)
+
+
+def published_catalog_model(slug: str) -> dict[str, Any] | None:
+    return CatalogRuntime().published_catalog_model(slug)
+
+
+def ollama_cloud_runtime_upstream(model_id: str, policy: Any) -> dict[str, Any] | None:
+    return CatalogRuntime().ollama_cloud_runtime_upstream(model_id, policy)
+
+
+def ollama_cloud_alias_upstream_model(slug: str, policy: Any) -> dict[str, Any] | None:
+    return CatalogRuntime().ollama_cloud_alias_upstream_model(slug, policy)
+
+
+def choose_upstream(model_id: str) -> dict[str, Any]:
+    return CatalogRuntime().choose_upstream(model_id)
+
+
+def official_upstream() -> dict[str, Any]:
+    runtime = CatalogRuntime()
+    return {
+        "name": "official",
+        "provider_id": "openai",
+        "base_url": runtime.official_base_url(),
+        "auth": "codex_auth",
+        "reports_cached_input_tokens": True,
+    }
+
+
+def current_catalog_data() -> CatalogDocument:
+    return CatalogRuntime().current_catalog_data()
+
+
+def catalog_max_output_tokens(model_id: str) -> int | None:
+    return CatalogRuntime().catalog_max_output_tokens(model_id)
+
+
+__all__ = [
+    "CatalogFacts",
+    "CatalogRuntime",
+    "CatalogUpstream",
+    "catalog_max_output_tokens",
+    "choose_upstream",
+    "current_catalog_data",
+    "existing_generated_catalog_path",
+    "generated_catalog_by_slug",
+    "generated_catalog_slugs",
+    "load_policy",
+    "official_upstream",
+    "ollama_cloud_alias_upstream_model",
+    "ollama_cloud_runtime_upstream",
+    "published_catalog_model",
+    "resolve_external_model_alias",
+    "resolve_ollama_cloud_model",
+    "should_include_model",
+]

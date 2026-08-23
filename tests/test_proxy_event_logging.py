@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 from lock_fixtures import write_dead_legacy_lock
+import gateway_transport
 
 
 class ProxyEventLoggingTests(TestCase):
@@ -57,10 +58,10 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "codex_proxy.open_upstream_once",
+                            "gateway_transport.GatewayTransport.open_once",
                             side_effect=[URLError(TimeoutError("upstream timed out")), success],
                         ) as open_once,
-                        patch("codex_proxy.time.sleep"),
+                        patch("gateway_transport.time.sleep"),
                     ):
                         response = codex_proxy.open_upstream_response(
                             request,
@@ -105,7 +106,7 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "codex_proxy.open_upstream_once",
+                            "gateway_transport.GatewayTransport.open_once",
                             side_effect=HTTPError(
                                 "https://example.test/v1/responses",
                                 503,
@@ -114,7 +115,7 @@ class ProxyEventLoggingTests(TestCase):
                                 io.BytesIO(b"upstream error"),
                             ),
                         ) as open_once,
-                        patch("codex_proxy.time.sleep"),
+                        patch("gateway_transport.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
                             codex_proxy.open_upstream_response(
@@ -186,8 +187,8 @@ class ProxyEventLoggingTests(TestCase):
                             },
                             clear=False,
                         ),
-                        patch("codex_proxy.urlopen", side_effect=error) as open_once,
-                        patch("codex_proxy.time.sleep"),
+                        patch("gateway_transport.urlopen", side_effect=error) as open_once,
+                        patch("gateway_transport.time.sleep"),
                     ):
                         with self.assertRaises(HTTPError):
                             codex_proxy.open_upstream_response(
