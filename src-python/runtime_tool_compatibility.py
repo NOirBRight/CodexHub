@@ -35,6 +35,6 @@ from tool_compatibility import (
     build_plan,
     build_tool_compatibility_plan,
     classify_declaration,
+    is_opaque_collaboration_history_item,
 )
 from tool_compatibility import __all__ as __all__
-from tool_compatibility.plan import _is_opaque_collaboration_history_item

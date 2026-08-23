@@ -83,10 +83,13 @@ from .registry import (
     RequestScopedToolAliasRegistry,
 )
 
-def _is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
+def is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
     if item.get("type") != "function_call":
         return False
     return is_opaque_v1_history_item(item) or is_opaque_v2_history_item(item)
+
+
+_is_opaque_collaboration_history_item = is_opaque_collaboration_history_item
 
 
 def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> None:

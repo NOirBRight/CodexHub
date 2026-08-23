@@ -57,7 +57,9 @@ VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
 VENDORED_URLLIB3_WHEEL = VENDOR_DIR / "urllib3-2.7.0-py3-none-any.whl"
 if not VENDORED_URLLIB3_WHEEL.is_file():
     raise RuntimeError(f"missing pinned Gateway transport dependency: {VENDORED_URLLIB3_WHEEL}")
-sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
+_vendored_urllib3 = str(VENDORED_URLLIB3_WHEEL)
+if _vendored_urllib3 not in sys.path:
+    sys.path.insert(0, _vendored_urllib3)
 
 import urllib3
 

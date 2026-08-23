@@ -39,6 +39,7 @@ from .plan import (
     ToolPlan,
     build_plan,
     build_tool_compatibility_plan,
+    is_opaque_collaboration_history_item,
 )
 from .stream import CompatibilityStreamState
 
@@ -72,4 +73,5 @@ __all__ = [
     "build_plan",
     "build_tool_compatibility_plan",
     "classify_declaration",
+    "is_opaque_collaboration_history_item",
 ]

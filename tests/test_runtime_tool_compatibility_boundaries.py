@@ -26,7 +26,7 @@ from runtime_tool_compatibility import (
     SELECTED_PROVIDER_HOSTED,
     RequiredToolUnavailableError,
     ToolCompatibilityError,
-    _is_opaque_collaboration_history_item,
+    is_opaque_collaboration_history_item,
     build_tool_compatibility_plan,
 )
 
@@ -1178,7 +1178,7 @@ def test_malformed_foreign_collaboration_history_stays_at_semantic_boundary(
     item: dict,
     classification: str,
 ) -> None:
-    assert not _is_opaque_collaboration_history_item(item)
+    assert not is_opaque_collaboration_history_item(item)
 
     with pytest.raises(CollaborationBoundaryError) as exc_info:
         classify_collaboration_payload({"input": [item]})
