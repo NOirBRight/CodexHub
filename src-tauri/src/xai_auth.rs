@@ -1,7 +1,6 @@
 use crate::{config, runtime_paths};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 const SCRIPT_NAME: &str = "xai_device_login.py";
