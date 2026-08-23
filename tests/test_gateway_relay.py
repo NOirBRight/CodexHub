@@ -184,10 +184,19 @@ def test_relay_context_and_facade_adapter_are_the_seam():
     assert "import codex_proxy" not in module_source
     assert "import *" not in module_source
     assert 'globals()[' not in module_source
-    assert "def relay_transparent_upstream_response(" in module_source
-    assert "def relay_official_passthrough_sse_response(" in module_source
-    assert relay_transparent_upstream_response.__code__.co_filename == relay_upstream_response.__code__.co_filename
-    assert relay_official_passthrough_sse_response.__code__.co_filename == relay_upstream_response.__code__.co_filename
+    assert "from gateway_relay_passthrough import" in module_source
+    passthrough_source = Path(
+        relay_transparent_upstream_response.__code__.co_filename
+    ).read_text(encoding="utf-8")
+    assert "def relay_transparent_upstream_response(" in passthrough_source
+    assert "def relay_official_passthrough_sse_response(" in passthrough_source
+    assert "import codex_proxy" not in passthrough_source
+    assert relay_official_passthrough_sse_response.__code__.co_filename == (
+        relay_transparent_upstream_response.__code__.co_filename
+    )
+    assert Path(relay_transparent_upstream_response.__code__.co_filename).name == (
+        "gateway_relay_passthrough.py"
+    )
 
 
 def test_sse_line_iterator_uses_injected_lifecycle():
