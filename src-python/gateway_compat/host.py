@@ -11,22 +11,22 @@ from typing import Any
 
 from gateway_request import (
     EMBEDDED_MODEL_RE,
-    _has_browser_context_signal,
-    _reasoning_param_is_unsupported,
-    _sanitize_official_input_reasoning_items,
-    _sanitize_official_reasoning_items,
-    _strip_reasoning_encrypted_content,
+    has_browser_context_signal as _has_browser_context_signal,
+    reasoning_param_is_unsupported as _reasoning_param_is_unsupported,
+    sanitize_official_input_reasoning_items as _sanitize_official_input_reasoning_items,
+    sanitize_official_reasoning_items as _sanitize_official_reasoning_items,
+    strip_reasoning_encrypted_content as _strip_reasoning_encrypted_content,
 )
 from gateway_stream_semantics import (
     MULTI_AGENT_TOOL_NAMES,
     RESPONSES_TERMINAL_EVENT_TYPES,
-    _chat_content_text,
-    _hide_reasoning_text,
-    _is_raw_reasoning_stream_event,
-    _normalize_responses_message_input_items,
-    _normalize_responses_string_input,
-    _sse_json_line,
-    _text_contains_lifecycle_final_report,
+    chat_content_text as _chat_content_text,
+    hide_reasoning_text as _hide_reasoning_text,
+    is_raw_reasoning_stream_event as _is_raw_reasoning_stream_event,
+    normalize_responses_message_input_items as _normalize_responses_message_input_items,
+    normalize_responses_string_input as _normalize_responses_string_input,
+    sse_json_line as _sse_json_line,
+    text_contains_lifecycle_final_report as _text_contains_lifecycle_final_report,
 )
 
 # Compatibility-pipeline constants owned by the host after the facade removal.
@@ -72,7 +72,7 @@ def _is_collaboration_v2_context(event_context: Any) -> bool:
     return _collaboration_adapter().is_v2_context(event_context)
 
 
-def _resolve_collaboration_boundary(
+def resolve_collaboration_boundary(
     payload: Any,
     event_context: Any,
     *,
@@ -83,6 +83,7 @@ def _resolve_collaboration_boundary(
         event_context,
         surface=surface,
     )
+_resolve_collaboration_boundary = resolve_collaboration_boundary
 
 
 def _write_adapter_event(event_context: Any, event: str, **fields: Any) -> None:

@@ -13,13 +13,13 @@ from gateway_errors import (
     UnqualifiedRouteProtocolError,
     UnsupportedRouteProtocolError,
     UpstreamProtocolTranslationError,
-    _catalog_failure,
-    _identity_failure,
+    catalog_failure as _catalog_failure,
+    identity_failure as _identity_failure,
 )
 from gateway_settings import (
-    _default_retry_attempts_for_request_kind,
-    _request_kind_retry_attempts_configured,
-    _upstream_retry_attempts,
+    default_retry_attempts_for_request_kind as _default_retry_attempts_for_request_kind,
+    request_kind_retry_attempts_configured as _request_kind_retry_attempts_configured,
+    upstream_retry_attempts as _upstream_retry_attempts,
     gateway_auto_retry_max_attempts,
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_downstream_retry_notice_enabled,
@@ -175,7 +175,7 @@ def _chat_completions_url(upstream: Mapping[str, Any]) -> str:
     return _upstream_endpoint_url(upstream, "/chat/completions")
 
 
-def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
+def external_tool_protocol(upstream: Mapping[str, Any]) -> str:
     configured = str(upstream.get("tool_protocol") or "auto").strip().lower()
     if configured in TOOL_PROTOCOLS and configured != "auto":
         return configured
@@ -185,9 +185,10 @@ def _external_tool_protocol(upstream: Mapping[str, Any]) -> str:
     if upstream_format == "chat_completions":
         return "chat_tools"
     return "text_compat"
+_external_tool_protocol = external_tool_protocol
 
 
-def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
+def external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
     configured = upstream.get("tool_surface_strategy", "eager")
     if isinstance(configured, str) and configured in TOOL_SURFACE_STRATEGIES:
         return configured
@@ -198,9 +199,10 @@ def _external_tool_surface_strategy(upstream: Mapping[str, Any]) -> str:
             "External tool surface strategy is invalid.",
         )
     )
+_external_tool_surface_strategy = external_tool_surface_strategy
 
 
-def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
+def external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
     configured = upstream.get("native_responses_tool_codec", "none")
     if isinstance(configured, str) and configured in NATIVE_RESPONSES_TOOL_CODECS:
         return configured
@@ -211,6 +213,7 @@ def _external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
             "External native Responses tool codec is invalid.",
         )
     )
+_external_native_responses_tool_codec = external_native_responses_tool_codec
 
 
 OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
@@ -1804,7 +1807,7 @@ def route_plan_for_request(
     )
 
 
-def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
+def route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
     primary_attempt = plan.primary_attempt
     return {
         "route_plan_schema_version": plan.schema_version,
@@ -1934,9 +1937,10 @@ def _route_plan_event_fields(plan: RoutePlan) -> dict[str, Any]:
             mutation.value for mutation in plan.mutation_summary
         ],
     }
+_route_plan_event_fields = route_plan_event_fields
 
 
-def _route_attempt_event_fields(
+def route_attempt_event_fields(
     attempt: RouteAttemptPlan,
     *,
     provider_id: str | None = None,
@@ -2013,5 +2017,6 @@ def _route_attempt_event_fields(
         ],
         "route_attempt_mutation_summary": snapshot["mutation_summary"],
     }
+_route_attempt_event_fields = route_attempt_event_fields
 
 

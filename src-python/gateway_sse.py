@@ -13,11 +13,12 @@ from sse_events import (
 )
 
 
-def _sse_line_ending(line: bytes) -> bytes:
+def sse_line_ending(line: bytes) -> bytes:
     for candidate in (b"\r\n", b"\n", b"\r"):
         if line.endswith(candidate):
             return candidate
     return b"\n"
+_sse_line_ending = sse_line_ending
 
 
 def _sse_event_separator_after_line(line: bytes) -> bytes:
@@ -37,7 +38,7 @@ def _is_sse_event_metadata_line(line: bytes) -> bool:
     return line.startswith((b"event:", b"id:", b"retry:"))
 
 
-def _sse_payload_bytes(line: bytes) -> bytes | None:
+def sse_payload_bytes(line: bytes) -> bytes | None:
     if not line.startswith(b"data:"):
         return None
 
@@ -51,9 +52,10 @@ def _sse_payload_bytes(line: bytes) -> bytes | None:
     if not payload_bytes:
         return None
     return payload_bytes
+_sse_payload_bytes = sse_payload_bytes
 
 
-def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
+def parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     payload_bytes = _sse_payload_bytes(line)
     if payload_bytes is None:
         return None
@@ -62,6 +64,7 @@ def _parse_sse_json_payload(line: bytes) -> dict[str, Any] | None:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+_parse_sse_json_payload = parse_sse_json_payload
 
 
 def _parse_sse_json_payloads(blob: bytes) -> list[dict[str, Any]]:

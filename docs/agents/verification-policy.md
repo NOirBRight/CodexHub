@@ -52,7 +52,10 @@ helpers. They must not import or invoke private members of
 references, and that tests do not `patch("codex_proxy.` or
 `monkeypatch.setattr(codex_proxy`. Patch the owning module instead.
 `tests/test_entry_discipline.py` pins the thin Gateway entry (no `exec`,
-no `gateway_runtime.py`, line budgets). Do not add new private-method tests.
+no `gateway_runtime.py`, line budgets). Deep Modules v4 additionally
+ratchets `gateway_handler_impl.py` / `gateway_relay.py` and forbids
+`lookup()` / `api` / package `__getattr__` and `RelaySymbols`
+(`tests/test_deep_modules_v4_gates.py`). Do not add new private-method tests.
 
 ## Manual and runtime evidence
 

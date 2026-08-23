@@ -39,7 +39,7 @@ from route_primitives import (
 )
 
 
-from gateway_settings import _runtime_proxy_dir
+from gateway_settings import runtime_proxy_dir as _runtime_proxy_dir
 
 logger = logging.getLogger("vision_proxy")
 IMAGE_PROXY_CACHE_LOCK = threading.Lock()

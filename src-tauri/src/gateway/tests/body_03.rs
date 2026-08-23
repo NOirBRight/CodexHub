@@ -713,9 +713,7 @@ fn opencode_cleanup_write_failure_has_no_absolute_paths() {
         r#"{"model":"codexhub/openai/gpt-5.5","theme":"dark"}"#,
     )
     .unwrap();
-    let mut permissions = fs::metadata(&config_path).unwrap().permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(&config_path, permissions).unwrap();
+    let _replacement_lock = lock_path_against_replacement(&config_path);
     std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
 
     let result = super::opencode_ownership_bounded_cleanup(&config_path);

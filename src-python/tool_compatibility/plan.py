@@ -37,15 +37,15 @@ from .contracts import (
     RequiredToolUnavailableError,
     ToolCompatibilityEntry,
     ToolCompatibilityError,
-    _copy_mapping,
-    _dump_envelope,
-    _freeze,
-    _is_legacy_message_identity,
-    _item_identity,
-    _json_object_exact,
-    _json_object_with_key,
-    _provider_function_declaration,
-    _thaw,
+    copy_mapping as _copy_mapping,
+    dump_envelope as _dump_envelope,
+    freeze as _freeze,
+    is_legacy_message_identity as _is_legacy_message_identity,
+    item_identity as _item_identity,
+    json_object_exact as _json_object_exact,
+    json_object_with_key as _json_object_with_key,
+    provider_function_declaration as _provider_function_declaration,
+    thaw as _thaw,
 )
 from .dispositions import (
     ADAPT,
@@ -58,22 +58,22 @@ from .dispositions import (
     SELECTED_PROVIDER_HOSTED,
     TOOL_SEARCH,
     UNKNOWN_FUTURE_KIND,
-    _declaration_key,
-    _declaration_valid_for_family,
-    _family_for_item_type,
-    _has_explicit_named_tool_choice,
-    _history_output_type_for_entry,
-    _hosted_entry_item_kind,
-    _hosted_event_spec_for_declaration_kind,
-    _hosted_event_spec_for_item_type,
-    _hosted_history_item_key,
-    _hosted_kind_for_item_type,
-    _hosted_output_kind_for_item_type,
-    _name_of,
-    _namespace_details,
-    _required_by_rule,
-    _tool_choice_matches_declaration,
-    _unknown_response_item_kind,
+    declaration_key as _declaration_key,
+    declaration_valid_for_family as _declaration_valid_for_family,
+    family_for_item_type as _family_for_item_type,
+    has_explicit_named_tool_choice as _has_explicit_named_tool_choice,
+    history_output_type_for_entry as _history_output_type_for_entry,
+    hosted_entry_item_kind as _hosted_entry_item_kind,
+    hosted_event_spec_for_declaration_kind as _hosted_event_spec_for_declaration_kind,
+    hosted_event_spec_for_item_type as _hosted_event_spec_for_item_type,
+    hosted_history_item_key as _hosted_history_item_key,
+    hosted_kind_for_item_type as _hosted_kind_for_item_type,
+    hosted_output_kind_for_item_type as _hosted_output_kind_for_item_type,
+    name_of as _name_of,
+    namespace_details as _namespace_details,
+    required_by_rule as _required_by_rule,
+    tool_choice_matches_declaration as _tool_choice_matches_declaration,
+    unknown_response_item_kind as _unknown_response_item_kind,
     build_tool_compatibility_plan,
     classify_declaration,
 )
@@ -82,6 +82,12 @@ from .registry import (
     CompatibilityDiagnostics,
     RequestScopedToolAliasRegistry,
 )
+
+is_legacy_message_identity = _is_legacy_message_identity
+item_identity = _item_identity
+json_object_exact = _json_object_exact
+json_object_with_key = _json_object_with_key
+
 
 def is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
     if item.get("type") != "function_call":

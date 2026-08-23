@@ -134,3 +134,50 @@ def test_codex_adapter_refresh_maps_failures(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(SubscriptionAuthError) as failed:
         CodexAuthAdapter().refresh()
     assert failed.value.classification == "refresh-failed"
+
+
+def test_codex_adapter_drops_responses_lite_for_unsupported_models() -> None:
+    adapter = CodexAuthAdapter()
+    assert adapter.drop_incoming_header(
+        "x-openai-internal-codex-responses-lite",
+        model_id="openai/gpt-5.4",
+    )
+    assert adapter.drop_incoming_header(
+        "X-OpenAI-Internal-Codex-Responses-Lite",
+        model_id="gpt-5.4-mini",
+    )
+    assert not adapter.drop_incoming_header(
+        "x-openai-internal-codex-responses-lite",
+        model_id="gpt-4.1",
+    )
+    assert not adapter.drop_incoming_header("authorization", model_id="gpt-5.4")
+
+
+def test_codex_adapter_applies_identity_headers() -> None:
+    adapter = CodexAuthAdapter()
+    outgoing = {"Content-Type": "application/json"}
+    adapter.apply_identity_headers(
+        outgoing,
+        strict_official_passthrough=False,
+        session_id="sess",
+        client_request_id="req",
+        read_header=lambda headers, name: next(
+            (value for key, value in headers.items() if key.lower() == name.lower()),
+            None,
+        ),
+        make_id=lambda: "unused",
+    )
+    assert outgoing["Session-id"] == "sess"
+    assert outgoing["Thread-id"] == "sess"
+    assert outgoing["X-codex-window-id"] == "sess:1"
+    assert outgoing["X-client-request-id"] == "req"
+    passthrough = {"Content-Type": "application/json"}
+    adapter.apply_identity_headers(
+        passthrough,
+        strict_official_passthrough=True,
+        session_id="sess",
+        client_request_id="req",
+        read_header=lambda headers, name: None,
+        make_id=lambda: "unused",
+    )
+    assert passthrough == {"Content-Type": "application/json"}

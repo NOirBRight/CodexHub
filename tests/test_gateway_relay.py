@@ -166,7 +166,7 @@ def test_relay_context_and_facade_adapter_are_the_seam():
 
     assert {
         "handler",
-        "symbols",
+        "glue",
         "transparent_relay",
         "official_passthrough_relay",
         "prepared_exchange",

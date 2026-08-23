@@ -134,7 +134,7 @@ class GatewayPreResponseBudgetExhausted(TimeoutError):
 
 
 
-def _identity_failure(
+def identity_failure(
     message: str,
     *,
     reason: str,
@@ -148,9 +148,10 @@ def _identity_failure(
         provider_id=provider_id,
         model_slug=model_slug,
     )
+_identity_failure = identity_failure
 
 
-def _catalog_failure(
+def catalog_failure(
     message: str,
     *,
     reason: str,
@@ -164,12 +165,14 @@ def _catalog_failure(
         provider_id=provider_id,
         model_slug=model_slug,
     )
+_catalog_failure = catalog_failure
 
 
-def _redact_identity_in_text(text: str, identity: str | None) -> str:
+def redact_identity_in_text(text: str, identity: str | None) -> str:
     if identity and identity in text:
         return text.replace(identity, "[retry_identity_redacted]")
     return text
+_redact_identity_in_text = redact_identity_in_text
 
 
 def safe_upstream_error_detail(exc: BaseException, *, redact_identity: str | None = None) -> str:
@@ -339,7 +342,7 @@ def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
     }
 
 
-def _local_gateway_auth_error_payload() -> dict[str, Any]:
+def local_gateway_auth_error_payload() -> dict[str, Any]:
     message = "missing or invalid local Gateway client key"
     return {
         "error": "unauthorized",
@@ -352,6 +355,7 @@ def _local_gateway_auth_error_payload() -> dict[str, Any]:
             failure_class=RETRY_FAILURE_PERMANENT,
         ),
     }
+_local_gateway_auth_error_payload = local_gateway_auth_error_payload
 
 
 def _downstream_stream_error_payload(
@@ -402,7 +406,7 @@ def _downstream_stream_error_payload(
     return payload
 
 
-def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec) -> dict[str, Any]:
+def downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec) -> dict[str, Any]:
     error_type = error.error_type
     if error_type == "upstream_error":
         error_type = "upstream_stream_error"
@@ -440,9 +444,10 @@ def _downstream_sse_error_payload_for_inbound_format(error: DownstreamErrorSpec)
         error_type=error_type,
         redact_identity=error.redact_identity,
     )
+_downstream_sse_error_payload_for_inbound_format = downstream_sse_error_payload_for_inbound_format
 
 
-def _responses_failed_event_for_stream_error(
+def responses_failed_event_for_stream_error(
     *,
     upstream_name: str,
     model: str | None,
@@ -483,6 +488,7 @@ def _responses_failed_event_for_stream_error(
             "error": error_payload,
         },
     }
+_responses_failed_event_for_stream_error = responses_failed_event_for_stream_error
 
 
 def _chat_completion_error_payload(
@@ -553,7 +559,7 @@ def _with_codexhub_http_error(
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
-def _downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]:
+def downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]:
     return _json_error_payload_for_inbound_format(
         inbound_format=error.inbound_format,
         upstream_name=error.upstream_name,
@@ -564,6 +570,7 @@ def _downstream_json_error_payload(error: DownstreamErrorSpec) -> dict[str, Any]
         error_type=error.error_type,
         redact_identity=error.redact_identity,
     )
+_downstream_json_error_payload = downstream_json_error_payload
 
 
 def _json_error_payload_for_inbound_format(

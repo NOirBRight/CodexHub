@@ -48,7 +48,6 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
 
-from catalog import canonical_model_id
 import gateway_admission
 import gateway_events
 from gateway_admission import sleep_for_retry_with_gateway_cancellation
@@ -60,8 +59,8 @@ from gateway_errors import (
     safe_upstream_error_detail,
 )
 from gateway_settings import (
-    _request_kind_retry_attempts_configured,
-    _upstream_retry_attempts,
+    request_kind_retry_attempts_configured as _request_kind_retry_attempts_configured,
+    upstream_retry_attempts as _upstream_retry_attempts,
     gateway_auto_retry_max_attempts,
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
@@ -1041,16 +1040,18 @@ def _official_urlopen(request: Request, *, timeout: float) -> Any:
 
 
 
-def _header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
+def header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
     return [(str(key), str(value)) for key, value in headers.items()]
+_header_items = header_items
 
 
-def _get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
+def get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
     wanted = name.lower()
     for key, value in _header_items(headers):
         if key.lower() == wanted:
             return value
     return None
+_get_header = get_header
 
 
 def _default_access_token() -> str:
@@ -1124,54 +1125,6 @@ def _subscription_account_headers(
         account = load_account()
         return {"Chatgpt-account-id": account} if account else {}
     return dict(adapter.account_headers())
-
-
-def _apply_codex_identity_headers(
-    outgoing: dict[str, str],
-    *,
-    operational_authentication: OperationalAuthentication | None,
-    request_mutation_policy: MutationPolicy | None,
-    behavior_profile: str | None,
-    resolved_facts: TransportFacts,
-    read_header: Callable[..., str | None],
-    make_id: Callable[[], str],
-) -> None:
-    strict_official_passthrough = (
-        request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
-        if request_mutation_policy is not None
-        else behavior_profile == resolved_facts.official_passthrough_behavior
-    )
-    if strict_official_passthrough:
-        return
-    if not read_header(outgoing, "Accept"):
-        outgoing["Accept"] = "text/event-stream"
-    if not read_header(outgoing, "Originator"):
-        outgoing["Originator"] = "codexhub-proxy"
-    if not read_header(outgoing, "User-Agent"):
-        outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
-    session_id = read_header(outgoing, "Session-id")
-    if not session_id:
-        session_id = (
-            operational_authentication.generated_session_id
-            if operational_authentication is not None
-            else make_id()
-        )
-        if not session_id:
-            raise ValueError("materialized Codex auth is missing session identity")
-        outgoing["Session-id"] = session_id
-    if not read_header(outgoing, "Thread-id"):
-        outgoing["Thread-id"] = session_id
-    if not read_header(outgoing, "X-codex-window-id"):
-        outgoing["X-codex-window-id"] = f"{session_id}:1"
-    if not read_header(outgoing, "X-client-request-id"):
-        client_request_id = (
-            operational_authentication.generated_client_request_id
-            if operational_authentication is not None
-            else make_id()
-        )
-        if not client_request_id:
-            raise ValueError("materialized Codex auth is missing request identity")
-        outgoing["X-client-request-id"] = client_request_id
 
 
 def materialize_operational_authentication(
@@ -1269,27 +1222,24 @@ def build_upstream_headers(
         authentication_strategy=authentication_strategy,
     )
     outgoing: dict[str, str] = {}
-    upstream_model_id = canonical_model_id(
-        str(upstream.get("upstream_model") or model_id or "")
-    ).lower()
-    if upstream_model_id.startswith(resolved_facts.official_alias_prefix):
-        upstream_model_id = upstream_model_id[len(resolved_facts.official_alias_prefix):]
-    drop_responses_lite_header = (
-        auth_mode == "codex_auth"
-        and upstream_model_id in resolved_facts.official_responses_lite_unsupported_models
+    adapter = credential_for(auth_mode)
+    drop_incoming_header = (
+        getattr(adapter, "drop_incoming_header", None) if adapter is not None else None
     )
+    model_id_for_adapter = str(upstream.get("upstream_model") or model_id or "")
 
     for key, value in items(incoming_headers):
         lowered = key.lower()
         if lowered in resolved_facts.hop_by_hop_request_headers or lowered == "authorization":
             continue
-        if drop_responses_lite_header and lowered == "x-openai-internal-codex-responses-lite":
+        if drop_incoming_header is not None and drop_incoming_header(
+            lowered, model_id=model_id_for_adapter
+        ):
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
         outgoing[key] = value
 
-    adapter = credential_for(auth_mode)
     if adapter is not None:
         outgoing["Authorization"] = _subscription_authorization(
             adapter,
@@ -1306,13 +1256,26 @@ def build_upstream_headers(
         ).items():
             if header_value and not read_header(outgoing, header_name):
                 outgoing[header_name] = header_value
-        if auth_mode == "codex_auth":
-            _apply_codex_identity_headers(
+        apply_identity_headers = getattr(adapter, "apply_identity_headers", None)
+        if apply_identity_headers is not None:
+            strict_official_passthrough = (
+                request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+                if request_mutation_policy is not None
+                else behavior_profile == resolved_facts.official_passthrough_behavior
+            )
+            apply_identity_headers(
                 outgoing,
-                operational_authentication=operational_authentication,
-                request_mutation_policy=request_mutation_policy,
-                behavior_profile=behavior_profile,
-                resolved_facts=resolved_facts,
+                strict_official_passthrough=strict_official_passthrough,
+                session_id=(
+                    operational_authentication.generated_session_id
+                    if operational_authentication is not None
+                    else None
+                ),
+                client_request_id=(
+                    operational_authentication.generated_client_request_id
+                    if operational_authentication is not None
+                    else None
+                ),
                 read_header=read_header,
                 make_id=make_id,
             )
@@ -1562,7 +1525,7 @@ def _status_allows_capacity_error_value(status: int | None) -> bool:
     return status not in PERMANENT_HTTP_ERROR_STATUSES
 
 
-def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
+def retry_after_delay_seconds(exc: BaseException | None) -> int | None:
     if not isinstance(exc, HTTPError):
         return None
     value = _get_header(getattr(exc, "headers", {}), "retry-after")
@@ -1582,9 +1545,10 @@ def _retry_after_delay_seconds(exc: BaseException | None) -> int | None:
     if retry_at.tzinfo is None:
         retry_at = retry_at.replace(tzinfo=timezone.utc)
     return max(0, math.ceil(retry_at.timestamp() - time.time()))
+_retry_after_delay_seconds = retry_after_delay_seconds
 
 
-def _upstream_failure_class(exc: BaseException) -> str:
+def upstream_failure_class(exc: BaseException) -> str:
     if isinstance(exc, _STREAM_INTERRUPTED_ERROR):
         return _upstream_failure_class(exc.cause)
     if isinstance(exc, _STREAM_ERROR_EVENT):
@@ -1633,6 +1597,7 @@ def _upstream_failure_class(exc: BaseException) -> str:
     ):
         return RETRY_FAILURE_QUICK_TRANSIENT
     return RETRY_FAILURE_PERMANENT
+_upstream_failure_class = upstream_failure_class
 
 
 def _capacity_retry_elapsed_limit_allows(started_at: float, delay_seconds: int) -> bool:
@@ -2239,12 +2204,13 @@ _UpstreamSseReaderLifecycle = UpstreamSseReaderLifecycle
 # ---------------------------------------------------------------------------
 
 
-def _retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str | None:
+def retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str | None:
     """Return the private stable retry identity if one exists in the context."""
     if event_context is None:
         return None
     identity = event_context.get("_retry_attempt_identity")
     return identity if isinstance(identity, str) and identity else None
+_retry_identity_from_context = retry_identity_from_context
 
 
 def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
@@ -2295,7 +2261,7 @@ def _model_access_path_idempotency_guaranteed(model_access_path: tuple[str, ...]
     return False
 
 
-def _model_access_path_from_event_context(
+def model_access_path_from_event_context(
     event_context: Mapping[str, Any] | None,
     upstream_name: str,
     upstream_format: str,
@@ -2317,6 +2283,7 @@ def _model_access_path_from_event_context(
         except Exception:
             inbound_format = ""
     return (upstream_name, model, behavior_profile, upstream_format, inbound_format)
+_model_access_path_from_event_context = model_access_path_from_event_context
 
 
 def _ensure_retry_attempt_identity(
@@ -2343,11 +2310,12 @@ def _ensure_retry_attempt_identity(
     return identity
 
 
-_SUPPRESSED_RETRY_SAFETY_CLASSES = frozenset({
+SUPPRESSED_RETRY_SAFETY_CLASSES = frozenset({
     RETRY_SAFETY_SUPPRESSED_POST_WRITE,
     RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
     RETRY_SAFETY_UNKNOWN,
 })
+_SUPPRESSED_RETRY_SAFETY_CLASSES = SUPPRESSED_RETRY_SAFETY_CLASSES
 
 
 def _retry_safety_class(

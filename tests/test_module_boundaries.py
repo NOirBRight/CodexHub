@@ -245,6 +245,73 @@ def test_gateway_relay_passthrough_does_not_import_the_facade() -> None:
     assert "CodexProxyHandler" not in source
 
 
+def _cross_module_underscore_imports(root: Path) -> list[tuple[str, int, str, str]]:
+    """Return (relative path, lineno, imported module, name) for private cross-module imports."""
+    import ast
+
+    violations: list[tuple[str, int, str, str]] = []
+
+    def module_name(path: Path) -> str:
+        rel = path.relative_to(root)
+        parts = list(rel.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        return ".".join(parts)
+
+    def resolve_from(file_mod: str, node: ast.ImportFrom) -> str | None:
+        if node.module is None and not node.level:
+            return None
+        imported = node.module or ""
+        if node.level:
+            pkg = file_mod.split(".")
+            if node.level > 1:
+                pkg = pkg[: -(node.level - 1)] if len(pkg) >= node.level - 1 else []
+            elif node.level == 1:
+                pkg = pkg[:-1]
+            imported = ".".join([*pkg, node.module] if node.module else pkg)
+        return imported or None
+
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        file_mod = module_name(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            owner = resolve_from(file_mod, node)
+            if not owner or owner == file_mod:
+                continue
+            for alias in node.names:
+                name = alias.name
+                if name.startswith("_") and not name.startswith("__"):
+                    violations.append(
+                        (str(path.relative_to(root.parent)), node.lineno, owner, name)
+                    )
+    return violations
+
+
+def test_no_cross_module_underscore_imports() -> None:
+    src_root = Path(__file__).resolve().parents[1] / "src-python"
+    allowlist: tuple[tuple[str, str, str], ...] = ()
+    violations = [
+        item
+        for item in _cross_module_underscore_imports(src_root)
+        if (item[0], item[2], item[3]) not in allowlist
+    ]
+    assert violations == [], (
+        "cross-module underscore imports must use the owning module's public name:\n"
+        + "\n".join(f"  {path}:{lineno} from {owner} import {name}" for path, lineno, owner, name in violations)
+    )
+
+
+def test_underscore_import_gate_flags_a_new_private_import() -> None:
+    import ast
+
+    tree = ast.parse("from gateway_sse import sse_payload_bytes, _sse_payload_bytes\n")
+    imported = [alias.name for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names]
+    assert "_sse_payload_bytes" in imported
+    assert "sse_payload_bytes" in imported
+
+
 def test_gateway_relay_pair_imports_cleanly_in_either_order() -> None:
     """gateway_relay imports gateway_relay_passthrough at the bottom of its
     body; the passthrough module must therefore load without importing

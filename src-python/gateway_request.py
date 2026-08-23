@@ -26,7 +26,7 @@ import gateway_catalog_runtime as _catalog
 import gateway_stream_semantics as _stream_semantics
 from gateway_errors import safe_upstream_error_detail
 import gateway_settings
-from gateway_transport import _get_header, _header_items
+from gateway_transport import get_header as _get_header, header_items as _header_items
 from route_primitives import (
     IMAGE_PROXY_PROMPT,
     IMAGE_PROXY_PROMPT_VERSION,
@@ -159,7 +159,7 @@ def _looks_like_official_encrypted_content(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(OFFICIAL_ENCRYPTED_CONTENT_PREFIX)
 
 
-def _sanitize_official_reasoning_items(value: Any) -> bool:
+def sanitize_official_reasoning_items(value: Any) -> bool:
     changed = False
 
     if isinstance(value, list):
@@ -181,9 +181,10 @@ def _sanitize_official_reasoning_items(value: Any) -> bool:
             changed = True
 
     return changed
+_sanitize_official_reasoning_items = sanitize_official_reasoning_items
 
 
-def _sanitize_official_input_reasoning_items(payload: dict[str, Any]) -> tuple[bool, dict[str, int]]:
+def sanitize_official_input_reasoning_items(payload: dict[str, Any]) -> tuple[bool, dict[str, int]]:
     """Remove non-portable reasoning references at the Official input boundary.
 
     Codex stores third-party Responses reasoning items in the shared task
@@ -235,9 +236,10 @@ def _sanitize_official_input_reasoning_items(payload: dict[str, Any]) -> tuple[b
     if changed:
         payload["input"] = rewritten_items
     return changed, counts
+_sanitize_official_input_reasoning_items = sanitize_official_input_reasoning_items
 
 
-def _strip_reasoning_encrypted_content(value: Any) -> bool:
+def strip_reasoning_encrypted_content(value: Any) -> bool:
     changed = False
 
     if isinstance(value, list):
@@ -258,9 +260,10 @@ def _strip_reasoning_encrypted_content(value: Any) -> bool:
             changed = True
 
     return changed
+_strip_reasoning_encrypted_content = strip_reasoning_encrypted_content
 
 
-def _has_browser_context_signal(value: Any) -> bool:
+def has_browser_context_signal(value: Any) -> bool:
     for fragment in _stream_semantics._collect_text_fragments(value):
         lowered = fragment.lower()
         if any(marker in lowered for marker in BROWSER_CONTEXT_MARKERS):
@@ -268,6 +271,7 @@ def _has_browser_context_signal(value: Any) -> bool:
         if BROWSER_CURRENT_URL_RE.search(fragment):
             return True
     return False
+_has_browser_context_signal = has_browser_context_signal
 
 
 def _has_browser_context_guidance(value: Any) -> bool:
@@ -277,7 +281,7 @@ def _has_browser_context_guidance(value: Any) -> bool:
     )
 
 
-def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, upstream_model: Any) -> bool:
+def reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, upstream_model: Any) -> bool:
     if upstream_name == "official":
         return False
     for model in (upstream_model, requested_model):
@@ -287,6 +291,7 @@ def _reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, up
         if any(model_key.startswith(prefix) for prefix in UNSUPPORTED_REASONING_MODEL_PREFIXES):
             return True
     return False
+_reasoning_param_is_unsupported = reasoning_param_is_unsupported
 
 
 def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:
@@ -306,7 +311,7 @@ def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:
     return False
 
 
-def _reasoning_policy_for_request(
+def reasoning_policy_for_request(
     inbound_payload: Any,
     upstream: Mapping[str, Any] | None,
     model: str | None,
@@ -325,9 +330,10 @@ def _reasoning_policy_for_request(
     if levels:
         return "provider-default"
     return None
+_reasoning_policy_for_request = reasoning_policy_for_request
 
 
-def _validate_reasoning_effort_for_upstream(
+def validate_reasoning_effort_for_upstream(
     payload: Any,
     upstream: Mapping[str, Any],
     model: str | None,
@@ -359,6 +365,7 @@ def _validate_reasoning_effort_for_upstream(
             "reasoning effort 'ultra' is supported only for gpt-5.6-sol and gpt-5.6-terra"
         )
     raise ValueError("reasoning effort 'ultra' is not supported for third-party models")
+_validate_reasoning_effort_for_upstream = validate_reasoning_effort_for_upstream
 
 
 def _bearer_token(headers: Mapping[str, str] | Any) -> str | None:
@@ -373,7 +380,7 @@ def _bearer_token(headers: Mapping[str, str] | Any) -> str | None:
     return value
 
 
-def _local_request_authorized(
+def local_request_authorized(
     headers: Mapping[str, str] | Any,
     request_context: Mapping[str, str],
 ) -> bool:
@@ -382,6 +389,7 @@ def _local_request_authorized(
         return True
     token = _bearer_token(headers)
     return bool(token and hmac.compare_digest(token, expected_key))
+_local_request_authorized = local_request_authorized
 
 
 def _truthy_probe_value(value: str | None) -> bool:
@@ -407,14 +415,15 @@ def _header_tokens(headers: Mapping[str, str] | Any, name: str) -> set[str]:
     return {token.strip().lower() for token in value.split(",") if token.strip()}
 
 
-def _is_websocket_upgrade(headers: Mapping[str, str] | Any) -> bool:
+def is_websocket_upgrade(headers: Mapping[str, str] | Any) -> bool:
     upgrade = _get_header(headers, "Upgrade")
     if not upgrade or upgrade.lower() != "websocket":
         return False
     return "upgrade" in _header_tokens(headers, "Connection")
+_is_websocket_upgrade = is_websocket_upgrade
 
 
-def _websocket_probe_frame_metadata(frame: Any) -> dict[str, Any]:
+def websocket_probe_frame_metadata(frame: Any) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "direction": "client_to_proxy",
         "opcode": int(frame.opcode),
@@ -437,6 +446,7 @@ def _websocket_probe_frame_metadata(frame: Any) -> dict[str, Any]:
     if isinstance(payload, Mapping):
         metadata["json_top_level_keys"] = sorted(str(key) for key in payload.keys())
     return metadata
+_websocket_probe_frame_metadata = websocket_probe_frame_metadata
 
 
 def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, str]:
@@ -515,7 +525,7 @@ def _infer_client_id(user_agent: str | None) -> str | None:
     return None
 
 
-def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+def request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     renamed: dict[str, Any] = {}
     for key, value in fields.items():
         if key == "request_body_hmac":
@@ -533,9 +543,10 @@ def _request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) -
         elif key == "body_sha256":
             renamed[f"{prefix}_body_sha256"] = value
     return renamed
+_request_observability_with_prefix = request_observability_with_prefix
 
 
-def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
+def is_event_stream(headers: Mapping[str, str] | Any) -> bool:
     content_type = _get_header(headers, "Content-Type")
     if content_type and "text/event-stream" in content_type.lower():
         return True
@@ -543,12 +554,14 @@ def _is_event_stream(headers: Mapping[str, str] | Any) -> bool:
     # an explicit Content-Type header but do signal chunked transfer.
     transfer_encoding = _get_header(headers, "Transfer-Encoding")
     return bool(transfer_encoding and "chunked" in transfer_encoding.lower())
+_is_event_stream = is_event_stream
 
 
-_UNSET_CONTENT_ENCODING = object()
+UNSET_CONTENT_ENCODING = object()
+_UNSET_CONTENT_ENCODING = UNSET_CONTENT_ENCODING
 
 
-def _filtered_response_headers(
+def filtered_response_headers(
     headers: Mapping[str, str] | Any,
     is_event_stream: bool,
     content_length: int | None = None,
@@ -574,10 +587,12 @@ def _filtered_response_headers(
     if content_encoding is not _UNSET_CONTENT_ENCODING and isinstance(content_encoding, str) and content_encoding:
         outgoing.append(("Content-Encoding", content_encoding))
     return outgoing
+_filtered_response_headers = filtered_response_headers
 
 
-def _json_response_bytes(payload: dict[str, Any]) -> bytes:
+def json_response_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=True).encode("utf-8")
+_json_response_bytes = json_response_bytes
 
 
 def provider_scoped_path(path: str, endpoint_suffix: str) -> str | None:
@@ -654,8 +669,9 @@ def vision_proxy_adapter() -> VisionProxyAdapter:
 _vision_proxy_adapter = vision_proxy_adapter
 
 
-def _value_contains_image(value: Any) -> bool:
+def value_contains_image(value: Any) -> bool:
     return vision_proxy_adapter().value_contains_image(value)
+_value_contains_image = value_contains_image
 
 
 def enforce_text_only_image_boundary(

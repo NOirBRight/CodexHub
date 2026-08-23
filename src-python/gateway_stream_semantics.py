@@ -18,7 +18,7 @@ from typing import Any
 
 from gateway_events import (
     RUNTIME_CODEX_DIR,
-    _usage_from_payload,
+    usage_from_payload as _usage_from_payload,
     write_adapter_event as _write_adapter_event,
 )
 from gateway_errors import (
@@ -27,8 +27,8 @@ from gateway_errors import (
     UpstreamProtocolTranslationError,
 )
 from gateway_settings import lifecycle_empty_final_resample_enabled
-from gateway_sse import _parse_sse_json_payload
-from gateway_transport import _get_header, bind_transport_failure_types
+from gateway_sse import parse_sse_json_payload as _parse_sse_json_payload
+from gateway_transport import get_header as _get_header, bind_transport_failure_types
 from protocol_translation import (
     UnsupportedProtocolTranslationError,
     UpstreamStreamIncompleteError,
@@ -93,7 +93,7 @@ def _collect_text_fragments(value: Any) -> list[str]:
     return []
 
 
-def _hide_reasoning_text(value: Any) -> bool:
+def hide_reasoning_text(value: Any) -> bool:
     changed = False
     if isinstance(value, list):
         for item in value:
@@ -126,42 +126,50 @@ def _hide_reasoning_text(value: Any) -> bool:
         if _hide_reasoning_text(item):
             changed = True
     return changed
+_hide_reasoning_text = hide_reasoning_text
 
 
 
 def _message_item_visible_text(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_message_item_visible_text")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._message_item_visible_text(*args, **kwargs)
 
 
 def _valid_tool_name(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_valid_tool_name")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._valid_tool_name(*args, **kwargs)
 
 
 def _codex_apps_namespace_flat_alias(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_codex_apps_namespace_flat_alias")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._codex_apps_namespace_flat_alias(*args, **kwargs)
 
 
 def _supports_explicit_namespace_alias(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_supports_explicit_namespace_alias")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._supports_explicit_namespace_alias(*args, **kwargs)
 
 
 def normalize_third_party_tool_call(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_normalize_third_party_tool_call")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._normalize_third_party_tool_call(*args, **kwargs)
 
 
 def downgrade_invalid_third_party_tool_calls(*args: Any, **kwargs: Any) -> Any:
-    from gateway_compat import lookup
-    return lookup("_downgrade_invalid_third_party_tool_calls")(*args, **kwargs)
+    import gateway_compat.official_passthrough as official_passthrough
+
+    return official_passthrough._downgrade_invalid_third_party_tool_calls(*args, **kwargs)
 
 
-def _is_raw_reasoning_stream_event(payload: Mapping[str, Any]) -> bool:
+def is_raw_reasoning_stream_event(payload: Mapping[str, Any]) -> bool:
     event_type = payload.get("type")
     return isinstance(event_type, str) and event_type.startswith(REASONING_TEXT_EVENT_PREFIXES)
+_is_raw_reasoning_stream_event = is_raw_reasoning_stream_event
 
 
 def _is_reasoning_summary_stream_event(payload: Mapping[str, Any]) -> bool:
@@ -782,8 +790,9 @@ def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> 
     return False
 
 
-def _sse_json_line(payload: Mapping[str, Any], line_ending: bytes) -> bytes:
+def sse_json_line(payload: Mapping[str, Any], line_ending: bytes) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending
+_sse_json_line = sse_json_line
 
 
 def _chat_stream_status_chunk(
@@ -826,11 +835,12 @@ def _downstream_stream_status_payload(
     return _responses_stream_status_event(status)
 
 
-def _chat_content_text(value: Any) -> str:
+def chat_content_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     fragments = _collect_text_fragments(value)
     return "\n".join(fragments)
+_chat_content_text = chat_content_text
 
 
 def _tail_text_for_compact_detection(payload: Mapping[str, Any], inbound_format: str) -> str:
@@ -864,7 +874,7 @@ def _is_compact_summary_payload(payload: Mapping[str, Any], inbound_format: str)
     return summary_prompt and text_only_instruction and summary_shape
 
 
-def _request_kind_from_headers_and_payload(
+def request_kind_from_headers_and_payload(
     headers: Mapping[str, str] | Any,
     payload: Mapping[str, Any] | None,
     inbound_format: str,
@@ -887,6 +897,7 @@ def _request_kind_from_headers_and_payload(
     if isinstance(payload, Mapping) and _is_compact_summary_payload(payload, inbound_format):
         return RETRY_REQUEST_COMPACT
     return RETRY_REQUEST_MAIN_GENERATION
+_request_kind_from_headers_and_payload = request_kind_from_headers_and_payload
 
 
 def _strip_tools_for_text_only_proxy_payload(
@@ -1388,7 +1399,7 @@ def _lifecycle_final_format_violation(text: str) -> bool:
     return False
 
 
-def _text_contains_lifecycle_final_report(text: str) -> bool:
+def text_contains_lifecycle_final_report(text: str) -> bool:
     lines = _final_report_nonempty_lines(text)
     if not lines:
         return False
@@ -1397,6 +1408,7 @@ def _text_contains_lifecycle_final_report(text: str) -> bool:
             if _lines_match_final_report_prefixes(lines, start, prefixes):
                 return True
     return False
+_text_contains_lifecycle_final_report = text_contains_lifecycle_final_report
 
 
 def _chat_stream_visible_text(chunks: list[Mapping[str, Any] | str]) -> str:
@@ -1549,7 +1561,7 @@ _chat_messages_to_responses_input = partial(
 )
 
 
-def _normalize_responses_string_input(payload: dict[str, Any]) -> bool:
+def normalize_responses_string_input(payload: dict[str, Any]) -> bool:
     value = payload.get("input")
     if not isinstance(value, str):
         return False
@@ -1561,9 +1573,10 @@ def _normalize_responses_string_input(payload: dict[str, Any]) -> bool:
         }
     ]
     return True
+_normalize_responses_string_input = normalize_responses_string_input
 
 
-def _normalize_responses_message_input_items(payload: dict[str, Any]) -> bool:
+def normalize_responses_message_input_items(payload: dict[str, Any]) -> bool:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
         return False
@@ -1587,6 +1600,7 @@ def _normalize_responses_message_input_items(payload: dict[str, Any]) -> bool:
     if changed:
         payload["input"] = normalized_items
     return changed
+_normalize_responses_message_input_items = normalize_responses_message_input_items
 
 
 _chat_tools_to_responses_tools = chat_tools_to_responses_tools

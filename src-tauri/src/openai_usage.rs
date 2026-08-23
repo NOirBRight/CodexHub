@@ -4,10 +4,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::cmp::Reverse;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{mpsc, Mutex};
+use std::process::{Child, Command};
+#[cfg(test)]
+use std::process::{ChildStdout, Stdio};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::Mutex;
+#[cfg(test)]
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -546,12 +553,14 @@ fn collect_rate_limit_log_files(root: &Path, files: &mut Vec<RateLimitLogFile>) 
 /// error, timeout), so no CodexHub-owned app-server child is left behind.
 /// On Windows the child is also assigned to a kill-on-close Job Object so an
 /// abrupt application exit cannot orphan it.
+#[allow(dead_code)]
 struct AppServerChild {
     child: Child,
     #[cfg(windows)]
     _job: AppServerJob,
 }
 
+#[allow(dead_code)]
 impl AppServerChild {
     fn spawn(command: &mut Command) -> Result<Self, String> {
         let child = command
@@ -827,6 +836,7 @@ fn read_codex_app_server_response(
     }
 }
 
+#[cfg(test)]
 fn spawn_app_server_line_reader(
     stdout: ChildStdout,
 ) -> mpsc::Receiver<Result<Option<String>, String>> {
@@ -861,6 +871,7 @@ fn kill_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(test)]
 fn configure_no_window(command: &mut Command) {
     #[cfg(target_os = "windows")]
     {
@@ -874,6 +885,7 @@ fn configure_no_window(command: &mut Command) {
     }
 }
 
+#[allow(dead_code)]
 fn write_json_line(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
     serde_json::to_writer(&mut *stdin, value)
         .map_err(|error| format!("Failed to encode codex app-server request: {error}"))?;
