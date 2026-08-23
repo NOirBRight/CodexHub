@@ -11,6 +11,7 @@ import pytest
 import codex_proxy
 import gateway_events
 import route_primitives
+from gateway_compat import official_passthrough as gateway_compat_official
 from codex_semantic_adapter import (
     COLLABORATION_V1,
     COLLABORATION_V2,
@@ -426,7 +427,7 @@ def test_invalid_request_is_rejected_before_runtime_planning() -> None:
     body = _request(COLLABORATION_V2)
     body["tools"][0]["tools"].pop()
 
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
             codex_proxy.compatible_request_body(
                 json.dumps(body).encode(),
@@ -956,7 +957,7 @@ def test_mixed_collaboration_history_fails_before_runtime_planning() -> None:
         _v2_history()[0],
     ]
 
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
             codex_proxy.compatible_request_body(
                 json.dumps(body).encode(),

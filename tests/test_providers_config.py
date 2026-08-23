@@ -668,7 +668,7 @@ api_key = "ollama-secret"
                 for index in range(200)
             ],
         }
-        from codex_proxy import compatible_request_body
+        from gateway_compat.request import compatible_request_body
 
         prepared = json.loads(
             compatible_request_body(

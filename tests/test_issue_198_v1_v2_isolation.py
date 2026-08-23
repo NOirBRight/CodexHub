@@ -10,6 +10,7 @@ import pytest
 import codex_proxy
 import gateway_events
 import route_primitives
+from gateway_compat import official_passthrough as gateway_compat_official
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import (
     COLLABORATION_V1,
@@ -236,7 +237,7 @@ def test_current_v2_tools_reject_completed_mixed_collaboration_history() -> None
     }
     context = {"request_id": "mixed-history-v2-current"}
 
-    with patch.object(codex_proxy, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
         with pytest.raises(codex_proxy.UpstreamProtocolTranslationError) as caught:
             codex_proxy.compatible_request_body(
                 json.dumps(body).encode(),

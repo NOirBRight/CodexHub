@@ -12,6 +12,11 @@ import codex_proxy
 import gateway_catalog_runtime
 import gateway_events
 import gateway_transport
+import vision_proxy
+from gateway_compat import multi_agent as gateway_compat_multi_agent
+from gateway_compat import official_passthrough as gateway_compat_official
+from gateway_compat import request as gateway_compat_request
+from gateway_compat import response as gateway_compat_response
 import route_plan
 import route_primitives
 from protocol_translation import prepare_exchange as _real_prepare_exchange
@@ -1243,7 +1248,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 "codex_proxy.responses_request_to_chat_completion_body",
                 side_effect=AssertionError("responses request converted back to chat"),
             ),
-            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -1825,7 +1830,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 "route_plan.prepare_exchange",
                 side_effect=_assert_identity_prepare_exchange,
             ),
-            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2057,7 +2062,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("vision_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2263,7 +2268,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy.image_proxy_description_for_part", return_value="A boundary-guard chart description."),
+            patch("vision_proxy.image_proxy_description_for_part", return_value="A boundary-guard chart description."),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2350,7 +2355,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("vision_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
             patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2445,8 +2450,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy.image_proxy_cache_lookup", return_value=None),
-            patch("codex_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
+            patch("vision_proxy.image_proxy_cache_lookup", return_value=None),
+            patch("vision_proxy.image_proxy_description_for_part", side_effect=codex_proxy.ImageProxyError("vision down")),
             patch("gateway_transport.urlopen") as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2548,7 +2553,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", side_effect=resolve_external_model),
-            patch("codex_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
+            patch("vision_proxy.image_proxy_description_for_part", return_value="A chart with rising revenue."),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2622,8 +2627,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("gateway_compat.response.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2697,8 +2702,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("gateway_compat.response.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2775,10 +2780,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
-            patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
-            patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
-            patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
+            patch("gateway_compat.response.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("gateway_compat.official_passthrough._normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
+            patch("gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
+            patch("gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -2922,8 +2927,8 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
-            patch("codex_proxy.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
+            patch("gateway_compat.request.compatible_request_body", side_effect=AssertionError("codex adapter ran")),
+            patch("gateway_compat.response.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
             CodexProxyHandler.do_POST(handler)
@@ -3094,9 +3099,9 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 ),
             ),
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
-            patch("codex_proxy.normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
-            patch("codex_proxy.downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
-            patch("codex_proxy.guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
+            patch("gateway_compat.official_passthrough._normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
+            patch("gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
+            patch("gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
             patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)

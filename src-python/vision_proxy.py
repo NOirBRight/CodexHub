@@ -42,6 +42,11 @@ from route_primitives import (
 logger = logging.getLogger("vision_proxy")
 IMAGE_PROXY_CACHE_LOCK = threading.Lock()
 
+# Request-time injectables. Tests patch these; unset (None) means use the
+# Gateway runtime default implementation.
+image_proxy_cache_lookup = None
+image_proxy_description_for_part = None
+
 
 class VisionProxyPolicy(Enum):
     """Typed Route Plan policy understood by the Vision Proxy seam."""
