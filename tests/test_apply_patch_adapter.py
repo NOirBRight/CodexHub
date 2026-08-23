@@ -245,7 +245,7 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
         seen.append((event, fields, event_context))
 
     monkeypatch.setattr(codex_proxy, "_write_adapter_event", write_event)
-    payload, changed = codex_proxy._adapt_third_party_apply_patch_response_body(
+    payload, changed = codex_proxy.adapt_third_party_apply_patch_response_body(
         {"output": [_function_call()]},
         {"request_id": "live-write"},
     )
@@ -258,11 +258,11 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
             {"request_id": "live-write"},
         )
     ]
-    live_adapter = codex_proxy._apply_patch_adapter()
+    live_adapter = codex_proxy.apply_patch_adapter()
     assert live_adapter.write_event is write_event
 
     monkeypatch.setattr(codex_proxy, "RESPONSES_TERMINAL_EVENT_TYPES", {"response.custom_terminal"})
-    terminal_adapter = codex_proxy._apply_patch_adapter()
+    terminal_adapter = codex_proxy.apply_patch_adapter()
     assert terminal_adapter.facts.terminal_event_types == frozenset({"response.custom_terminal"})
     events, changed = terminal_adapter.adapt_stream_events([{"type": "response.custom_terminal"}])
     assert events == [{"type": "response.custom_terminal"}]
