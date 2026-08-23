@@ -62,10 +62,10 @@ from gateway_errors import (
     user_requested_shutdown_payload,
 )
 from gateway_error_dispatch import (
+    PostRequestLiveState,
     dispatch_proxy_post_exception,
     emit_proxy_post_success,
     finish_proxy_post_downstream_write_failure,
-    post_request_live_from_locals,
 )
 from gateway_exchange_hooks import build_post_exchange_hooks
 from gateway_exchange import (
@@ -78,14 +78,16 @@ from gateway_exchange import (
     OpenExchangeRequest,
     ParsedInboundRequest as GatewayRequestInput,
     RelayExchangeRequest,
+    execute_exchange,
+    parse_inbound_request,
+    terminal_result,
+)
+from gateway_exchange_bindings import (
     bind_downstream_stream_commit as _bind_downstream_stream_commit,
     downstream_has_been_exposed as _downstream_has_been_exposed,
     handler_downstream_stream_commit as _handler_downstream_stream_commit,
     relay_context_for_handler as _relay_context_for_handler,
     responses_synthetic_terminal_failure as _responses_synthetic_terminal_failure,
-    execute_exchange,
-    parse_inbound_request,
-    terminal_result,
 )
 from gateway_relay import (
     RelayContext,
@@ -656,6 +658,46 @@ class GatewayHandlerMixin:
         usage_capture: dict[str, Any] = {}
         request_start_written = False
         write_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
+        emit_request_start_once: Callable[[Mapping[str, Any]], None] | None = None
+        request_input = None
+        inbound_payload = None
+        prepared_caller_body = None
+        prompt_cache_key = None
+        model_canonical = None
+        primary_route_attempt = None
+        adapter_event_context: dict[str, Any] | None = None
+        admission = None
+
+        def current_live() -> PostRequestLiveState:
+            return PostRequestLiveState(
+                handler=self, inbound_format=inbound_format, provider_hint=provider_hint,
+                request_id=request_id, started_at=started_at, admission=admission,
+                downstream_sse_started=downstream_sse_started,
+                adapter_event_context=adapter_event_context,
+                proxy_request_context=proxy_request_context, model=model,
+                model_requested=model_requested, model_canonical=model_canonical,
+                upstream=upstream, upstream_name=upstream_name,
+                upstream_format=upstream_format,
+                reports_cached_input_tokens=reports_cached_input_tokens,
+                behavior_profile=behavior_profile, route_reason=route_reason,
+                route_plan=route_plan, caller_stream=caller_stream,
+                caller_request_observability=caller_request_observability,
+                usage_capture=usage_capture,
+                response_lifecycle_state=response_lifecycle_state,
+                prompt_cache_key=prompt_cache_key,
+                write_request_start_once=write_request_start_once,
+                emit_request_start_once=emit_request_start_once,
+                request_start_written=request_start_written,
+                primary_route_attempt=primary_route_attempt,
+                prepared_caller_body=prepared_caller_body,
+                active_route_attempt=active_route_attempt,
+                relay_execution_plan=relay_execution_plan,
+                request_observability=request_observability,
+                request_input=request_input, inbound_payload=inbound_payload,
+                send_user_requested_shutdown=send_user_requested_shutdown,
+                finish_downstream_write_failure=finish_downstream_write_failure,
+            )
+
 
         def send_user_requested_shutdown() -> None:
             _record_user_requested_shutdown()
@@ -667,29 +709,9 @@ class GatewayHandlerMixin:
 
         def finish_downstream_write_failure(*, write_exc: OSError | None = None) -> None:
             finish_proxy_post_downstream_write_failure(
-                post_request_live_from_locals(
-                    self,
-                    {
-                        "request_id": request_id,
-                        "model": model,
-                        "model_requested": model_requested,
-                        "upstream_name": upstream_name,
-                        "provider_hint": provider_hint,
-                        "upstream_format": upstream_format,
-                        "behavior_profile": behavior_profile,
-                        "inbound_format": inbound_format,
-                        "route_reason": route_reason,
-                        "caller_stream": caller_stream,
-                        "started_at": started_at,
-                        "request_observability": request_observability,
-                        "usage_capture": usage_capture,
-                        "proxy_request_context": proxy_request_context,
-                        "reports_cached_input_tokens": reports_cached_input_tokens,
-                    },
-                ),
+                current_live(),
                 write_exc=write_exc,
             )
-
 
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
@@ -697,7 +719,6 @@ class GatewayHandlerMixin:
             send_user_requested_shutdown()
             return
         previous_admission = _activate_gateway_request(admission)
-        adapter_event_context: dict[str, Any] | None = None
 
         try:
             admission.raise_if_cancelled()
@@ -1008,10 +1029,8 @@ class GatewayHandlerMixin:
                 return
             prepared_caller_body = body
 
-            live = post_request_live_from_locals(self, locals())
+            live = current_live()
             exchange_hooks = build_post_exchange_hooks(live)
-
-
             exchange_progress = ExchangeProgress(
                 upstream_format=upstream_format,
                 downstream_sse_started=downstream_sse_started,
@@ -1065,9 +1084,9 @@ class GatewayHandlerMixin:
                     terminal.error or "invalid exchange terminal result"
                 )
             status = terminal.status
-            emit_proxy_post_success(post_request_live_from_locals(self, locals()), status)
+            emit_proxy_post_success(current_live(), status)
         except Exception as exc:
-            dispatch_proxy_post_exception(exc, post_request_live_from_locals(self, locals()))
+            dispatch_proxy_post_exception(exc, current_live())
         finally:
             self._pre_response_deadline = None
             _restore_gateway_request(previous_admission)

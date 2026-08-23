@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
+from http.client import IncompleteRead
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request
 
+import gateway_admission
+import gateway_compat
+import gateway_errors
+import gateway_events
+import gateway_exchange_bindings
+import gateway_request
+import gateway_stream_semantics
+import gateway_transport
+import protocol_translation
+import proxy_telemetry
+import route_plan as route_plan_module
+import route_primitives
 from gateway_error_dispatch import PostRequestLiveState
 from gateway_exchange import (
     ExchangeFailureTypes,
@@ -13,70 +28,59 @@ from gateway_exchange import (
     OpenExchangeRequest,
     RelayExchangeRequest,
 )
-from http.client import IncompleteRead
 from protocol_translation import PreparedExchange
 from route_plan import RouteAttemptPlan
-from urllib.error import HTTPError
-
-
-def _handler_impl() -> Any:
-    import gateway_handler_impl as module
-
-    return module
 
 
 def build_post_exchange_hooks(live: PostRequestLiveState) -> ExchangeHooks:
     """Assemble live-patchable ExchangeHooks for one POST request."""
 
-    gi = _handler_impl()
-    write_proxy_event = gi.write_proxy_event
-    _request_observability_with_prefix = gi._request_observability_with_prefix
-    _route_attempt_event_fields = gi._route_attempt_event_fields
-    _rewrite_transparent_developer_role_messages = gi._rewrite_transparent_developer_role_messages
-    _normalize_transparent_tool_schema_booleans = gi._normalize_transparent_tool_schema_booleans
-    _safe_json_mapping = gi._safe_json_mapping
-    _excessive_transparent_responses_tool_loop_count = gi._excessive_transparent_responses_tool_loop_count
-    _excessive_transparent_chat_tool_loop_count = gi._excessive_transparent_chat_tool_loop_count
-    _gateway_transport = gi._gateway_transport
-    _responses_body_with_lifecycle_final_retry_guidance = gi._responses_body_with_lifecycle_final_retry_guidance
-    _write_adapter_event = gi._write_adapter_event
-    _handler_downstream_stream_commit = gi._handler_downstream_stream_commit
-    _open_upstream_response = gi._open_upstream_response
-    _active_gateway_request = gi._active_gateway_request
-    _retry_identity_from_context = gi._retry_identity_from_context
-    safe_upstream_error_detail = gi.safe_upstream_error_detail
-    _capture_usage = gi._capture_usage
-    official_passthrough_request_body = gi.official_passthrough_request_body
-    transparent_request_body = gi.transparent_request_body
-    compatible_request_body = gi.compatible_request_body
-    _downstream_has_been_exposed = gi._downstream_has_been_exposed
-    _upstream_failure_class = gi._upstream_failure_class
-    _retry_safety_class = gi._retry_safety_class
-    _model_access_path_from_event_context = gi._model_access_path_from_event_context
-    _retry_after_delay_seconds = gi._retry_after_delay_seconds
-    _emit_upstream_retry_event = gi._emit_upstream_retry_event
-    _emit_upstream_retry_suppressed_event = gi._emit_upstream_retry_suppressed_event
-    _downstream_retry_payload = gi._downstream_retry_payload
-    sleep_for_retry_with_gateway_cancellation = gi.sleep_for_retry_with_gateway_cancellation
-    _SUPPRESSED_RETRY_SAFETY_CLASSES = gi._SUPPRESSED_RETRY_SAFETY_CLASSES
-    _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = gi._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
-    RUNTIME_CODEX_DIR = gi.RUNTIME_CODEX_DIR
-    EXCESSIVE_TOOL_LOOP_ERROR_CODE = gi.EXCESSIVE_TOOL_LOOP_ERROR_CODE
-    EXCESSIVE_TOOL_LOOP_BOUND = gi.EXCESSIVE_TOOL_LOOP_BOUND
-    UpstreamProtocolTranslationError = gi.UpstreamProtocolTranslationError
-    UnsupportedProtocolTranslationError = gi.UnsupportedProtocolTranslationError
-    DownstreamClosedBeforeRetryError = gi.DownstreamClosedBeforeRetryError
-    CompactEmptyResponseError = gi.CompactEmptyResponseError
-    UpstreamStreamInterruptedError = gi.UpstreamStreamInterruptedError
-    UpstreamStreamIdleTimeoutError = gi.UpstreamStreamIdleTimeoutError
-    UpstreamStreamIncompleteError = gi.UpstreamStreamIncompleteError
-    UpstreamStreamErrorEvent = gi.UpstreamStreamErrorEvent
-    LifecycleEmptyFinalResponseError = gi.LifecycleEmptyFinalResponseError
-    LifecycleFinalFormatResponseError = gi.LifecycleFinalFormatResponseError
-    UpstreamEmptyCompletedResponseError = gi.UpstreamEmptyCompletedResponseError
-    proxy_telemetry = gi.proxy_telemetry
-    MutationPolicy = gi.MutationPolicy
-    time = gi.time
+    write_proxy_event = gateway_events.write_proxy_event
+    _request_observability_with_prefix = gateway_request.request_observability_with_prefix
+    _route_attempt_event_fields = route_plan_module.route_attempt_event_fields
+    _rewrite_transparent_developer_role_messages = gateway_compat.official_passthrough._rewrite_transparent_developer_role_messages
+    _normalize_transparent_tool_schema_booleans = gateway_compat.official_passthrough._normalize_transparent_tool_schema_booleans
+    _safe_json_mapping = gateway_compat.official_passthrough._safe_json_mapping
+    _excessive_transparent_responses_tool_loop_count = gateway_compat.official_passthrough._excessive_transparent_responses_tool_loop_count
+    _excessive_transparent_chat_tool_loop_count = gateway_compat.official_passthrough._excessive_transparent_chat_tool_loop_count
+    _gateway_transport = gateway_transport.default_gateway_transport
+    _responses_body_with_lifecycle_final_retry_guidance = gateway_compat.multi_agent._responses_body_with_lifecycle_final_retry_guidance
+    _write_adapter_event = gateway_events.write_adapter_event
+    _handler_downstream_stream_commit = gateway_exchange_bindings.handler_downstream_stream_commit
+    _open_upstream_response = gateway_transport.open_upstream_response
+    _active_gateway_request = gateway_admission.active_gateway_request
+    _retry_identity_from_context = gateway_transport.retry_identity_from_context
+    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
+    _capture_usage = gateway_events.capture_usage
+    official_passthrough_request_body = gateway_compat.official_passthrough_request_body
+    transparent_request_body = gateway_compat.transparent_request_body
+    compatible_request_body = gateway_compat.compatible_request_body
+    _downstream_has_been_exposed = gateway_exchange_bindings.downstream_has_been_exposed
+    _upstream_failure_class = gateway_transport.upstream_failure_class
+    _retry_safety_class = gateway_transport._retry_safety_class
+    _model_access_path_from_event_context = gateway_transport.model_access_path_from_event_context
+    _retry_after_delay_seconds = gateway_transport.retry_after_delay_seconds
+    _emit_upstream_retry_event = gateway_transport._emit_upstream_retry_event
+    _emit_upstream_retry_suppressed_event = gateway_transport._emit_upstream_retry_suppressed_event
+    _downstream_retry_payload = gateway_transport._downstream_retry_payload
+    sleep_for_retry_with_gateway_cancellation = gateway_admission.sleep_for_retry_with_gateway_cancellation
+    _SUPPRESSED_RETRY_SAFETY_CLASSES = gateway_transport.SUPPRESSED_RETRY_SAFETY_CLASSES
+    _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = gateway_compat.official_passthrough._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
+    RUNTIME_CODEX_DIR = gateway_events.RUNTIME_CODEX_DIR
+    EXCESSIVE_TOOL_LOOP_ERROR_CODE = gateway_compat.host.EXCESSIVE_TOOL_LOOP_ERROR_CODE
+    EXCESSIVE_TOOL_LOOP_BOUND = gateway_compat.host.EXCESSIVE_TOOL_LOOP_BOUND
+    UpstreamProtocolTranslationError = gateway_errors.UpstreamProtocolTranslationError
+    UnsupportedProtocolTranslationError = protocol_translation.UnsupportedProtocolTranslationError
+    DownstreamClosedBeforeRetryError = gateway_stream_semantics.DownstreamClosedBeforeRetryError
+    CompactEmptyResponseError = gateway_errors.CompactEmptyResponseError
+    UpstreamStreamInterruptedError = gateway_stream_semantics.UpstreamStreamInterruptedError
+    UpstreamStreamIdleTimeoutError = gateway_errors.UpstreamStreamIdleTimeoutError
+    UpstreamStreamIncompleteError = protocol_translation.UpstreamStreamIncompleteError
+    UpstreamStreamErrorEvent = gateway_stream_semantics.UpstreamStreamErrorEvent
+    LifecycleEmptyFinalResponseError = gateway_errors.LifecycleEmptyFinalResponseError
+    LifecycleFinalFormatResponseError = gateway_errors.LifecycleFinalFormatResponseError
+    UpstreamEmptyCompletedResponseError = gateway_stream_semantics.UpstreamEmptyCompletedResponseError
+    MutationPolicy = route_primitives.MutationPolicy
     handler = live.handler
     inbound_format = live.inbound_format
     provider_hint = live.provider_hint

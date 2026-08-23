@@ -2,49 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from http.client import IncompleteRead
 from typing import Any
 from urllib.error import HTTPError, URLError
 
-_LIVE_FIELD_NAMES = (
-    'inbound_format',
-    'provider_hint',
-    'request_id',
-    'started_at',
-    'admission',
-    'downstream_sse_started',
-    'adapter_event_context',
-    'proxy_request_context',
-    'model',
-    'model_requested',
-    'model_canonical',
-    'upstream',
-    'upstream_name',
-    'upstream_format',
-    'reports_cached_input_tokens',
-    'behavior_profile',
-    'route_reason',
-    'route_plan',
-    'caller_stream',
-    'caller_request_observability',
-    'usage_capture',
-    'response_lifecycle_state',
-    'prompt_cache_key',
-    'write_request_start_once',
-    'emit_request_start_once',
-    'request_start_written',
-    'primary_route_attempt',
-    'prepared_caller_body',
-    'active_route_attempt',
-    'relay_execution_plan',
-    'request_observability',
-    'request_input',
-    'inbound_payload',
-    'send_user_requested_shutdown',
-    'finish_downstream_write_failure',
-)
+import apply_patch_adapter
+import catalog
+import gateway_admission
+import gateway_errors
+import gateway_events
+import gateway_exchange_bindings
+import gateway_request
+import gateway_transport
+import route_primitives
 
 
 @dataclass
@@ -89,18 +63,6 @@ class PostRequestLiveState:
     finish_downstream_write_failure: Any = None
 
 
-def post_request_live_from_locals(handler: Any, locals_map: Mapping[str, Any]) -> PostRequestLiveState:
-    """Snapshot handler-method locals into a typed live-state object."""
-
-    values = {name: locals_map.get(name) for name in _LIVE_FIELD_NAMES}
-    return PostRequestLiveState(handler=handler, **values)
-
-
-def _handler_impl() -> Any:
-    import gateway_handler_impl as module
-
-    return module
-
 
 def finish_proxy_post_downstream_write_failure(
     live: PostRequestLiveState,
@@ -109,17 +71,16 @@ def finish_proxy_post_downstream_write_failure(
 ) -> None:
     """Close the downstream commit seam and emit the 499 complete event."""
 
-    gi = _handler_impl()
     handler = live.handler
     exc = write_exc or OSError("downstream closed")
-    failure_seam = gi._handler_downstream_stream_commit(handler)
+    failure_seam = gateway_exchange_bindings.handler_downstream_stream_commit(handler)
     if failure_seam is not None:
         failure_seam.close()
     handler.close_connection = True
-    gi.write_proxy_event(
+    gateway_events.write_proxy_event(
         "downstream_stream_closed",
         request_id=live.request_id,
-        model=gi.canonical_model_id(live.model) if live.model else None,
+        model=catalog.canonical_model_id(live.model) if live.model else None,
         model_requested=live.model_requested,
         upstream=live.upstream_name or "upstream_error",
         provider_hint=live.provider_hint,
@@ -128,16 +89,16 @@ def finish_proxy_post_downstream_write_failure(
         inbound_format=live.inbound_format,
         status=499,
         error=type(exc).__name__,
-        detail=gi.safe_upstream_error_detail(exc),
+        detail=gateway_errors.safe_upstream_error_detail(exc),
         **(live.proxy_request_context or {}),
     )
-    gi.write_proxy_event(
+    gateway_events.write_proxy_event(
         "request_complete",
         request_id=live.request_id,
         method="POST",
-        model=gi.canonical_model_id(live.model) if live.model else None,
+        model=catalog.canonical_model_id(live.model) if live.model else None,
         model_requested=live.model_requested,
-        model_canonical=gi.canonical_model_id(live.model) if live.model else None,
+        model_canonical=catalog.canonical_model_id(live.model) if live.model else None,
         upstream=live.upstream_name or "upstream_error",
         provider_id=live.upstream_name,
         provider_hint=live.provider_hint,
@@ -149,7 +110,7 @@ def finish_proxy_post_downstream_write_failure(
         route_mode="official" if live.upstream_name == "official" else "codexhub",
         is_stream=live.caller_stream,
         status=499,
-        duration_ms=int((gi.time.monotonic() - live.started_at) * 1000),
+        duration_ms=int((time.monotonic() - live.started_at) * 1000),
         **(live.request_observability or {}),
         **(live.usage_capture or {}),
         **(live.proxy_request_context or {}),
@@ -159,8 +120,7 @@ def finish_proxy_post_downstream_write_failure(
 def emit_proxy_post_success(live: PostRequestLiveState, status: int) -> None:
     """Emit the successful POST request_complete event."""
 
-    gi = _handler_impl()
-    gi.write_proxy_event(
+    gateway_events.write_proxy_event(
         "request_complete",
         request_id=live.request_id,
         method="POST",
@@ -178,7 +138,7 @@ def emit_proxy_post_success(live: PostRequestLiveState, status: int) -> None:
         route_mode="official" if live.upstream_name == "official" else "codexhub",
         is_stream=live.caller_stream,
         status=status,
-        duration_ms=int((gi.time.monotonic() - live.started_at) * 1000),
+        duration_ms=int((time.monotonic() - live.started_at) * 1000),
         **(live.request_observability or {}),
         **(live.usage_capture or {}),
         **(live.proxy_request_context or {}),
@@ -188,27 +148,25 @@ def emit_proxy_post_success(live: PostRequestLiveState, status: int) -> None:
 def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState) -> None:
     """Map a POST-request exception onto JSON or SSE downstream errors."""
 
-    gi = _handler_impl()
-    write_proxy_event = gi.write_proxy_event
-    _retry_identity_from_context = gi._retry_identity_from_context
-    safe_upstream_error_detail = gi.safe_upstream_error_detail
-    _redact_identity_in_text = gi._redact_identity_in_text
-    _request_observability_with_prefix = gi._request_observability_with_prefix
-    _responses_failed_event_for_stream_error = gi._responses_failed_event_for_stream_error
-    canonical_model_id = gi.canonical_model_id
-    APPLY_PATCH_ADAPTER_ERROR_CODE = gi.APPLY_PATCH_ADAPTER_ERROR_CODE
-    transport_failure_phase = gi.transport_failure_phase
-    logger = gi.logger
-    GatewayUserRequestedShutdown = gi.GatewayUserRequestedShutdown
-    CompactEmptyResponseError = gi.CompactEmptyResponseError
-    LifecycleEmptyFinalResponseError = gi.LifecycleEmptyFinalResponseError
-    LifecycleFinalFormatResponseError = gi.LifecycleFinalFormatResponseError
-    ModelIdentityResolutionError = gi.ModelIdentityResolutionError
-    ImageProxyError = gi.ImageProxyError
-    UpstreamProtocolTranslationError = gi.UpstreamProtocolTranslationError
-    GatewayPreResponseBudgetExhausted = gi.GatewayPreResponseBudgetExhausted
-    time = gi.time
-    RETRY_FAILURE_PERMANENT = gi.RETRY_FAILURE_PERMANENT
+    write_proxy_event = gateway_events.write_proxy_event
+    _retry_identity_from_context = gateway_transport.retry_identity_from_context
+    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
+    _redact_identity_in_text = gateway_errors.redact_identity_in_text
+    _request_observability_with_prefix = gateway_request.request_observability_with_prefix
+    _responses_failed_event_for_stream_error = gateway_errors.responses_failed_event_for_stream_error
+    canonical_model_id = catalog.canonical_model_id
+    APPLY_PATCH_ADAPTER_ERROR_CODE = apply_patch_adapter.APPLY_PATCH_ADAPTER_ERROR_CODE
+    transport_failure_phase = gateway_transport.transport_failure_phase
+    logger = logging.getLogger("codex_proxy")
+    GatewayUserRequestedShutdown = gateway_admission.GatewayUserRequestedShutdown
+    CompactEmptyResponseError = gateway_errors.CompactEmptyResponseError
+    LifecycleEmptyFinalResponseError = gateway_errors.LifecycleEmptyFinalResponseError
+    LifecycleFinalFormatResponseError = gateway_errors.LifecycleFinalFormatResponseError
+    ModelIdentityResolutionError = gateway_errors.ModelIdentityResolutionError
+    ImageProxyError = gateway_errors.ImageProxyError
+    UpstreamProtocolTranslationError = gateway_errors.UpstreamProtocolTranslationError
+    GatewayPreResponseBudgetExhausted = gateway_errors.GatewayPreResponseBudgetExhausted
+    RETRY_FAILURE_PERMANENT = route_primitives.RETRY_FAILURE_PERMANENT
     handler = live.handler
     inbound_format = live.inbound_format
     provider_hint = live.provider_hint

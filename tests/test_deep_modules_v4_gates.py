@@ -9,9 +9,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_PYTHON = REPO_ROOT / "src-python"
 COMPAT_ROOT = SRC_PYTHON / "gateway_compat"
 
-# Post-T6 measured sizes + 10%, pinned so the files cannot grow back to the 3000 cap.
-HANDLER_IMPL_LINE_BUDGET = 1972  # 1793 * 1.10
+# Measured sizes + 10%, pinned so the files cannot grow back to the 3000 cap.
+HANDLER_IMPL_LINE_BUDGET = 1972  # 1812 <= 1972 (handler did not need a raise)
 RELAY_LINE_BUDGET = 2986  # 2715 * 1.10
+EXCHANGE_LINE_BUDGET = 689  # 627 * 1.10
+BINDINGS_LINE_BUDGET = 310  # 282 * 1.10
+HOOKS_LINE_BUDGET = 575  # 523 * 1.10
+DISPATCH_LINE_BUDGET = 920  # 837 * 1.10
 
 
 def _line_count(path: Path) -> int:
@@ -107,10 +111,86 @@ def test_relaysymbols_class_stays_gone() -> None:
 def test_handler_impl_and_relay_line_budgets_are_ratcheted() -> None:
     handler_count = _line_count(SRC_PYTHON / "gateway_handler_impl.py")
     relay_count = _line_count(SRC_PYTHON / "gateway_relay.py")
+    exchange_count = _line_count(SRC_PYTHON / "gateway_exchange.py")
+    bindings_count = _line_count(SRC_PYTHON / "gateway_exchange_bindings.py")
+    hooks_count = _line_count(SRC_PYTHON / "gateway_exchange_hooks.py")
+    dispatch_count = _line_count(SRC_PYTHON / "gateway_error_dispatch.py")
     assert handler_count <= HANDLER_IMPL_LINE_BUDGET, f"gateway_handler_impl.py is {handler_count} lines"
     assert relay_count <= RELAY_LINE_BUDGET, f"gateway_relay.py is {relay_count} lines"
+    assert exchange_count <= EXCHANGE_LINE_BUDGET, f"gateway_exchange.py is {exchange_count} lines"
+    assert bindings_count <= BINDINGS_LINE_BUDGET, f"gateway_exchange_bindings.py is {bindings_count} lines"
+    assert hooks_count <= HOOKS_LINE_BUDGET, f"gateway_exchange_hooks.py is {hooks_count} lines"
+    assert dispatch_count <= DISPATCH_LINE_BUDGET, f"gateway_error_dispatch.py is {dispatch_count} lines"
     assert HANDLER_IMPL_LINE_BUDGET < 3000
     assert RELAY_LINE_BUDGET < 3000
-    assert not (handler_count > HANDLER_IMPL_LINE_BUDGET)
-    assert HANDLER_IMPL_LINE_BUDGET + 1 > HANDLER_IMPL_LINE_BUDGET
-    assert RELAY_LINE_BUDGET + 1 > RELAY_LINE_BUDGET
+    assert EXCHANGE_LINE_BUDGET < 3000
+    assert BINDINGS_LINE_BUDGET < 3000
+    assert HOOKS_LINE_BUDGET < 3000
+    assert DISPATCH_LINE_BUDGET < 3000
+
+
+def _contains_handler_impl_import(source: str) -> bool:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "gateway_handler_impl" or alias.name.startswith("gateway_handler_impl."):
+                    return True
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("gateway_handler_impl"):
+            return True
+    return False
+
+
+def test_extracted_post_modules_do_not_import_handler_impl() -> None:
+    for name in ("gateway_error_dispatch.py", "gateway_exchange_hooks.py"):
+        source = (SRC_PYTHON / name).read_text(encoding="utf-8")
+        assert not _contains_handler_impl_import(source), f"{name} imports gateway_handler_impl"
+        assert "post_request_live_from_locals" not in source
+        assert "locals()" not in source
+
+
+def test_extracted_post_modules_do_not_shadow_imported_modules() -> None:
+    """Assignment like `route_plan = live.route_plan` must not hide `import route_plan`."""
+
+    for name in ("gateway_error_dispatch.py", "gateway_exchange_hooks.py"):
+        tree = ast.parse((SRC_PYTHON / name).read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.asname or alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name != "*":
+                        imported.add(alias.asname or alias.name)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            assigned = {
+                child.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+            }
+            shadowed = sorted(assigned & imported)
+            assert not shadowed, f"{name}::{node.name} shadows imported names {shadowed}"
+
+
+def test_gateway_exchange_has_no_mid_file_imports() -> None:
+    tree = ast.parse((SRC_PYTHON / "gateway_exchange.py").read_text(encoding="utf-8"))
+    seen_def = False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            seen_def = True
+            continue
+        if seen_def and isinstance(node, (ast.Import, ast.ImportFrom)):
+            raise AssertionError(f"gateway_exchange.py has a mid-file import at line {node.lineno}")
+
+
+def test_gateway_exchange_bindings_owns_handler_relay_bindings() -> None:
+    exchange = (SRC_PYTHON / "gateway_exchange.py").read_text(encoding="utf-8")
+    bindings = (SRC_PYTHON / "gateway_exchange_bindings.py").read_text(encoding="utf-8")
+    assert "def handler_downstream_stream_commit(" not in exchange
+    assert "def handler_downstream_stream_commit(" in bindings
+    assert "def execute_exchange(" in exchange
+    assert "def execute_exchange(" not in bindings
+

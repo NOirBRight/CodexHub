@@ -11,10 +11,14 @@ ENTRY_PATH = SRC_PYTHON / "codex_proxy.py"
 ENTRY_LINE_BUDGET = 500
 GATEWAY_TOP_LEVEL_LINE_BUDGET = 3000
 PACKAGE_LINE_BUDGET = 2000
-# Deep Modules v4 ratchet: measured post-T6 size + 10%.
+# Deep Modules v4 ratchet: measured size + 10%. Unlisted files use GATEWAY_TOP_LEVEL_LINE_BUDGET - 1.
 GATEWAY_FILE_LINE_BUDGETS = {
     "gateway_handler_impl.py": 1972,
     "gateway_relay.py": 2986,
+    "gateway_exchange.py": 689,
+    "gateway_exchange_bindings.py": 310,
+    "gateway_exchange_hooks.py": 575,
+    "gateway_error_dispatch.py": 920,
 }
 
 ENTRY_ALLOWED_FIRST_PARTY = frozenset(
