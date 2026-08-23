@@ -9,9 +9,13 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from gateway_relay import RelayContext
+if TYPE_CHECKING:
+    # Import only for annotations: gateway_relay imports this module at the
+    # bottom of its body, so a runtime import here would be circular when
+    # this module is the first of the pair to load.
+    from gateway_relay import RelayContext
 
 
 def relay_official_passthrough_sse_response(

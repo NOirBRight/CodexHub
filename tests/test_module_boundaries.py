@@ -243,3 +243,24 @@ def test_gateway_relay_passthrough_does_not_import_the_facade() -> None:
     assert "from gateway_runtime" not in source
     assert "BaseHTTPRequestHandler" not in source
     assert "CodexProxyHandler" not in source
+
+
+def test_gateway_relay_pair_imports_cleanly_in_either_order() -> None:
+    """gateway_relay imports gateway_relay_passthrough at the bottom of its
+    body; the passthrough module must therefore load without importing
+    gateway_relay at runtime, or whichever module loads first breaks."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src-python")
+    for first in ("gateway_relay_passthrough", "gateway_relay"):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {first}"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 0, f"import {first} first failed:\n{result.stderr}"
